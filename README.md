@@ -1,41 +1,67 @@
-# ACEmulator Core Server
+# ACE-DreamWeave
 
-[![Discord](https://img.shields.io/discord/261242462972936192.svg?label=play+now!&style=for-the-badge&logo=discord)](https://discord.gg/C2WzhP9)
+An open-source Asheron's Call server. This is the server that runs DreamWeave, built on [ACEmulator](https://github.com/ACEmulator/ACE).
 
-Build status: [![GitHub last commit (master)](https://img.shields.io/github/last-commit/acemulator/ace/master)](https://github.com/ACEmulator/ACE/commits/master) [![Windows CI](https://ci.appveyor.com/api/projects/status/rqebda31cgu8u59w/branch/master?svg=true)](https://ci.appveyor.com/project/LtRipley36706/ace/branch/master) [![docker build](https://github.com/ACEmulator/ACE/actions/workflows/docker-image.yml/badge.svg)](https://hub.docker.com/r/acemulator/ace)
+**This is the engine, not the game.** It is a complete, buildable, runnable AC server. It is not a copy of the DreamWeave world. The custom content - the weenies, quests, dungeons and placements that make DreamWeave what it is - lives in a separate private repository along with the tooling used to author it, and is not published here.
 
-[![Download Latest Server Release](https://img.shields.io/github/v/release/ACEmulator/ACE?label=latest%20server%20release) ![GitHub Release Date](https://img.shields.io/github/release-date/acemulator/ace)](https://github.com/ACEmulator/ACE/releases/latest)
-[![Download Latest World Database Release](https://img.shields.io/github/v/release/ACEmulator/ACE-World-16PY-Patches?label=latest%20world%20database%20release) ![GitHub Release Date](https://img.shields.io/github/release-date/acemulator/ACE-World-16PY-Patches)](https://github.com/ACEmulator/ACE-World-16PY-Patches/releases/latest)
-
-[![GitHub All Releases](https://img.shields.io/github/downloads/acemulator/ace/total?label=server%20downloads)](https://github.com/ACEmulator/ACE/releases) [![GitHub All Releases](https://img.shields.io/github/downloads/acemulator/ACE-World-16PY-Patches/total?label=database%20downloads)](https://github.com/ACEmulator/ACE-World-16PY-Patches/releases) [![Docker Pulls](https://img.shields.io/docker/pulls/acemulator/ace)](https://hub.docker.com/r/acemulator/ace)
-
-**ACEmulator is a custom, completely from-scratch open source server implementation for Asheron's Call built on C#**
- * MySQL and MariaDB are used as the database engine.
- * Latest client supported.
- * [![License](https://img.shields.io/github/license/acemulator/ace)](https://github.com/ACEmulator/ACE/blob/master/LICENSE)
+That split is deliberate rather than grudging. The server code is genuinely useful to anyone running an AC shard; one shard's content is only useful to that shard.
 
 ***
 ## Disclaimer
-**This project is for educational and non-commercial purposes only, use of the game client is for interoperability with the emulated server.**
-- Asheron's Call was a registered trademark of Turbine, Inc. and WB Games Inc which has since expired.
-- ACEmulator is not associated or affiliated in any way with Turbine, Inc. or WB Games Inc.
+
+**This project is for educational and non-commercial purposes only. Use of the game client is for interoperability with the emulated server.**
+- Asheron's Call was a registered trademark of Turbine, Inc. and WB Games Inc., which has since expired.
+- This project is not associated or affiliated in any way with Turbine, Inc. or WB Games Inc.
 ***
-## Getting Started
-Extended documentation can be found on the project [Wiki](https://github.com/ACEmulator/ACE/wiki).
-* [Developing ACE](https://github.com/ACEmulator/ACE/wiki/ACE-Development)
-* [Hosting ACE](https://github.com/ACEmulator/ACE/wiki/ACE-Hosting)
-* [Content Creation](https://github.com/ACEmulator/ACE/wiki/Content-Creation)
 
-## Contributions
-* Contributions in the form of issues and pull requests are welcomed and encouraged.
-* The preferred way to contribute is to fork the repo and submit a pull request on GitHub.
-* Code style information can be found on the [Wiki](https://github.com/ACEmulator/ACE/wiki/Code-Style).
+## Relationship to ACEmulator
 
-Please note that this project is released with a [Contributor Code of Conduct](https://github.com/ACEmulator/ACE/blob/master/CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
+This repository shares ACEmulator's real history. Every commit before [`08471633`](https://github.com/ACEmulator/ACE/commit/08471633e4f8eec7077ecca5b5bde80223b853df) is theirs, unmodified, and the contributor list is overwhelmingly theirs. The fork's own server changes sit above that point as a single commit.
 
-## Bug Reports
-* Please use the [issue tracker](https://github.com/ACEmulator/ACE/issues) provided by GitHub to send us bug reports.
-* You may also discuss issues and bug reports on our discord listed below.
+ACEmulator is the upstream project, and the place to start if you want a stock AC server rather than this fork's variations. Their [wiki](https://github.com/ACEmulator/ACE/wiki) remains the best general documentation for developing and hosting an ACE server, and nearly all of it applies here unchanged.
 
-## Contact
-* [Discord Channel](https://discord.gg/C2WzhP9)
+Licensed AGPL-3.0, inherited from upstream. Note that the AGPL's network clause concerns running a modified server for players, not only distributing the code.
+
+## What the fork adds
+
+On top of stock ACEmulator: a class-ability system with trainers and skill tokens, equipment and weapon modifiers, in-game banking, a mule and storage system, a realm and instancing layer, and a network of linked portals.
+
+These are server-side systems. The content that surfaces them in game is not included here, so a stock world database will run fine but most of them will not be reachable in play.
+
+## Build
+
+```
+dotnet build Source/ACE.sln -c Debug -p:Platform=x64
+```
+
+The `-p:Platform=x64` is not optional. `ACE.Server`, the test projects and `ACE.Database.LoadTest` target x64 specifically, and without it the wrong platform is selected for those.
+
+## Run
+
+`ACE.Server` needs `Config.js` and `log4net.config` beside the built executable - copy them from the adjacent `.example` files, or let `Program.cs` scaffold them on first run.
+
+You will also need three MySQL or MariaDB databases: `ace_auth`, `ace_shard` and `ace_world`, one connection block each under `Config.js`'s `MySql` section. Schema for all three is in `Database/Base/`. The world database itself is distributed separately by the upstream project - see [ACE-World-16PY-Patches](https://github.com/ACEmulator/ACE-World-16PY-Patches).
+
+## Tests
+
+```
+dotnet test Source/ACE.Server.Tests --test-adapter-path:.
+dotnet test Source/ACE.Database.Tests --test-adapter-path:.
+dotnet test Source/ACE.DatLoader.Tests --test-adapter-path:.
+```
+
+Tests that need a resource you do not have skip themselves rather than failing: those needing MySQL, those needing the client's `.dat` files, and a handful that cross-check server code against the fork's private content. A clean checkout should report zero failures, with skips.
+
+CI stands up a real MySQL and imports the upstream world database, so pull requests get meaningful coverage rather than a wall of skips.
+
+One local-only caveat: several tests locate repository files by walking up from the test assembly, so do not redirect test output outside the tree with `--artifacts-path`. That breaks the walk and produces failures unrelated to your change.
+
+## Contributing
+
+Pull requests are welcome, and `build-test` must pass.
+
+Changes touching the custom gameplay systems are harder to verify from here than you might expect, because the tests that cross-check them against content cannot run without that content. Those checks run on our side, so expect to be asked for a little patience on anything in that area.
+
+If your change is really an upstream fix rather than something specific to this fork, [ACEmulator](https://github.com/ACEmulator/ACE) is the better home for it. It will reach far more people there, and it flows back down here.
+
+This project inherits upstream's [Contributor Code of Conduct](CODE_OF_CONDUCT.md). By participating you agree to abide by its terms.
