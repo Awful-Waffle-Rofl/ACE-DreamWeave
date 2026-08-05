@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 
@@ -72,6 +73,113 @@ namespace ACE.Server.WorldObjects
             var diff = dest - source;
             diff.Z = 0;
             return Vector3.Normalize(diff);
+        }
+
+        // PROTOTYPE: count/damage/spread-angle come from dedicated MultiShot* properties (WorldObject_Weapon.cs),
+        // independent of melee's Cleaving. Range is intentionally NOT independently tunable - it always matches
+        // the shooter's own current missile range (GetMaxMissileRange), same as the primary shot. The base width
+        // stays code-level for now, not per-weapon tunable.
+        public const float MultiShotBaseWidth = 1.5f;      // flat half-width of the fan near the shooter, in units
+
+        // PROTOTYPE: extra targets must also be within this distance of the PRIMARY target (not just within the
+        // shooter's angular fan out to the weapon's own max range) - otherwise a point-blank primary shot could
+        // still acquire a sibling clear out near the edge of the weapon's range, which read as a "high arc to the
+        // end of range" from a shot that visually only travelled a few feet. This clusters extra hits near where
+        // the primary arrow actually lands, while the fan's forward/lateral checks (still measured from the
+        // shooter) continue to enforce "never behind the shooter, never outside the weapon's own arc."
+        public const float MultiShotTargetProximityRange = 20.0f;   // max distance (units) from the primary target
+
+        /// <summary>
+        /// Acquires up to totalTargets additional creatures for a multi-shot missile attack, using a
+        /// trapezoid ("fan with a widened base") in front of the shooter, aimed at the original target's direction
+        /// rather than the shooter's facing. The flat base avoids the standard cone-apex problem where an enemy
+        /// standing close to the shooter but off to the side would otherwise register a large angular deviation
+        /// and get incorrectly excluded.
+        ///
+        /// Unlike GetCleaveTarget, this does not spawn a real flying projectile per extra target - hits are
+        /// resolved instantly (same as melee cleave calling DamageTarget directly), specifically so that one
+        /// acquired creature standing in front of another can never "block" the other from being hit the way a
+        /// physically-simulated projectile could (ProjectileCollisionHelper.OnCollideObject treats a collision
+        /// with anything other than a projectile's assigned ProjectileTarget as a miss).
+        ///
+        /// PROTOTYPE: multi-shot never targets players (PvP exclusion) - see also the primary-target-is-a-player
+        /// check in Player_Missile.LaunchMissile, which skips calling this at all in that case.
+        /// </summary>
+        public List<Creature> GetMultiShotTargets(Creature target, WorldObject weapon, int totalTargets)
+        {
+            var multiShotTargets = new List<Creature>();
+
+            // the caller decides how many extra arrows there are (weapon count + Multishot class ability
+            // rank, stacking); the weapon still shapes the fan via MultiShotSpreadAngle
+            if (totalTargets <= 0)
+                return multiShotTargets;
+
+            var player = this as Player;
+
+            var aimDir = GetDir2D(Location.Pos, target.Location.Pos);
+            var rightDir = new Vector3(-aimDir.Y, aimDir.X, 0);
+
+            var maxRange = GetMaxMissileRange();
+            var spreadRate = (float)Math.Tan(weapon.MultiShotSpreadAngle * Math.PI / 180.0);
+
+            // sort visible objects by ascending distance, same source GetCleaveTarget uses
+            var visible = PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
+            visible.Sort(DistanceComparator);
+
+            foreach (var obj in visible)
+            {
+                // multi-shot skips the original (player-selected) target - it already has its own real projectile
+                if (obj.ID == target.PhysicsObj.ID)
+                    continue;
+
+                var creature = obj.WeenieObj.WorldObject as Creature;
+                if (creature == null || creature.Teleporting || creature.IsDead)
+                    continue;
+
+                // PvP exclusion: multi-shot's extra hits never target players
+                if (creature is Player)
+                    continue;
+
+                if (player != null && player.CheckPKStatusVsTarget(creature, null) != null)
+                    continue;
+
+                if (!creature.Attackable && creature.TargetingTactic == TargetingTactic.None || creature.Teleporting)
+                    continue;
+
+                if (creature is CombatPet && (player != null || this is CombatPet))
+                    continue;
+
+                var toCandidate = creature.Location.Pos - Location.Pos;
+                toCandidate.Z = 0;
+
+                var forwardDist = Vector3.Dot(toCandidate, aimDir);
+                if (forwardDist < 0 || forwardDist > maxRange)
+                    continue;
+
+                var lateralDist = Math.Abs(Vector3.Dot(toCandidate, rightDir));
+                if (lateralDist > MultiShotBaseWidth + forwardDist * spreadRate)
+                    continue;
+
+                // must also be near where the primary arrow actually lands, not just somewhere in the fan out
+                // to the weapon's full range - see MultiShotTargetProximityRange
+                var toPrimaryTarget = creature.Location.Pos - target.Location.Pos;
+                toPrimaryTarget.Z = 0;
+                if (toPrimaryTarget.Length() > MultiShotTargetProximityRange)
+                    continue;
+
+                // Terrain/walls should block a multi-shot hit; other creatures should not (2 enemies in a line
+                // should each still get hit). NOT YET VERIFIED: whether IsDirectVisible's underlying physics
+                // raycast treats intervening creatures as obstacles the same way it treats geometry - test this
+                // explicitly (two enemies in a direct line) once this is running.
+                if (!IsDirectVisible(creature))
+                    continue;
+
+                multiShotTargets.Add(creature);
+                if (multiShotTargets.Count == totalTargets)
+                    break;
+            }
+
+            return multiShotTargets;
         }
 
         /// <summary>
@@ -235,7 +343,7 @@ namespace ACE.Server.WorldObjects
 
         public Vector3 GetAimVelocity(WorldObject target, float projectileSpeed)
         {
-            var crossLandblock = Location.Landblock != target.Location.Landblock;
+            var crossLandblock = Location.InstancedLandblock != target.Location.InstancedLandblock;
 
             // eye level -> target point
             var origin = crossLandblock ? Location.ToGlobal(false) : Location.Pos;
@@ -251,12 +359,12 @@ namespace ACE.Server.WorldObjects
             return velocity;
         }
 
-        public Vector3 CalculateProjectileVelocity(Vector3 localOrigin, WorldObject target, float projectileSpeed, out Vector3 origin, out Quaternion rotation)
+        public Vector3 CalculateProjectileVelocity(Vector3 localOrigin, WorldObject target, float projectileSpeed, out Vector3 origin, out Quaternion rotation, out float time)
         {
-            var sourceLoc = PhysicsObj.Position.ACEPosition();
-            var targetLoc = target.PhysicsObj.Position.ACEPosition();
+            var sourceLoc = PhysicsObj.Position.ACEPosition(PhysicsObj.CurInstance);
+            var targetLoc = target.PhysicsObj.Position.ACEPosition(target.PhysicsObj.CurInstance);
 
-            var crossLandblock = sourceLoc.Landblock != targetLoc.Landblock;
+            var crossLandblock = sourceLoc.InstancedLandblock != targetLoc.InstancedLandblock;
 
             var startPos = crossLandblock ? sourceLoc.ToGlobal(false) : sourceLoc.Pos;
             var endPos = crossLandblock ? targetLoc.ToGlobal(false) : targetLoc.Pos;
@@ -272,7 +380,7 @@ namespace ACE.Server.WorldObjects
             startPos += Vector3.Transform(localOrigin, rotation);
             endPos.Z += target.Height / GetAimHeight(target);
 
-            var velocity = GetProjectileVelocity(target, startPos, dir, endPos, projectileSpeed, out float time);
+            var velocity = GetProjectileVelocity(target, startPos, dir, endPos, projectileSpeed, out time);
 
             return velocity;
         }

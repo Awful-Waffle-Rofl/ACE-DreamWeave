@@ -9,6 +9,7 @@ using ACE.Database.Models.Shard;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
 using ACE.Server.Managers;
 using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
@@ -325,6 +326,12 @@ namespace ACE.Server.WorldObjects
         /// <param name="setAsDisplayTitle">If this is true, make this the player's current title</param>
         public void AddTitle(uint titleId, bool setAsDisplayTitle = false)
         {
+            // Mule (WaffleACE): a mule earns no titles. Safe to place ahead of everything: the two
+            // PlayerFactory calls that hand out a heritage/starting title run at character creation, long
+            // before any conversion could have set the flag.
+            if (MuleBlocked(MuleAction.GainTitle))
+                return;
+
             if (!Enum.IsDefined(typeof(CharacterTitle), titleId))
                 return;
 

@@ -481,6 +481,39 @@ namespace ACE.Database
         // Spell
         // =====================================
 
+        /// <summary>
+        /// Realms Phase 3: per-realm content override rows for a landblock, mapped into
+        /// the base LandblockInstance shape. An empty list means the realm has no
+        /// override for this landblock and base content should load.
+        /// </summary>
+        public virtual List<LandblockInstance> GetRealmInstancesByLandblock(ushort landblock, ushort realmId)
+        {
+            using (var context = new WorldDbContext())
+            {
+                var rows = context.LandblockInstanceRealm
+                    .Include(r => r.LandblockInstanceLinkRealm)
+                    .AsNoTracking()
+                    .Where(r => r.RealmId == realmId && r.Landblock == landblock)
+                    .ToList();
+
+                return Adapter.RealmContentConverter.ConvertToLandblockInstances(rows);
+            }
+        }
+
+        /// <summary>
+        /// ACRealms port Phase 2: the realm registry, loaded once at boot by RealmManager.
+        /// Returns an empty list if the realm table has no rows (base world only).
+        /// </summary>
+        public virtual List<Realm> GetAllRealms()
+        {
+            using (var context = new WorldDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.Realm.ToList();
+            }
+        }
+
         public Dictionary<uint, string> GetAllSpellNames(WorldDbContext context)
         {
             return context.Spell

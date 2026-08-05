@@ -109,6 +109,7 @@ namespace ACE.Database.Adapter
 
                     existingValue.PositionType = (ushort)kvp.Key;
                     existingValue.ObjCellId = kvp.Value.ObjCellId;
+                    existingValue.Instance = kvp.Value.Instance;
                     existingValue.OriginX = kvp.Value.PositionX;
                     existingValue.OriginY = kvp.Value.PositionY;
                     existingValue.OriginZ = kvp.Value.PositionZ;

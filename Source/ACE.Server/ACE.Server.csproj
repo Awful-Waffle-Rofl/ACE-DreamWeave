@@ -11,6 +11,10 @@
     <ImplicitUsings>disable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="ACE.Server.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
@@ -137,6 +141,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Managers\Analytics\ace_analytics.sql" />
     <EmbeddedResource Include="Entity\Mutations\ArmorLevel\armor_level_extremity.txt" />
     <EmbeddedResource Include="Entity\Mutations\ArmorLevel\armor_level_non_extremity.txt" />
     <EmbeddedResource Include="Entity\Mutations\ArmorLevel\covenant_armor.txt" />
@@ -239,7 +244,7 @@
     <PackageReference Include="log4net" Version="2.0.17" />
     <PackageReference Include="Log4Net.Async.Standard" Version="3.1.0" />
     <PackageReference Include="McMaster.NETCore.Plugins" Version="2.0.0" />
-    <PackageReference Include="MySqlConnector" Version="2.6.0" />
+    <PackageReference Include="MySqlConnector" Version="2.6.1" />
   </ItemGroup>
 
   <ItemGroup>

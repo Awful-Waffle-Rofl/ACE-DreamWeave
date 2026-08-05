@@ -32,6 +32,22 @@ namespace ACE.Server.Command.Handlers
             });
         }
 
+        [CommandHandler("savebatchstats", AccessLevel.Developer, CommandHandlerFlag.None, 0, "Show SaveBiotaBatch instrumentation (batch sizes, cache-hit ratio).", "<reset>\n" + "optional parameter \"reset\" to clear the counters")]
+        public static void HandleSaveBatchStats(Session session, params string[] parameters)
+        {
+            if (parameters?.Length > 0 && parameters[0].ToLower() == "reset")
+            {
+                SaveBatchStats.Reset();
+
+                CommandHandlerHelper.WriteOutputInfo(session, "SaveBiotaBatch stats reset.");
+
+                return;
+            }
+
+            foreach (var line in SaveBatchStats.GetReport().Split('\n'))
+                CommandHandlerHelper.WriteOutputInfo(session, line.TrimEnd('\r'));
+        }
+
         [CommandHandler("databaseperftest", AccessLevel.Developer, CommandHandlerFlag.None, 0, "Test server/database performance.", "biotasPerTest\n" + "optional parameter biotasPerTest if omitted 1000")]
         public static void HandleDatabasePerfTest(Session session, params string[] parameters)
         {

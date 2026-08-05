@@ -44,6 +44,11 @@ namespace ACE.Server.WorldObjects
             if (!(activator is Player player))
                 return;
 
+            // Drift Network class-ability props (the Arcane Pedestal Luminance-exchange stone) opt in by data
+            // and run their interaction here; any other Generic object falls through to normal use behavior.
+            if (ClassAbilities.ClassAbilityTrainer.TryHandleUse(this, player))
+                return;
+
             if (UseSound > 0)
                 player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
         }

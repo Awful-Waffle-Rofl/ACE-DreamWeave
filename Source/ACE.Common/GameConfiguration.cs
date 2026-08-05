@@ -21,6 +21,18 @@ namespace ACE.Common
 
         public bool ServerPerformanceMonitorAutoStart { get; set; } = false;
 
+        /// <summary>
+        /// Enables the analytics pipeline (writes online-roster/per-block snapshots and per-character
+        /// xp/lum rate rows to the MySql.Analytics database on a background thread). Off by default.
+        /// </summary>
+        public bool EnableAnalytics { get; set; } = false;
+
+        /// <summary>Seconds between analytics snapshot/rate flushes. Clamped to a minimum of 10.</summary>
+        public uint AnalyticsFlushIntervalSeconds { get; set; } = 60;
+
+        /// <summary>Days of raw per-character rate rows to retain before pruning.</summary>
+        public uint AnalyticsRetentionDays { get; set; } = 7;
+
         public ThreadConfiguration Threading { get; set; } = new ThreadConfiguration();
 
         /// <summary>

@@ -19,7 +19,8 @@
 
   <!-- MSTest adapter -->
   <MSTest>
-    <MapInconclusiveToFailed>True</MapInconclusiveToFailed>
+    <!-- Inconclusive is used to skip tests whose environment (MySQL, client .dat files) is unavailable -->
+    <MapInconclusiveToFailed>False</MapInconclusiveToFailed>
     <CaptureTraceOutput>false</CaptureTraceOutput>
     <DeleteDeploymentDirectoryAfterTestRunIsComplete>False</DeleteDeploymentDirectoryAfterTestRunIsComplete>
     <DeploymentEnabled>False</DeploymentEnabled>

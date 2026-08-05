@@ -40,6 +40,35 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// A forced attack target from the Taunt class ability - overrides targeting tactic selection
+        /// in FindNextTarget until TauntExpiry (Timers.RunningTime). Runtime-only, never persisted.
+        /// </summary>
+        public Creature TauntTarget;
+
+        public double TauntExpiry;
+
+        /// <summary>
+        /// Forces this monster to attack the taunter for the given duration, waking it if idle.
+        /// Mirrors the retaliate checks in Player_Monster.OnAttackMonster.
+        /// </summary>
+        public void ApplyTaunt(Player taunter, double duration)
+        {
+            if ((Tolerance & PlayerCombatPet_RetaliateExclude) != 0)
+                return;
+
+            TauntTarget = taunter;
+            TauntExpiry = Timers.RunningTime + duration;
+
+            var prevAttackTarget = AttackTarget;
+            AttackTarget = taunter;
+
+            if (MonsterState != State.Awake)
+                WakeUp();
+            else if (AttackTarget != prevAttackTarget)
+                EmoteManager.OnNewEnemy(AttackTarget);
+        }
+
+        /// <summary>
         /// Transitions a monster from awake to idle state
         /// </summary>
         public virtual void Sleep()
@@ -52,6 +81,7 @@ namespace ACE.Server.WorldObjects
             CurrentAttack = null;
             firstUpdate = true;
             AttackTarget = null;
+            TauntTarget = null;
             IsAwake = false;
             IsMoving = false;
             MonsterState = State.Idle;
@@ -141,6 +171,26 @@ namespace ACE.Server.WorldObjects
                 SetNextTargetTime();
 
                 var visibleTargets = GetAttackTargets();
+
+                // Taunt class ability - a still-valid forced target overrides tactic selection entirely.
+                // The hold requires direct line of sight: if the taunter breaks LoS (hides behind
+                // geometry), the taunt breaks and normal tactic selection resumes immediately below.
+                if (TauntTarget != null)
+                {
+                    if (Timers.RunningTime < TauntExpiry && !TauntTarget.IsDead && visibleTargets.Contains(TauntTarget)
+                        && IsDirectVisible(TauntTarget))
+                    {
+                        var prevTauntTarget = AttackTarget;
+                        AttackTarget = TauntTarget;
+
+                        if (AttackTarget != prevTauntTarget)
+                            EmoteManager.OnNewEnemy(AttackTarget);
+
+                        return true;
+                    }
+                    TauntTarget = null;
+                }
+
                 if (visibleTargets.Count == 0)
                 {
                     if (MonsterState != State.Return)

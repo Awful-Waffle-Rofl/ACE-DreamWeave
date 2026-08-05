@@ -1,0 +1,170 @@
+# Custom property-id registry - single authority for FORK-allocated property enum ids.
+# Reserve an id here BEFORE the code that uses it lands. Two branches claiming the same id then
+# collide as a git conflict in this file instead of as a silent post-merge duplicate.
+# Motivating case: PropertyInt 9032 was claimed twice on the same day (PR #222 vs
+# feature/equipment-mods). CI's duplicate-id test catches that only AFTER both sides merge.
+#
+# Flow: Docs/Runbook.md, "Reserving a custom property id".
+#   status=reserved -> claimed, the code is not on master yet, so the enum member need not exist.
+#                      If it DOES exist it must still name-match, so a reserved row needs no edit
+#                      when its branch lands - only a flip to active once it is on master.
+#   status=active   -> the enum member exists on master and MUST name-match this row exactly.
+#
+# A range row (id_or_range = "start-end") reserves a whole block and carries a block LABEL, not an
+# enum name. It does not satisfy the per-id requirement: allocating an id inside a reserved block
+# means splitting a single-id row out of it.
+#
+# Guarded bands: every enum member whose value falls inside a band below must have a row here with
+# the exact same name. Enforced by Source/ACE.Server.Tests/PropertyRegistryTests.cs.
+#
+# Deliberately OUTSIDE the guarded bands, because these ids are not this fork's to allocate:
+#   - PCAP recorder ids from upstream ACEmulator's packet-capture tooling:
+#     PropertyInt 8007-8043, PropertyFloat 8004-8018, PropertyDataId 8001-8044,
+#     PropertyInstanceId 8000-8008, PropertyString 8006-8032.
+#   - Upstream ACEmulator's own custom properties, which arrive here via upstream merges:
+#     PropertyBool 9001-9010, PropertyInt 9008-9015, PropertyInt64 9000-9003,
+#     PropertyString 9001-9007.
+# Each fork band therefore starts one id past the last upstream allocation in that enum. An
+# upstream merge that lands a NEW member inside a fork band fails the registry test on purpose:
+# that is a genuine collision needing a decision, not a false alarm.
+#
+# Machine-readable band declarations - the test reads these lines, so keep them and the prose above
+# in sync. Format: "#band" <TAB> enum_file <TAB> start-end
+#band	PropertyBool	9011-9999
+#band	PropertyDataId	9000-9999
+#band	PropertyFloat	8019-9999
+#band	PropertyInstanceId	9000-9999
+#band	PropertyInt	9016-9999
+#band	PropertyInt	42000-42999
+#band	PropertyInt64	9004-9999
+#band	PropertyString	9008-9999
+#
+# enum_file is the enum name; the file is Source/ACE.Entity/Enum/Properties/<enum_file>.cs.
+# Rows are tab-separated and sorted by enum_file (ordinal), then by id / range start.
+# enum_file	id_or_range	enum_name_or_block_label	owner	status	notes
+PropertyBool	9011	MultiShot	multishot	active	PROTOTYPE split-arrow missile flag; WorldObject_Weapon.IsMultiShot
+PropertyBool	9012	ClassAbilityTokenPrepaid	classabilities	active	RETIRED 2026-08-03 - do not read or write. Every class ability token is prepaid unconditionally, so the marker has no meaning; the enum member is kept (and the id stays claimed) because pre-2026-08-03 shard biotas still carry the property. Do not reuse the id.
+PropertyBool	9013	ClassAbilityExchanger	classabilities	active	flags the Drift Network voucher-refund NPC
+PropertyBool	9014	ClassAbilityLumExchanger	classabilities	active	flags the Arcane Pedestal Luminance-for-CAP prop
+PropertyBool	9015	DpsChallengeTarget	proving-grounds	active	arena dummy creature whose DamageHistory scores the run
+PropertyBool	9016	DpsChallengeActive	proving-grounds	active	on a player while a DPS run is armed
+PropertyBool	9017	SurvivalChallengeCreature	proving-grounds-defense	active	arena creature eligible for per-tier raw-power raises
+PropertyBool	9018	SurvivalChallengeActive	proving-grounds-defense	active	on a player while a survival run is armed
+PropertyBool	9019	PortalBlocksRareGems	proving-grounds-defense	active	allocated after 9020/9021; listed here in id order
+PropertyBool	9020	WaveChallengeCreature	proving-grounds-wave	active	wave-roster enemy; its death reports to the run controller
+PropertyBool	9021	WaveChallengeActive	proving-grounds-wave	active	on a player while a wave run is armed
+PropertyBool	9022	BankAutoDeposit	banking	active	when false, vendor sale proceeds pay out as coin stacks into the pack instead of crediting the bank
+PropertyBool	9023	IsMule	mule-system	active	irreversible storage/trade-only character; blocks xp/luminance/quests/crafting/combat and overrides carry capacity (attributes untouched)
+PropertyBool	9024	ClassAbilityRespecer	classabilities	active	flags the Drift Network full class-ability respec NPC
+PropertyFloat	8019	MultiShotSpreadAngle	multishot	active	PROTOTYPE split-arrow tuning
+PropertyFloat	8020	MultiShotDamageMultiplier	multishot	active	PROTOTYPE split-arrow tuning
+PropertyFloat	8100	GearModDeadeye	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8101	GearModEagleEye	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8102	GearModLongDraw	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8103	GearModHeavyDraw	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8104	GearModSplitshot	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8105	GearModDoubleVolley	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8106	GearModVenom	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8107	GearModAcidProc	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8108	GearModCaustic	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8109	GearModRiposte	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8110	GearModAttackSpeed	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8111	GearModThorns	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8112	GearModShieldCheck	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8113	GearModBulwark	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8114	GearModFrenziedPace	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8115	GearModLingeringFury	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8116	GearModSavageBlows	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8117	GearModBloodFury	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8118	GearModExecutioner	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8119	GearModBloodlust	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8120	GearModOverchannel	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8121	GearModEchoCast	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8122	GearModElementalRend	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8123	GearModResonance	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8124	GearModVoidDamage	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8125	GearModWithering	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8126	GearModEmpoweredSummons	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyFloat	8127	GearModManaBarrier	equipment-mods	active	class-ability-t2-additions gear mod for Mana Barrier
+PropertyFloat	8128	GearModNetherBloom	equipment-mods	active	class-ability-t2-additions gear mod for Nether Bloom
+PropertyFloat	8129	GearModSoulTether	equipment-mods	active	class-ability-t2-additions gear mod for Soul Tether
+PropertyFloat	8130	WeaponModDevastation	weapon-mods	active	Tier A applied magnitude; delta added to GearCritDamage 374. Renamed from WeaponModCrushingBlow 2026-07-30; id unchanged
+PropertyFloat	8131	WeaponModWeakPoint	weapon-mods	active	Tier A applied magnitude; delta added to GearCrit 372. Renamed from WeaponModBitingStrike 2026-07-30; id unchanged
+PropertyFloat	8132	WeaponModBloodthirst	weapon-mods	active	Tier A applied magnitude; delta added to GearDamage 370
+PropertyFloat	8133	WeaponModCleave	weapon-mods	active	Tier A applied magnitude; delta added to Cleaving 292
+PropertyFloat	8134	WeaponModShieldBypass	weapon-mods	active	Tier A applied magnitude; delta added to IgnoreShield 151
+PropertyFloat	8135	WeaponModSwiftFlight	weapon-mods	active	Tier A applied magnitude; delta added to MaximumVelocity 26
+PropertyFloat	8136	RETIRED_DO_NOT_REUSE	retired	reserved	was WeaponModWarding; retired 2026-07-30 when the Tier A pool was cut to damage-oriented modifiers. Stale rows exist on dev shards. Guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated
+PropertyFloat	8137	RETIRED_DO_NOT_REUSE	retired	reserved	was WeaponModCritWard; retired 2026-07-30 when the Tier A pool was cut to damage-oriented modifiers. Stale rows exist on dev shards. Guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated
+PropertyFloat	8138	RETIRED_DO_NOT_REUSE	retired	reserved	was WeaponModResolute; retired 2026-07-30 when the Tier A pool was cut to damage-oriented modifiers. Stale rows exist on dev shards. Guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated
+PropertyFloat	8139	RETIRED_DO_NOT_REUSE	retired	reserved	was WeaponModVigor; retired 2026-07-30 when the Tier A pool was cut to damage-oriented modifiers. Stale rows exist on dev shards. Guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated
+PropertyFloat	8140	RETIRED_DO_NOT_REUSE	retired	reserved	was WeaponModMending; retired 2026-07-30 when the Tier A pool was cut to damage-oriented modifiers. Stale rows exist on dev shards. Guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated
+PropertyFloat	8141	WeaponModLifeLeech	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8142	WeaponModManaLeech	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8143	WeaponModStaminaLeech	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8144	WeaponModAmbush	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8145	WeaponModQuickening	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8146	WeaponModOverload	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8147	WeaponModSecondWind	weapon-mods	active	Tier B applied magnitude as a FRACTION; no native property, read live at combat time
+PropertyFloat	8148	WeaponModSunder	weapon-mods	reserved	Tier B phase 2; needs a new enchantment/spell row, so NO enum member yet
+PropertyFloat	8149	WeaponModRampage	weapon-mods	reserved	Tier B phase 2; needs per-target stack state, so NO enum member yet
+PropertyFloat	8150	GearModBloodCharge	equipment-mods	active	docs/eqmod-class-reconcile; Sanguine Reserve (BloodMage) per-charge life damage. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8151	GearModTransfusion	equipment-mods	active	docs/eqmod-class-reconcile; Transfusion (BloodMage) Drain surplus share. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8152	GearModHemorrhage	equipment-mods	active	docs/eqmod-class-reconcile; Weakened Blood (BloodMage) life vulnerability. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8153	GearModDeepen	equipment-mods	active	docs/eqmod-class-reconcile; Malediction (BloodMage) debuff intensity. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8154	GearModBloodletting	equipment-mods	active	docs/eqmod-class-reconcile; Crimson Harvest (BloodMage) radius. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8155	GearModSanguinate	equipment-mods	active	docs/eqmod-class-reconcile; Exsanguinate (BloodMage) burst multiplier. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8156	GearModBloodPrice	equipment-mods	active	docs/eqmod-class-reconcile; Blood Price (BloodMage) spell damage. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8157	GearModClotting	equipment-mods	active	docs/eqmod-class-reconcile; Sanguine Ward (BloodMage) absorb fraction. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8158	GearModSpellblade	equipment-mods	active	docs/eqmod-class-reconcile; Spellblade (Spellsword) proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8159	GearModHarmonics	equipment-mods	active	docs/eqmod-class-reconcile; Resonance (Spellsword) per-stack magic damage. NAMED Harmonics because EquipmentModId.Resonance is already taken by the Archmage Spell AOE mod. Docs/EquipmentMods/DESIGN.md 2.2
+PropertyFloat	8160	GearModRuneblade	equipment-mods	active	docs/eqmod-class-reconcile; Runeblade (Spellsword) proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8161	GearModSundermark	equipment-mods	active	docs/eqmod-class-reconcile; Sundermark (Spellsword) proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8162	GearModSurge	equipment-mods	active	docs/eqmod-class-reconcile; Spellsurge (Spellsword) per-stack war-proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8163	GearModSpellstorm	equipment-mods	active	docs/eqmod-class-reconcile; Spellstorm (Spellsword) proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8164	GearModCascade	equipment-mods	active	docs/eqmod-class-reconcile; Cascade (Spellsword) chain chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8165	GearModDispellingEdge	equipment-mods	active	docs/eqmod-class-reconcile; Dispelling Edge (Spellsword) proc chance. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8166	GearModProvoke	equipment-mods	active	docs/eqmod-class-reconcile; Taunt hold duration. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8167	GearModBellow	equipment-mods	active	docs/eqmod-class-reconcile; Taunt radius. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8168	GearModShieldWall	equipment-mods	active	docs/eqmod-class-reconcile; Vanguard correction, Shield Block chance. Prerequisite landed on the same branch - ShieldBlockAbility.BlockChance now caps its Armor Tinkering rider with class_ability_affinity_chance_cap, so the pooled avoidance cap no longer eats the mod. Docs/EquipmentMods/DESIGN.md 2.3
+PropertyFloat	8169-8199	equipment-mods future	equipment-mods	reserved	PR #216 headroom for further gear mods, shrunk from 8166-8199 by the Vanguard correction; split single-id rows out of this block when allocated
+PropertyFloat	9000	OfflineExperienceBonusRemaining	offline-bonus	active	banked offline-bonus seconds on a character
+PropertyFloat	9001	SurvivalChallengeRampRate	proving-grounds-defense	active	per-tier raw-power multiplier on the arena portal weenie
+PropertyFloat	9002	SurvivalChallengeRatingPerTier	proving-grounds-defense	active	per-tier flat DamageRating increment on the arena portal weenie
+PropertyFloat	9003	RETIRED_DO_NOT_REUSE	retired	reserved	allocated then retired; stale rows may still exist in shipped content. Guarded by WaveChallengePropertyTests.PropertyFloat_9003_StaysUnallocated
+PropertyFloat	9004	WaveChallengeInterWaveDelay	proving-grounds-wave	active	seconds between a cleared wave and the next spawn
+PropertyFloat	9005	WaveChallengeStallTimeout	proving-grounds-wave	active	seconds of zero damage that end a run as stalled
+PropertyFloat	9006	WaveChallengeWaveTimeLimit	proving-grounds-wave	active	seconds a single wave may stay alive before the run ends
+PropertyInt	9016	MultiShotCount	multishot	active	PROTOTYPE split-arrow extra target count
+PropertyInt	9017	AvailableClassAbilityPoints	classabilities	active	point balance on the player biota
+PropertyInt	9018	TotalClassAbilityPointsEarned	classabilities	active	lifetime earned points on the player biota
+PropertyInt	9019	ClassAbilityPointsPurchasedWithLum	classabilities	active	points bought with Luminance
+PropertyInt	9020	ClassAbilityPointValue	classabilities	active	points granted by a consumable Gem
+PropertyInt	9021	PortalInstancing	realms	active	portal routes into a fresh ephemeral instance
+PropertyInt	9022	PortalRealm	realms	active	portal routes into this realm's default instance
+PropertyInt	9023	ClassAbilityTokenId	classabilities	active	class ability a token teaches
+PropertyInt	9024	ClassAbilityTokenTier	classabilities	active	exact rank a token teaches
+PropertyInt	9025	PortalExitInstance	realms	active	exit portal whose target is the player's stored EphemeralRealmExitTo
+PropertyInt	9026	MilestoneClassAbilityPointsGranted	classabilities	active	lifetime level-milestone payout counter; never reset
+PropertyInt	9027	DpsChallengeDuration	proving-grounds	active	run length in seconds on the arena portal weenie
+PropertyInt	9028	SurvivalChallengeInterval	proving-grounds-defense	active	seconds between escalation tiers on the arena portal weenie
+PropertyInt	9029	WaveChallengeWaves	proving-grounds-wave	active	total waves on the arena portal weenie
+PropertyInt	9030	WaveChallengeWaveIndex	proving-grounds-wave	active	which wave a roster weenie defines; sanity-check only
+PropertyInt	9031	WaveChallengeRosterBaseWcid	proving-grounds-wave	active	wcid of the wave 1 roster weenie
+PropertyInt	9032	EnlightenmentClassAbilityPointsGranted	enlightenment	active	lifetime enlightenment-milestone payout counter; never reset
+PropertyInt	9033	GearModCapacity	equipment-mods	active	PR #216 feature/equipment-mods
+PropertyInt	9034	WeaponModTinkerCount	weapon-mods	active	tinker slots filled; PRESENCE marks a weapon managed by this system
+PropertyInt	9035	SalvageToolCharges	salvage-hammers	active	multi-use salvage tool CAPACITY (the three Hammers: Tourmaline/Amethyst/Obsidian); PRESENCE above 0 marks an item as a tool rather than a bag, which is what keeps a tool at 7 of 10 distinct from a refused PARTIAL bag; the live count is Structure and MaxStructure equals this
+PropertyInt	42000	HomeRealm	realms	active	ACRealms port; the id matches ACRealms upstream and is intentionally far outside the 9xxx band
+PropertyInt64	9004	BankedPyreals	banking	active	id mirrors Conquest-ACE for data interop
+PropertyInt64	9005	BankedLuminance	banking	active	id mirrors Conquest-ACE for data interop
+PropertyInt64	9006-9014	banking Conquest-ACE interop gap	banking	reserved	HYPOTHESIS: gap left because the banking ids mirror Conquest-ACE (per the enum comment); confirm against Conquest-ACE before allocating anything here
+PropertyInt64	9015	BankedLegendaryKeys	banking	active	id mirrors Conquest-ACE for data interop
+PropertyInt64	9016	BankedPromissoryNotes	banking	active	id mirrors Conquest-ACE for data interop
+PropertyInt64	9017	BestDpsScore	proving-grounds	active	best recorded total damage in the arena run
+PropertyInt64	9018	QuestStampCount	quest-stamps	active	monotonic per-character stamp count
+PropertyInt64	9019	AccountQuestStampCount	quest-stamps	active	ephemeral account-wide sum; read by InqInt64Stat emotes
+PropertyInt64	9020	BestSurvivalScore	proving-grounds-defense	active	best seconds survived
+PropertyInt64	9021	BestWaveScore	proving-grounds-wave	active	highest fully-cleared wave
+PropertyString	9008	ClassAbilityTrainerAbilities	classabilities	active	abilities a Drift Network trainer NPC offers
+PropertyString	9009	WeaponModTinkerLog	weapon-mods	active	this system's own current tinker composition; REPLACED never appended

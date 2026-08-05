@@ -1,5 +1,4 @@
 using ACE.Common.Extensions;
-using ACE.DatLoader;
 using ACE.DatLoader.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -19,9 +18,7 @@ namespace ACE.Server.Entity
         /// </summary>
         public static uint GetFormula(Creature creature, Skill skill, bool current = true)
         {
-            var skillTable = DatManager.PortalDat.SkillTable;
-
-            if (!skillTable.SkillBaseHash.TryGetValue((uint)skill, out SkillBase skillBase))
+            if (!GameTables.SkillTable.SkillBaseHash.TryGetValue((uint)skill, out SkillBase skillBase))
                 return 0;
 
             return GetFormula(creature, skillBase.Formula, current);
@@ -33,7 +30,7 @@ namespace ACE.Server.Entity
         /// </summary>
         public static uint GetFormula(Creature creature, PropertyAttribute2nd vital, bool current = true)
         {
-            var vitalTable = DatManager.PortalDat.SecondaryAttributeTable;
+            var vitalTable = GameTables.SecondaryAttributeTable;
 
             switch (vital)
             {

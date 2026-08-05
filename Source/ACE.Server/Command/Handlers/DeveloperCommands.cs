@@ -43,6 +43,20 @@ namespace ACE.Server.Command.Handlers
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
+        /// <summary>
+        /// PropertyBools that the command dispatcher uses to authorize privileged commands.
+        /// Setting any of these via @setproperty is a privilege-escalation vector, so only a full
+        /// Admin may do so (see HandleSetProperty).
+        /// </summary>
+        private static readonly HashSet<PropertyBool> AccessControlBools = new HashSet<PropertyBool>
+        {
+            PropertyBool.IsAdmin,
+            PropertyBool.IsArch,
+            PropertyBool.IsEnvoy,
+            PropertyBool.IsSentinel,
+            PropertyBool.IsAdvocate,
+        };
+
         // TODO: Replace later with a command to spawn a generator at the player's location
         /*
         /// <summary>
@@ -116,6 +130,27 @@ namespace ACE.Server.Command.Handlers
         public static void HandleFixBusy(Session session, params string[] parameters)
         {
             session.Player.SendUseDoneEvent();
+        }
+
+        /// <summary>
+        /// Prints one sample line per ChatMessageType so the client's actual colors can be read off the
+        /// screen instead of guessed from the enum's doc comments.
+        ///
+        /// Those comments have now been wrong twice for GameMessageSystemChat: x1E is documented "light cyan"
+        /// but renders dark navy, and Tell (0x03) renders yellow here even though a real NPC tell renders
+        /// bright cyan. The color a client picks depends on the message-carrying opcode, not only on the
+        /// type byte, so the only reliable answer for THIS message class is to look at it.
+        /// </summary>
+        [CommandHandler("chatcolors", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0,
+            "Prints a sample line in every ChatMessageType to identify client colors")]
+        public static void HandleChatColors(Session session, params string[] parameters)
+        {
+            var types = Enum.GetValues(typeof(ChatMessageType))
+                .Cast<ChatMessageType>()
+                .OrderBy(t => (uint)t);
+
+            foreach (var type in types)
+                session.Network.EnqueueSend(new GameMessageSystemChat($"[0x{(uint)type:X2}] {type} - the quick brown fox", type));
         }
 
 
@@ -493,7 +528,7 @@ namespace ACE.Server.Command.Handlers
                     for (int y = 0; y <= 0xFE; y++)
                     {
                         var blockid = new LandblockId((byte)x, (byte)y);
-                        LandblockManager.GetLandblock(blockid, false, false);
+                        LandblockManager.GetLandblock(blockid, 0, false, false);
                     }
                 }
 
@@ -673,7 +708,7 @@ namespace ACE.Server.Command.Handlers
                 positionData[i] = position;
             }
 
-            session.Player.Teleport(new Position(cell, positionData[0], positionData[1], positionData[2], positionData[3], positionData[4], positionData[5], positionData[6]));
+            session.Player.Teleport(new Position(cell, positionData[0], positionData[1], positionData[2], positionData[3], positionData[4], positionData[5], positionData[6], session.Player.Location.Instance));
         }
 
         /// <summary>
@@ -784,7 +819,7 @@ namespace ACE.Server.Command.Handlers
         // Experience
         // ==================================
 
-        [CommandHandler("grantxp", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1, "Give XP to yourself (or the specified character).", "ulong\n" + "@grantxp [name] 191226310247 is max level 275")]
+        [CommandHandler("grantxp", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1, "Give XP to yourself (or the specified character).", "ulong\n" + "@grantxp [name] 191226310247 reaches retail level 275; enlightenment raises the personal cap past that (275 + 5 per enlightenment)")]
         public static void HandleGrantXp(Session session, params string[] parameters)
         {
             if (parameters?.Length > 0)
@@ -866,6 +901,48 @@ namespace ACE.Server.Command.Handlers
             }
 
             ChatPacket.SendServerMessage(session, "Usage: /grantluminance [name] 1234 (max 999999999999)", ChatMessageType.Broadcast);
+        }
+
+        /// <summary>
+        /// Credits banked Luminance (via the banking system), which - unlike available Luminance - is uncapped
+        /// (MaximumLuminance does not limit it) and works even on a character that never unlocked Luminance.
+        /// Banked Luminance is spendable at NPCs (e.g. class ability tokens) but not transferable between players,
+        /// so this is the way to give a test character enough Luminance to buy Luminance-priced content. Prefer
+        /// this over /grantluminance, which only tops up available Luminance to the existing cap.
+        /// </summary>
+        [CommandHandler("addluminance", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1,
+            "Adds banked Luminance (uncapped, spendable at NPCs) to yourself or a named online player.",
+            "<amount> [playerName]")]
+        public static void HandleAddLuminance(Session session, params string[] parameters)
+        {
+            if (!long.TryParse(parameters[0], out var amount) || amount <= 0)
+            {
+                ChatPacket.SendServerMessage(session, "Usage: /addluminance <amount> [playerName] - amount must be a positive number.", ChatMessageType.Broadcast);
+                return;
+            }
+
+            var target = session.Player;
+
+            if (parameters.Length > 1)
+            {
+                var playerName = string.Join(" ", parameters.Skip(1));
+                target = PlayerManager.GetOnlinePlayer(playerName);
+
+                if (target == null)
+                {
+                    ChatPacket.SendServerMessage(session, $"Player '{playerName}' is not online.", ChatMessageType.Broadcast);
+                    return;
+                }
+            }
+
+            var balance = target.AddBankedLuminance(amount);
+
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Added {amount:N0} banked Luminance to {target.Name} (bank balance: {balance:N0}).", ChatMessageType.Advancement));
+
+            if (target != session.Player)
+                target.Session.Network.EnqueueSend(new GameMessageSystemChat($"You have been granted {amount:N0} banked Luminance (bank balance: {balance:N0}). Check it with /bank.", ChatMessageType.Advancement));
+
+            PlayerManager.BroadcastToAuditChannel(session.Player, $"{session.Player.Name} added {amount:N0} banked Luminance to {target.Name}.");
         }
 
         [CommandHandler("grantitemxp", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1, "Give item XP to the last appraised item.")]
@@ -1895,6 +1972,19 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
+            // Security: block privilege escalation via the access-control PropertyBools.
+            // The command dispatcher authorizes admin commands off these per-character bools
+            // (CommandManager.GetCommandHandler), so letting a sub-Admin set them here is a vertical
+            // privilege escalation (e.g. a Developer self-appraising and setting IsAdmin). Legitimate
+            // elevation goes through @set-accountaccess (bools are derived from account access at login).
+            if (pType == typeof(PropertyBool) && result is PropertyBool boolProp
+                && AccessControlBools.Contains(boolProp) && !session.Player.IsAdmin)
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat($"You are not authorized to set {prop}. Use @set-accountaccess to change account access levels.", ChatMessageType.Broadcast));
+                PlayerManager.BroadcastToAuditChannel(session.Player, $"{session.Player.Name} was DENIED setting access-control property {prop} = {value} on {obj.Name} ({obj.Guid})");
+                return;
+            }
+
             if (value == "null")
             {
                 if (propType.Equals("PropertyInt", StringComparison.OrdinalIgnoreCase))
@@ -2121,7 +2211,7 @@ namespace ACE.Server.Command.Handlers
                     return;
                 }
 
-                var pos = new Position(dest.ObjCellId, dest.OriginX, dest.OriginY, dest.OriginZ, dest.AnglesX, dest.AnglesY, dest.AnglesZ, dest.AnglesW);
+                var pos = new Position(dest.ObjCellId, dest.OriginX, dest.OriginY, dest.OriginZ, dest.AnglesX, dest.AnglesY, dest.AnglesZ, dest.AnglesW, 0);
                 WorldObject.AdjustDungeon(pos);
 
                 session.Player.Teleport(pos);
@@ -2155,7 +2245,7 @@ namespace ACE.Server.Command.Handlers
                     return;
                 }
 
-                var pos = new Position(dest.ObjCellId, dest.OriginX, dest.OriginY, dest.OriginZ, dest.AnglesX, dest.AnglesY, dest.AnglesZ, dest.AnglesW);
+                var pos = new Position(dest.ObjCellId, dest.OriginX, dest.OriginY, dest.OriginZ, dest.AnglesX, dest.AnglesY, dest.AnglesZ, dest.AnglesW, 0);
                 WorldObject.AdjustDungeon(pos);
 
                 session.Player.Teleport(pos);
@@ -2168,7 +2258,7 @@ namespace ACE.Server.Command.Handlers
         [CommandHandler("dungeonname", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, "Shows the dungeon name for the current landblock")]
         public static void HandleDungeonName(Session session, params string[] parameters)
         {
-            var landblock = session.Player.Location.Landblock;
+            var landblock = session.Player.Location.LandblockShort;
 
             var blockStart = landblock << 16;
             var blockEnd = blockStart | 0xFFFF;
@@ -2459,7 +2549,7 @@ namespace ACE.Server.Command.Handlers
                 msg += $"------- IsInDeathProcess: {player.IsInDeathProcess}\n";
                 var foundOnLandblock = false;
                 if (player.CurrentLandblock != null)
-                    foundOnLandblock = LandblockManager.GetLandblock(player.CurrentLandblock.Id, false).GetObject(player.Guid) != null;
+                    foundOnLandblock = LandblockManager.GetLandblock(player.CurrentLandblock.Id, player.CurrentLandblock.Instance, false).GetObject(player.Guid) != null;
                 msg += $"------- FoundOnLandblock: {foundOnLandblock}\n";
                 var playerForcedLogOffRequested = player.ForcedLogOffRequested;
                 msg += $"------- ForcedLogOffRequested: {playerForcedLogOffRequested}\n";
@@ -2856,7 +2946,7 @@ namespace ACE.Server.Command.Handlers
             {
                 Console.WriteLine($"Dungeon landblock");
 
-                if (!HouseManager.ApartmentBlocks.ContainsKey(session.Player.Location.Landblock))
+                if (!HouseManager.ApartmentBlocks.ContainsKey(session.Player.Location.LandblockShort))
                     return;
             }
             else
@@ -2893,7 +2983,7 @@ namespace ACE.Server.Command.Handlers
                 wo = session.Player.CurrentLandblock?.GetObject(guid);
 
                 if (wo == null)
-                    wo = ServerObjectManager.GetObjectA(guid)?.WeenieObj?.WorldObject;
+                    wo = ServerObjectManager.GetObjectA(guid, session.Player.Location.Instance)?.WeenieObj?.WorldObject;
 
                 if (wo == null)
                 {
@@ -3391,7 +3481,7 @@ namespace ACE.Server.Command.Handlers
                 session.Network.EnqueueSend(new GameMessageSystemChat($"Invalid level {parameters[0]}", ChatMessageType.Broadcast));
                 return;
             }
-            if (delevel < 1 || delevel > Player.GetMaxLevel())
+            if (delevel < 1 || delevel > session.Player.GetPlayerMaxLevel())
             {
                 session.Network.EnqueueSend(new GameMessageSystemChat($"Invalid level {delevel}", ChatMessageType.Broadcast));
                 return;
@@ -3405,7 +3495,7 @@ namespace ACE.Server.Command.Handlers
             // get amount of unassigned xp required
             var currentLevel = session.Player.Level.Value;
             var xpBetweenLevels = (long)session.Player.GetXPBetweenLevels(delevel, currentLevel);
-            var xpIntoCurrentLevel = session.Player.TotalExperience - (long)DatManager.PortalDat.XpTable.CharacterLevelXPList[currentLevel];
+            var xpIntoCurrentLevel = session.Player.TotalExperience - (long)EnlightenmentXpCurve.GetTotalXPRequiredForLevel(currentLevel);
             var unassignedXPRequired = xpBetweenLevels + xpIntoCurrentLevel;
 
             session.Network.EnqueueSend(new GameMessageSystemChat($"Unassigned XP required: {unassignedXPRequired:N0}", ChatMessageType.Broadcast));
@@ -3419,7 +3509,7 @@ namespace ACE.Server.Command.Handlers
             // get # of available skill credits required
             var skillCreditsRequired = 0;
             for (var i = delevel + 1; i <= currentLevel; i++)
-                skillCreditsRequired += (int)DatManager.PortalDat.XpTable.CharacterLevelSkillCreditList[i];
+                skillCreditsRequired += (int)EnlightenmentXpCurve.GetSkillCreditsForLevel(i);
 
             session.Network.EnqueueSend(new GameMessageSystemChat($"Skill credits required: {skillCreditsRequired:N0}", ChatMessageType.Broadcast));
 
@@ -3937,7 +4027,7 @@ namespace ACE.Server.Command.Handlers
                     session.Network.EnqueueSend(new GameEventPortalStorm(session));
 
                     // We're going to move the player to 0,0
-                    Position newPos = new Position(0x7F7F001C, 84, 84, 80, 0, 0, 0, 1);
+                    Position newPos = new Position(0x7F7F001C, 84, 84, 80, 0, 0, 0, 1, 0);
                     session.Player.Teleport(newPos);
                     break;
                 case 3:

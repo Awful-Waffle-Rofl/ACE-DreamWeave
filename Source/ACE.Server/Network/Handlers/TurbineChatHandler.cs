@@ -344,6 +344,9 @@ namespace ACE.Server.Network.Handlers
 
         private static void LogTurbineChat(uint channelID, string name, string message, uint senderID, ChatType chatType)
         {
+            // Relay public global channels to Discord (no-ops unless the relay is enabled + configured).
+            DiscordRelayManager.QueueMessage(chatType, name, message);
+
             switch (chatType)
             {
                 case ChatType.Allegiance:

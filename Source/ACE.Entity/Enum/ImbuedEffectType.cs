@@ -22,6 +22,18 @@ namespace ACE.Entity.Enum
         Spellbook                       = 0x2000,
         NetherRending                   = 0x4000,
 
+        /// <summary>
+        /// FORK ADDITION - not a retail imbue. The life-magic ("blood") counterpart of the elemental
+        /// rends, so a caster can cleave Health resistance the way a Fire wand cleaves Fire.
+        /// 0x8000 was the next free bit; every retail value above is unchanged.
+        ///
+        /// Only does anything alongside the DamageType.Health case in
+        /// WorldObject_Weapon.GetRendDamageType and the weaponResistanceMod term in
+        /// Creature_Properties' ResistanceType.HealthDrain branch - the retail HealthDrain branch
+        /// discards the weapon modifier entirely, so this bit is inert without that change.
+        /// </summary>
+        HealthRending                   = 0x8000,
+
         IgnoreSomeMagicProjectileDamage = 0x20000000,
         AlwaysCritical                  = 0x40000000,
         IgnoreAllArmor                  = 0x80000000

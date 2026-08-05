@@ -15,6 +15,7 @@ using log4net;
 using ACE.Common;
 using ACE.Common.Extensions;
 using ACE.Database.Entity;
+using ACE.Database.Extensions;
 using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -224,41 +225,271 @@ namespace ACE.Database
 
         public virtual Biota GetBiota(ShardDbContext context, uint id, bool doNotAddToCache = false)
         {
+            return GetBiotaCore(context, id);
+        }
+
+        /// <summary>
+        /// Non-virtual core of GetBiota, so callers that must not risk re-entering ShardDatabaseWithCaching's
+        /// cache-check logic against the wrong context (e.g. batch staging) can call this directly instead of
+        /// relying on every call site remembering to `base.`-qualify the virtual GetBiota.
+        /// </summary>
+        protected Biota GetBiotaCore(ShardDbContext context, uint id)
+        {
             var biota = context.Biota
                 .FirstOrDefault(r => r.Id == id);
 
             if (biota == null)
                 return null;
 
-            PopulatedCollectionFlags populatedCollectionFlags = (PopulatedCollectionFlags)biota.PopulatedCollectionFlags;
-
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAnimPart)) biota.BiotaPropertiesAnimPart = context.BiotaPropertiesAnimPart.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute)) biota.BiotaPropertiesAttribute = context.BiotaPropertiesAttribute.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute2nd)) biota.BiotaPropertiesAttribute2nd = context.BiotaPropertiesAttribute2nd.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBodyPart)) biota.BiotaPropertiesBodyPart = context.BiotaPropertiesBodyPart.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBook)) biota.BiotaPropertiesBook = context.BiotaPropertiesBook.FirstOrDefault(r => r.ObjectId == biota.Id);
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBookPageData)) biota.BiotaPropertiesBookPageData = context.BiotaPropertiesBookPageData.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBool)) biota.BiotaPropertiesBool = context.BiotaPropertiesBool.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesCreateList)) biota.BiotaPropertiesCreateList = context.BiotaPropertiesCreateList.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesDID)) biota.BiotaPropertiesDID = context.BiotaPropertiesDID.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEmote)) biota.BiotaPropertiesEmote = context.BiotaPropertiesEmote.Include(r => r.BiotaPropertiesEmoteAction).Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEnchantmentRegistry)) biota.BiotaPropertiesEnchantmentRegistry = context.BiotaPropertiesEnchantmentRegistry.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEventFilter)) biota.BiotaPropertiesEventFilter = context.BiotaPropertiesEventFilter.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesFloat)) biota.BiotaPropertiesFloat = context.BiotaPropertiesFloat.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesGenerator)) biota.BiotaPropertiesGenerator = context.BiotaPropertiesGenerator.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesIID)) biota.BiotaPropertiesIID = context.BiotaPropertiesIID.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt)) biota.BiotaPropertiesInt = context.BiotaPropertiesInt.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt64)) biota.BiotaPropertiesInt64 = context.BiotaPropertiesInt64.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesPalette)) biota.BiotaPropertiesPalette = context.BiotaPropertiesPalette.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesPosition)) biota.BiotaPropertiesPosition = context.BiotaPropertiesPosition.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesSkill)) biota.BiotaPropertiesSkill = context.BiotaPropertiesSkill.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesSpellBook)) biota.BiotaPropertiesSpellBook = context.BiotaPropertiesSpellBook.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesString)) biota.BiotaPropertiesString = context.BiotaPropertiesString.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesTextureMap)) biota.BiotaPropertiesTextureMap = context.BiotaPropertiesTextureMap.Where(r => r.ObjectId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.HousePermission)) biota.HousePermission = context.HousePermission.Where(r => r.HouseId == biota.Id).ToList();
-            if (populatedCollectionFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAllegiance)) biota.BiotaPropertiesAllegiance = context.BiotaPropertiesAllegiance.Where(r => r.AllegianceId == biota.Id).ToList();
+            PopulateBiotaCollections(context, new[] { biota });
 
             return biota;
+        }
+
+        /// <summary>
+        /// The many-ids counterpart of GetBiotaCore: one chunked query for the parent rows, then ONE
+        /// PopulateBiotaCollections pass over the whole set, instead of GetBiotaCore's per-object call with a
+        /// single-element array. Returned keyed by id, with ids that have no row simply absent.
+        /// TRACKING IS LOAD-BEARING HERE. Like GetBiotaCore, this deliberately leaves the context's default
+        /// tracking behavior alone rather than using AsNoTracking: the entities it returns are handed straight to
+        /// StageBiota, and BiotaUpdater mutates them and calls context.BiotaPropertiesX.Remove(...) on their
+        /// children. Untracked entities would let SaveChanges() commit an incomplete update, or none at all, with
+        /// no error anywhere - so any caller that wants a read-only bulk load must not reuse this.
+        /// </summary>
+        protected Dictionary<uint, Biota> GetBiotasCore(ShardDbContext context, IReadOnlyCollection<uint> ids)
+        {
+            if (ids.Count == 0)
+                return new Dictionary<uint, Biota>();
+
+            var biotas = QueryableExtensions.QueryChunked(ids, chunk => context.Biota.Where(r => chunk.Contains(r.Id)));
+
+            PopulateBiotaCollections(context, biotas);
+
+            return biotas.ToDictionary(b => b.Id);
+        }
+
+        /// <summary>
+        /// Batch-assembles the ~24 property-table collections for many biotas at once: one query per property
+        /// table actually present anywhere in the batch (chunked by id, since MySQL has practical IN-clause
+        /// limits), instead of one query per property table PER OBJECT. GetBiotaCore uses this with a
+        /// single-element list; the bulk loaders (GetStaticObjectsByLandblock, GetDynamicObjectsByLandblock,
+        /// GetBiotasByType, GetBiotasByWcid) use it with however many objects they loaded, so this flag-gating
+        /// logic lives in exactly one place rather than duplicated between the single-object and batch paths.
+        /// </summary>
+        protected void PopulateBiotaCollections(ShardDbContext context, IList<Biota> biotas)
+        {
+            if (biotas.Count == 0)
+                return;
+
+            var ids = biotas.Select(b => b.Id).ToArray();
+
+            PopulatedCollectionFlags aggregateFlags = 0;
+            foreach (var b in biotas)
+                aggregateFlags |= (PopulatedCollectionFlags)b.PopulatedCollectionFlags;
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAnimPart))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesAnimPart.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesAnimPart))
+                        b.BiotaPropertiesAnimPart = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesAttribute.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute))
+                        b.BiotaPropertiesAttribute = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute2nd))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesAttribute2nd.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesAttribute2nd))
+                        b.BiotaPropertiesAttribute2nd = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBodyPart))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesBodyPart.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesBodyPart))
+                        b.BiotaPropertiesBodyPart = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBook))
+            {
+                // Singular (PK is ObjectId), not a list.
+                var byId = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesBook.Where(r => chunk.Contains(r.ObjectId))).ToDictionary(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesBook))
+                        b.BiotaPropertiesBook = byId.TryGetValue(b.Id, out var book) ? book : null;
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBookPageData))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesBookPageData.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesBookPageData))
+                        b.BiotaPropertiesBookPageData = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesBool))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesBool.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesBool))
+                        b.BiotaPropertiesBool = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesCreateList))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesCreateList.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesCreateList))
+                        b.BiotaPropertiesCreateList = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesDID))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesDID.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesDID))
+                        b.BiotaPropertiesDID = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEmote))
+            {
+                // Nested one-to-many under a one-to-many - preserved exactly as the original single-object query, just scoped to the chunked id set.
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesEmote.Include(r => r.BiotaPropertiesEmoteAction).Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesEmote))
+                        b.BiotaPropertiesEmote = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEnchantmentRegistry))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesEnchantmentRegistry.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesEnchantmentRegistry))
+                        b.BiotaPropertiesEnchantmentRegistry = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesEventFilter))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesEventFilter.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesEventFilter))
+                        b.BiotaPropertiesEventFilter = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesFloat))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesFloat.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesFloat))
+                        b.BiotaPropertiesFloat = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesGenerator))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesGenerator.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesGenerator))
+                        b.BiotaPropertiesGenerator = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesIID))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesIID.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesIID))
+                        b.BiotaPropertiesIID = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesInt.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt))
+                        b.BiotaPropertiesInt = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt64))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesInt64.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesInt64))
+                        b.BiotaPropertiesInt64 = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesPalette))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesPalette.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesPalette))
+                        b.BiotaPropertiesPalette = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesPosition))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesPosition.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesPosition))
+                        b.BiotaPropertiesPosition = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesSkill))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesSkill.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesSkill))
+                        b.BiotaPropertiesSkill = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesSpellBook))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesSpellBook.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesSpellBook))
+                        b.BiotaPropertiesSpellBook = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesString))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesString.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesString))
+                        b.BiotaPropertiesString = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesTextureMap))
+            {
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesTextureMap.Where(r => chunk.Contains(r.ObjectId))).ToLookup(r => r.ObjectId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesTextureMap))
+                        b.BiotaPropertiesTextureMap = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.HousePermission))
+            {
+                // Keyed by HouseId, not ObjectId.
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.HousePermission.Where(r => chunk.Contains(r.HouseId))).ToLookup(r => r.HouseId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.HousePermission))
+                        b.HousePermission = grouped[b.Id].ToList();
+            }
+
+            if (aggregateFlags.HasFlag(PopulatedCollectionFlags.BiotaPropertiesAllegiance))
+            {
+                // Keyed by AllegianceId, not ObjectId.
+                var grouped = QueryableExtensions.QueryChunked(ids, chunk => context.BiotaPropertiesAllegiance.Where(r => chunk.Contains(r.AllegianceId))).ToLookup(r => r.AllegianceId);
+                foreach (var b in biotas)
+                    if (((PopulatedCollectionFlags)b.PopulatedCollectionFlags).HasFlag(PopulatedCollectionFlags.BiotaPropertiesAllegiance))
+                        b.BiotaPropertiesAllegiance = grouped[b.Id].ToList();
+            }
         }
 
         public virtual Biota GetBiota(uint id, bool doNotAddToCache = false)
@@ -273,14 +504,9 @@ namespace ACE.Database
             {
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
-                var results = context.Biota.Where(r => r.WeenieClassId == wcid);
+                var biotas = context.Biota.Where(r => r.WeenieClassId == wcid).ToList();
 
-                var biotas = new List<Biota>();
-                foreach (var result in results)
-                {
-                    var biota = GetBiota(result.Id);
-                    biotas.Add(biota);
-                }
+                PopulateBiotaCollections(context, biotas);
 
                 return biotas;
             }
@@ -288,30 +514,26 @@ namespace ACE.Database
 
         public List<Biota> GetBiotasByType(WeenieType type)
         {
-            // warning: this query is currently unindexed!
             using (var context = new ShardDbContext())
             {
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
                 var iType = (int)type;
 
-                var results = context.Biota.Where(r => r.WeenieType == iType);
+                var biotas = context.Biota.Where(r => r.WeenieType == iType).ToList();
 
-                var biotas = new List<Biota>();
-                foreach (var result in results)
-                {
-                    var biota = GetBiota(result.Id);
-                    biotas.Add(biota);
-                }
+                PopulateBiotaCollections(context, biotas);
 
                 return biotas;
             }
         }
 
-        protected bool DoSaveBiota(ShardDbContext context, Biota biota)
+        /// <summary>
+        /// Commits a context with ACE's existing retry-once-then-fail convention. Shared by the single-item
+        /// commit path (DoSaveBiota) and the batch commit path (SaveBiotaBatch) so both fail the same way.
+        /// </summary>
+        protected bool CommitContext(ShardDbContext context, string label)
         {
-            SetBiotaPopulatedCollections(biota);
-
             Exception firstException = null;
             retry:
 
@@ -320,7 +542,7 @@ namespace ACE.Database
                 context.SaveChanges();
 
                 if (firstException != null)
-                    log.InfoFormat("[DATABASE] DoSaveBiota 0x{0:X8}:{1} retry succeeded after initial exception of: {2}", biota.Id, biota.GetProperty(PropertyString.Name), firstException.GetFullMessage());
+                    log.InfoFormat("[DATABASE] {0} retry succeeded after initial exception of: {1}", label, firstException.GetFullMessage());
 
                 return true;
             }
@@ -333,106 +555,254 @@ namespace ACE.Database
                 }
 
                 // Character name might be in use or some other fault
-                log.Error($"[DATABASE] DoSaveBiota 0x{biota.Id:X8}:{biota.GetProperty(PropertyString.Name)} failed first attempt with exception: {firstException.GetFullMessage()}");
-                log.Error($"[DATABASE] DoSaveBiota 0x{biota.Id:X8}:{biota.GetProperty(PropertyString.Name)} failed second attempt with exception: {ex.GetFullMessage()}");
+                log.Error($"[DATABASE] {label} failed first attempt with exception: {firstException.GetFullMessage()}");
+                log.Error($"[DATABASE] {label} failed second attempt with exception: {ex.GetFullMessage()}");
                 return false;
             }
+        }
+
+        protected bool DoSaveBiota(ShardDbContext context, Biota biota)
+        {
+            SetBiotaPopulatedCollections(biota);
+
+            return CommitContext(context, $"DoSaveBiota 0x{biota.Id:X8}:{biota.GetProperty(PropertyString.Name)}");
+        }
+
+        /// <summary>
+        /// Adds-or-updates a single biota's changes into the given context, without committing. Looks the existing
+        /// row up itself, one object at a time - the single-item SaveBiota path. The batch path pre-loads every id
+        /// in one pass instead and calls the overload below, so this lookup is the only difference between them.
+        /// </summary>
+        protected Biota StageBiota(ShardDbContext context, ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock)
+        {
+            return StageBiota(context, biota, rwLock, GetBiotaCore(context, biota.Id));
+        }
+
+        /// <summary>
+        /// Adds-or-updates a single biota's changes into the given context against an ALREADY-LOADED existing
+        /// entity, null meaning there is no such row yet and this is an insert. This is the shared core of both
+        /// staging paths, so the insert-versus-update decision and the lock discipline around it exist once.
+        /// existingBiota must have been loaded on THIS context and still be tracked by it (see GetBiotasCore).
+        /// </summary>
+        protected Biota StageBiota(ShardDbContext context, ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock, Biota existingBiota)
+        {
+            rwLock.EnterReadLock();
+            try
+            {
+                if (existingBiota == null)
+                {
+                    existingBiota = ACE.Database.Adapter.BiotaConverter.ConvertFromEntityBiota(biota);
+
+                    context.Biota.Add(existingBiota);
+                }
+                else
+                {
+                    ACE.Database.Adapter.BiotaUpdater.UpdateDatabaseBiota(context, biota, existingBiota);
+                }
+            }
+            finally
+            {
+                rwLock.ExitReadLock();
+            }
+
+            return existingBiota;
         }
 
         public virtual bool SaveBiota(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock, bool doNotAddToCache = false)
         {
             using (var context = new ShardDbContext())
             {
-                var existingBiota = GetBiota(context, biota.Id, doNotAddToCache);
-
-                rwLock.EnterReadLock();
-                try
-                {
-                    if (existingBiota == null)
-                    {
-                        existingBiota = ACE.Database.Adapter.BiotaConverter.ConvertFromEntityBiota(biota);
-
-                        context.Biota.Add(existingBiota);
-                    }
-                    else
-                    {
-                        ACE.Database.Adapter.BiotaUpdater.UpdateDatabaseBiota(context, biota, existingBiota);
-                    }
-                }
-                finally
-                {
-                    rwLock.ExitReadLock();
-                }
+                var existingBiota = StageBiota(context, biota, rwLock);
 
                 return DoSaveBiota(context, existingBiota);
             }
         }
 
+        /// <summary>
+        /// Cap on how many biotas one SaveBiotaBatch may stage into a single context and commit as one
+        /// transaction. It bounds two separate things with the same number: how long one batch can monopolize
+        /// SerializedShardDatabase's single worker thread, and how large a transaction SaveBiotasInParallel opens
+        /// when a caller hands it a very large set (the landblock checkpoint being the worst case).
+        /// </summary>
+        public const int MaxSaveBiotaBatchSize = 100;
+
+        /// <summary>
+        /// Stages many biotas into ONE shared context and commits ONCE, amortizing the per-round-trip cost of
+        /// SaveChanges() across the whole batch instead of paying it per item. If the shared commit fails twice
+        /// (ACE's existing retry-once convention), falls back to the unchanged per-item SaveBiota path so one
+        /// genuinely-bad item in the batch can't spuriously fail the other items.
+        /// The existing rows for the whole batch are read in ONE pass up front. Staging item by item through the
+        /// lookup-based StageBiota would call GetBiotaCore per item, and GetBiotaCore runs PopulateBiotaCollections
+        /// over a single-element array - which is the exact per-object property-table fan-out that
+        /// PopulateBiotaCollections exists to avoid, re-introduced once per batch member.
+        /// </summary>
+        public virtual List<bool> SaveBiotaBatch(IList<(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock)> items, bool doNotAddToCache = false)
+        {
+            SaveBatchStats.RecordBatch(items.Count, 0, items.Count);
+
+            using (var context = new ShardDbContext())
+            {
+                var existingBiotas = GetBiotasCore(context, items.Select(i => i.biota.Id).ToList());
+
+                foreach (var item in items)
+                {
+                    // Absent from the dictionary means no row exists yet, which is exactly the null StageBiota
+                    // reads as "insert" - the same answer GetBiotaCore gave per item, just resolved in bulk.
+                    existingBiotas.TryGetValue(item.biota.Id, out var existingBiota);
+
+                    var staged = StageBiota(context, item.biota, item.rwLock, existingBiota);
+                    SetBiotaPopulatedCollections(staged);
+                }
+
+                if (CommitContext(context, $"SaveBiotaBatch of {items.Count} item(s)"))
+                    return items.Select(_ => true).ToList();
+
+                log.Warn($"[DATABASE] SaveBiotaBatch of {items.Count} item(s) failed twice as a batch; falling back to per-item saves.");
+            }
+
+            return items.Select(item => SaveBiota(item.biota, item.rwLock, doNotAddToCache)).ToList();
+        }
+
+        /// <summary>
+        /// Observability hook: how many of these biotas are currently held in the in-memory biota cache.
+        /// The base database has no cache and always reports zero; ShardDatabaseWithCaching overrides it.
+        /// Used only by SaveBatchStats - it must never influence what gets written.
+        /// </summary>
+        protected virtual int CountCachedBiotas(IList<(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock)> items)
+        {
+            return 0;
+        }
+
+        /// <summary>
+        /// Name kept for its existing callers, but this no longer fans out over the database thread pool: N
+        /// parallel contexts each committing its own transaction is the cost being removed, and the batch path
+        /// additionally collapses the per-item existence reads into one query per property table per chunk.
+        /// Chunked rather than committed as one transaction because this method bypasses the queue drain's cap
+        /// entirely - Landblock's checkpoint save can hand it thousands of biotas, and one unbounded transaction
+        /// over all of them would hold locks far too long. Many bounded commits, roughly 100x fewer than before.
+        /// </summary>
         public bool SaveBiotasInParallel(IEnumerable<(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock)> biotas, bool doNotAddToCache = false)
         {
+            // Materialized once so the instrumentation below cannot double-enumerate a lazy sequence, and so
+            // the count it reports is exactly the set the chunk loop then iterates.
+            var items = biotas as IList<(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock)> ?? biotas.ToList();
+
+            SaveBatchStats.RecordParallelCall(items.Count, CountCachedBiotas(items));
+
             var result = true;
 
-            Parallel.ForEach(biotas, ConfigManager.Config.Server.Threading.DatabaseParallelOptions, biota =>
+            foreach (var chunk in items.Chunk(MaxSaveBiotaBatchSize))
             {
-                if (!SaveBiota(biota.biota, biota.rwLock, doNotAddToCache))
+                if (!SaveBiotaBatch(chunk, doNotAddToCache).All(r => r))
                     result = false;
-            });
+            }
 
             return result;
+        }
+
+        /// <summary>
+        /// Deletes the given biotas with one set-based DELETE ... WHERE id IN (...) per chunk, all inside ONE
+        /// transaction, and applies ACE's existing retry-once-then-fail convention to the whole thing. This is the
+        /// delete-side counterpart of CommitContext, which cannot be reused directly because it is SaveChanges-shaped
+        /// and a set-based delete stages nothing into the change tracker.
+        /// The context is created inside the retry rather than outside it: unlike SaveBiotaBatch, there is no staged
+        /// state to preserve across attempts, so a second attempt is better off with a clean context and connection.
+        /// </summary>
+        private bool ExecuteBiotaDelete(IReadOnlyCollection<uint> ids, string label)
+        {
+            Exception firstException = null;
+            retry:
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    // ShardDbContext configures EnableRetryOnFailure, and MySqlRetryingExecutionStrategy REFUSES a
+                    // user-initiated transaction outright ("does not support user-initiated transactions") unless
+                    // the whole transaction is handed to it as one retriable unit. SaveBiotaBatch never hits this
+                    // because a bare SaveChanges() is already its own implicit transaction; the moment a batch
+                    // needs an explicit one, it has to go through CreateExecutionStrategy.
+                    // Re-running the delegate on a strategy retry is safe: deleting an id that is already gone is
+                    // a no-op, so every statement in here is idempotent.
+                    var strategy = context.Database.CreateExecutionStrategy();
+
+                    strategy.Execute(() =>
+                    {
+                        // One explicit transaction across every chunk, so a multi-chunk delete is as atomic as the
+                        // single SaveChanges() that SaveBiotaBatch commits - never half-applied.
+                        using (var transaction = context.Database.BeginTransaction())
+                        {
+                            QueryableExtensions.ExecuteChunked(ids, chunk => context.Biota.Where(r => chunk.Contains(r.Id)).ExecuteDelete());
+
+                            transaction.Commit();
+                        }
+                    });
+                }
+
+                if (firstException != null)
+                    log.InfoFormat("[DATABASE] {0} retry succeeded after initial exception of: {1}", label, firstException.GetFullMessage());
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (firstException == null)
+                {
+                    firstException = ex;
+                    goto retry;
+                }
+
+                log.Error($"[DATABASE] {label} failed first attempt with exception: {firstException.GetFullMessage()}");
+                log.Error($"[DATABASE] {label} failed second attempt with exception: {ex.GetFullMessage()}");
+                return false;
+            }
         }
 
         public virtual bool RemoveBiota(uint id)
         {
-            using (var context = new ShardDbContext())
-            {
-                var existingBiota = context.Biota
-                    .AsNoTracking()
-                    .FirstOrDefault(r => r.Id == id);
-
-                if (existingBiota == null)
-                    return true;
-
-                context.Biota.Remove(existingBiota);
-
-                Exception firstException = null;
-                retry:
-
-                try
-                {
-                    context.SaveChanges();
-
-                    if (firstException != null)
-                        log.InfoFormat("[DATABASE] RemoveBiota 0x{0:X8} retry succeeded after initial exception of: {1}", id, firstException.GetFullMessage());
-
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    if (firstException == null)
-                    {
-                        firstException = ex;
-                        goto retry;
-                    }
-
-                    // Character name might be in use or some other fault
-                    log.Error($"[DATABASE] RemoveBiota 0x{id:X8} failed first attempt with exception: {firstException.GetFullMessage()}");
-                    log.Error($"[DATABASE] RemoveBiota 0x{id:X8} failed second attempt with exception: {ex.GetFullMessage()}");
-                    return false;
-                }
-            }
+            // No SELECT first. The old load-then-Remove pair existed only to hand EF an entity to mark deleted;
+            // the loaded row was never read for anything else, and a missing row returned true then and still does.
+            // All 25 child tables have ON DELETE CASCADE foreign keys to biota(id), so InnoDB removes their rows
+            // either way - EF only ever issued the parent DELETE here too.
+            return ExecuteBiotaDelete(new[] { id }, $"RemoveBiota 0x{id:X8}");
         }
 
+        /// <summary>
+        /// Deletes many biotas as ONE transaction of set-based DELETEs, instead of a SELECT + DELETE + commit per id.
+        /// If that fails twice (ACE's existing retry-once convention), falls back to the unchanged per-item
+        /// RemoveBiota path so one genuinely-bad id can't fail the other ids in the batch.
+        /// Every id in a batch that commits reports true, regardless of how many rows were actually affected: a
+        /// biota that was already gone is a successful removal on the single-item path, and the batch path must not
+        /// disagree with it. Affected-row counts cannot be attributed back to individual ids anyway.
+        /// </summary>
+        public virtual List<bool> RemoveBiotaBatch(IList<uint> ids)
+        {
+            // Same-id duplicates are deliberately NOT filtered out the way SaveBiotaBatch's caller filters them.
+            // Staging one entity into a context twice throws; naming one id twice in a DELETE ... IN (...) is
+            // harmless and idempotent.
+            var idList = ids as IReadOnlyCollection<uint> ?? ids.ToList();
+
+            if (ExecuteBiotaDelete(idList, $"RemoveBiotaBatch of {ids.Count} id(s)"))
+                return ids.Select(_ => true).ToList();
+
+            log.Warn($"[DATABASE] RemoveBiotaBatch of {ids.Count} id(s) failed twice as a batch; falling back to per-item removes.");
+
+            return ids.Select(id => RemoveBiota(id)).ToList();
+        }
+
+        /// <summary>
+        /// Name kept for its existing callers, but this no longer fans out over the database thread pool: a set of
+        /// deletes is cheaper as one batched transaction than as N parallel connections each doing its own commit,
+        /// and RemoveBiotaBatch is virtual so ShardDatabaseWithCaching still gets its cache eviction.
+        /// </summary>
         public bool RemoveBiotasInParallel(IEnumerable<uint> ids)
         {
-            var result = true;
+            var idList = ids as IList<uint> ?? ids.ToList();
 
-            Parallel.ForEach(ids, ConfigManager.Config.Server.Threading.DatabaseParallelOptions, id =>
-            {
-                if (!RemoveBiota(id))
-                    result = false;
-            });
+            if (idList.Count == 0)
+                return true;
 
-            return result;
+            return RemoveBiotaBatch(idList).All(r => r);
         }
 
 
@@ -445,68 +815,100 @@ namespace ACE.Database
             return new PossessedBiotas(inventory, wieldedItems);
         }
 
-        public List<Biota> GetInventoryInParallel(uint parentId, bool includedNestedItems)
+        /// <summary>
+        /// Bulk-loads a possession set - the objects linked to parentId by a single PropertyInstanceId - the same
+        /// way the landblock bulk loaders do: one NoTracking context, one query for the child ids, one chunked
+        /// query for the biota rows, and one PopulateBiotaCollections pass that fetches each property table once
+        /// for the whole set.
+        ///
+        /// This replaced a Parallel.ForEach over the virtual GetBiota(id), which opened its own context per item
+        /// and issued 1 + K queries for it (K = that object's populated property-table count). Measured on the
+        /// loadtest shard with a 303-object possession chain, that shape issued 2,727 SELECTs and took ~407ms;
+        /// this shape issues a fixed handful regardless of item count.
+        ///
+        /// Nesting is deliberately breadth-first and exactly one level deep, matching the behavior of the code it
+        /// replaces: direct children are loaded, then in ONE further id query the children of whichever of those
+        /// are WeenieType.Container. Containers nested inside those packs are not descended, as before.
+        ///
+        /// Note this does NOT populate ShardDatabaseWithCaching's in-memory biota cache, matching the four other
+        /// bulk loaders. Anything loaded here is NoTracking, and an untracked entity in that cache would make
+        /// BiotaUpdater.UpdateDatabaseBiota commit a silent partial write on the next save of that object.
+        /// </summary>
+        private List<Biota> GetPossessionsCore(ShardDbContext context, uint parentId, PropertyInstanceId linkType, bool includedNestedItems)
         {
-            var inventory = new ConcurrentBag<Biota>();
+            var biotas = LoadBiotaRows(context, GetLinkedObjectIds(context, new[] { parentId }, linkType));
 
-            using (var context = new ShardDbContext())
+            if (includedNestedItems)
             {
-                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+                var containerIds = biotas
+                    .Where(b => b.WeenieType == (int)WeenieType.Container)
+                    .Select(b => b.Id)
+                    .ToArray();
 
-                var results = context.BiotaPropertiesIID
-                    .Where(r => r.Type == (ushort)PropertyInstanceId.Container && r.Value == parentId)
-                    .ToList();
-
-                Parallel.ForEach(results, ConfigManager.Config.Server.Threading.DatabaseParallelOptions, result =>
-                {
-                    var biota = GetBiota(result.ObjectId);
-
-                    if (biota != null)
-                    {
-                        inventory.Add(biota);
-
-                        if (includedNestedItems && biota.WeenieType == (int)WeenieType.Container)
-                        {
-                            var subItems = GetInventoryInParallel(biota.Id, false);
-
-                            foreach (var subItem in subItems)
-                                inventory.Add(subItem);
-                        }
-                    }
-                });
+                if (containerIds.Length > 0)
+                    biotas.AddRange(LoadBiotaRows(context, GetLinkedObjectIds(context, containerIds, PropertyInstanceId.Container)));
             }
 
-            return inventory.ToList();
+            PopulateBiotaCollections(context, biotas);
+
+            return biotas;
         }
 
-        public List<Biota> GetWieldedItemsInParallel(uint parentId)
+        /// <summary>
+        /// The ids of every object whose given PropertyInstanceId points at one of parentIds. One query per chunk
+        /// of parents, rather than one per parent.
+        /// </summary>
+        private static uint[] GetLinkedObjectIds(ShardDbContext context, IReadOnlyCollection<uint> parentIds, PropertyInstanceId linkType)
         {
-            var wieldedItems = new ConcurrentBag<Biota>();
+            var type = (ushort)linkType;
 
+            return QueryableExtensions
+                .QueryChunked(parentIds, chunk => context.BiotaPropertiesIID.Where(r => r.Type == type && chunk.Contains(r.Value)).Select(r => r.ObjectId))
+                .Distinct()
+                .ToArray();
+        }
+
+        /// <summary>
+        /// The biota rows for the given ids, without their property collections - callers finish the job with a
+        /// single PopulateBiotaCollections pass over everything they gathered.
+        /// </summary>
+        private static List<Biota> LoadBiotaRows(ShardDbContext context, IReadOnlyCollection<uint> ids)
+        {
+            if (ids.Count == 0)
+                return new List<Biota>();
+
+            return QueryableExtensions.QueryChunked(ids, chunk => context.Biota.Where(b => chunk.Contains(b.Id)));
+        }
+
+        /// <summary>
+        /// Kept the historical "InParallel" name because it is part of this class's public surface and is called
+        /// from ACE.Server; the work is no longer parallel, it is batched, which is strictly cheaper here.
+        /// </summary>
+        public List<Biota> GetInventoryInParallel(uint parentId, bool includedNestedItems)
+        {
             using (var context = new ShardDbContext())
             {
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
-                var results = context.BiotaPropertiesIID
-                    .Where(r => r.Type == (ushort)PropertyInstanceId.Wielder && r.Value == parentId)
-                    .ToList();
-
-                Parallel.ForEach(results, ConfigManager.Config.Server.Threading.DatabaseParallelOptions, result =>
-                {
-                    var biota = GetBiota(result.ObjectId);
-
-                    if (biota != null)
-                        wieldedItems.Add(biota);
-                });
+                return GetPossessionsCore(context, parentId, PropertyInstanceId.Container, includedNestedItems);
             }
+        }
 
-            return wieldedItems.ToList();
+        /// <summary>
+        /// See GetInventoryInParallel for why this keeps its name. Wielded items are never nested.
+        /// </summary>
+        public List<Biota> GetWieldedItemsInParallel(uint parentId)
+        {
+            using (var context = new ShardDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return GetPossessionsCore(context, parentId, PropertyInstanceId.Wielder, includedNestedItems: false);
+            }
         }
 
         public List<Biota> GetStaticObjectsByLandblock(ushort landblockId)
         {
-            var staticObjects = new List<Biota>();
-
             var staticLandblockId = (uint)(0x70000 | landblockId);
 
             var min = staticLandblockId << 12;
@@ -516,22 +918,16 @@ namespace ACE.Database
             {
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
-                var results = context.Biota.Where(b => b.Id >= min && b.Id <= max).ToList();
+                var staticObjects = context.Biota.Where(b => b.Id >= min && b.Id <= max).ToList();
 
-                foreach (var result in results)
-                {
-                    var biota = GetBiota(result.Id);
-                    staticObjects.Add(biota);
-                }
+                PopulateBiotaCollections(context, staticObjects);
+
+                return staticObjects;
             }
-
-            return staticObjects;
         }
 
-        public List<Biota> GetDynamicObjectsByLandblock(ushort landblockId)
+        public List<Biota> GetDynamicObjectsByLandblock(ushort landblockId, uint instance)
         {
-            var dynamics = new List<Biota>();
-
             var min = (uint)(landblockId << 16);
             var max = min | 0xFFFF;
 
@@ -539,14 +935,20 @@ namespace ACE.Database
             {
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
-                var results = context.BiotaPropertiesPosition
-                    .Where(p => p.PositionType == 1 && p.ObjCellId >= min && p.ObjCellId <= max && p.ObjectId >= 0x80000000)
+                var positionResults = context.BiotaPropertiesPosition
+                    .Where(p => p.PositionType == 1 && p.ObjCellId >= min && p.ObjCellId <= max && p.ObjectId >= 0x80000000 && (p.Instance ?? 0) == instance)
                     .ToList();
 
-                foreach (var result in results)
-                {
-                    var biota = GetBiota(result.ObjectId);
+                var ids = positionResults.Select(p => p.ObjectId).Distinct().ToArray();
 
+                var biotas = QueryableExtensions.QueryChunked(ids, chunk => context.Biota.Where(b => chunk.Contains(b.Id))).ToList();
+
+                PopulateBiotaCollections(context, biotas);
+
+                var dynamics = new List<Biota>();
+
+                foreach (var biota in biotas)
+                {
                     // Filter out objects that are in a container
                     if (biota.BiotaPropertiesIID.FirstOrDefault(r => r.Type == 2 && r.Value != 0) != null)
                         continue;
@@ -557,9 +959,9 @@ namespace ACE.Database
 
                     dynamics.Add(biota);
                 }
-            }
 
-            return dynamics;
+                return dynamics;
+            }
         }
 
         public List<Biota> GetHousesOwned()
@@ -619,27 +1021,45 @@ namespace ACE.Database
 
             var results = query.ToList();
 
+            // Resolve the CharacterContexts cache once per character, up front. The eight Include(...).Load()
+            // calls below are bound to `query` - which is the ACCOUNT-WIDE predicate, never re-scoped to an
+            // individual character - so they load the same rows for every character on the account no matter
+            // where they run. Running them inside the per-character loop therefore re-issued all eight once per
+            // uncached character: 1 + 8M statements for an M-character account, where 1 + 8 does the same work.
+            var existingChars = new Character[results.Count];
+            var needsPropertyLoad = false;
+
+            for (int i = 0; i < results.Count; i++)
+            {
+                var id = results[i].Id;
+
+                existingChars[i] = CharacterContexts.FirstOrDefault(r => r.Key.Id == id).Key;
+
+                if (existingChars[i] == null)
+                    needsPropertyLoad = true;
+            }
+
+            // Runs if ANY character on the account is uncached, not just the first one - each Load() covers the
+            // whole result set, so one pass serves however many of them were missing.
+            if (needsPropertyLoad)
+            {
+                query.Include(r => r.CharacterPropertiesContractRegistry).Load();
+                query.Include(r => r.CharacterPropertiesFillCompBook).Load();
+                query.Include(r => r.CharacterPropertiesFriendList).Load();
+                query.Include(r => r.CharacterPropertiesQuestRegistry).Load();
+                query.Include(r => r.CharacterPropertiesShortcutBar).Load();
+                query.Include(r => r.CharacterPropertiesSpellBar).Load();
+                query.Include(r => r.CharacterPropertiesSquelch).Load();
+                query.Include(r => r.CharacterPropertiesTitleBook).Load();
+            }
+
             for (int i = 0; i < results.Count; i++)
             {
                 // Do we have a reference to this Character already?
-                var existingChar = CharacterContexts.FirstOrDefault(r => r.Key.Id == results[i].Id);
-
-                if (existingChar.Key != null)
-                    results[i] = existingChar.Key;
+                if (existingChars[i] != null)
+                    results[i] = existingChars[i];
                 else
-                {
-                    // No reference, pull all the properties and add it to the cache
-                    query.Include(r => r.CharacterPropertiesContractRegistry).Load();
-                    query.Include(r => r.CharacterPropertiesFillCompBook).Load();
-                    query.Include(r => r.CharacterPropertiesFriendList).Load();
-                    query.Include(r => r.CharacterPropertiesQuestRegistry).Load();
-                    query.Include(r => r.CharacterPropertiesShortcutBar).Load();
-                    query.Include(r => r.CharacterPropertiesSpellBar).Load();
-                    query.Include(r => r.CharacterPropertiesSquelch).Load();
-                    query.Include(r => r.CharacterPropertiesTitleBook).Load();
-
                     CharacterContexts.Add(results[i], context);
-                }
             }
 
             return results;

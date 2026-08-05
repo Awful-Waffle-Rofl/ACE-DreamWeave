@@ -6,6 +6,7 @@ using log4net;
 using ACE.Database;
 using ACE.Database.Models.Auth;
 using ACE.Entity.Enum;
+using ACE.Server.Managers;
 using ACE.Server.Network;
 
 namespace ACE.Server.Command.Handlers
@@ -60,6 +61,8 @@ namespace ACE.Server.Command.Handlers
                         DatabaseManager.AutoPromoteNextAccountToAdmin = false;
 
                     message = ("Account successfully created for " + account.AccountName + " (" + account.AccountId + ") with access rights as " + articleAorAN + " " + Enum.GetName(typeof(AccessLevel), accessLevel) + ".");
+
+                    PlayerManager.BroadcastToAuditChannel(session?.Player, $"{session?.Player?.Name ?? "<console>"} created account {account.AccountName} ({account.AccountId}) with access level {accessLevel}");
                 }
                 catch
                 {
@@ -123,6 +126,8 @@ namespace ACE.Server.Command.Handlers
             if (DatabaseManager.AutoPromoteNextAccountToAdmin && accessLevel == AccessLevel.Admin)
                 DatabaseManager.AutoPromoteNextAccountToAdmin = false;
 
+            PlayerManager.BroadcastToAuditChannel(session?.Player, $"{session?.Player?.Name ?? "<console>"} changed access level of account {accountName} ({accountId}) to {accessLevel}");
+
             CommandHandlerHelper.WriteOutputInfo(session, "Account " + accountName + " updated with access rights set as " + articleAorAN + " " + Enum.GetName(typeof(AccessLevel), accessLevel) + ".", ChatMessageType.Broadcast);
         }
 
@@ -152,6 +157,9 @@ namespace ACE.Server.Command.Handlers
             account.SetSaltForBCrypt();
 
             DatabaseManager.Authentication.UpdateAccount(account);
+
+            // Note: the password itself is never logged.
+            PlayerManager.BroadcastToAuditChannel(session?.Player, $"{session?.Player?.Name ?? "<console>"} changed the password of account {accountName} ({account.AccountId})");
 
             CommandHandlerHelper.WriteOutputInfo(session, $"Account password for {accountName} successfully changed.", ChatMessageType.Broadcast);
         }

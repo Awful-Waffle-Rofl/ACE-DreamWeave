@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 
@@ -12,6 +13,95 @@ namespace ACE.Server
 {
     partial class Program
     {
+        // Internal (not private) so the pure cache-key/migration helpers can be exercised from ACE.Server.Tests.
+        internal class WorldCustomizationCacheEntry
+        {
+            public long Size { get; set; }
+            public long MTimeUtcTicks { get; set; }
+            public string Sha256 { get; set; }
+        }
+
+        internal class WorldCustomizationCacheFile
+        {
+            // Cache schema version. v2 keys entries by repo-relative path (forward slashes) instead of the
+            // absolute FullName v1 used. A loaded cache with Version < 2 is migrated in place (see
+            // MigrateCacheKeysToV2) so a stage doesn't pointlessly re-apply its whole content set once.
+            public int Version { get; set; }
+
+            // Identifies the exact ace_world database + version this cache was built against.
+            // A mismatch (different DB, restored backup, or a base world update that just ran)
+            // means the cache can no longer be trusted and must be discarded.
+            public string Fingerprint { get; set; }
+
+            public Dictionary<string, WorldCustomizationCacheEntry> Files { get; set; } = new Dictionary<string, WorldCustomizationCacheEntry>();
+        }
+
+        internal const int WorldCustomizationCacheVersion = 2;
+
+        /// <summary>
+        /// Computes a file's repo-relative cache key: the path relative to its content root with forward
+        /// slashes. Files discovered under a WorldCustomizationAddedPaths root are prefixed with that root's
+        /// leaf directory name so keys stay unambiguous across roots. Pure/testable (no DB, no I/O).
+        /// </summary>
+        internal static string ComputeContentRelativeKey(string absoluteFilePath, string rootPath, bool isAddedPath)
+        {
+            var rel = Path.GetRelativePath(rootPath, absoluteFilePath).Replace('\\', '/');
+
+            if (isAddedPath)
+            {
+                var leaf = new DirectoryInfo(rootPath.TrimEnd('/', '\\', Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Name;
+                if (!string.IsNullOrEmpty(leaf))
+                    rel = leaf + "/" + rel;
+            }
+
+            return rel;
+        }
+
+        /// <summary>
+        /// True (with the relative key) if <paramref name="absoluteKey"/> resolves under one of the given
+        /// roots. Used to migrate a v1 (absolute-path-keyed) cache to v2; keys that don't resolve are dropped.
+        /// Roots are tried in order, so the primary content folder should come first.
+        /// </summary>
+        internal static bool TryResolveRelativeKey(string absoluteKey, IReadOnlyList<(string rootPath, bool isAddedPath)> roots, out string relativeKey)
+        {
+            relativeKey = null;
+            if (string.IsNullOrEmpty(absoluteKey) || roots == null)
+                return false;
+
+            foreach (var (rootPath, isAddedPath) in roots)
+            {
+                var rel = Path.GetRelativePath(rootPath, absoluteKey);
+                if (rel != absoluteKey && !rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel))
+                {
+                    relativeKey = ComputeContentRelativeKey(absoluteKey, rootPath, isAddedPath);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Rewrites a v1 (absolute-key) file map to v2 (relative-key). Entries whose absolute key resolves
+        /// under a known root are preserved under the new key (avoids a pointless full re-apply); keys that
+        /// don't resolve are dropped. Pure/testable.
+        /// </summary>
+        internal static Dictionary<string, WorldCustomizationCacheEntry> MigrateCacheKeysToV2(
+            Dictionary<string, WorldCustomizationCacheEntry> oldFiles,
+            IReadOnlyList<(string rootPath, bool isAddedPath)> roots)
+        {
+            var migrated = new Dictionary<string, WorldCustomizationCacheEntry>();
+            if (oldFiles == null)
+                return migrated;
+
+            foreach (var kvp in oldFiles)
+            {
+                if (TryResolveRelativeKey(kvp.Key, roots, out var relKey))
+                    migrated[relKey] = kvp.Value; // last-writer-wins if two absolutes collapse (shouldn't happen)
+            }
+
+            return migrated;
+        }
         private static void CheckForWorldDatabaseUpdate()
         {
             log.Info($"Automatic World Database Update started...");
@@ -176,48 +266,312 @@ namespace ACE.Server
             return content_folder;
         }
 
+        private static string GetWorldCustomizationCacheFilePath()
+        {
+            var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "WorldCustomizationCache.json");
+            if (File.Exists(cwdPath))
+                return cwdPath;
+
+            var executingAssemblyLocation = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            var directoryName = Path.GetFullPath(Path.GetDirectoryName(executingAssemblyLocation));
+
+            return Path.Combine(directoryName, "WorldCustomizationCache.json");
+        }
+
+        // Ties the cache to the specific ace_world database it was built against (host/port/db name + its
+        // Base/Patch version). If this doesn't match what's stored on disk, the target database changed identity
+        // (new DB, restored backup) or CheckForWorldDatabaseUpdate() just applied an update this run -- either way
+        // the cache is stale and must not be trusted.
+        private static string GetWorldCustomizationFingerprint()
+        {
+            try
+            {
+                var version = new Database.WorldDatabase().GetVersion();
+                var baseVersion = version?.BaseVersion ?? "unknown";
+                var patchVersion = version?.PatchVersion ?? "unknown";
+
+                return $"{ConfigManager.Config.MySql.World.Host}:{ConfigManager.Config.MySql.World.Port}/{ConfigManager.Config.MySql.World.Database}|{baseVersion}|{patchVersion}";
+            }
+            catch
+            {
+                // Can't establish an identity for the target database right now -- don't cache anything and fall back
+                // to a full reapply rather than risk trusting a cache built against a different database.
+                return null;
+            }
+        }
+
+        private static WorldCustomizationCacheFile LoadWorldCustomizationCache(string fingerprint)
+        {
+            if (fingerprint == null)
+                return new WorldCustomizationCacheFile { Fingerprint = null };
+
+            var cachePath = GetWorldCustomizationCacheFilePath();
+
+            if (File.Exists(cachePath))
+            {
+                try
+                {
+                    var cache = JsonSerializer.Deserialize<WorldCustomizationCacheFile>(File.ReadAllText(cachePath));
+
+                    if (cache != null && cache.Fingerprint == fingerprint)
+                        return cache;
+                }
+                catch
+                {
+                    // Corrupt/unreadable cache file -- fall through to a fresh one.
+                }
+            }
+
+            return new WorldCustomizationCacheFile { Fingerprint = fingerprint };
+        }
+
+        private static void SaveWorldCustomizationCache(WorldCustomizationCacheFile cache)
+        {
+            if (cache.Fingerprint == null)
+                return;
+
+            try
+            {
+                cache.Version = WorldCustomizationCacheVersion;
+                var cachePath = GetWorldCustomizationCacheFilePath();
+                File.WriteAllText(cachePath, JsonSerializer.Serialize(cache, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unable to save World Customization cache: {ex.Message}");
+            }
+        }
+
+        private static string ComputeSha256(string filePath)
+        {
+            using var sha256 = SHA256.Create();
+            using var stream = File.OpenRead(filePath);
+            return Convert.ToHexString(sha256.ComputeHash(stream));
+        }
+
+        // A single content .sql discovered on disk, paired with the metadata the applier needs.
+        private sealed class DiscoveredContentFile
+        {
+            public FileInfo File;
+            public string RelativeKey;      // repo-relative, forward slashes; the cache key + planner path
+        }
+
         private static void AutoApplyWorldCustomizations()
         {
             var content_folders_search_option = ConfigManager.Config.Offline.RecurseWorldCustomizationPaths ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            var content_folders = new List<string> { GetContentFolder() };
-            content_folders.AddRange(ConfigManager.Config.Offline.WorldCustomizationAddedPaths);
-            content_folders.Sort();
+
+            // Roots: the primary content folder first (unprefixed keys), then the configured added paths
+            // (keys prefixed with the added root's leaf directory name). Order matters for key resolution.
+            var roots = new List<(string rootPath, bool isAddedPath)> { (GetContentFolder(), false) };
+            foreach (var added in ConfigManager.Config.Offline.WorldCustomizationAddedPaths.OrderBy(p => p, StringComparer.Ordinal))
+                roots.Add((added, true));
+
+            var fingerprint = GetWorldCustomizationFingerprint();
+            var cache = LoadWorldCustomizationCache(fingerprint);
+
+            // Migrate a v1 (absolute-path-keyed) cache to v2 (relative-key) in place, so an existing stage
+            // doesn't do one pointless full re-apply just because the key scheme changed.
+            if (cache.Fingerprint != null && cache.Version < WorldCustomizationCacheVersion)
+            {
+                var before = cache.Files.Count;
+                cache.Files = MigrateCacheKeysToV2(cache.Files, roots);
+                cache.Version = WorldCustomizationCacheVersion;
+                Console.WriteLine($"Migrated World Customization cache to v{WorldCustomizationCacheVersion} (relative keys): {cache.Files.Count} of {before} entries carried over.");
+            }
+
+            if (fingerprint == null)
+                Console.WriteLine($"Unable to determine World database identity/version -- World Customization caching disabled for this run (full reapply).");
+            else if (cache.Files.Count == 0)
+                Console.WriteLine($"No valid World Customization cache found for this database -- performing a full reapply and rebuilding the cache.");
 
             Console.WriteLine($"Searching for World Customization SQL scripts .... ");
 
-            content_folders.ForEach(path =>
+            // --- discovery: gather every .sql across all roots, computing its repo-relative key ---
+            var discovered = new List<DiscoveredContentFile>();
+            var byRelKey = new Dictionary<string, DiscoveredContentFile>(StringComparer.Ordinal);
+            var plannerInputs = new List<ContentFileInput>();
+            var previewExcludedCount = 0;
+
+            foreach (var (rootPath, isAddedPath) in roots)
             {
-                var contentDI = new DirectoryInfo(path);
-                if (contentDI.Exists)
+                var contentDI = new DirectoryInfo(rootPath);
+                if (!contentDI.Exists)
+                    continue;
+
+                Console.WriteLine($"Searching for SQL files within {rootPath} .... ");
+
+                foreach (var file in contentDI.GetFiles("*.sql", content_folders_search_option))
                 {
-                    Console.WriteLine($"Searching for SQL files within {path} .... ");
+                    var relKey = ComputeContentRelativeKey(file.FullName, rootPath, isAddedPath);
 
-                    var sqlConnect = new MySqlConnector.MySqlConnection($"server={ConfigManager.Config.MySql.World.Host};port={ConfigManager.Config.MySql.World.Port};user={ConfigManager.Config.MySql.World.Username};password={ConfigManager.Config.MySql.World.Password};database={ConfigManager.Config.MySql.World.Database};{ConfigManager.Config.MySql.World.ConnectionOptions}");
-                    foreach (var file in contentDI.GetFiles("*.sql", content_folders_search_option).OrderBy(f => f.FullName))
+                    // preview/ is human sign-off material, never world content -- drop it before it can
+                    // become a planner input (an excluded-but-planned file would still be applied).
+                    // Checked against the ABSOLUTE path as well as the relative key: an added root
+                    // pointing INSIDE Content/preview (e.g. ...\Content\preview\decor_scale_check) is
+                    // keyed by its leaf directory only, so the relative key alone would carry no
+                    // "preview" segment and the whole root would auto-apply.
+                    if (WorldContentPlanner.IsExcludedFromAutoApply(relKey) ||
+                        WorldContentPlanner.IsExcludedFromAutoApply(file.FullName))
                     {
-                        Console.Write($"Found {file.FullName} .... ");
-                        var sqlDBFile = File.ReadAllText(file.FullName);
-                        sqlDBFile = sqlDBFile.Replace("ace_world", ConfigManager.Config.MySql.World.Database);
-                        var script = new MySqlConnector.MySqlCommand(sqlDBFile, sqlConnect);
-
-                        Console.Write($"Importing into World database on SQL server at {ConfigManager.Config.MySql.World.Host}:{ConfigManager.Config.MySql.World.Port} .... ");
-                        try
-                        {
-                            ExecuteScript(script);
-                            //Console.Write($" {count} database records affected ....");
-                            Console.WriteLine(" complete!");
-                        }
-                        catch (MySqlConnector.MySqlException ex)
-                        {
-                            Console.WriteLine($" error!");
-                            Console.WriteLine($" Unable to apply patch due to following exception: {ex}");
-                        }
+                        previewExcludedCount++;
+                        continue;
                     }
-                    CleanupConnection(sqlConnect);
-                }
-            });
 
-            Console.WriteLine($"World Customization SQL scripts import complete!");
+                    // First root to claim a relative key wins (primary content folder has precedence).
+                    if (byRelKey.ContainsKey(relKey))
+                        continue;
+
+                    // Header block for the planner: first 30 lines (matches apply-content.sh's `head -30`).
+                    var header = ReadHeaderLines(file.FullName, 30);
+
+                    var df = new DiscoveredContentFile { File = file, RelativeKey = relKey };
+                    discovered.Add(df);
+                    byRelKey[relKey] = df;
+                    plannerInputs.Add(new ContentFileInput(file.FullName, relKey, header));
+                }
+            }
+
+            if (previewExcludedCount > 0)
+                Console.WriteLine($"Skipped {previewExcludedCount} preview .sql file(s) -- preview/ is human sign-off material and is never applied to the World database.");
+
+            // --- plan: deterministic, dependency-correct order (or hard-fail with diagnostics) ---
+            var plan = WorldContentPlanner.CreatePlan(plannerInputs);
+            if (!plan.IsValid)
+            {
+                log.Error("World Customization content plan is INVALID -- applying ZERO files this run. Fix the following and restart:");
+                foreach (var diag in plan.Diagnostics)
+                    log.Error($"  content-plan: {diag}");
+
+                // Apply nothing; leave the cache untouched so the server boots on yesterday's content.
+                Console.WriteLine($"World Customization SQL scripts import aborted -- content plan invalid ({plan.Diagnostics.Count} problem(s)). See log.");
+                return;
+            }
+
+            var appliedCount = 0;
+            var skippedCount = 0;
+            var failedUnits = new HashSet<string>(StringComparer.Ordinal);
+            var deadFiles = 0;
+
+            var sqlConnect = new MySqlConnector.MySqlConnection($"server={ConfigManager.Config.MySql.World.Host};port={ConfigManager.Config.MySql.World.Port};user={ConfigManager.Config.MySql.World.Username};password={ConfigManager.Config.MySql.World.Password};database={ConfigManager.Config.MySql.World.Database};{ConfigManager.Config.MySql.World.ConnectionOptions}");
+
+            try
+            {
+                sqlConnect.Open();
+
+                foreach (var planned in plan.Files)
+                {
+                    if (planned.IsUnclassified)
+                        log.Warn($"World Customization: '{planned.RelativePath}' is unclassified (no matching content folder / @phase) -- applying last.");
+
+                    var df = byRelKey[planned.RelativePath];
+                    var file = df.File;
+                    var cacheKey = planned.RelativePath;
+
+                    // Transitive-dependent skip: if any dependency failed (or was itself skipped) this run,
+                    // don't apply this file. Its own unit joins the failed set so its dependents skip too.
+                    var deadDep = planned.DependsOn.FirstOrDefault(d => failedUnits.Contains(d));
+                    if (deadDep != null)
+                    {
+                        Console.WriteLine($"Skipping {planned.RelativePath} -- depends on failed unit '{deadDep}'.");
+                        log.Warn($"World Customization: skipped {planned.RelativePath}: depends on failed unit {deadDep}");
+                        if (planned.UnitName != null)
+                            failedUnits.Add(planned.UnitName);
+                        // Skipped files must NOT enter the cache (preserve retry-next-boot).
+                        deadFiles++;
+                        continue;
+                    }
+
+                    var mtimeTicks = file.LastWriteTimeUtc.Ticks;
+                    cache.Files.TryGetValue(cacheKey, out var cachedEntry);
+
+                    // Fast path: if size+mtime match what we last recorded, trust the stored hash without re-hashing.
+                    // Otherwise (including right after a fresh git checkout, which resets mtimes) fall back to a
+                    // real content hash before deciding whether anything actually changed.
+                    var needsHash = cachedEntry == null || cachedEntry.Size != file.Length || cachedEntry.MTimeUtcTicks != mtimeTicks;
+                    var hash = needsHash ? ComputeSha256(file.FullName) : cachedEntry.Sha256;
+
+                    if (cachedEntry != null && cachedEntry.Sha256 == hash)
+                    {
+                        // Unchanged since it was last successfully applied to this exact database -- skip re-running it.
+                        if (needsHash)
+                            cache.Files[cacheKey] = new WorldCustomizationCacheEntry { Size = file.Length, MTimeUtcTicks = mtimeTicks, Sha256 = hash };
+
+                        skippedCount++;
+                        continue;
+                    }
+
+                    Console.Write($"Found {file.FullName} .... ");
+                    var sqlDBFile = File.ReadAllText(file.FullName);
+                    sqlDBFile = sqlDBFile.Replace("ace_world", ConfigManager.Config.MySql.World.Database);
+                    var script = new MySqlConnector.MySqlCommand(sqlDBFile, sqlConnect);
+
+                    Console.Write($"Importing into World database on SQL server at {ConfigManager.Config.MySql.World.Host}:{ConfigManager.Config.MySql.World.Port} .... ");
+
+                    // Wrap the whole-file batch in a transaction so a mid-file failure leaves no partial rows.
+                    var transaction = sqlConnect.BeginTransaction();
+                    script.Transaction = transaction;
+                    try
+                    {
+                        ExecuteScript(script);
+                        transaction.Commit();
+                        Console.WriteLine(" complete!");
+
+                        cache.Files[cacheKey] = new WorldCustomizationCacheEntry { Size = file.Length, MTimeUtcTicks = mtimeTicks, Sha256 = hash };
+                        appliedCount++;
+                    }
+                    catch (MySqlConnector.MySqlException ex)
+                    {
+                        try { transaction.Rollback(); } catch { /* connection may already be faulted */ }
+
+                        Console.WriteLine($" error!");
+                        Console.WriteLine($" Unable to apply patch due to following exception: {ex}");
+                        log.Error($"World Customization: failed to apply {planned.RelativePath}: {ex.Message}");
+
+                        // Mark this file's unit failed so its transitive dependents skip this run. Don't record it
+                        // as applied -- leave it out of the cache so it's retried on every subsequent startup until
+                        // it succeeds, matching today's implicit retry-forever behavior.
+                        if (planned.UnitName != null)
+                            failedUnits.Add(planned.UnitName);
+                        cache.Files.Remove(cacheKey);
+                    }
+                }
+            }
+            finally
+            {
+                CleanupConnection(sqlConnect);
+            }
+
+            // Drop entries for files that no longer exist on disk (matched by relative key), so the cache
+            // doesn't grow unbounded. byRelKey is the authoritative set of what was discovered this run.
+            foreach (var key in cache.Files.Keys.Where(k => !byRelKey.ContainsKey(k)).ToList())
+                cache.Files.Remove(key);
+
+            SaveWorldCustomizationCache(cache);
+
+            var deadNote = deadFiles > 0 ? $", {deadFiles} skipped (failed dependency)" : "";
+            Console.WriteLine($"World Customization SQL scripts import complete! ({appliedCount} applied, {skippedCount} unchanged/skipped{deadNote})");
+        }
+
+        /// <summary>Reads up to <paramref name="maxLines"/> lines from a file into a single string (the unit header block).</summary>
+        private static string ReadHeaderLines(string filePath, int maxLines)
+        {
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                using var reader = new StreamReader(filePath);
+                string line;
+                var count = 0;
+                while (count < maxLines && (line = reader.ReadLine()) != null)
+                {
+                    sb.AppendLine(line);
+                    count++;
+                }
+            }
+            catch
+            {
+                // Unreadable header -> treat as headerless; the file still participates by folder phase.
+            }
+            return sb.ToString();
         }
 
         private static void AutoApplyDatabaseUpdates()

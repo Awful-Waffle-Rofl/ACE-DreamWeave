@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
+using ACE.Server.Entity;
 
 namespace ACE.Server.WorldObjects
 {
@@ -32,9 +33,9 @@ namespace ACE.Server.WorldObjects
         {
         }
 
-        public override bool? Init(Player player, PetDevice petDevice)
+        public override bool? Init(Player player, PetDevice petDevice, bool spawnStagger = false)
         {
-            var success = base.Init(player, petDevice);
+            var success = base.Init(player, petDevice, spawnStagger);
 
             if (success == null || !success.Value)
                 return success;
@@ -51,6 +52,22 @@ namespace ACE.Server.WorldObjects
             CritRating = petDevice.GearCrit;
             CritResistRating = petDevice.GearCritResist;
 
+            // class ability: Empowered Summons scales the pet's stats (health, damage, defenses). A rating
+            // point is ~1% here, so the same fraction feeds health (as a %) and the rating pools (as points).
+            var statMod = player.GetEmpoweredSummonsStatMod();
+            if (statMod > 1.0f)
+            {
+                var bonusFraction = statMod - 1.0f;
+
+                Health.StartingValue += (uint)Math.Round(Health.MaxValue * bonusFraction);
+                Health.Current = Health.MaxValue;
+
+                var ratingBonus = (int)Math.Round(bonusFraction * 100.0f);
+                DamageRating = (DamageRating ?? 0) + ratingBonus;
+                DamageResistRating = (DamageResistRating ?? 0) + ratingBonus;
+                CritDamageResistRating = (CritDamageResistRating ?? 0) + ratingBonus;
+            }
+
             // are CombatPets supposed to attack monsters that are in the same faction as the pet owner?
             // if not, there are a couple of different approaches to this
             // the easiest way for the code would be to simply set Faction1Bits for the CombatPet to match the pet owner's
@@ -60,6 +77,34 @@ namespace ACE.Server.WorldObjects
             Faction1Bits = player.Faction1Bits;
 
             return true;
+        }
+
+        /// <summary>
+        /// Soul Tether reduces the damage this pet takes. Read here - at the pet's incoming-damage site, on
+        /// every hit - rather than at summon time, so a rank learned or unlearned while the pet is already
+        /// in the world takes effect immediately. Returns the multiplier to 1.0 (no change) when the owner
+        /// is gone or has not learned the ability.
+        /// </summary>
+        public override uint TakeDamage(WorldObject source, DamageType damageType, float amount, bool crit = false)
+        {
+            var mod = P_PetOwner?.GetSoulTetherDamageReductionMod() ?? 1.0f;
+
+            if (mod < 1.0f && amount > 0.0f)
+                amount *= mod;
+
+            return base.TakeDamage(source, damageType, amount, crit);
+        }
+
+        /// <summary>
+        /// Notifies the owner that its combat pet has fallen, which arms Soul Tether's resummon-cooldown
+        /// skip. Recorded for every owner (the ability is checked when the skip is read), so the flag stays
+        /// accurate if the ability is learned between the pet's death and the resummon.
+        /// </summary>
+        public override DeathMessage OnDeath(DamageHistoryInfo lastDamager, DamageType damageType, bool criticalHit = false)
+        {
+            P_PetOwner?.OnCombatPetDied();
+
+            return base.OnDeath(lastDamager, damageType, criticalHit);
         }
 
         public override void HandleFindTarget()

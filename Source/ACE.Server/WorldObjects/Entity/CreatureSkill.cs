@@ -1,7 +1,6 @@
 using System;
 
 using ACE.Common.Extensions;
-using ACE.DatLoader;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
@@ -33,6 +32,17 @@ namespace ACE.Server.WorldObjects.Entity
             set => PropertiesSkill.InitLevel = value;
         }
 
+        /// <summary>
+        /// InitLevel as reported to the client, folding in the getter-only "Enhanced &lt;skill&gt;" class
+        /// skill bonus so the client's skill panel (which rebuilds the value from the attribute formula +
+        /// Ranks + InitLevel, not from the server's Current) reflects it. The stored InitLevel is left
+        /// untouched. The client's attribute contribution already matches the server because attributes
+        /// are sent with their own Enhanced bonus folded in (NetworkStartingValue), so there is no
+        /// double counting.
+        /// </summary>
+        public uint NetworkInitLevel =>
+            InitLevel + (creature is Player player ? (uint)player.GetEnhancedSkillBonus(Skill) : 0);
+
         public SkillAdvancementClass AdvancementClass
         {
             get => PropertiesSkill.SAC;
@@ -54,7 +64,7 @@ namespace ACE.Server.WorldObjects.Entity
 
                 if (AdvancementClass == SkillAdvancementClass.Untrained)
                 {
-                    DatManager.PortalDat.SkillTable.SkillBaseHash.TryGetValue((uint)Skill, out var skillTableRecord);
+                    GameTables.SkillTable.SkillBaseHash.TryGetValue((uint)Skill, out var skillTableRecord);
 
                     if (skillTableRecord?.MinLevel == 1)
                         return true;
@@ -145,7 +155,13 @@ namespace ACE.Server.WorldObjects.Entity
                 total += InitLevel + Ranks;
 
                 if (creature is Player player)
+                {
                     total += GetAugBonus_Base(player);
+
+                    // "Enhanced <skill>" class ability - a flat base increase, so it counts toward
+                    // wield requirements (which read Base) just like trained ranks
+                    total += (uint)player.GetEnhancedSkillBonus(Skill);
+                }
 
                 return total;
             }
@@ -166,7 +182,12 @@ namespace ACE.Server.WorldObjects.Entity
 
                 // base gets scaled by vitae
                 if (player != null)
+                {
                     total += GetAugBonus_Base(player);
+
+                    // "Enhanced <skill>" is a base increase, so it rides with base (pre-multiplier)
+                    total += (uint)player.GetEnhancedSkillBonus(Skill);
+                }
 
                 // apply multiplicative enchantments
                 var multiplier = creature.EnchantmentManager.GetSkillMod_Multiplier(Skill);
@@ -222,7 +243,9 @@ namespace ACE.Server.WorldObjects.Entity
             //        break;
             //}
 
-            if (AdvancementClass >= SkillAdvancementClass.Trained && player.Enlightenment != 0)
+            // +1 per enlightenment to SPECIALIZED skills only (trained skills get nothing); a permanent,
+            // non-redistributable floor computed getter-only, never written into the skill record
+            if (AdvancementClass == SkillAdvancementClass.Specialized && player.Enlightenment != 0)
                 total += (uint)player.Enlightenment;
 
             return total;

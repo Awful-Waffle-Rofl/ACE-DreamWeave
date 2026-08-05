@@ -8,6 +8,7 @@ using ACE.Common.Extensions;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
@@ -185,6 +186,16 @@ namespace ACE.Server.WorldObjects.Managers
                 if (caster is Player player && player.AugmentationIncreasedSpellDuration > 0 && !isWeaponSpell && spell.DotDuration == 0)
                     duration *= 1.0f + player.AugmentationIncreasedSpellDuration * 0.2f;
 
+                // Malediction (Blood Mage T2): a refresh recomputes the duration from the spell rather than
+                // rebuilding the entry, so the extension has to be reapplied here or re-casting the debuff
+                // would clip it back to the base length. The refreshed entry keeps its original (already
+                // boosted) StatModValue - see the comment above; intensity is set once, at BuildEntry.
+                if (caster is Player maledictionRefreshCaster &&
+                    maledictionRefreshCaster.TryGetMaledictionMods(spell, out _, out var maledictionRefreshDuration))
+                {
+                    duration = MaledictionAbility.ExtendDuration(duration, maledictionRefreshDuration);
+                }
+
                 var timeRemaining = refreshSpell.Duration + refreshSpell.StartTime;
 
                 if (duration > timeRemaining)
@@ -266,6 +277,20 @@ namespace ACE.Server.WorldObjects.Managers
                     entry.StatModValue = caster.CalculateDotEnchantment_StatModValue(spell, WorldObject, weapon, entry.StatModValue);
                 }
                 //Console.WriteLine($"enchantment_statModVal: {entry.StatModValue}");
+            }
+
+            // Malediction (Blood Mage T2): a Vulnerability / Imperil the PLAYER applies lands harder and
+            // lasts longer. Applied here, while the registry entry is being built, for the same reason
+            // CalculateDotEnchantment_StatModValue is applied here: the value written to the registry is the
+            // one every reader sees, so the whole party's attacks benefit, not just the caster's.
+            //
+            // Deliberately AFTER the stack decision in Add(): stacking is keyed off spell power level, so a
+            // boosted Vulnerability VI still refreshes a plain Vulnerability VI rather than surpassing it.
+            if (caster is Player maledictionCaster &&
+                maledictionCaster.TryGetMaledictionMods(spell, out var maledictionIntensity, out var maledictionDuration))
+            {
+                entry.StatModValue = MaledictionAbility.ScaleStatModValue(spell.StatModType, entry.StatModValue, maledictionIntensity);
+                entry.Duration = MaledictionAbility.ExtendDuration(entry.Duration, maledictionDuration);
             }
 
             // handle equipment sets
@@ -1347,6 +1372,10 @@ namespace ACE.Server.WorldObjects.Managers
 
                 var sourcePlayer = damager as Player;
 
+                // class ability: Withering scales the caster's void (nether) DoT tick damage
+                if (damageType == DamageType.Nether && sourcePlayer != null)
+                    tickAmount *= sourcePlayer.GetWitheringVoidDotMod();
+
                 if (sourcePlayer != null && targetPlayer != null)
                 {
                     // if a PKType with Enduring Enchantment has died, ensure they don't continue to take DoT from PK sources
@@ -1366,7 +1395,7 @@ namespace ACE.Server.WorldObjects.Managers
                 // with the halvening, this actually seems like the fairest balance currently..
                 var useNetherDotDamageRating = targetPlayer != null;
 
-                var damageResistRatingMod = creature.GetDamageResistRatingMod(CombatType.Magic, useNetherDotDamageRating);   // df?
+                var damageResistRatingMod = creature.GetDamageResistRatingMod(CombatType.Magic, useNetherDotDamageRating, attacker: damager);   // df?
 
                 if (sourcePlayer != null && targetPlayer != null)
                 {

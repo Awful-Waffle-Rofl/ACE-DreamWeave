@@ -114,7 +114,12 @@ namespace ACE.Server.WorldObjects
                 return CombatType.Missile;
         }
 
-        public DamageEvent DamageTarget(Creature target, WorldObject damageSource)
+        /// <summary>
+        /// PROTOTYPE: damageMultiplier scales the fully-computed damage (after resistances/criticals/etc, before
+        /// it's applied to the target's health) - used by multi-shot's additional targets. Defaults to 1.0, a
+        /// pure no-op for every existing caller.
+        /// </summary>
+        public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f)
         {
             if (target.Health.Current <= 0)
                 return null;
@@ -132,6 +137,26 @@ namespace ACE.Server.WorldObjects
             }
 
             var damageEvent = DamageEvent.CalculateDamage(this, target, damageSource);
+
+            if (damageEvent.HasDamage && damageMultiplier != 1.0f)
+                damageEvent.Damage *= damageMultiplier;
+
+            // class abilities that modify outgoing damage (e.g. Poison Weapon) - folded into the hit
+            // before it's applied/reported, so mitigation has already happened and the attacker
+            // notification shows the modified total. Covers melee, missile, and multi-shot extra
+            // hits - they all route through here; spells never do.
+            ApplyOutgoingDamageClassAbilities(target, damageEvent);
+
+            // equipment mods whose class ability this player has NOT learned - the standalone half of the
+            // hybrid standalone rule. An owned ability folds its own mod in above, and this call is a no-op
+            // for that mod, so exactly one of the two ever applies it. See Player_EquipmentMods.cs.
+            ApplyEquipmentModOutgoingDamage(target, damageEvent);
+
+            // Tier B weapon mods carried by the equipped weapon: Ambush's conditional damage and the three
+            // leeches, in that order so a leech takes its fraction of the boosted number. Gated on
+            // weapon_mods_enabled inside. Spells never route through here - their half is wired at the
+            // two SpellProjectile sites. See Player_WeaponMods.cs.
+            ApplyWeaponModOutgoingDamage(target, damageEvent);
 
             if (damageEvent.HasDamage)
             {
@@ -226,6 +251,9 @@ namespace ACE.Server.WorldObjects
             var accuracyMod = GetAccuracyMod(weapon);
 
             attackSkill = (uint)Math.Round(attackSkill * accuracyMod * offenseMod);
+
+            // class abilities: Eagle Eye adds a flat % to effective missile attack skill (missile only)
+            attackSkill = (uint)Math.Round(attackSkill * GetEagleEyeAccuracyMod());
 
             //if (IsExhausted)
                 //attackSkill = GetExhaustedSkill(attackSkill);
@@ -504,9 +532,30 @@ namespace ACE.Server.WorldObjects
                 percent = (float)amount / Health.MaxValue;
             }
 
+            // Sanguine Ward (Blood Mage T3): a transient absorb pool eats the hit BEFORE it reaches Health,
+            // the same place the cloak proc above reduces it. Deliberately NOT the Mana Barrier shape (a
+            // refund after the deduction): the ward must never put health back, only stop it leaving, so a
+            // caster who just spent 40% of their pool on Hecatomb is still at 60% with a ward up. Inert -
+            // and free, on an early-out - for every player with no ward running, which is everyone who is
+            // not mid-Hecatomb.
+            var afterSanguineWard = AbsorbWithSanguineWard(source, amount);
+
+            if (afterSanguineWard != amount)
+            {
+                amount = afterSanguineWard;
+                percent = (float)amount / Health.MaxValue;
+            }
+
             // update health
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
             DamageHistory.Add(source, damageType, damageTaken);
+
+            // class abilities that react to a landed incoming hit (e.g. Thorns) - placed before the
+            // death check so they still fire on a killing blow
+            ApplyIncomingDamageClassAbilities(source, damageType, damageTaken);
+
+            // the Thorns equipment mod for a player who never learned Thorns, so the hook above never fired
+            ApplyEquipmentModIncomingDamage(source, damageType);
 
             // update stamina
             if (CombatMode != CombatMode.NonCombat)

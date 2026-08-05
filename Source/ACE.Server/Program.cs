@@ -50,6 +50,24 @@ namespace ACE.Server
             AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
             AppDomain.CurrentDomain.ProcessExit += new EventHandler(OnProcessExit);
 
+            // In a container, `docker stop` delivers SIGTERM, whose default action is to terminate
+            // the process immediately - which skips ProcessExit and ACE's shard-saving shutdown, so
+            // any writes since the last periodic save are lost. Intercept SIGTERM (and SIGINT, for
+            // an attached console) and route it to the normal graceful shutdown: log everyone off,
+            // unload landblocks, and drain the shard DB queue before exiting. `docker stop -t
+            // <seconds>` must allow enough time for that to finish before SIGKILL.
+            if (IsRunningInContainer)
+            {
+                sigTermRegistration = PosixSignalRegistration.Create(PosixSignal.SIGTERM, HandleContainerSignal);
+                sigIntRegistration = PosixSignalRegistration.Create(PosixSignal.SIGINT, HandleContainerSignal);
+
+                // SIGHUP is repurposed as a live "reload content caches" trigger, so a content
+                // deploy (deploy-content-prod.yml) can pick up weenie/realm changes without a
+                // restart. A detached container is never sent SIGHUP by a terminal hangup, so
+                // hijacking its default (terminate) action is safe.
+                sigHupRegistration = PosixSignalRegistration.Create(PosixSignal.SIGHUP, HandleReloadSignal);
+            }
+
             // Typically, you wouldn't force the current culture on an entire application unless you know sure your application is used in a specific region (which ACE is not)
             // We do this because almost all of the client/user input/output code does not take culture into account, and assumes en-US formatting.
             // Without this, many commands that require special characters like , and . will break
@@ -59,13 +77,22 @@ namespace ACE.Server
 
             // Look for the log4net.config first in the current environment directory, then in the ExecutingAssembly location
             var exeLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            var containerConfigDirectory = "/ace/Config";
+
+            // Resolves to /ace/Config in a container (today's behavior, unchanged), or to
+            // ACE_CONFIG_DIR if that environment variable is set (even inside a container), or
+            // to null outside a container with no ACE_CONFIG_DIR - meaning "no external
+            // directory, use the exe directory" exactly as before this mechanism existed.
+            var externalConfigDirectory = ExternalConfigDirectory.Resolve(IsRunningInContainer);
+
+            if (externalConfigDirectory != null && !Directory.Exists(externalConfigDirectory))
+                Directory.CreateDirectory(externalConfigDirectory);
+
             var log4netConfig = Path.Combine(exeLocation, "log4net.config");
             var log4netConfigExample = Path.Combine(exeLocation, "log4net.config.example");
-            var log4netConfigContainer = Path.Combine(containerConfigDirectory, "log4net.config");
+            var log4netConfigExternal = externalConfigDirectory != null ? Path.Combine(externalConfigDirectory, "log4net.config") : null;
 
-            if (IsRunningInContainer && File.Exists(log4netConfigContainer))
-                File.Copy(log4netConfigContainer, log4netConfig, true);
+            if (log4netConfigExternal != null && File.Exists(log4netConfigExternal))
+                File.Copy(log4netConfigExternal, log4netConfig, true);
 
             var log4netFileInfo = new FileInfo("log4net.config");
             if (!log4netFileInfo.Exists)
@@ -81,23 +108,23 @@ namespace ACE.Server
                 }
                 else
                 {
-                    if (!IsRunningInContainer)
+                    if (externalConfigDirectory == null)
                     {
                         Console.WriteLine("log4net Configuration file is missing,  cloning from example file.");
                         File.Copy(log4netConfigExample, log4netConfig);
                     }
                     else
                     {
-                        if (!File.Exists(log4netConfigContainer))
+                        if (!File.Exists(log4netConfigExternal))
                         {
-                            Console.WriteLine("log4net Configuration file is missing, ACEmulator is running in a container,  cloning from docker file.");
+                            Console.WriteLine($"log4net Configuration file is missing, an external config directory is in use ({externalConfigDirectory}), cloning from docker file.");
                             var log4netConfigDocker = Path.Combine(exeLocation, "log4net.config.docker");
                             File.Copy(log4netConfigDocker, log4netConfig);
-                            File.Copy(log4netConfigDocker, log4netConfigContainer);
+                            File.Copy(log4netConfigDocker, log4netConfigExternal);
                         }
                         else
                         {
-                            File.Copy(log4netConfigContainer, log4netConfig);
+                            File.Copy(log4netConfigExternal, log4netConfig);
                         }
 
                     }
@@ -129,26 +156,45 @@ namespace ACE.Server
             if (IsRunningInContainer)
                 log.Info("ACEmulator is running in a container...");
 
+            // Named here, once, so it is obvious from the log which Config.js/log4net.config the
+            // server actually loaded - a silently-wrong config file is the failure mode this
+            // mechanism is designed to prevent.
+            if (externalConfigDirectory != null)
+                log.Info($"Using external config directory: {externalConfigDirectory}");
+
             var configFile = Path.Combine(exeLocation, "Config.js");
-            var configConfigContainer = Path.Combine(containerConfigDirectory, "Config.js");
+            var configFileExternal = externalConfigDirectory != null ? Path.Combine(externalConfigDirectory, "Config.js") : null;
 
-            if (IsRunningInContainer && File.Exists(configConfigContainer))
-                File.Copy(configConfigContainer, configFile, true);
-
-            if (!File.Exists(configFile))
+            // Once an external config directory is named it is AUTHORITATIVE. If it has no Config.js
+            // yet, seed it - by adopting the exe directory's existing copy if there is one, otherwise
+            // by running out-of-box setup into it - and only then copy it in.
+            //
+            // Getting this wrong is not a cosmetic bug. The first version of this gated the whole
+            // block on the EXE-directory file being absent, so pointing ACE_CONFIG_DIR at an empty
+            // directory left the server running the exe directory's stale Config.js while the log
+            // above cheerfully announced the external directory. That is exactly the silently-wrong
+            // config this mechanism exists to prevent, and a boot test caught it (2026-07-29).
+            if (configFileExternal != null)
             {
-                if (!IsRunningInContainer)
-                    DoOutOfBoxSetup(configFile);
-                else
+                if (!File.Exists(configFileExternal))
                 {
-                    if (!File.Exists(configConfigContainer))
+                    if (File.Exists(configFile))
                     {
-                        DoOutOfBoxSetup(configFile);
-                        File.Copy(configFile, configConfigContainer);
+                        log.Info($"External config directory has no Config.js yet - adopting the existing {configFile} into it.");
+                        File.Copy(configFile, configFileExternal);
                     }
                     else
-                        File.Copy(configConfigContainer, configFile);
+                    {
+                        DoOutOfBoxSetup(configFile);
+                        File.Copy(configFile, configFileExternal);
+                    }
                 }
+
+                File.Copy(configFileExternal, configFile, true);
+            }
+            else if (!File.Exists(configFile))
+            {
+                DoOutOfBoxSetup(configFile);
             }
 
             log.Info("Initializing ConfigManager...");
@@ -238,6 +284,10 @@ namespace ACE.Server
             log.Info("Initializing DatManager...");
             DatManager.Initialize(ConfigManager.Config.Server.DatFilesDirectory, true);
 
+            // hand the game layer its formula/spell tables (unit tests inject synthetic tables here instead)
+            Entity.GameTables.Initialize(DatManager.PortalDat.SkillTable, DatManager.PortalDat.SecondaryAttributeTable);
+            Entity.SpellSet.Initialize(DatManager.PortalDat.SpellTable);
+
             if (ConfigManager.Config.DDD.EnableDATPatching)
             {
                 log.Info("Initializing DDDManager...");
@@ -295,9 +345,14 @@ namespace ACE.Server
                 DatabaseManager.World.CacheAllTreasureMaterialColor();
                 log.Info("Precaching Treasures - Wielded...");
                 DatabaseManager.World.CacheAllTreasureWielded();
+                log.Info("Precaching Rare Gem Spells...");
+                DatabaseManager.World.GetRareGemSpellIds();
             }
             else
                 log.Info("Precaching World Database Disabled...");
+
+            log.Info("Initializing RealmManager...");
+            RealmManager.Initialize();
 
             log.Info("Initializing PlayerManager...");
             PlayerManager.Initialize();
@@ -313,6 +368,12 @@ namespace ACE.Server
 
             log.Info("Initializing WorldManager...");
             WorldManager.Initialize();
+
+            log.Info("Initializing ServerMetrics...");
+            ServerMetrics.Initialize();
+
+            log.Info("Initializing AnalyticsManager...");
+            ACE.Server.Managers.Analytics.AnalyticsManager.Initialize();
 
             log.Info("Initializing EventManager...");
             EventManager.Initialize();
@@ -348,6 +409,55 @@ namespace ACE.Server
             log.Error(e.ExceptionObject);
         }
 
+        // Kept in static fields so the registrations are not garbage-collected while active.
+        private static PosixSignalRegistration sigTermRegistration;
+        private static PosixSignalRegistration sigIntRegistration;
+        private static PosixSignalRegistration sigHupRegistration;
+
+        // Live cache reload on SIGHUP - the restart-free half of the content-deploy invalidation.
+        // Clears the world content caches (weenie/spell/recipe/wielded/landblock-instance) and
+        // re-registers realms, so a weenie or realm content apply takes effect without a restart.
+        // NOTE: this does NOT respawn already-loaded landblocks - placement/landblock_instance
+        // changes still need reload-landblock (an admin standing in the block) or a restart.
+        private static void HandleReloadSignal(PosixSignalContext context)
+        {
+            context.Cancel = true;   // do not let SIGHUP terminate the process
+            try
+            {
+                log.Info("SIGHUP received - reloading content caches (clearcache + reload-realms)...");
+                ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleClearCache(null);
+                var (added, updated, missing) = RealmManager.Reload();
+                log.Info($"[SIGHUP] content caches cleared; realms reloaded (added {added}, updated {updated}, missing {missing.Count}).");
+            }
+            catch (Exception ex)
+            {
+                log.Error("[SIGHUP] content-cache reload failed", ex);
+            }
+        }
+
+        // Guards the container graceful shutdown so the signal handler and OnProcessExit, which
+        // both funnel into it, run it exactly once.
+        private static int containerShutdownStarted;
+
+        private static void HandleContainerSignal(PosixSignalContext context)
+        {
+            // Cancel the default action (immediate termination) so the graceful shutdown can run.
+            context.Cancel = true;
+            InitiateContainerShutdown($"{context.Signal} received");
+        }
+
+        private static void InitiateContainerShutdown(string reason)
+        {
+            if (Interlocked.CompareExchange(ref containerShutdownStarted, 1, 0) != 0)
+                return;
+
+            log.Warn($"{reason} - initiating graceful shutdown (saving world state before exit)...");
+
+            // Runs the full shutdown synchronously (log off players, unload landblocks, drain the
+            // shard DB queue) and then Environment.Exit, which re-enters OnProcessExit below.
+            ServerManager.DoShutdownNow();
+        }
+
         private static void OnProcessExit(object sender, EventArgs e)
         {
             if (!IsRunningInContainer)
@@ -373,7 +483,9 @@ namespace ACE.Server
             }
             else
             {
-                ServerManager.DoShutdownNow();
+                // A no-op if a SIGTERM/SIGINT handler already started the shutdown; otherwise this
+                // covers a plain process exit that did not arrive via one of those signals.
+                InitiateContainerShutdown("Process exit");
                 DatabaseManager.Stop();
             }
         }

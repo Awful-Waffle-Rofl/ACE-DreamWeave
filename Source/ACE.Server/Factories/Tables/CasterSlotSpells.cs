@@ -47,10 +47,42 @@ namespace ACE.Server.Factories.Tables
             ( SpellId.CurseDestructionOther1, 0.05f ),
         };
 
+        /// <summary>
+        /// FORK ADDITION (Sanguine caster family): the bonus slot spell a Health-typed (DamageType.Health)
+        /// caster grants, filling the same role netherSpells fills for Nether and wandStaffSpells fills
+        /// for the classic four elements. Retail never shipped a Health-typed caster, so Roll() had no
+        /// case for it and fell through to wandStaffSpells - a Sanguine wand handed out Flame Bolt /
+        /// Force Bolt / etc, a thematically backwards War Magic cast on a life-magic item.
+        ///
+        /// THE EXCLUSION LIST IS DELIBERATE AND MUST NOT BE "COMPLETED" LATER. Martyr's Hecatomb, Curse
+        /// of Raven Fury, and every other health-costing life spell are left out on purpose - this is a
+        /// correctness constraint, not a taste choice. An item-cast bonus spell draws its cost from the
+        /// item's own mana (see MutateCaster_SpellDID's ItemManaCost, LootGenerationFactory_Caster.cs),
+        /// but a LifeProjectile spell's real cost is HEALTH taken from the CASTER, not mana from the
+        /// item. Putting Hecatomb on this table would give the wielder a free-to-cast (mana-wise) health
+        /// drain that silently eats the player's own health every time they used the item's bonus spell
+        /// slot - the item would look like ordinary bonus-spell utility and actually be a self-harm
+        /// button. Only spells whose entire cost is the item's mana belong here.
+        /// </summary>
+        private static ChanceTable<SpellId> lifeSpells = new ChanceTable<SpellId>()
+        {
+            ( SpellId.HarmOther1,     0.25f ),
+            ( SpellId.HealOther1,     0.25f ),
+            ( SpellId.DrainHealth1,   0.20f ),
+            ( SpellId.DrainStamina1,  0.15f ),
+            ( SpellId.DrainMana1,     0.15f ),
+        };
+
         public static SpellId Roll(WorldObject wo)
         {
+            // IsOrb is a wcid-equality check against a single retail orb wcid (W_ORB_CLASS) and does not
+            // recognize the Sanguine Orb (1000243) - see IsOrb's own "todo" comment. Left untouched
+            // deliberately (widening it would change behaviour for existing retail orbs, a separate
+            // decision); with the Health case below, the Sanguine Orb falls through to lifeSpells, which
+            // is the correct table for it anyway, so this is not a functional gap.
             var table = IsOrb(wo) ? orbSpells :
-                wo.W_DamageType == DamageType.Nether ? netherSpells : wandStaffSpells;
+                wo.W_DamageType == DamageType.Nether ? netherSpells :
+                wo.W_DamageType == DamageType.Health ? lifeSpells : wandStaffSpells;
 
             return table.Roll();
         }

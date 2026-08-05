@@ -35,11 +35,11 @@ namespace ACE.Server.Tests.Physics
             var radSum = 20.0f;
 
             var time = Sphere.FindTimeOfCollision(movement, otherSpherePosition, radSum);
-            Assert.IsLessThan(PhysicsGlobals.EPSILON, time - 0.38452994616207481f);
+            Assert.AreEqual(0.38452994616207481, time, PhysicsGlobals.EPSILON);
 
             otherSpherePosition = new Vector3(50, 60, 60);
             time = Sphere.FindTimeOfCollision(movement, otherSpherePosition, radSum);
-            Assert.IsLessThan(PhysicsGlobals.EPSILON, time - 0.46125741132772069f);
+            Assert.AreEqual(0.46125741132772069, time, PhysicsGlobals.EPSILON);
 
             otherSpherePosition = new Vector3(30, 42, 63);
             time = Sphere.FindTimeOfCollision(movement, otherSpherePosition, radSum);
@@ -53,11 +53,13 @@ namespace ACE.Server.Tests.Physics
             var ray = new Ray(new Vector3(-10, -10, -10), new Vector3(20, 20, 20));
             double time = float.MinValue;
             var intersects = sphere.SphereIntersectsRay(ray, out time);
-            Assert.IsTrue(intersects && time - 12.320511131409415f < PhysicsGlobals.EPSILON);
+            Assert.IsTrue(intersects);
+            Assert.AreEqual(12.320511131409415, time, PhysicsGlobals.EPSILON);
 
             ray = new Ray(new Vector3(20, 25, 30), new Vector3(-20, -25, -30));
             intersects = sphere.SphereIntersectsRay(ray, out time);
-            Assert.IsTrue(intersects && time - 38.874800109922887f < PhysicsGlobals.EPSILON);
+            Assert.IsTrue(intersects);
+            Assert.AreEqual(38.874800109922887, time, PhysicsGlobals.EPSILON);
 
             // ray starting inside sphere
             // is not considered an intersection by the game
@@ -69,7 +71,8 @@ namespace ACE.Server.Tests.Physics
             // but the function returns as a negative #
             ray = new Ray(new Vector3(50, 50, 50), new Vector3(100, 100, 100));
             intersects = sphere.SphereIntersectsRay(ray, out time);
-            Assert.IsTrue(intersects && time - -81.602495098501151 < PhysicsGlobals.EPSILON);
+            Assert.IsTrue(intersects);
+            Assert.AreEqual(-81.602495098501151, time, PhysicsGlobals.EPSILON);
         }
 
         [TestMethod]
@@ -78,7 +81,7 @@ namespace ACE.Server.Tests.Physics
             var sphere = new Sphere(Vector3.Zero, 5.0f);
 
             // represents the movement path
-            var transition = new Transition();
+            var transition = new Transition(0);
             transition.SpherePath.GlobalCurrCenter.Add(new Sphere(new Vector3(20, 20, 20), 5.0f));    
 
             // the point we are checking against is represented with this sphere...
@@ -114,7 +117,7 @@ namespace ACE.Server.Tests.Physics
             var sphereNonCollide = new Sphere(new Vector3(10, 10, 10), 5.0f);
 
             // represents the movement path
-            var transition = new Transition();
+            var transition = new Transition(0);
             transition.SpherePath.NumSphere = 1;
             transition.SpherePath.InsertType = InsertType.Placement;
             transition.SpherePath.GlobalSphere.Add(sphereNonCollide);
@@ -182,7 +185,7 @@ namespace ACE.Server.Tests.Physics
         public void Sphere_LandOnSphere()
         {
             var sphere = new Sphere(Vector3.Zero, 5.0f);
-            var transition = new Transition();
+            var transition = new Transition(0);
 
             // defines the collision normal
             transition.SpherePath.GlobalCurrCenter.Add(new Sphere(new Vector3(0, 0, -1), 5.0f));
@@ -202,7 +205,7 @@ namespace ACE.Server.Tests.Physics
         public void Sphere_StepSphereUp()
         {
             var sphere = new Sphere(Vector3.Zero, 5.0f);
-            var transition = new Transition();
+            var transition = new Transition(0);
 
             // the location being stepped up to
             var disp = new Vector3(0, 0, 1);
@@ -217,7 +220,7 @@ namespace ACE.Server.Tests.Physics
         {
             var sphere = new Sphere(Vector3.Zero, 5.0f);
 
-            var transition = new Transition();
+            var transition = new Transition(0);
             transition.SpherePath.StepDownAmt = -10.0f;     // the amount being stepped down this frame
             transition.SpherePath.WalkInterp = 10.0f;
 
@@ -235,7 +238,7 @@ namespace ACE.Server.Tests.Physics
             var sphere = new Sphere(Vector3.Zero, 5.0f);
             var collisionNormal = new Vector3(0, 0, -1);
 
-            var transition = new Transition();
+            var transition = new Transition(0);
 
             var transitionState = sphere.SlideSphere(transition, ref collisionNormal, Vector3.Zero);
             Assert.AreEqual(TransitionState.Slid, transitionState);

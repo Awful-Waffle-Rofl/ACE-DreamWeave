@@ -298,7 +298,7 @@ namespace ACE.Server.Managers
         {
             var p = biota.BiotaPropertiesPosition.FirstOrDefault(i => i.PositionType == (ushort)PositionType.Location);
 
-            return GetCoords(new Position(p.ObjCellId, p.OriginX, p.OriginY, p.OriginZ, p.AnglesX, p.AnglesY, p.AnglesZ, p.AnglesW));
+            return GetCoords(new Position(p.ObjCellId, p.OriginX, p.OriginY, p.OriginZ, p.AnglesX, p.AnglesY, p.AnglesZ, p.AnglesW, 0));
         }
 
         /// <summary>
@@ -311,7 +311,7 @@ namespace ACE.Server.Managers
             if (coords == null)
             {
                 // apartment slumlord?
-                if (ApartmentBlocks.TryGetValue(position.Landblock, out var apartmentBlock))
+                if (ApartmentBlocks.TryGetValue(position.LandblockShort, out var apartmentBlock))
                     coords = $"{apartmentBlock} - ";
                 else
                     log.Error($"[HOUSE] HouseManager.GetCoords({position}) - couldn't find apartment block");
@@ -718,7 +718,7 @@ namespace ACE.Server.Managers
             var landblock = (ushort)((houseGuid >> 12) & 0xFFFF);
 
             var landblockId = new LandblockId((uint)(landblock << 16 | 0xFFFF));
-            var isLoaded = LandblockManager.IsLoaded(landblockId);
+            var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
             if (!isLoaded)
             {
@@ -732,7 +732,7 @@ namespace ACE.Server.Managers
             }
 
             // landblock is loaded, return a reference to the current House object
-            var loaded = LandblockManager.GetLandblock(landblockId, false);
+            var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
             var house = loaded.GetObject(new ObjectGuid(houseGuid)) as House;
 
             if (house != null && house.SlumLord != null)

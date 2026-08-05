@@ -182,6 +182,12 @@ namespace ACE.Entity.Enum.Properties
         /// </summary>
         TeleportedCharacter = 27,
 
-        PCAPRecordedLocation = 8040
+        PCAPRecordedLocation = 8040,
+
+        /// <summary>
+        /// ACRealms port (id matches ACRealms): where to return a player when they leave
+        /// (or lose) an ephemeral instance
+        /// </summary>
+        EphemeralRealmExitTo = 42001
     }
 }

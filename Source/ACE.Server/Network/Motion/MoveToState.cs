@@ -35,6 +35,9 @@ namespace ACE.Server.Network.Structure
             RawMotionState = new RawMotionState(this, reader);
             Position = new Position(reader);
 
+            // client positions carry no instance - they are always within the player's current one
+            Position.Instance = wo.Location.Instance;
+
             InstanceSequence = reader.ReadUInt16();
             ServerControlSequence = reader.ReadUInt16();
             TeleportSequence = reader.ReadUInt16();

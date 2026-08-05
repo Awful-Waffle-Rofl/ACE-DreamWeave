@@ -671,10 +671,13 @@ namespace ACE.Server.WorldObjects
             }
 
             // next search all containers for item.. run function again for each container.
+            // Propagate forceSave so an item removed from a nested side-container is persisted too;
+            // otherwise a forceSave caller leaves the sub-item's stale ContainerId in the DB, which
+            // is the classic relog-dupe window.
             var sideContainers = Inventory.Values.Where(i => i.WeenieType == WeenieType.Container).ToList();
             foreach (var container in sideContainers)
             {
-                if (((Container)container).TryRemoveFromInventory(objectGuid, out item))
+                if (((Container)container).TryRemoveFromInventory(objectGuid, out item, forceSave))
                 {
                     EncumbranceVal -= (item.EncumbranceVal ?? 0);
                     Value -= (item.Value ?? 0);

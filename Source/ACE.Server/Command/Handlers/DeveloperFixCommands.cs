@@ -404,6 +404,12 @@ namespace ACE.Server.Command.Handlers
                 if (player.Account == null || player.Account.AccessLevel == (uint)AccessLevel.Admin)
                     continue;
 
+                // skip enlightened characters: enlightenment intentionally untrains all skills and recomputes
+                // the credit total, so the normal level-based credit check would compute a negative target and
+                // 'verify-skill-credits fix' would untrain their skills.
+                if ((player.GetProperty(PropertyInt.Enlightenment) ?? 0) > 0)
+                    continue;
+
                 if (!player.Heritage.HasValue)
                 {
                     Console.WriteLine($"{player.Name} (0x{player.Guid}) does not have a Heritage, skipping!");
@@ -904,10 +910,16 @@ namespace ACE.Server.Command.Handlers
 
             foreach (var player in players)
             {
+                // skip enlightened characters: enlightenment zeroes total and unassigned XP by design, so the
+                // XP-reconciliation math would flag a large "missing" amount that HandleMissingXp would hand
+                // back at the character's next login.
+                if ((player.GetProperty(PropertyInt.Enlightenment) ?? 0) > 0)
+                    continue;
+
                 var totalXP = player.GetProperty(PropertyInt64.TotalExperience) ?? 0;
                 var unassignedXP = player.GetProperty(PropertyInt64.AvailableExperience) ?? 0;
 
-                // loop through all attributes/vitals/skills, add up assigned xp
+                // loop through all attributes/vitals/abilities, add up assigned xp
                 long attributeXP = 0;
                 long vitalXP = 0;
                 long skillXP = 0;
@@ -2080,7 +2092,7 @@ namespace ACE.Server.Command.Handlers
 
                                 if (rare.Value.Location != null)
                                 {
-                                    wo.Location = new ACE.Entity.Position(rare.Value.Location.ObjCellId, rare.Value.Location.OriginX, rare.Value.Location.OriginY, rare.Value.Location.OriginZ, rare.Value.Location.AnglesX, rare.Value.Location.AnglesY, rare.Value.Location.AnglesZ, rare.Value.Location.AnglesW);
+                                    wo.Location = new ACE.Entity.Position(rare.Value.Location.ObjCellId, rare.Value.Location.OriginX, rare.Value.Location.OriginY, rare.Value.Location.OriginZ, rare.Value.Location.AnglesX, rare.Value.Location.AnglesY, rare.Value.Location.AnglesZ, rare.Value.Location.AnglesW, 0);
                                 }
 
                                 if (rare.Value.Shortcut != null)
@@ -2444,7 +2456,7 @@ namespace ACE.Server.Command.Handlers
 
                             if (coin.Value.Location != null)
                             {
-                                wo.Location = new ACE.Entity.Position(coin.Value.Location.ObjCellId, coin.Value.Location.OriginX, coin.Value.Location.OriginY, coin.Value.Location.OriginZ, coin.Value.Location.AnglesX, coin.Value.Location.AnglesY, coin.Value.Location.AnglesZ, coin.Value.Location.AnglesW);
+                                wo.Location = new ACE.Entity.Position(coin.Value.Location.ObjCellId, coin.Value.Location.OriginX, coin.Value.Location.OriginY, coin.Value.Location.OriginZ, coin.Value.Location.AnglesX, coin.Value.Location.AnglesY, coin.Value.Location.AnglesZ, coin.Value.Location.AnglesW, 0);
                             }
 
                             if (coin.Value.Shortcut != null)

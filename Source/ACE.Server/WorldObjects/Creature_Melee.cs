@@ -114,14 +114,18 @@ namespace ACE.Server.WorldObjects
         {
             var player = this as Player;
 
-            if (!weapon.IsCleaving) return null;
+            // class ability: Whirlwind (paid for this swing) cleaves in a full 360° arc for one extra target -
+            // even on a weapon with no innate cleave, in which case Whirlwind is the whole reason we cleave.
+            var whirlwind = player != null && player.WhirlwindSwingActive;
+
+            if (!weapon.IsCleaving && !whirlwind) return null;
 
             // sort visible objects by ascending distance
             var visible = PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
             visible.Sort(DistanceComparator);
 
             var cleaveTargets = new List<Creature>();
-            var totalCleaves = weapon.CleaveTargets;
+            var totalCleaves = weapon.CleaveTargets + (whirlwind ? 1 : 0);
 
             foreach (var obj in visible)
             {
@@ -147,10 +151,13 @@ namespace ACE.Server.WorldObjects
                 if (cylDist > CleaveCylRange)
                     return cleaveTargets;
 
-                // only cleave in front of attacker
-                var angle = GetAngle(creature);
-                if (Math.Abs(angle) > CleaveAngle / 2.0f)
-                    continue;
+                // only cleave in front of attacker (Whirlwind widens this to a full 360° arc)
+                if (!whirlwind)
+                {
+                    var angle = GetAngle(creature);
+                    if (Math.Abs(angle) > CleaveAngle / 2.0f)
+                        continue;
+                }
 
                 // found cleavable object
                 cleaveTargets.Add(creature);

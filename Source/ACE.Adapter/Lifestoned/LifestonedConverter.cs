@@ -80,6 +80,12 @@ namespace ACE.Adapter.Lifestoned
 
                 // WeeniePropertiesAnimPart
 
+                if (input.AnimParts != null)
+                {
+                    foreach (var animPart in input.AnimParts)
+                        result.WeeniePropertiesAnimPart.Add(new WeeniePropertiesAnimPart { Index = animPart.Index, AnimationId = animPart.AnimationId });
+                }
+
                 if (input.Attributes != null)
                 {
                     if (input.Attributes.Strength != null)
@@ -425,6 +431,12 @@ namespace ACE.Adapter.Lifestoned
 
                 // WeeniePropertiesPalette
 
+                if (input.Palettes != null)
+                {
+                    foreach (var palette in input.Palettes)
+                        result.WeeniePropertiesPalette.Add(new WeeniePropertiesPalette { SubPaletteId = palette.SubPaletteId, Offset = palette.Offset, Length = palette.Length });
+                }
+
                 if (input.Positions != null)
                 {
                     foreach (var value in input.Positions)
@@ -474,6 +486,12 @@ namespace ACE.Adapter.Lifestoned
                 }
 
                 // WeeniePropertiesTextureMap
+
+                if (input.TextureMaps != null)
+                {
+                    foreach (var textureMap in input.TextureMaps)
+                        result.WeeniePropertiesTextureMap.Add(new WeeniePropertiesTextureMap { Index = textureMap.PartIndex, OldId = textureMap.OldTexture, NewId = textureMap.NewTexture });
+                }
 
                 return true;
             }
@@ -550,6 +568,13 @@ namespace ACE.Adapter.Lifestoned
                 // PointsOfInterest
 
                 // WeeniePropertiesAnimPart
+
+                if (input.WeeniePropertiesAnimPart != null && input.WeeniePropertiesAnimPart.Count > 0)
+                {
+                    result.AnimParts = input.WeeniePropertiesAnimPart
+                        .Select(a => new AnimPartListing { Index = a.Index, AnimationId = a.AnimationId })
+                        .ToList();
+                }
 
                 if (input.WeeniePropertiesAttribute != null && input.WeeniePropertiesAttribute.Count > 0)
                 {
@@ -989,6 +1014,13 @@ namespace ACE.Adapter.Lifestoned
 
                 // WeeniePropertiesPalette
 
+                if (input.WeeniePropertiesPalette != null && input.WeeniePropertiesPalette.Count > 0)
+                {
+                    result.Palettes = input.WeeniePropertiesPalette
+                        .Select(p => new PaletteListing { SubPaletteId = p.SubPaletteId, Offset = p.Offset, Length = p.Length })
+                        .ToList();
+                }
+
                 if (input.WeeniePropertiesPosition != null && input.WeeniePropertiesPosition.Count > 0)
                 {
                     result.Positions = new List<PositionListing>();
@@ -1076,6 +1108,13 @@ namespace ACE.Adapter.Lifestoned
                 }
 
                 // WeeniePropertiesTextureMap
+
+                if (input.WeeniePropertiesTextureMap != null && input.WeeniePropertiesTextureMap.Count > 0)
+                {
+                    result.TextureMaps = input.WeeniePropertiesTextureMap
+                        .Select(t => new TextureMapListing { PartIndex = t.Index, OldTexture = t.OldId, NewTexture = t.NewId })
+                        .ToList();
+                }
 
                 result.Changelog = new List<ChangelogEntry>();
                 result.Changelog.Add(new ChangelogEntry

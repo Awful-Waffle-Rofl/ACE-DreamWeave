@@ -174,51 +174,84 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // verify player has enough pack slots / burden to receive these pyreals
-            var itemsToReceive = new ItemsToReceive(this);
-
-            itemsToReceive.Add((uint)ACE.Entity.Enum.WeenieClassName.W_COINSTACK_CLASS, payoutCoinAmount);
-
-            if (itemsToReceive.PlayerExceedsLimits)
-            {
-                if (itemsToReceive.PlayerExceedsAvailableBurden)
-                    Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You are too encumbered to sell that!"));
-                else if (itemsToReceive.PlayerOutOfInventorySlots)
-                    Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You do not have enough free pack space to sell that!"));
-
-                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, Guid.Full));
-                SendUseDoneEvent();     // WeenieError.FullInventoryLocation?
-                return;
-            }
-
-            var payoutCoinStacks = CreatePayoutCoinStacks(payoutCoinAmount);
+            // Always-on banking shop hook: proceeds go straight to the bank, so no pack space is needed
+            // to receive coins. Sold items are still removed from the pack below.
 
             vendor.MoneyOutflow += payoutCoinAmount;
 
             // remove sell items from player inventory
+            //
+            // the off-player save each removal needs is collected rather than enqueued per item: a large sale would
+            // otherwise put N un-mergeable entries on the single shard queue, each one head-of-line blocking every
+            // other player's shard work (including logins). One batched save follows the loop instead.
+            var deferredSaves = NewDeferredSaveList();
+
             foreach (var item in sellList.Values)
             {
-                if (TryRemoveFromInventoryWithNetworking(item.Guid, out _, RemoveFromInventoryAction.SellItem) || TryDequipObjectWithNetworking(item.Guid, out _, DequipObjectAction.SellItem))
+                if (TryRemoveFromInventoryWithNetworking(item.Guid, out _, RemoveFromInventoryAction.SellItem, deferredSaves) || TryDequipObjectWithNetworking(item.Guid, out _, DequipObjectAction.SellItem, deferredSaves))
                     Session.Network.EnqueueSend(new GameEventItemServerSaysContainId(Session, item, vendor));
                 else
                     log.WarnFormat("[VENDOR] Item 0x{0:X8}:{1} for player {2} not found in HandleActionSellItem.", item.Guid.Full, item.Name, Name); // This shouldn't happen
             }
 
+            // ORDERING: this must be enqueued BEFORE ProcessItemsForPurchase, which issues the
+            // RemoveBiotaFromDatabase / Destroy for these same ids. The shard queue is strict FIFO, so
+            // save-then-remove leaves the row deleted; the reverse would resurrect a sold item after its delete.
+            // Nothing between the loop above and here mutates or destroys any of these items.
+            FlushDeferredSaves(deferredSaves);
+
             // send the list of items to the vendor
             // for the vendor to determine what to do with each item (resell, destroy)
             vendor.ProcessItemsForPurchase(this, sellList);
 
-            // add coins to player inventory
-            foreach (var item in payoutCoinStacks)
+            // Sale proceeds (vendors always pay out in pyreals). Banking them is the default, since it needs no
+            // pack space, but a player can opt out with /bank autodeposit off and be paid in real coin stacks:
+            // inventory-reading tools poll the pyreal stacks actually in the pack, so for them the coin has to
+            // land there. CalculatePayoutCoinAmount returns an int, so payoutCoinAmount already fits the int
+            // CreatePayoutCoinStacks takes - no narrowing is involved - and it is known non-negative here.
+            if (BankAutoDeposit)
             {
-                if (!TryCreateInInventoryWithNetworking(item))  // this shouldn't happen because of pre-validations in itemsToReceive
-                {
-                    log.WarnFormat("[VENDOR] Payout 0x{0:X8}:{1} for player {2} failed to add to inventory HandleActionSellItem.", item.Guid.Full, item.Name, Name);
-                    item.Destroy();
-                }
+                var bankBalance = ModifyBankBalance(PropertyInt64.BankedPyreals, payoutCoinAmount);
+                UpdateCoinValue();
+                RushNextPlayerSave(5);
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Deposited {payoutCoinAmount:N0} pyreals to your bank. Balance: {bankBalance:N0}", ChatMessageType.Broadcast));
             }
+            else
+            {
+                // Retail payout path. Anything that will not fit (full pack / over burden) is banked instead of
+                // being dropped: no coin may ever be lost, so every stack either reaches the pack or is credited
+                // and destroyed (the same cleanup DepositPyreals does for an un-placeable remainder stack).
+                long paidToPack = 0;
+                long overflowToBank = 0;
 
-            // UpdateCoinValue removed -- already handled in TryCreateInInventoryWithNetworking
+                foreach (var stack in CreatePayoutCoinStacks(payoutCoinAmount))
+                {
+                    var stackValue = stack.StackSize ?? 1;
+
+                    if (TryCreateInInventoryWithNetworking(stack))
+                    {
+                        paidToPack += stackValue;
+                    }
+                    else
+                    {
+                        overflowToBank += stackValue;
+                        stack.Destroy();
+                    }
+                }
+
+                long bankBalance = 0;
+                if (overflowToBank > 0)
+                    bankBalance = ModifyBankBalance(PropertyInt64.BankedPyreals, overflowToBank);
+
+                UpdateCoinValue();
+                RushNextPlayerSave(5);
+
+                if (paidToPack > 0)
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"You receive {paidToPack:N0} pyreals.", ChatMessageType.Broadcast));
+
+                if (overflowToBank > 0)
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Your pack was full, so {overflowToBank:N0} pyreals went to your bank instead. Balance: {bankBalance:N0}", ChatMessageType.Broadcast));
+            }
 
             Session.Network.EnqueueSend(new GameMessageSound(Guid, Sound.PickUpItem));
 
@@ -299,21 +332,96 @@ namespace ACE.Server.WorldObjects
             return verified;
         }
 
+        /// <summary>
+        /// Splits <paramref name="amount"/> into per-stack sizes, none exceeding <paramref name="maxStackSize"/>.
+        /// </summary>
+        public static IReadOnlyList<int> CalcPayoutStackSizes(int amount, int maxStackSize)
+        {
+            if (maxStackSize <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxStackSize), maxStackSize, "max stack size must be greater than zero");
+
+            var sizes = new List<int>();
+
+            if (amount <= 0)
+                return sizes;
+
+            for (var i = 0; i < amount / maxStackSize; i++)
+                sizes.Add(maxStackSize);
+
+            var remainder = amount % maxStackSize;
+            if (remainder > 0)
+                sizes.Add(remainder);
+
+            return sizes;
+        }
+
         private List<WorldObject> CreatePayoutCoinStacks(int amount)
         {
             var coinStacks = new List<WorldObject>();
 
-            while (amount > 0)
+            if (amount <= 0)
+                return coinStacks;
+
+            // The per-stack cap is read off a created coin object rather than hardcoded: MaxStackSize is
+            // world-database data, so a constant here would diverge from the weenie if that value is retuned.
+            // The first object doubles as the probe, so nothing is created that does not end up in the list.
+            var probe = WorldObjectFactory.CreateNewWorldObject("coinstack");
+
+            var sizes = CalcPayoutStackSizes(amount, probe.MaxStackSize.Value);
+
+            for (var i = 0; i < sizes.Count; i++)
             {
-                var currencyStack = WorldObjectFactory.CreateNewWorldObject("coinstack");
+                var currencyStack = i == 0 ? probe : WorldObjectFactory.CreateNewWorldObject("coinstack");
 
-                var currentStackAmount = Math.Min(amount, currencyStack.MaxStackSize.Value);
-
-                currencyStack.SetStackSize(currentStackAmount);
+                currencyStack.SetStackSize(sizes[i]);
                 coinStacks.Add(currencyStack);
-                amount -= currentStackAmount;
             }
+
             return coinStacks;
+        }
+
+        /// <summary>
+        /// The coin total the client is shown. Because the always-on bank shop hook (see SpendCurrency) lets
+        /// banked pyreals back a vendor purchase, what the player can actually spend is inventory coin plus
+        /// banked pyreals. The client both displays this ("you have Np") and refuses to send a purchase it
+        /// believes is unaffordable, so it has to be told the spendable total, not just the carried one.
+        ///
+        /// CoinValue itself deliberately stays inventory-only: GetNumCoinsDropped (half your coin on death)
+        /// and the inventory side of SpendCurrency read it, and neither may ever see banked money.
+        /// </summary>
+        public int GetSpendableCoinValue() => CalcSpendableCoinValue(CoinValue ?? 0, BankedPyreals);
+
+        /// <summary>
+        /// Inventory coin + banked pyreals, as an int the client can hold.
+        /// </summary>
+        public static int CalcSpendableCoinValue(long inventoryCoin, long bankedPyreals)
+        {
+            // Each side is clamped before the add: a bank balance is a long, so summing it with coin first
+            // could overflow into a negative and show a rich player 0p. The cap only limits what the client
+            // is told; the server re-checks the true balance in Vendor.BuyItems_ValidateTransaction.
+            var inv = Math.Clamp(inventoryCoin, 0, int.MaxValue);
+            var banked = Math.Clamp(bankedPyreals, 0, int.MaxValue);
+
+            return (int)Math.Min(inv + banked, int.MaxValue);
+        }
+
+        private int lastSentSpendableCoinValue = -1;
+
+        /// <summary>
+        /// Pushes the spendable coin total to the client, if it changed since the last push. Reads the cached
+        /// CoinValue instead of walking inventory, so it is also safe to call on a player from another
+        /// player's thread - a bank transfer credits its target from the sender's thread.
+        /// </summary>
+        public void SendSpendableCoinValue()
+        {
+            var spendable = GetSpendableCoinValue();
+
+            if (spendable == lastSentSpendableCoinValue)
+                return;
+
+            lastSentSpendableCoinValue = spendable;
+
+            Session?.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.CoinValue, spendable));
         }
 
         private void UpdateCoinValue(bool sendUpdateMessageIfChanged = true)
@@ -323,13 +431,10 @@ namespace ACE.Server.WorldObjects
             foreach (var coinStack in GetInventoryItemsOfTypeWeenieType(WeenieType.Coin))
                 coins += coinStack.Value ?? 0;
 
-            if (sendUpdateMessageIfChanged && CoinValue == coins)
-                sendUpdateMessageIfChanged = false;
-
             CoinValue = coins;
 
             if (sendUpdateMessageIfChanged)
-                Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.CoinValue, CoinValue ?? 0));
+                SendSpendableCoinValue();
         }
 
         private List<WorldObject> SpendCurrency(uint currentWcid, uint amount, bool destroy = false)
@@ -338,6 +443,48 @@ namespace ACE.Server.WorldObjects
                 return null;
 
             var cost = new List<WorldObject>();
+
+            // Always-on banking shop hook: for currencies the bank holds (pyreals + promissory notes),
+            // spend from inventory first, then draw the remainder from the bank. Non-bankable alternate
+            // currencies fall through to the original inventory-only path below.
+            var altName = GetAlternateCurrencyName(currentWcid); // non-null only for promissory notes
+            var bankable = currentWcid == coinStackWcid || altName != null;
+
+            if (destroy && bankable)
+            {
+                long invAmount = currentWcid == coinStackWcid ? (CoinValue ?? 0) : GetNumInventoryItemsOfWCID(currentWcid);
+                long fromInv = Math.Min(invAmount, amount);
+                long fromBank = amount - fromInv;
+
+                long bankAvail = currentWcid == coinStackWcid ? BankedPyreals : GetBankedAlternateCurrency(currentWcid);
+                if (fromBank > bankAvail)
+                {
+                    // Upstream validation should make this impossible; refuse rather than hand over goods for free.
+                    log.Error($"[BANK] {Name} SpendCurrency shortfall on wcid {currentWcid}: need {fromBank} from bank, have {bankAvail}");
+                    return null;
+                }
+
+                if (fromInv > 0)
+                    TryConsumeFromInventoryWithNetworking(currentWcid, (int)fromInv);
+
+                if (fromBank > 0)
+                {
+                    if (currentWcid == coinStackWcid)
+                    {
+                        ModifyBankBalance(PropertyInt64.BankedPyreals, -fromBank);
+                        UpdateCoinValue();
+                        Session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Debited {fromBank:N0} pyreals from your bank.", ChatMessageType.Broadcast));
+                    }
+                    else
+                    {
+                        DebitBankedAlternateCurrency(currentWcid, fromBank);
+                        Session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Debited {fromBank:N0} {altName} from your bank.", ChatMessageType.Broadcast));
+                    }
+                    RushNextPlayerSave(5);
+                }
+
+                return cost;
+            }
 
             if (currentWcid == coinStackWcid)
             {

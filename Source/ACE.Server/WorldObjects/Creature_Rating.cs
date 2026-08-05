@@ -3,6 +3,7 @@ using System.Linq;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Managers;
 
 namespace ACE.Server.WorldObjects
@@ -223,8 +224,11 @@ namespace ACE.Server.WorldObjects
                 lumAugBonus = player.LumAugDamageRating;
             }
 
+            // Damage Rating class ability (Berserker T3): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player drPlayer ? drPlayer.GetClassAbilityRating(ClassAbilityId.DamageRating) : 0;
+
             // heritage / weapon type bonus factored in elsewhere?
-            return damageRating + equipment + enchantments - weaknessRating + augBonus + lumAugBonus;
+            return damageRating + equipment + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus;
         }
 
         public int GetDamageResistRating(CombatType? combatType = null, bool directDamage = true)
@@ -253,16 +257,29 @@ namespace ACE.Server.WorldObjects
                 specBonus = GetSpecDefenseBonus(combatType);
             }
 
-            return damageResistRating + equipment + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus;
+            // Damage Resist Rating class ability (Vanguard T2): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player drrPlayer ? drrPlayer.GetClassAbilityRating(ClassAbilityId.DamageResistRating) : 0;
+
+            return damageResistRating + equipment + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus;
         }
 
-        public float GetDamageResistRatingMod(CombatType? combatType = null, bool directDamage = true)
+        public float GetDamageResistRatingMod(CombatType? combatType = null, bool directDamage = true, WorldObject attacker = null)
         {
             var damageResistRating = GetDamageResistRating(combatType, directDamage);
 
             var allowBug = PropertyManager.GetBool("allow_negative_rating_curve").Item;
 
-            return GetNegativeRatingMod(damageResistRating, allowBug);
+            var mod = GetNegativeRatingMod(damageResistRating, allowBug);
+
+            // Battle Hardened class ability: a silent, Strength-scaled reduction to all incoming damage,
+            // applied on top of the normal damage-resist rating. Only players can learn it, and it is
+            // PvE-only - a player attacker (PvP) is excluded, consistent with the other class abilities.
+            // This is the single choke point every incoming-damage path (physical, magic, DoT) passes
+            // through; each caller supplies the attacker so PvP can be distinguished here.
+            if (this is Player battleHardenedPlayer && attacker is not Player)
+                mod *= battleHardenedPlayer.GetBattleHardenedDamageResistMod();
+
+            return mod;
         }
 
         public int GetSpecDefenseBonus(CombatType? combatType)
@@ -311,7 +328,10 @@ namespace ACE.Server.WorldObjects
             if (this is Player player)
                 augBonus = player.AugmentationCriticalExpertise;
 
-            return critChanceRating + enchantments + equipment + augBonus;
+            // Crit Rating class ability (Archer T3): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player crPlayer ? crPlayer.GetClassAbilityRating(ClassAbilityId.CritRating) : 0;
+
+            return critChanceRating + enchantments + equipment + augBonus + classAbilityBonus;
         }
 
         public int GetCritDamageRating()
@@ -335,7 +355,10 @@ namespace ACE.Server.WorldObjects
                 lumAugBonus = player.LumAugCritDamageRating;
             }
 
-            return critDamageRating + equipment + enchantments + augBonus + lumAugBonus;
+            // Crit Damage Rating class ability (Rogue T3): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player cdrPlayer ? cdrPlayer.GetClassAbilityRating(ClassAbilityId.CritDamageRating) : 0;
+
+            return critDamageRating + equipment + enchantments + augBonus + lumAugBonus + classAbilityBonus;
         }
 
         public int GetCritResistRating()
@@ -351,8 +374,11 @@ namespace ACE.Server.WorldObjects
             // equipment ratings
             var equipment = GetEquippedItemsRatingSum(PropertyInt.GearCritResist);
 
+            // Crit Resist Rating class ability (Vanguard T3): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player crrPlayer ? crrPlayer.GetClassAbilityRating(ClassAbilityId.CritResistRating) : 0;
+
             // no augs / lum augs?
-            return critResistRating + enchantments + equipment;
+            return critResistRating + enchantments + equipment + classAbilityBonus;
         }
 
         public int GetCritDamageResistRating()
@@ -388,7 +414,10 @@ namespace ACE.Server.WorldObjects
             if (this is Player player)
                 lumAugBonus = player.LumAugHealingRating;
 
-            return healBoostRating + equipment + enchantments + lumAugBonus;
+            // Heal Boost Rating class ability (Blood Mage T2): +3/6/10 into the same additive pool
+            var classAbilityBonus = this is Player hbrPlayer ? hbrPlayer.GetClassAbilityRating(ClassAbilityId.HealBoostRating) : 0;
+
+            return healBoostRating + equipment + enchantments + lumAugBonus + classAbilityBonus;
         }
 
         public int GetHealingResistRating()

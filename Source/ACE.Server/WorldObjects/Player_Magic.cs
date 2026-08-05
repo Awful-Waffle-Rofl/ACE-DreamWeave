@@ -81,6 +81,14 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.HandleActionCastTargetedSpell({targetGuid:X8}, {spellId}, {builtInSpell})");
 
+            // Mule (WaffleACE): a mule never casts. SendUseDoneEvent releases the client's cast sequence,
+            // matching the other refusal branches below.
+            if (MuleBlocked(MuleAction.CastSpell))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
             if (CombatMode != CombatMode.Magic)
             {
                 log.Warn($"{Name}.HandleActionCastTargetedSpell({targetGuid:X8}, {spellId}, {casterItem?.Name}) - CombatMode mismatch {CombatMode}, LastCombatMode: {LastCombatMode}");
@@ -271,6 +279,13 @@ namespace ACE.Server.WorldObjects
         public void HandleActionMagicCastUnTargetedSpell(uint spellId)
         {
             //Console.WriteLine($"{Name}.HandleActionCastUnTargetedSpell({spellId})");
+
+            // Mule (WaffleACE): a mule never casts, targeted or untargeted.
+            if (MuleBlocked(MuleAction.CastSpell))
+            {
+                SendUseDoneEvent();
+                return;
+            }
 
             if (CombatMode != CombatMode.Magic)
             {
@@ -567,7 +582,24 @@ namespace ACE.Server.WorldObjects
         {
             manaUsed = 0;
             if (castingPreCheckStatus == CastingPreCheckStatus.Success)
+            {
                 manaUsed = CalculateManaUsage(this, spell, target);
+
+                // class abilities: Overchannel / Spell AOE mana surcharge on the player's own war casts
+                // (never weapon-spell procs, which draw from item mana). Surcharging here means an
+                // unaffordable surcharge fails the affordability check below - the intended mana brake.
+                if (casterItem == null)
+                {
+                    manaUsed = (uint)Math.Round(manaUsed * GetClassAbilityManaSurcharge(spell));
+
+                    // Tier B weapon mod: Overload, a flat chance the cast costs nothing at all, read off the
+                    // equipped WAND. Rolled AFTER the surcharge so a free cast is free of the surcharge too,
+                    // and inside the same casterItem == null branch, because a weapon-spell proc draws from
+                    // item mana rather than the player's pool and has no caster in hand to carry the mod.
+                    if (RollWeaponModOverload())
+                        manaUsed = 0;
+                }
+            }
             else if (castingPreCheckStatus == CastingPreCheckStatus.CastFailed)
                 manaUsed = 5;   // todo: verify with retail
 
@@ -602,6 +634,14 @@ namespace ACE.Server.WorldObjects
 
         public static float CastSpeed = 2.0f;       // from retail pcaps, player animation speed for windup / first half of cast gesture
 
+        // Per-cast multiplier on CastSpeed for the cast currently being enqueued. 1.0 normally; the
+        // Nether Rush class ability sets it &gt; 1.0 for void spells at the two cast entry points, just
+        // before DoWindupGestures/DoCastGesture. Reset each cast (ApplyNetherRushCastSpeed returns
+        // 1.0 for non-void / unlearned), so it never leaks into a later cast.
+        private float castSpeedMultiplier = 1.0f;
+
+        private float EffectiveCastSpeed => CastSpeed * castSpeedMultiplier;
+
         public void DoWindupGestures(Spell spell, bool isWeaponSpell, ActionChain castChain)
         {
             if (spell.Flags.HasFlag(SpellFlags.FastCast) || isWeaponSpell)
@@ -626,14 +666,14 @@ namespace ACE.Server.WorldObjects
                 {
                     castChain.AddAction(this, () =>
                     {
-                        var animLength = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, windupGesture, CastSpeed);
+                        var animLength = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, windupGesture, EffectiveCastSpeed);
                         RecordCast.Log($"Windup Gesture: {windupGesture}, Windup Time: {animLength}");
                     });
                 }
 
                 // don't mess with CurrentMotionState here?
                 if (!FastTick)
-                    windupTime = EnqueueMotionMagic(castChain, windupGesture, CastSpeed);
+                    windupTime = EnqueueMotionMagic(castChain, windupGesture, EffectiveCastSpeed);
 
                 /*Console.WriteLine($"{spell.Name}");
                 Console.WriteLine($"Windup Gesture: " + windupGesture);
@@ -642,7 +682,7 @@ namespace ACE.Server.WorldObjects
             }
 
             if (FastTick)
-                windupTime = EnqueueMotionAction(castChain, spell.Formula.WindupGestures, CastSpeed, MotionStance.Magic, checkCasting: true);
+                windupTime = EnqueueMotionAction(castChain, spell.Formula.WindupGestures, EffectiveCastSpeed, MotionStance.Magic, checkCasting: true);
         }
 
         public void DoCastGesture(Spell spell, WorldObject casterItem, ActionChain castChain)
@@ -660,7 +700,7 @@ namespace ACE.Server.WorldObjects
             {
                 castChain.AddAction(this, () =>
                 {
-                    var animLength = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MagicState.CastGesture, CastSpeed);
+                    var animLength = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MagicState.CastGesture, EffectiveCastSpeed);
                     RecordCast.Log($"Cast Gesture: {MagicState.CastGesture}, Cast Time: {animLength}");
                 });
             }
@@ -680,9 +720,9 @@ namespace ACE.Server.WorldObjects
 
             var castTime = 0.0f;
             if (FastTick)
-                castTime = EnqueueMotion(castChain, MagicState.CastGesture, CastSpeed, true, null, true);
+                castTime = EnqueueMotion(castChain, MagicState.CastGesture, EffectiveCastSpeed, true, null, true);
             else
-                castTime = EnqueueMotionMagic(castChain, MagicState.CastGesture, CastSpeed);
+                castTime = EnqueueMotionMagic(castChain, MagicState.CastGesture, EffectiveCastSpeed);
 
             //Console.WriteLine($"Cast Gesture: " + MagicState.CastGesture);
             //Console.WriteLine($"Cast time: " + castTime);
@@ -839,7 +879,7 @@ namespace ACE.Server.WorldObjects
 
             if (MagicState.CastMeter)
             {
-                var gestureTime = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MagicState.CastGesture, CastSpeed);
+                var gestureTime = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MagicState.CastGesture, EffectiveCastSpeed);
                 var castTime = DateTime.UtcNow - MagicState.CastGestureStartTime;
                 var efficiency = 1.0f - (float)castTime.TotalSeconds / gestureTime;
                 var msg = $"Cast efficiency: {efficiency * 100}%";
@@ -891,6 +931,12 @@ namespace ACE.Server.WorldObjects
             switch (castingPreCheckStatus)
             {
                 case CastingPreCheckStatus.Success:
+
+                    // FORK: Blood Price (Blood Mage T3) - a damaging spell of any school also costs health.
+                    // Charged HERE and only here: on a committed, successful cast, after mana, and once per
+                    // cast rather than once per projectile or per target. A fizzle takes the default branch
+                    // below and never reaches this, so it is billed no health.
+                    ApplyBloodPriceCost(spell, target);
 
                     if (!spell.IsFellowshipSpell)
                         CreatePlayerSpell(target, spell, isWeaponSpell);
@@ -1035,6 +1081,9 @@ namespace ACE.Server.WorldObjects
             var spellChain = new ActionChain();
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
 
+            // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell);
+
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, isWeaponSpell, spellChain);
 
@@ -1160,6 +1209,9 @@ namespace ACE.Server.WorldObjects
             var spellChain = new ActionChain();
 
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
+
+            // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell);
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, false, spellChain);

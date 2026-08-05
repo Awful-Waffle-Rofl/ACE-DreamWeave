@@ -15,6 +15,7 @@ using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
+using ACE.Server.Managers.Analytics;
 using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -25,26 +26,93 @@ namespace ACE.Server.WorldObjects
     {
         /// <summary>
         /// Returns all inventory, side slot items, items in side containers, and all wielded items.
+        /// <para />
+        /// Deduped by guid: an object is returned at most once even if corrupt shard data puts it in more
+        /// than one source collection at the same time (a biota carrying both a Container and a Wielder
+        /// instance-id lands in Inventory and EquippedObjects both). Callers rely on that guarantee - both
+        /// <see cref="AuditItemSpells"/> and Player_Commerce.VerifySellItems build a guid-keyed
+        /// <c>ToDictionary</c> straight off this list, which throws on a duplicate key. AuditItemSpells runs
+        /// during login on the world thread, where that throw killed the whole server process.
         /// </summary>
         public List<WorldObject> GetAllPossessions()
         {
-            var results = new List<WorldObject>();
+            return GetAllPossessions(Inventory.Values, EquippedObjects.Values, LogDuplicatePossession);
+        }
 
-            results.AddRange(Inventory.Values);
+        /// <summary>
+        /// Flattening + guid dedup half of <see cref="GetAllPossessions()"/>, split out from the player's
+        /// live collections so it is testable without a Player. <paramref name="onDuplicate"/> is invoked
+        /// once per dropped duplicate occurrence.
+        /// </summary>
+        internal static List<WorldObject> GetAllPossessions(ICollection<WorldObject> inventory, ICollection<WorldObject> equippedObjects, Action<WorldObject> onDuplicate = null)
+        {
+            var results = new List<WorldObject>(inventory.Count + equippedObjects.Count);
+            var seen = new HashSet<ObjectGuid>();
 
-            foreach (var item in Inventory.Values)
+            void tryAdd(WorldObject item)
             {
-                if (item is Container container)
-                    results.AddRange(container.Inventory.Values);
+                if (seen.Add(item.Guid))
+                    results.Add(item);
+                else
+                    onDuplicate?.Invoke(item);
             }
 
-            results.AddRange(EquippedObjects.Values);
+            foreach (var item in inventory)
+                tryAdd(item);
+
+            foreach (var item in inventory)
+            {
+                if (item is Container container)
+                {
+                    foreach (var subItem in container.Inventory.Values)
+                        tryAdd(subItem);
+                }
+            }
+
+            foreach (var item in equippedObjects)
+                tryAdd(item);
 
             return results;
         }
 
+        /// <summary>
+        /// A duplicate here is always corrupt persisted state, never a legitimate runtime condition, so it
+        /// is surfaced with everything an operator needs to locate and repair the row.
+        /// </summary>
+        private void LogDuplicatePossession(WorldObject item)
+        {
+            log.Warn($"{Name} (0x{Guid.Full:X8}).GetAllPossessions(): possession 0x{item.Guid.Full:X8} ({item.Name}, wcid {item.WeenieClassId}) appears in more than one of Inventory / side container / EquippedObjects; dropping the duplicate. This is corrupt shard data: inspect ace_shard.biota_properties_i_i_d for object_Id {item.Guid.Full}, where type 2 (Container) and type 3 (Wielder) must not both be set.");
+        }
+
+        /// <summary>
+        /// The SINGLE authority for a Player's carrying capacity. Every player-facing capacity site routes
+        /// through here - the three pickup-gate overloads and GetAvailableBurden below, AugmentationDevice's
+        /// BurdenLimit message, Player.HandleActionJump's stamina cost, Player.GetBurdenMod (which drives the
+        /// run / jump / defense degradation via Creature_Combat.GetBurdenMod), Creature.GetRunRate's player
+        /// branch, and the physics layer's WeenieObject.InqBurden.
+        ///
+        /// Routing them all here is load-bearing for the mule override below: if only the pickup gate knew
+        /// about it, a loaded mule would be waved through the gate and then crushed by the burden movement
+        /// penalty, which reads a capacity the gate never used.
+        ///
+        /// EncumbranceSystem.EncumbranceCapacity is left in place but now has NO callers - every one of its
+        /// former call sites was a player path and all of them moved here. It clamps the augmentation bonus at
+        /// 150 where this does not, but AugmentationType.BurdenLimit maxes at rank 5 (AugmentationDevice.cs
+        /// AugmentationMaxRank) and 30 * 5 == 150 is not greater than 150, so the two agreed for every rank a
+        /// player can legitimately hold; they diverged only above rank 5, which takes a direct property write.
+        /// Collapsing onto this implementation therefore changes nothing for any legitimately augmented player.
+        /// </summary>
         public int GetEncumbranceCapacity()
         {
+            // This is the single authority for a Player's capacity; every player-facing site routes through
+            // it, so the pickup gate and the burden movement penalty cannot disagree.
+            //
+            // A MULE HAS NO OVERRIDE HERE, deliberately, and one was tried and removed. Overriding this
+            // number is invisible to the client: verified in game 2026-08-02, the client derives the burden
+            // bar from Strength itself and ignores a server-sent PropertyInt.EncumbranceCapacity, so a mule
+            // carrying almost nothing still displayed a heavily loaded bar while the server correctly allowed
+            // the load. Capacity must therefore be bought with the Strength attribute (Player_Mule sets it
+            // from 'mule_strength') so client and server derive the same number from the same input.
             var strength = Attributes[PropertyAttribute.Strength].Current;
 
             return (int)((150 * strength) + (AugmentationIncreasedCarryingCapacity * 30 * strength));
@@ -165,10 +233,44 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
-        private void DeepSave(WorldObject item)
+        /// <summary>
+        /// Creates the collection a bulk caller hands to the deferred-save overloads of
+        /// TryRemoveFromInventoryWithNetworking / TryDequipObjectWithNetworking, so it can issue exactly one
+        /// SaveBiotasInParallel for the whole batch instead of one per item. Exposed as a factory so call sites
+        /// do not have to name the tuple type (and pull in the usings it needs) just to declare a local.
+        /// </summary>
+        public static Collection<(Biota biota, ReaderWriterLockSlim rwLock)> NewDeferredSaveList()
         {
-            var biotas = new Collection<(Biota biota, ReaderWriterLockSlim rwLock)>();
+            return new Collection<(Biota biota, ReaderWriterLockSlim rwLock)>();
+        }
 
+        /// <summary>
+        /// Enqueues one shard save for everything a bulk caller collected.
+        /// <para />
+        /// MUST be called from inside the same synchronous handler invocation that did the removals - batching
+        /// within one handler is the point, deferring across ticks or behind a timer is not: a crash between the
+        /// removal and the save would leave a sold/dropped item's row still pointing at the previous owner.
+        /// <para />
+        /// It also MUST be called before any code that deletes those same biotas (a vendor sale's
+        /// RemoveBiotaFromDatabase / Destroy). SerializedShardDatabase is one FIFO queue drained by one thread,
+        /// so enqueue order is execution order: save-then-remove deletes the row, remove-then-save resurrects it.
+        /// <para />
+        /// An empty collection is a no-op, so an unchanged item never burns a queue slot.
+        /// </summary>
+        public static void FlushDeferredSaves(ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> biotas)
+        {
+            if (biotas == null || biotas.Count == 0)
+                return;
+
+            DatabaseManager.Shard.SaveBiotasInParallel(biotas, null);
+        }
+
+        /// <summary>
+        /// Collects, without enqueueing, exactly the biotas DeepSave would have saved: the item itself if it has
+        /// pending changes, plus - for a container - every sub-item with pending changes.
+        /// </summary>
+        private void CollectDeepSave(WorldObject item, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> biotas)
+        {
             if (item.ChangesDetected)
             {
                 item.SaveBiotaToDatabase(false);
@@ -188,8 +290,29 @@ namespace ACE.Server.WorldObjects
                     }
                 }
             }
+        }
 
-            DatabaseManager.Shard.SaveBiotasInParallel(biotas, null);
+        /// <summary>
+        /// Persists an item that has just gone off-player.
+        /// <para />
+        /// When deferredSaves is non-null the biotas are only collected into it, and the caller is responsible for
+        /// calling FlushDeferredSaves once after its loop. That turns a bulk action over N items from N
+        /// un-mergeable queue entries (each its own context and transaction, each head-of-line blocking every
+        /// other player's shard work) into one.
+        /// </summary>
+        private void DeepSave(WorldObject item, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> deferredSaves = null)
+        {
+            if (deferredSaves != null)
+            {
+                CollectDeepSave(item, deferredSaves);
+                return;
+            }
+
+            var biotas = NewDeferredSaveList();
+
+            CollectDeepSave(item, biotas);
+
+            FlushDeferredSaves(biotas);
         }
 
         public enum RemoveFromInventoryAction
@@ -209,12 +332,17 @@ namespace ACE.Server.WorldObjects
             SpendItem
         }
 
-        public bool TryRemoveFromInventoryWithNetworking(uint objectGuid, out WorldObject item, RemoveFromInventoryAction removeFromInventoryAction)
+        public bool TryRemoveFromInventoryWithNetworking(uint objectGuid, out WorldObject item, RemoveFromInventoryAction removeFromInventoryAction, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> deferredSaves = null)
         {
-            return TryRemoveFromInventoryWithNetworking(new ObjectGuid(objectGuid), out item, removeFromInventoryAction); // todo fix
+            return TryRemoveFromInventoryWithNetworking(new ObjectGuid(objectGuid), out item, removeFromInventoryAction, deferredSaves); // todo fix
         }
 
-        public bool TryRemoveFromInventoryWithNetworking(ObjectGuid objectGuid, out WorldObject item, RemoveFromInventoryAction removeFromInventoryAction)
+        /// <summary>
+        /// When deferredSaves is non-null, the off-player save for this item is collected into it instead of being
+        /// enqueued immediately; the caller must call Player.FlushDeferredSaves once, in the same handler, before
+        /// anything deletes these biotas. See DeepSave.
+        /// </summary>
+        public bool TryRemoveFromInventoryWithNetworking(ObjectGuid objectGuid, out WorldObject item, RemoveFromInventoryAction removeFromInventoryAction, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> deferredSaves = null)
         {
             if (!TryRemoveFromInventory(objectGuid, out item))
                 return false;
@@ -238,7 +366,7 @@ namespace ACE.Server.WorldObjects
                 // If we don't, the player can drop the item, log out, and log back in. If the landblock hasn't queued a database save in that time,
                 // the player will end up loading with this object in their inventory even though the landblock is the true owner. This is because
                 // when we load player inventory, the database still has the record that shows this player as the ContainerId for the item.
-                DeepSave(item);
+                DeepSave(item, deferredSaves);
             }
 
             if (removeFromInventoryAction == RemoveFromInventoryAction.ConsumeItem || removeFromInventoryAction == RemoveFromInventoryAction.TradeItem)
@@ -383,17 +511,20 @@ namespace ACE.Server.WorldObjects
             ConsumeItem
         }
 
-        public bool TryDequipObjectWithNetworking(uint objectGuid, out WorldObject item, DequipObjectAction dequipObjectAction)
+        public bool TryDequipObjectWithNetworking(uint objectGuid, out WorldObject item, DequipObjectAction dequipObjectAction, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> deferredSaves = null)
         {
-            return TryDequipObjectWithNetworking(new ObjectGuid(objectGuid), out item, dequipObjectAction); // todo fix this
+            return TryDequipObjectWithNetworking(new ObjectGuid(objectGuid), out item, dequipObjectAction, deferredSaves); // todo fix this
         }
 
         /// <summary>
         /// This will remove the Wielder and CurrentWieldedLocation properties on the item and will remove it from the EquippedObjects dictionary.<para />
         /// It does not add it to inventory as you could be unwielding to the ground or a chest.<para />
-        /// It will also decrease the EncumbranceVal and Value.
+        /// It will also decrease the EncumbranceVal and Value.<para />
+        /// When deferredSaves is non-null, the off-player save for this item is collected into it instead of being
+        /// enqueued immediately; the caller must call Player.FlushDeferredSaves once, in the same handler, before
+        /// anything deletes these biotas. See DeepSave.
         /// </summary>
-        public bool TryDequipObjectWithNetworking(ObjectGuid objectGuid, out WorldObject item, DequipObjectAction dequipObjectAction)
+        public bool TryDequipObjectWithNetworking(ObjectGuid objectGuid, out WorldObject item, DequipObjectAction dequipObjectAction, ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> deferredSaves = null)
         {
             if (!TryDequipObjectWithBroadcasting(objectGuid, out item, out var wieldedLocation, (dequipObjectAction == DequipObjectAction.DropItem)))
                 return false;
@@ -430,7 +561,7 @@ namespace ACE.Server.WorldObjects
                 // If we don't, the player can drop the item, log out, and log back in. If the landblock hasn't queued a database save in that time,
                 // the player will end up loading with this object in their inventory even though the landblock is the true owner. This is because
                 // when we load player inventory, the database still has the record that shows this player as the ContainerId for the item.
-                DeepSave(item);
+                DeepSave(item, deferredSaves);
             }
 
             if (dequipObjectAction != DequipObjectAction.ToCorpseOnDeath)
@@ -2244,6 +2375,13 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.HandleActionStackableSplitToContainer({stackId:X8}, {containerId:X8}, {placementPosition}, {amount})");
 
+            if (IsBusy || Teleporting || suicideInProgress)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YoureTooBusy));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
+                return;
+            }
+
             if (amount <= 0)
             {
                 log.WarnFormat("Player 0x{0:X8}:{1} tried to split item with invalid amount ({3}) 0x{2:X8}.", Guid.Full, Name, stackId, amount);
@@ -2441,9 +2579,26 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.DoHandleActionStackableSplitToContainer({stack?.Name}, {stackFoundInContainer?.Name}, {stackRootOwner?.Name}, {container?.Name}, {containerRootOwner?.Name}, {newStack?.Name}, {placementPosition}, {amount})");
 
-            // Before we modify the original stack, we make sure we can add the new stack
+            // Decrement the source stack BEFORE creating/placing the new split stack. If we added the
+            // new stack first and the source decrement then failed, the player would be left holding
+            // both the full source stack and the new stack (item dupe). Order matches the 3D-split path.
+            if (!AdjustStack(stack, -amount, stackFoundInContainer, stackRootOwner))
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stack.Guid.Full));
+                return false;
+            }
+
+            // Now try to place the new stack. If that fails, roll the source stack back to its
+            // original size so no units are lost.
             if (!container.TryAddToInventory(newStack, placementPosition, true))
             {
+                AdjustStack(stack, amount, stackFoundInContainer, stackRootOwner);
+
+                if (stackRootOwner == null)
+                    EnqueueBroadcast(new GameMessageSetStackSize(stack));
+                else
+                    Session.Network.EnqueueSend(new GameMessageSetStackSize(stack));
+
                 Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "TryAddToInventory failed!")); // Custom error message
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stack.Guid.Full));
                 return false;
@@ -2457,9 +2612,6 @@ namespace ACE.Server.WorldObjects
 
             Session.Network.EnqueueSend(new GameMessageCreateObject(newStack));
             Session.Network.EnqueueSend(new GameEventItemServerSaysContainId(Session, newStack, container));
-
-            if (!AdjustStack(stack, -amount, stackFoundInContainer, stackRootOwner))
-                return false;
 
             if (stackRootOwner == null)
                 EnqueueBroadcast(new GameMessageSetStackSize(stack));
@@ -2476,6 +2628,13 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void HandleActionStackableSplitTo3D(uint stackId, int amount)
         {
+            if (IsBusy || Teleporting || suicideInProgress)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YoureTooBusy));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
+                return;
+            }
+
             if (amount <= 0)
             {
                 log.WarnFormat("Player 0x{0:X8}:{1} tried to split item with invalid amount ({3}) 0x{2:X8}.", Guid.Full, Name, stackId, amount);
@@ -2849,6 +3008,13 @@ namespace ACE.Server.WorldObjects
         public void HandleActionStackableMerge(uint mergeFromGuid, uint mergeToGuid, int amount)
         {
             //Console.WriteLine($"HandleActionStackableMerge({mergeFromGuid:X8}, {mergeToGuid:X8}, {amount})");
+
+            if (IsBusy || Teleporting || suicideInProgress)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YoureTooBusy));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, mergeFromGuid));
+                return;
+            }
 
             if (amount <= 0)
             {
@@ -3354,6 +3520,9 @@ namespace ACE.Server.WorldObjects
 
                     return;
                 }
+
+                // Analytics (Tier-2): player-to-player give succeeded; record the item flow.
+                AnalyticsManager.RecordGive(this, target, itemToGive);
 
                 if (item == itemToGive)
                     Session.Network.EnqueueSend(new GameEventItemServerSaysContainId(Session, item, target));

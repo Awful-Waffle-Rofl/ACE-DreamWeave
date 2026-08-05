@@ -1378,5 +1378,15 @@ namespace ACE.Server.WorldObjects
             get => GetProperty(PropertyInt.ImbueSuccesses) ?? 0;
             set { if (value == 0) RemoveProperty(PropertyInt.ImbueSuccesses); else SetProperty(PropertyInt.ImbueSuccesses, value); }
         }
+
+        /// <summary>
+        /// ACRealms port: the realm this character calls home (0 = base world).
+        /// Portals and recalls resolve their destination instance from this.
+        /// </summary>
+        public ushort HomeRealm
+        {
+            get => (ushort)(GetProperty(PropertyInt.HomeRealm) ?? 0);
+            set { if (value == 0) RemoveProperty(PropertyInt.HomeRealm); else SetProperty(PropertyInt.HomeRealm, value); }
+        }
     }
 }

@@ -51,6 +51,36 @@ namespace ACE.Server.Entity
         public LandblockId Id { get; }
 
         /// <summary>
+        /// The instance this landblock copy belongs to, laid out as
+        /// [1 bit ephemeral][15 bits realmId][16 bits shortInstanceId].
+        /// Always 0 in Phase 1 of the instancing port (base world only).
+        /// </summary>
+        public uint Instance { get; }
+
+        /// <summary>
+        /// The 64-bit (instance, landblock) key identifying this specific landblock copy
+        /// </summary>
+        public ulong LongId => (ulong)Instance << 32 | Id.Raw;
+
+        /// <summary>
+        /// Set exactly when this landblock is a live ephemeral instance
+        /// (a temporary on-demand copy); null for permanent landblocks.
+        /// </summary>
+        internal Realms.EphemeralRealm InnerRealmInfo { get; set; }
+
+        /// <summary>
+        /// True if this landblock copy is an ephemeral (temporary, unpersisted) instance
+        /// </summary>
+        public bool IsEphemeral
+        {
+            get
+            {
+                ACE.Entity.Position.ParseInstanceID(Instance, out var isEphemeralRealm, out _, out _);
+                return isEphemeralRealm;
+            }
+        }
+
+        /// <summary>
         /// Flag indicates if this landblock is permanently loaded (for example, towns on high-traffic servers)
         /// </summary>
         public bool Permaload = false;
@@ -165,11 +195,12 @@ namespace ACE.Server.Entity
         }
 
 
-        public Landblock(LandblockId id)
+        public Landblock(LandblockId id, uint instance)
         {
             //log.DebugFormat("Landblock({0:X8})", (id.Raw | 0xFFFF));
 
             Id = id;
+            Instance = instance;
 
             CellLandblock = DatManager.CellDat.ReadFromDat<CellLandblock>(Id.Raw | 0xFFFF);
             LandblockInfo = DatManager.CellDat.ReadFromDat<LandblockInfo>((uint)Id.Landblock << 16 | 0xFFFE);
@@ -177,7 +208,7 @@ namespace ACE.Server.Entity
             lastActiveTime = DateTime.UtcNow;
 
             var cellLandblock = DBObj.GetCellLandblock(Id.Raw | 0xFFFF);
-            PhysicsLandblock = new Physics.Common.Landblock(cellLandblock);
+            PhysicsLandblock = new Physics.Common.Landblock(cellLandblock, instance);
         }
 
         public void Init(bool reload = false)
@@ -203,9 +234,16 @@ namespace ACE.Server.Entity
         /// </summary>
         private void CreateWorldObjects()
         {
-            var objects = DatabaseManager.World.GetCachedInstancesByLandblock(Id.Landblock);
+            // Realms Phase 3: a realm's override rows replace base content for its instances
+            ACE.Entity.Position.ParseInstanceID(Instance, out _, out var realmId, out _);
+            var objects = DatabaseManager.World.GetCachedInstancesByLandblock(Id.Landblock, realmId);
             var shardObjects = DatabaseManager.Shard.BaseDatabase.GetStaticObjectsByLandblock(Id.Landblock);
             var factoryObjects = WorldObjectFactory.CreateNewWorldObjects(objects, shardObjects);
+
+            // world-db content is instance-agnostic - everything this landblock copy
+            // loads lives in this copy's instance
+            foreach (var fo in factoryObjects)
+                fo.Location.Instance = Instance;
 
             actionQueue.EnqueueAction(new ActionEventDelegate(() =>
             {
@@ -252,7 +290,7 @@ namespace ACE.Server.Entity
         /// </summary>
         private void SpawnDynamicShardObjects()
         {
-            var dynamics = DatabaseManager.Shard.BaseDatabase.GetDynamicObjectsByLandblock(Id.Landblock);
+            var dynamics = DatabaseManager.Shard.BaseDatabase.GetDynamicObjectsByLandblock(Id.Landblock, Instance);
             var factoryShardObjects = WorldObjectFactory.CreateWorldObjects(dynamics);
 
             actionQueue.EnqueueAction(new ActionEventDelegate(() =>
@@ -290,8 +328,9 @@ namespace ACE.Server.Entity
                     pos.Frame.Origin.Z = PhysicsLandblock.GetZ(pos.Frame.Origin);
 
                     wo.Location = new Position(pos.ObjCellID, pos.Frame.Origin, pos.Frame.Orientation);
+                    wo.Location.Instance = Instance;
 
-                    var sortCell = LScape.get_landcell(pos.ObjCellID) as SortCell;
+                    var sortCell = LScape.get_landcell(pos.ObjCellID, Instance) as SortCell;
                     if (sortCell != null && sortCell.has_building())
                     {
                         wo.Destroy();
@@ -379,7 +418,7 @@ namespace ACE.Server.Entity
                 var weenie = DatabaseManager.World.GetCachedWeenie(obj.WeenieClassId);
                 WeenieMeshes.Add(
                     new ModelMesh(weenie.GetProperty(PropertyDataId.Setup) ?? 0,
-                    new DatLoader.Entity.Frame(new Position(obj.ObjCellId, obj.OriginX, obj.OriginY, obj.OriginZ, obj.AnglesX, obj.AnglesY, obj.AnglesZ, obj.AnglesW))));
+                    new DatLoader.Entity.Frame(new Position(obj.ObjCellId, obj.OriginX, obj.OriginY, obj.OriginZ, obj.AnglesX, obj.AnglesY, obj.AnglesZ, obj.AnglesW, Instance))));
             }
         }
 
@@ -861,10 +900,19 @@ namespace ACE.Server.Entity
 
             wo.CurrentLandblock = this;
 
+            // an object arriving from another instance (e.g. a player teleporting into
+            // an ephemeral copy) must be re-registered under its new instance
+            if (wo.PhysicsObj != null && wo.PhysicsObj.KnownInstance != Instance)
+            {
+                Physics.Managers.ServerObjectManager.RemoveServerObject(wo.PhysicsObj);
+                wo.PhysicsObj.KnownInstance = Instance;
+                Physics.Managers.ServerObjectManager.AddServerObject(wo.PhysicsObj);
+            }
+
             if (wo.PhysicsObj == null)
                 wo.InitPhysicsObj();
             else
-                wo.PhysicsObj.set_object_guid(wo.Guid);  // re-add to ServerObjectManager
+                wo.PhysicsObj.set_object_guid(wo.Guid, Instance);  // re-add to ServerObjectManager
 
             if (wo.PhysicsObj.CurCell == null)
             {
@@ -1138,9 +1186,11 @@ namespace ACE.Server.Entity
             SaveDB();
 
             // remove all objects
+            // ephemeral instances fully destroy their contents (including any db rows
+            // written mid-session) - nothing in a temporary instance survives it
             foreach (var wo in worldObjects.ToList())
             {
-                if (!wo.Value.BiotaOriginatedFromOrHasBeenSavedToDatabase())
+                if (!wo.Value.BiotaOriginatedFromOrHasBeenSavedToDatabase() || (IsEphemeral && !(wo.Value is Player)))
                     wo.Value.Destroy(false, true);
                 else
                     RemoveWorldObjectInternal(wo.Key);
@@ -1151,7 +1201,7 @@ namespace ACE.Server.Entity
             actionQueue.Clear();
 
             // remove physics landblock
-            LScape.unload_landblock(landblockID);
+            LScape.unload_landblock(landblockID, Instance);
 
             PhysicsLandblock.release_shadow_objs();
         }
@@ -1178,6 +1228,11 @@ namespace ACE.Server.Entity
 
         private void SaveDB()
         {
+            // ephemeral instances are never persisted - nothing inside them may
+            // overwrite base-world state (statics share guids across instances)
+            if (IsEphemeral)
+                return;
+
             var biotas = new Collection<(Biota biota, ReaderWriterLockSlim rwLock)>();
 
             foreach (var wo in worldObjects.Values)

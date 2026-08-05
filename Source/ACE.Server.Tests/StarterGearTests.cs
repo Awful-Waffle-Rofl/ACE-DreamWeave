@@ -1,11 +1,6 @@
-using System;
-using System.IO;
-
-using Newtonsoft.Json;
-
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
-using ACE.Server.Entity;
+using ACE.Server.Factories;
 
 namespace ACE.Server.Tests
 {
@@ -15,11 +10,14 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void CanParseStarterGearJson()
         {
-            var testDir = AppContext.BaseDirectory;
-            var starterGearPath = Path.GetFullPath(Path.Combine(testDir, "..", "..", "..", "..", "..", "ACE.Server", "starterGear.json"));
-            string contents = File.ReadAllText(starterGearPath);
+            // exercises the production loader: the ACE.Server project reference copies
+            // starterGear.json to the test output directory, and StarterGearFactory reads it
+            // from the assembly location with the same serializer options the server uses
+            var config = StarterGearFactory.GetStarterGearConfiguration();
 
-            StarterGearConfiguration config = JsonConvert.DeserializeObject<StarterGearConfiguration>(contents);
+            Assert.IsNotNull(config, "starterGear.json failed to load or parse");
+            Assert.IsNotNull(config.Skills, "starterGear.json parsed but has no skills element");
+            Assert.AreNotEqual(0, config.Skills.Count, "starterGear.json parsed but contains no skills");
         }
     }
 }

@@ -17,9 +17,11 @@ using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Entity.Mutations;
+using ACE.Server.EquipmentMods;
 using ACE.Server.Factories;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 
@@ -42,6 +44,17 @@ namespace ACE.Server.Managers
 
         public static void UseObjectOnTarget(Player player, WorldObject source, WorldObject target, bool confirmed = false)
         {
+            // Mule (WaffleACE): a mule cannot craft or tinker. Placed at the very top on purpose - above the
+            // equipment_mods_enabled / weapon_mods_enabled intercepts further down, because neither
+            // EquipmentModManager nor WeaponModManager carries a skill check of its own, so a guard placed
+            // after them would leave both fork systems wide open. SendUseDoneEvent releases the client's
+            // crafting UI, which every other refusal branch in this method also does.
+            if (player.MuleBlocked(MuleAction.Craft))
+            {
+                player.SendUseDoneEvent();
+                return;
+            }
+
             if (player.IsBusy)
             {
                 player.SendUseDoneEvent(WeenieError.YoureTooBusy);
@@ -61,6 +74,44 @@ namespace ACE.Server.Managers
                 player.Session.Network.EnqueueSend(new GameMessageSystemChat($"The {source.NameWithMaterial} cannot be combined with itself.", ChatMessageType.Craft));
                 player.Session.Network.EnqueueSend(new GameEventCommunicationTransientString(player.Session, $"You can't use the {source.NameWithMaterial} on itself."));
                 player.SendUseDoneEvent();
+                return;
+            }
+
+            // Equipment mods (WaffleACE): a bag of one of the two designated salvage materials is claimed here,
+            // before the cookbook lookup, and handled in C#. There is no cookbook row that could express this
+            // (it would need one row per eligible target wcid) and the potency rolls need code regardless.
+            // When the feature is off this falls through silently to normal recipe handling, so the bags keep
+            // their ordinary tinkering behavior.
+            //
+            // There is nothing to forward: EquipmentModManager has no confirmed parameter at all. Its own
+            // server-side dialog was removed because the client already fires its generic tinkering-material
+            // confirmation before the server is ever contacted, so a second panel was pure duplication. A
+            // replayed Confirmation_CraftInteration response therefore has no destructive prompt to skip on
+            // this path, and no state on it that a confirmation response could advance.
+            if (PropertyManager.GetBool("equipment_mods_enabled").Item && EquipmentModManager.IsModMaterial(source))
+            {
+                EquipmentModManager.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
+            // Weapon mods (WaffleACE): the weapon-side sibling, claimed the same way and for the same reasons.
+            // A full bag of Tourmaline rerolls a weapon's whole ten-slot budget; a full bag of Amethyst trades
+            // one random slot for one random modifier. When the feature is off this falls through silently, so
+            // both bags keep their ordinary tinkering behavior.
+            //
+            // Claiming the use HERE, before the cookbook lookup, is also what makes the retail tinker cap a
+            // non-issue: the data-driven "NumTimesTinkered >= 10" refusal lives in VerifyRequirements, which
+            // this never reaches, while retail tinkering stays bound by it.
+            //
+            // As with the equipment-mod intercept above, there is nothing to forward: WeaponModManager has no
+            // confirmed parameter at all. Its own server-side dialog was removed on 2026-07-30 because the
+            // client already fires its generic tinkering-material confirmation before the server is ever
+            // contacted, so a second panel was pure duplication. A replayed Confirmation_CraftInteration
+            // response therefore has no destructive prompt to skip here either, and no state on the
+            // weapon-mod path that a confirmation response could advance.
+            if (PropertyManager.GetBool("weapon_mods_enabled").Item && WeaponModManager.IsModMaterial(source))
+            {
+                WeaponModManager.UseObjectOnTarget(player, source, target);
                 return;
             }
 

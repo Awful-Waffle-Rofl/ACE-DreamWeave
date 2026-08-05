@@ -66,6 +66,25 @@ namespace ACE.Server.Network.GameEvent.Events
 
             var _propertiesInt = Session.Player.GetAllPropertyIntWhere(SendOnLoginProperties.PropertiesInt);
 
+            // Banked pyreals are spendable at vendors (always-on bank shop hook), and the client's vendor panel
+            // reads CoinValue. The login snapshot has to carry the same spendable total that UpdateCoinValue
+            // pushes thereafter, or a player who banked all their coin logs in to "you have 0p" and cannot buy.
+            _propertiesInt[PropertyInt.CoinValue] = Session.Player.GetSpendableCoinValue();
+
+            // The client bakes Enlightenment * 2 into its own max-health formula and the server does not
+            // (see Player.GetNetworkGearMaxHealth). The login snapshot has to carry the same corrected
+            // GearMaxHealth that HandleMaxHealthUpdate pushes thereafter, or an enlightened player logs in
+            // to a health bar whose maximum is 2/enl above anything they can heal to. Always assigned, so a
+            // stale stored rating cannot survive into the snapshot.
+            _propertiesInt[PropertyInt.GearMaxHealth] = Session.Player.GetNetworkGearMaxHealth();
+
+            // Deliberately NOT sending PropertyInt.EncumbranceCapacity here. It was added to this snapshot
+            // when a mule's capacity was an override rather than a function of Strength, and removed again
+            // once that was tested in game (2026-08-02): the client ignores a received capacity and derives
+            // the burden bar from Strength itself, so the send changed nothing and only implied a control the
+            // server does not have. Capacity is once again always 150 * Strength (+ augs), which the client
+            // reproduces from the attributes it is already sent. If you ever need a capacity the client will
+            // honour, change Strength - see Player_Mule.
             if (_propertiesInt.Count != 0)
             {
                 propertyFlags |= DescriptionPropertyFlag.PropertyInt32;
@@ -235,49 +254,49 @@ namespace ACE.Server.Network.GameEvent.Events
                 if ((attributeFlags & AttributeCache.Strength) != 0)
                 {
                     Writer.Write(Session.Player.Strength.Ranks);
-                    Writer.Write(Session.Player.Strength.StartingValue);
+                    Writer.Write(Session.Player.Strength.NetworkStartingValue);
                     Writer.Write(Session.Player.Strength.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Endurance) != 0)
                 {
                     Writer.Write(Session.Player.Endurance.Ranks);
-                    Writer.Write(Session.Player.Endurance.StartingValue);
+                    Writer.Write(Session.Player.Endurance.NetworkStartingValue);
                     Writer.Write(Session.Player.Endurance.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Quickness) != 0)
                 {
                     Writer.Write(Session.Player.Quickness.Ranks);
-                    Writer.Write(Session.Player.Quickness.StartingValue);
+                    Writer.Write(Session.Player.Quickness.NetworkStartingValue);
                     Writer.Write(Session.Player.Quickness.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Coordination) != 0)
                 {
                     Writer.Write(Session.Player.Coordination.Ranks);
-                    Writer.Write(Session.Player.Coordination.StartingValue);
+                    Writer.Write(Session.Player.Coordination.NetworkStartingValue);
                     Writer.Write(Session.Player.Coordination.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Focus) != 0)
                 {
                     Writer.Write(Session.Player.Focus.Ranks);
-                    Writer.Write(Session.Player.Focus.StartingValue);
+                    Writer.Write(Session.Player.Focus.NetworkStartingValue);
                     Writer.Write(Session.Player.Focus.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Self) != 0)
                 {
                     Writer.Write(Session.Player.Self.Ranks);
-                    Writer.Write(Session.Player.Self.StartingValue);
+                    Writer.Write(Session.Player.Self.NetworkStartingValue);
                     Writer.Write(Session.Player.Self.ExperienceSpent);
                 }
 
                 if ((attributeFlags & AttributeCache.Health) != 0)
                 {
                     Writer.Write(Session.Player.Health.Ranks);
-                    Writer.Write(Session.Player.Health.StartingValue); // init_level - always appears to be 0
+                    Writer.Write(Session.Player.Health.NetworkStartingValue); // init_level (+ Enhanced Health bonus) - base is normally 0
                     Writer.Write(Session.Player.Health.ExperienceSpent);
                     Writer.Write(Session.Player.Health.Current);
                 }
@@ -285,7 +304,7 @@ namespace ACE.Server.Network.GameEvent.Events
                 if ((attributeFlags & AttributeCache.Stamina) != 0)
                 {
                     Writer.Write(Session.Player.Stamina.Ranks);
-                    Writer.Write(Session.Player.Stamina.StartingValue); // init_level - always appears to be 0
+                    Writer.Write(Session.Player.Stamina.NetworkStartingValue); // init_level (+ Enhanced Stamina bonus) - base is normally 0
                     Writer.Write(Session.Player.Stamina.ExperienceSpent);
                     Writer.Write(Session.Player.Stamina.Current);
                 }
@@ -293,7 +312,7 @@ namespace ACE.Server.Network.GameEvent.Events
                 if ((attributeFlags & AttributeCache.Mana) != 0)
                 {
                     Writer.Write(Session.Player.Mana.Ranks);
-                    Writer.Write(Session.Player.Mana.StartingValue); // init_level - always appears to be 0
+                    Writer.Write(Session.Player.Mana.NetworkStartingValue); // init_level (+ Enhanced Mana bonus) - base is normally 0
                     Writer.Write(Session.Player.Mana.ExperienceSpent);
                     Writer.Write(Session.Player.Mana.Current);
                 }
@@ -314,7 +333,7 @@ namespace ACE.Server.Network.GameEvent.Events
                     Writer.Write((ushort)1u);
                     Writer.Write((uint)kvp.Value.AdvancementClass); // skill state
                     Writer.Write(kvp.Value.ExperienceSpent); // xp spent on this skill
-                    Writer.Write(kvp.Value.InitLevel);  // init_level, for training/specialized bonus from character creation
+                    Writer.Write(kvp.Value.NetworkInitLevel);  // init_level (+ Enhanced <skill> bonus), for training/specialized bonus from character creation
                     Writer.Write(0u); // task difficulty, aka "resistance_of_last_check"
                     Writer.Write(0d); // last_time_used
                 }

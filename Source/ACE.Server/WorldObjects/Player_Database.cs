@@ -56,6 +56,10 @@ namespace ACE.Server.WorldObjects
 
         private void SetPropertiesAtLogOut()
         {
+            // persist the final drained value of the offline bonus before recording the logoff time
+            // (next login accrues fresh offline time from this LogoffTimestamp)
+            UpdateOfflineBonus();
+
             LogoffTimestamp = Time.GetUnixTime();
             // These properties are used with offline players to determine passup rates
             SetProperty(PropertyInt.CurrentLoyaltyAtLastLogoff, (int)GetCreatureSkill(Skill.Loyalty).Current);

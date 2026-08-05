@@ -12,7 +12,9 @@ using ACE.Database.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.Command.Handlers;
 using ACE.Server.Entity;
+using ACE.Server.Realms;
 using ACE.Server.Entity.Actions;
 using ACE.Server.WorldObjects;
 using ACE.Server.Network;
@@ -57,8 +59,27 @@ namespace ACE.Server.Managers
         {
             var thread = new Thread(() =>
             {
-                LandblockManager.PreloadConfigLandblocks();
-                UpdateWorld();
+                try
+                {
+                    LandblockManager.PreloadConfigLandblocks();
+                    UpdateWorld();
+                }
+                catch (Exception ex)
+                {
+                    // This delegate runs on a bare background thread, so an escaping exception would
+                    // otherwise terminate the process with no log line at all. Log it loudly instead.
+                    log.Fatal("World thread terminated by an unhandled exception. The world is stopped.", ex);
+                }
+                finally
+                {
+                    // Reach the same state a clean shutdown reaches, whether or not we got here by an
+                    // exception. On the normal path both of these are already set, so this is a no-op:
+                    // UpdateWorld only returns once pendingWorldStop is true, and it clears WorldActive
+                    // on the way out. On the exception path they matter, because ServerManager's
+                    // shutdown waits on WorldActive and would otherwise spin forever.
+                    pendingWorldStop = true;
+                    WorldActive = false;
+                }
             });
             thread.Name = "World Manager";
             thread.Priority = ThreadPriority.AboveNormal;
@@ -210,12 +231,106 @@ namespace ACE.Server.Managers
                 if (session.Player.Instantiation != null)
                     session.Player.Location = new Position(session.Player.Instantiation);
                 else
-                    session.Player.Location = new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);  // ultimate fallback
+                    session.Player.Location = new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f, 0);  // ultimate fallback
             }
 
             var olthoiPlayerReturnedToLifestone = session.Player.IsOlthoiPlayer && character.TotalLogins >= 1 && session.Player.LoginAtLifestone;
             if (olthoiPlayerReturnedToLifestone)
                 session.Player.Location = new Position(session.Player.Sanctuary);
+
+            // DreamWeave opening scene: on a character's first-ever login, route them through the
+            // Loom - a per-character-private ephemeral instance of Portal Space (realm 2). Their
+            // normal starting Location (the training hall of the starter town they chose) becomes
+            // the exit target, stamped as EphemeralRealmExitTo so leaving the Loom lands them
+            // there. Nothing else PlayerFactory set is touched: Instantiation still points at the
+            // starter town, Sanctuary still points at the hall, and RecallsDisabled is still set,
+            // so the hall plays out exactly as it does for a character who never saw the Loom.
+            // Safely no-ops if the Loom realm is not registered (loom.sql not applied), or for Olthoi.
+            //
+            // A player who logs out INSIDE the Loom is resumed into a fresh copy of it rather than
+            // dropped at the exit. Their instance is gone by then, and the block below would
+            // otherwise read their stamped exit and quietly deposit them in the training hall -
+            // which let a character skip the opening scene entirely just by relogging.
+            var inLoom = session.Player.Location != null && session.Player.Location.RealmID == LoomRealmId
+                && session.Player.GetPosition(PositionType.EphemeralRealmExitTo) != null;
+
+            var routedToLoom = false;
+
+            if ((character.TotalLogins == 0 || inLoom) && !session.Player.IsOlthoiPlayer
+                && session.Player.Location != null && RealmManager.GetRealm(LoomRealmId) != null)
+            {
+                // on a first login the player's Location IS the hall, and becomes the exit target;
+                // on a resume their Location is the dead Loom instance and the hall is already stamped
+                var exitTo = inLoom
+                    ? new Position(session.Player.GetPosition(PositionType.EphemeralRealmExitTo))
+                    : new Position(session.Player.Location);
+
+                var loomLandblock = RealmManager.GetNewEphemeralLandblock(new ACE.Entity.LandblockId(0x526AFFFFu), session.Player, LoomRealmId);
+                if (loomLandblock != null && loomLandblock.IsDungeon)
+                {
+                    // authored in-game (@loc): the far end of the chamber, facing the Loomstone,
+                    // so the walk toward the figure is the first thing the character does
+                    var loomSpawn = new Position(0x526A0293u, 219.699234f, -49.672867f, -23.995001f, 0f, 0f, -0.932604f, 0.360902f, 0u);
+                    session.Player.Location = new Position(loomSpawn, loomLandblock.Instance);
+                    session.Player.SetPosition(PositionType.EphemeralRealmExitTo, exitTo);
+                    routedToLoom = true;
+                }
+            }
+
+            // DPS challenge (WaffleACE): a player who logged out mid-run forfeits it. The run flag is
+            // persisted, so catch it here and re-home them to their lifestone rather than let the exit-stamp
+            // logic below quietly deposit them back at the arena entrance. Falls through to the normal
+            // validated-location path if they have no lifestone set.
+            if (session.Player.DpsChallengeActive)
+            {
+                session.Player.DpsChallengeActive = false;
+                session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                if (session.Player.Sanctuary != null)
+                    session.Player.Location = new Position(session.Player.Sanctuary);
+            }
+
+            // Survival challenge (WaffleACE): a player who logged out mid-run forfeits it (no score). Same handling
+            // as the DPS challenge above - clear the persisted run flag and re-home them to their lifestone rather
+            // than let the exit-stamp logic below deposit them back at the (now-gone) arena entrance.
+            if (session.Player.SurvivalChallengeActive)
+            {
+                session.Player.SurvivalChallengeActive = false;
+                session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                if (session.Player.Sanctuary != null)
+                    session.Player.Location = new Position(session.Player.Sanctuary);
+            }
+
+            // Wave challenge (WaffleACE): a player who logged out mid-gauntlet forfeits the run. The waves they
+            // actually cleared were already banked into BestWaveScore as each one cleared, so nothing is lost here.
+            // Same handling as the two challenges above - clear the persisted run flag and re-home them to their
+            // lifestone rather than deposit them back at the (now-gone) arena entrance.
+            if (session.Player.WaveChallengeActive)
+            {
+                session.Player.WaveChallengeActive = false;
+                session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                if (session.Player.Sanctuary != null)
+                    session.Player.Location = new Position(session.Player.Sanctuary);
+            }
+
+            // ACRealms port: a saved position may point into an instance that no longer
+            // exists (an ephemeral instance from a previous session) or an unregistered
+            // realm - relocate to the stamped exit position, or re-home
+            var validatedLocation = session.Player.Location.ValidateInstanceDestination(session.Player);
+            if (validatedLocation.Instance != session.Player.Location.Instance)
+            {
+                var exitTo = session.Player.GetPosition(PositionType.EphemeralRealmExitTo);
+                if (exitTo != null)
+                {
+                    session.Network.EnqueueSend(new GameMessageSystemChat("The instance you were in has expired and you have been transported outside!", ChatMessageType.System));
+                    session.Player.Location = new Position(exitTo);
+                    session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                }
+                else
+                {
+                    log.Info($"WorldManager.DoPlayerEnterWorld: player {session.Player.Name}'s saved instance 0x{session.Player.Location.Instance:X8} is unavailable, relocating to home realm.");
+                    session.Player.Location = validatedLocation;
+                }
+            }
 
             session.Player.PlayerEnterWorld();
 
@@ -223,7 +338,7 @@ namespace ACE.Server.Managers
             if (!success)
             {
                 // send to lifestone, or fallback location
-                var fixLoc = session.Player.Sanctuary ?? new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f);
+                var fixLoc = session.Player.Sanctuary ?? new Position(0xA9B40019, 84, 7.1f, 94, 0, 0, -0.0784591f, 0.996917f, 0);
 
                 log.Error($"WorldManager.DoPlayerEnterWorld: failed to spawn {session.Player.Name}, relocating to {fixLoc.ToLOCString()}");
 
@@ -250,14 +365,17 @@ namespace ACE.Server.Managers
 
             var popup_header = PropertyManager.GetString("popup_header").Item;
             var popup_motd = PropertyManager.GetString("popup_motd").Item;
-            var popup_welcome = player.IsOlthoiPlayer ? PropertyManager.GetString("popup_welcome_olthoi").Item : PropertyManager.GetString("popup_welcome").Item;
 
             if (character.TotalLogins <= 1)
             {
-                if (player.IsOlthoiPlayer)
-                    session.Network.EnqueueSend(new GameEventPopupString(session, AppendLines(popup_welcome, popup_motd)));
+                // the welcome popup sends the player off to find the Society Greeter, who is in the
+                // training hall - so it must not arrive while they are still standing in the Loom,
+                // where there is no greeter and no training to begin. Hold it until the DreamWeave
+                // sets them down in the hall; the exit portal plays it on arrival.
+                if (routedToLoom)
+                    player.DeferredWelcomePopup = true;
                 else
-                    session.Network.EnqueueSend(new GameEventPopupString(session, AppendLines(popup_header, popup_motd, popup_welcome)));
+                    SendWelcomePopup(session);
             }
             else if (!string.IsNullOrEmpty(popup_motd))
             {
@@ -271,10 +389,49 @@ namespace ACE.Server.Managers
             if (!string.IsNullOrEmpty(server_motd))
                 session.Network.EnqueueSend(new GameMessageSystemChat($"{server_motd}\n", ChatMessageType.Broadcast));
 
+            // Report the offline bonus time banked for however long this character was away (accrued in
+            // PlayerEnterWorld above). No-op when the feature is disabled or nothing was banked.
+            session.Player.SendOfflineBonusLoginMessage();
+
+            // Let an under-leveled alt know it is receiving the catch-up bonus. No-op when the feature is
+            // disabled or this is already the furthest-along character on the account.
+            if (session.Player.IsAltCharacterBonusActive)
+                session.Player.ShowAltCharacterBonusStatus();
+
+            // Tell alpha testers what this shard lets them give themselves. Null - and so nothing sent -
+            // on any server where the self-grant commands are not enabled, which is every server but stage.
+            var stageTestMsg = StageTestCommands.GetLoginMessage();
+            if (stageTestMsg != null)
+                session.Network.EnqueueSend(new GameMessageSystemChat(stageTestMsg, ChatMessageType.Broadcast));
+
             if (olthoiPlayerReturnedToLifestone)
                 session.Network.EnqueueSend(new GameMessageSystemChat("You have returned to the Olthoi Queen to serve the hive.", ChatMessageType.Broadcast));
             else if (playerLoggedInOnNoLogLandblock) // see http://acpedia.org/wiki/Mount_Elyrii_Hive
                 session.Network.EnqueueSend(new GameMessageSystemChat("The currents of portal space cannot return you from whence you came. Your previous location forbids login.", ChatMessageType.Broadcast));            
+        }
+
+        /// <summary>
+        /// The realm holding the DreamWeave opening scene (the Loom). Realm 2 is the
+        /// no-combat realm per the realm standard (Content/realms/README.md); the Loom
+        /// is its first tenant. Must match the realm id registered by loom.sql.
+        /// </summary>
+        public const ushort LoomRealmId = 2;
+
+        /// <summary>
+        /// The first-login welcome popup. Normally sent as the player enters the world, but a
+        /// character routed through the Loom has it held back (Player.DeferredWelcomePopup) until
+        /// the DreamWeave delivers them to the training hall the popup is telling them about.
+        /// </summary>
+        public static void SendWelcomePopup(Session session)
+        {
+            var popup_header = PropertyManager.GetString("popup_header").Item;
+            var popup_motd = PropertyManager.GetString("popup_motd").Item;
+            var popup_welcome = session.Player.IsOlthoiPlayer ? PropertyManager.GetString("popup_welcome_olthoi").Item : PropertyManager.GetString("popup_welcome").Item;
+
+            if (session.Player.IsOlthoiPlayer)
+                session.Network.EnqueueSend(new GameEventPopupString(session, AppendLines(popup_welcome, popup_motd)));
+            else
+                session.Network.EnqueueSend(new GameEventPopupString(session, AppendLines(popup_header, popup_motd, popup_welcome)));
         }
 
         private static string AppendLines(params string[] lines)
@@ -372,9 +529,15 @@ namespace ACE.Server.Managers
                 DelayManager.RunActions();
                 ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.DelayManager_RunActions);
 
+                var tickStart = worldTickTimer.Elapsed;
                 ServerPerformanceMonitor.RestartEvent(ServerPerformanceMonitor.MonitorType.UpdateGameWorld);
                 var gameWorldUpdated = UpdateGameWorld();
                 ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.UpdateGameWorld);
+
+                // Monitoring: record the real game-tick duration, only when the world actually updated so
+                // idle spin-sleeps don't skew it. Exposed as a histogram (ServerMetrics -> dotnet-monitor).
+                if (gameWorldUpdated)
+                    ServerMetrics.RecordWorldTick((worldTickTimer.Elapsed - tickStart).TotalMilliseconds);
 
                 ServerPerformanceMonitor.RestartEvent(ServerPerformanceMonitor.MonitorType.NetworkManager_DoSessionWork);
                 int sessionCount = NetworkManager.DoSessionWork();
@@ -411,6 +574,8 @@ namespace ACE.Server.Managers
             LandblockManager.Tick(Timers.PortalYearTicks);
 
             HouseManager.Tick();
+
+            FellowshipManager.Tick();
 
             ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.UpdateGameWorld_Entire);
             ServerPerformanceMonitor.RegisterCumulativeEvents();

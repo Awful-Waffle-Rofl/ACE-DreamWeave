@@ -1,8 +1,6 @@
-using System;
 using System.Collections.Generic;
-using System.Linq;
 
-using ACE.DatLoader;
+using ACE.DatLoader.FileTypes;
 using ACE.Entity.Enum;
 
 namespace ACE.Server.Entity
@@ -12,9 +10,16 @@ namespace ACE.Server.Entity
         // helper collection for spell sorting
         public static readonly HashSet<int> SetSpells = new HashSet<int>();
 
-        static SpellSet()
+        /// <summary>
+        /// Collects the equipment set spells from the spell table. Called once at boot
+        /// (Program.cs, right after DatManager initializes); until then the set is empty
+        /// and enchantment sorting treats nothing as a set spell.
+        /// </summary>
+        public static void Initialize(SpellTable spellTable)
         {
-            foreach (var spellSet in DatManager.PortalDat.SpellTable.SpellSet.Values)
+            SetSpells.Clear();
+
+            foreach (var spellSet in spellTable.SpellSet.Values)
             {
                 foreach (var tier in spellSet.SpellSetTiers.Values)
                 {

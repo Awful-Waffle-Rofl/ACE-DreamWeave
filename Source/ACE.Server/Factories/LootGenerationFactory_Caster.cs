@@ -43,6 +43,12 @@ namespace ACE.Server.Factories
             {
                 if (wo.W_DamageType == DamageType.Nether)
                     wo.WieldSkillType = (int)Skill.VoidMagic;
+                else if (wo.W_DamageType == DamageType.Health)
+                    // fork addition (Sanguine casters): retail has no Health-typed caster, so this
+                    // branch never existed for it. Without this case a Health caster that rolls a
+                    // tier 4-8 mutation (which sets WieldRequirements = RawSkill) would silently fall
+                    // into the else below and require WarMagic to wield - backwards for a life caster.
+                    wo.WieldSkillType = (int)Skill.LifeMagic;
                 else
                     wo.WieldSkillType = (int)Skill.WarMagic;
             }

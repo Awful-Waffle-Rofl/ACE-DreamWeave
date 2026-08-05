@@ -18,6 +18,10 @@ namespace ACE.Server.WorldObjects
         // todo: Figure out if this is the best place to do this, and whether there are concurrency issues associated with it.
         public void FellowshipCreate(string fellowshipName, bool shareXP)
         {
+            // Mule (WaffleACE): a mule is storage and trade only - it cannot lead a fellowship.
+            if (MuleBlocked(MuleAction.JoinFellowship))
+                return;
+
             // An Olthoi player cannot create a fellowship
             if (IsOlthoiPlayer)
             {
@@ -86,6 +90,16 @@ namespace ACE.Server.WorldObjects
         public void FellowshipRecruit(Player newPlayer)
         {
             if (newPlayer == null) return;
+
+            // Mule (WaffleACE): the joining side of the same rule. Guarded on newPlayer, not on the recruiter -
+            // the recruit is the one joining. Mirrors the Olthoi branch below by also telling the recruiter and
+            // releasing their UI, since they get no other feedback.
+            if (newPlayer.MuleBlocked(MuleAction.JoinFellowship))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{newPlayer.Name} is a mule and cannot join a fellowship.", ChatMessageType.Fellowship));
+                SendWeenieError(WeenieError.None);
+                return;
+            }
 
             // An Olthoi player cannot join a fellowship
             if (newPlayer.IsOlthoiPlayer)

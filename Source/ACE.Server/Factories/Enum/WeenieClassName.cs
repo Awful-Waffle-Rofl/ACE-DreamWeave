@@ -41886,5 +41886,14 @@ namespace ACE.Server.Factories.Enum
         ace87830_olthoislasher = 87830,
         ace87831_surface = 87831,
         ace87832_rootsofskuldgenerator = 87832,
+
+        // ---------------------------------------------------------------
+        // FORK WCIDS (not retail) - Sanguine caster family, driftwarden owner block 1000224-1000299.
+        // Content/sql/weenies/<wcid> for the SQL, Content/wcid-registry.tsv for the allocation.
+        // Referenced from CasterWcids.cs's ChanceTables so the loot generator can roll them.
+        // ---------------------------------------------------------------
+        driftwardensanguinewand = 1000242,
+        driftwardensanguineorb = 1000243,
+        driftwardensanguinestaff = 1000244,
     }
 }

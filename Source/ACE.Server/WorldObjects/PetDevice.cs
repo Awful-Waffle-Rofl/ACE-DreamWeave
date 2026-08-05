@@ -83,6 +83,18 @@ namespace ACE.Server.WorldObjects
 
             var result = SummonCreature(player, wcid);
 
+            // class ability: Summon 2x brings out the second combat pet in this SAME activation - one
+            // double-click, one charge, one cooldown. Re-reading CanSummonAdditionalCombatPet after the first
+            // summon is what keeps this correct and self-limiting: it now sees the pet just placed in the
+            // primary slot with the secondary slot free, and returns false when the first summon was a passive
+            // pet, when the player has not learned the skill, or when the secondary slot is already occupied
+            // (the player had a pet out before this activation), so it can never produce a third pet.
+            //
+            // The second summon's result is deliberately not folded into the structure/cooldown decision
+            // below: if it fails, the player still got the first pet for the one charge they spent.
+            if (result == true && player.CanSummonAdditionalCombatPet())
+                SummonCreature(player, wcid, true);
+
             if (result == null || result.Value)
             {
                 // CombatPet devices should always have structure
@@ -124,6 +136,10 @@ namespace ACE.Server.WorldObjects
 
             if (player.CurrentActivePet != null && player.CurrentActivePet is CombatPet)
             {
+                // class ability: Summon 2x permits a second concurrent combat pet
+                if (player.CanSummonAdditionalCombatPet())
+                    return new ActivationResult(true);
+
                 if (PropertyManager.GetBool("pet_stow_replace").Item)
                 {
                     // original ace
@@ -145,7 +161,7 @@ namespace ACE.Server.WorldObjects
             return new ActivationResult(true);
         }
 
-        public bool? SummonCreature(Player player, uint wcid)
+        public bool? SummonCreature(Player player, uint wcid, bool spawnStagger = false)
         {
             var wo = WorldObjectFactory.CreateNewWorldObject(wcid);
 
@@ -162,7 +178,7 @@ namespace ACE.Server.WorldObjects
                 log.Error($"{player.Name}.SummonCreature({wcid}) - PetDevice {WeenieClassId} - {WeenieClassName} tried to summon {wo.WeenieClassId} - {wo.WeenieClassName} of unknown type {wo.WeenieType}");
                 return false;
             }
-            var success = pet.Init(player, this);
+            var success = pet.Init(player, this, spawnStagger);
 
             if (success != true) wo.Destroy();
 

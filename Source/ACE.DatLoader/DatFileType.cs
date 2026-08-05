@@ -463,7 +463,7 @@ namespace ACE.DatLoader
         CharacterGenerator      = 0x10000002, // DB_TYPE_CHAR_GEN_0
 
         /// <summary>
-        /// indexed as "weenie/skills" in the client
+        /// indexed as "weenie/abilities" in the client
         /// </summary>
         [DatDatabaseType(DatDatabaseType.Portal)]
         [DatFileTypeExtension("wa2")]
@@ -471,7 +471,7 @@ namespace ACE.DatLoader
         SecondaryAttributeTable = 0x10000003, // DB_TYPE_ATTRIBUTE_2ND_TABLE_0
 
         /// <summary>
-        /// indexed as "weenie/skills" in the client
+        /// indexed as "weenie/abilities" in the client
         /// </summary>
         [DatDatabaseType(DatDatabaseType.Portal)]
         [DatFileTypeExtension("wsk")]

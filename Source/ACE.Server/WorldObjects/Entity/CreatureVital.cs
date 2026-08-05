@@ -53,6 +53,14 @@ namespace ACE.Server.WorldObjects.Entity
         }
 
         /// <summary>
+        /// StartingValue as reported to the client, folding in the getter-only "Enhanced &lt;vital&gt;"
+        /// class ability bonus. The client computes a vital's maximum from the attribute formula + Ranks +
+        /// StartingValue, so the bonus must ride here to show up; the stored InitLevel is left untouched.
+        /// </summary>
+        public uint NetworkStartingValue =>
+            StartingValue + (creature is Player player ? (uint)player.GetEnhancedVitalBonus(Vital) : 0);
+
+        /// <summary>
         /// Total Experience Spent on this vital
         /// </summary>
         public uint ExperienceSpent
@@ -109,8 +117,16 @@ namespace ACE.Server.WorldObjects.Entity
 
                 var total = StartingValue + Ranks + attr;
 
-                if (creature is Player player && Vital == PropertyAttribute2nd.MaxHealth)
-                    total += (uint)(player.Enlightenment * 2 + player.GetGearMaxHealth());
+                if (creature is Player player)
+                {
+                    // enlightenment no longer grants bonus vitals (the +1/enl floor is attributes + specialized
+                    // skills only); the attribute increase still flows into vitals via AttributeFormula
+                    if (Vital == PropertyAttribute2nd.MaxHealth)
+                        total += (uint)player.GetGearMaxHealth();
+
+                    // "Enhanced <vital>" class ability - a flat base increase (counts toward wield requirements)
+                    total += (uint)player.GetEnhancedVitalBonus(Vital);
+                }
 
                 return total;
             }
@@ -142,8 +158,12 @@ namespace ACE.Server.WorldObjects.Entity
                 // including Asheron's Benediction, and oddly enough, vitae as well
 
                 // it's also possible these were considered "base"
+                // (enlightenment no longer grants bonus vitals - see the Base getter above)
                 if (Vital == PropertyAttribute2nd.MaxHealth)
-                    total += (uint)(player.Enlightenment * 2 + player.GetGearMaxHealth());
+                    total += (uint)player.GetGearMaxHealth();
+
+                // "Enhanced <vital>" is a base increase, so it rides with base (pre-multiplier)
+                total += (uint)player.GetEnhancedVitalBonus(Vital);
             }
 
             // apply multiplicative enchantments first

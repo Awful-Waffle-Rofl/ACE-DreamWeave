@@ -26,8 +26,11 @@ namespace ACE.Server.Physics.Animation
         public CellArray CellArray;
         //public ObjCell NewCellPtr;
 
-        public Transition()
+        public uint Instance { get; }
+
+        public Transition(uint instance)
         {
+            Instance = instance;
             Init();
         }
 
@@ -91,7 +94,7 @@ namespace ACE.Server.Physics.Animation
             SpherePath.CellArrayValid = true;
             SpherePath.HitsInteriorCell = false;
 
-            ObjCell.find_cell_list(CellArray, ref newCell, SpherePath);
+            ObjCell.find_cell_list(CellArray, ref newCell, SpherePath, Instance);
         }
 
         public void CalcNumSteps(ref Vector3 offset, ref Vector3 offsetPerStep, ref int numSteps)
@@ -156,7 +159,7 @@ namespace ACE.Server.Physics.Animation
 
             //ObjCell newCell = null;
             var newCell = ObjCell.EmptyCell;    // null check?
-            ObjCell.find_cell_list(CellArray, ref newCell, SpherePath);
+            ObjCell.find_cell_list(CellArray, ref newCell, SpherePath, Instance);
 
             for (var i = 0; i < CellArray.Cells.Count; i++)
             {
@@ -525,7 +528,7 @@ namespace ACE.Server.Physics.Animation
                 SpherePath.HitsInteriorCell = false;
 
                 ObjCell empty = null;
-                ObjCell.find_cell_list(CellArray, ref empty, SpherePath);
+                ObjCell.find_cell_list(CellArray, ref empty, SpherePath, Instance);
                 return true;
             }
 
@@ -687,9 +690,9 @@ namespace ACE.Server.Physics.Animation
         /// Initializes a new default transition
         /// </summary>
         /// <returns></returns>
-        public static Transition MakeTransition()
+        public static Transition MakeTransition(uint instance)
         {
-            var transition = new Transition();
+            var transition = new Transition(instance);
             transition.Init();
             return transition;
         }

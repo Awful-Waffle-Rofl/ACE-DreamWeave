@@ -1478,7 +1478,7 @@ namespace ACE.Server.Command.Handlers.Processors
 
             instance.Guid = wo.Guid.Full;
 
-            instance.Landblock = (int)wo.Location.Landblock;
+            instance.Landblock = (int)wo.Location.LandblockShort;
 
             instance.WeenieClassId = wo.WeenieClassId;
 
@@ -1546,7 +1546,7 @@ namespace ACE.Server.Command.Handlers.Processors
 
             if (wo?.Location == null) return;
 
-            var landblock = (ushort)wo.Location.Landblock;
+            var landblock = (ushort)wo.Location.LandblockShort;
 
             // if generator child, try getting the "real" guid
             var guid = wo.Guid.Full;
@@ -1692,7 +1692,7 @@ namespace ACE.Server.Command.Handlers.Processors
             var cellX = (int)pos.PositionX / 24;
             var cellY = (int)pos.PositionY / 24;
 
-            var landblock = (ushort)pos.Landblock;
+            var landblock = (ushort)pos.LandblockShort;
 
             // clear any cached encounters for this landblock
             DatabaseManager.World.ClearCachedEncountersByLandblock(landblock);
@@ -1712,11 +1712,11 @@ namespace ACE.Server.Command.Handlers.Processors
 
             if (wo == null) return;
 
-            session.Network.EnqueueSend(new GameMessageSystemChat($"Creating new encounter @ landblock {pos.Landblock:X4}, cellX={cellX}, cellY={cellY}\n{wo.WeenieClassId} - {wo.Name}", ChatMessageType.Broadcast));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Creating new encounter @ landblock {pos.LandblockShort:X4}, cellX={cellX}, cellY={cellY}\n{wo.WeenieClassId} - {wo.Name}", ChatMessageType.Broadcast));
 
             // add a new encounter (verifications?)
             var encounter = new Encounter();
-            encounter.Landblock = (int)pos.Landblock;
+            encounter.Landblock = (int)pos.LandblockShort;
             encounter.CellX = cellX;
             encounter.CellY = cellY;
             encounter.WeenieClassId = weenie.ClassId;
@@ -1756,7 +1756,7 @@ namespace ACE.Server.Command.Handlers.Processors
 
             wo.Location = new Position(newPos.ObjCellID, newPos.Frame.Origin, newPos.Frame.Orientation);
 
-            var sortCell = Physics.Common.LScape.get_landcell(newPos.ObjCellID) as Physics.Common.SortCell;
+            var sortCell = Physics.Common.LScape.get_landcell(newPos.ObjCellID, session.Player.Location.Instance) as Physics.Common.SortCell;
             if (sortCell != null && sortCell.has_building())
             {
                 session.Network.EnqueueSend(new GameMessageSystemChat($"Failed to create encounter near building cell", ChatMessageType.Broadcast));
@@ -1861,7 +1861,7 @@ namespace ACE.Server.Command.Handlers.Processors
             var cellX = (int)obj.Location.PositionX / 24;
             var cellY = (int)obj.Location.PositionY / 24;
 
-            var landblock = (ushort)obj.Location.Landblock;
+            var landblock = (ushort)obj.Location.LandblockShort;
 
             // clear any cached encounters for this landblock
             DatabaseManager.World.ClearCachedEncountersByLandblock(landblock);
@@ -1878,7 +1878,7 @@ namespace ACE.Server.Command.Handlers.Processors
                 return;
             }
 
-            session.Network.EnqueueSend(new GameMessageSystemChat($"Removing encounter @ landblock {obj.Location.Landblock:X4}, cellX={cellX}, cellY={cellY}\n{obj.WeenieClassId} - {obj.Name}", ChatMessageType.Broadcast));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Removing encounter @ landblock {obj.Location.LandblockShort:X4}, cellX={cellX}, cellY={cellY}\n{obj.WeenieClassId} - {obj.Name}", ChatMessageType.Broadcast));
 
             encounters.Remove(encounter);
 
@@ -2868,7 +2868,7 @@ namespace ACE.Server.Command.Handlers.Processors
                 var newLoc = new Position(session.Player.Location);
 
                 // slide?
-                var setPos = new Physics.Common.SetPosition(newLoc.PhysPosition(), Physics.Common.SetPositionFlags.Teleport /* | Physics.Common.SetPositionFlags.Slide */);
+                var setPos = new Physics.Common.SetPosition(newLoc.PhysPosition(), Physics.Common.SetPositionFlags.Teleport /* | Physics.Common.SetPositionFlags.Slide */, newLoc.Instance);
                 var result = obj.PhysicsObj.SetPosition(setPos);
 
                 if (result != Physics.Common.SetPositionError.OK)
@@ -2890,10 +2890,10 @@ namespace ACE.Server.Command.Handlers.Processors
                 {
                     //session.Network.EnqueueSend(new GameMessageSystemChat($"Moving {obj.Name} ({obj.Guid}) to home position: {obj.Location} to {instance.ObjCellId:X8} [{instance.OriginX} {instance.OriginY} {instance.OriginZ}]", ChatMessageType.Broadcast));
 
-                    var homePos = new Position(instance.ObjCellId, instance.OriginX, instance.OriginY, instance.OriginZ, instance.AnglesX, instance.AnglesY, instance.AnglesZ, instance.AnglesW);
+                    var homePos = new Position(instance.ObjCellId, instance.OriginX, instance.OriginY, instance.OriginZ, instance.AnglesX, instance.AnglesY, instance.AnglesZ, instance.AnglesW, 0);
 
                     // slide?
-                    var setPos = new Physics.Common.SetPosition(homePos.PhysPosition(), Physics.Common.SetPositionFlags.Teleport /* | Physics.Common.SetPositionFlags.Slide*/);
+                    var setPos = new Physics.Common.SetPosition(homePos.PhysPosition(), Physics.Common.SetPositionFlags.Teleport /* | Physics.Common.SetPositionFlags.Slide*/, homePos.Instance);
                     var result = obj.PhysicsObj.SetPosition(setPos);
 
                     if (result != Physics.Common.SetPositionError.OK)
@@ -2909,7 +2909,7 @@ namespace ACE.Server.Command.Handlers.Processors
 
                 var transit = obj.PhysicsObj.transition(obj.PhysicsObj.Position, newPos, true);
 
-                var errorMsg = $"{obj.Name} ({obj.Guid}) failed to move from {obj.PhysicsObj.Position.ACEPosition()} to {newPos.ACEPosition()}";
+                var errorMsg = $"{obj.Name} ({obj.Guid}) failed to move from {obj.PhysicsObj.Position.ACEPosition(obj.PhysicsObj.CurInstance)} to {newPos.ACEPosition(obj.PhysicsObj.CurInstance)}";
 
                 if (transit == null)
                 {
@@ -2929,9 +2929,9 @@ namespace ACE.Server.Command.Handlers.Processors
 
             // update ace location
             var prevLoc = new Position(obj.Location);
-            obj.Location = obj.PhysicsObj.Position.ACEPosition();
+            obj.Location = obj.PhysicsObj.Position.ACEPosition(obj.PhysicsObj.CurInstance);
 
-            if (prevLoc.Landblock != obj.Location.Landblock)
+            if (prevLoc.InstancedLandblock != obj.Location.InstancedLandblock)
                 LandblockManager.RelocateObjectForPhysics(obj, true);
 
             // broadcast new position

@@ -95,5 +95,15 @@ namespace ACE.Entity.Enum.Properties
         AllegianceCastellanTitle       = 9005,
         GodState                       = 9006,
         TinkerLog                      = 9007,
+        // On a Drift Network trainer NPC weenie: a comma/semicolon-separated list of ClassAbilityId Names the NPC
+        // trains (e.g. "multishot,thorns"). Its presence flags the weenie as a class ability trainer; on use it
+        // sells the next learnable rank of each listed skill for class ability points (see
+        // ACE.Server.ClassAbilities.ClassAbilityTrainer). The exchanger NPC uses PropertyBool ClassAbilityExchanger.
+        ClassAbilityTrainerAbilities        = 9008,
+        // The weapon-mod system's own record of a weapon's CURRENT layer 1 tinker composition: a
+        // comma-separated list of MaterialType ids, same format as TinkerLog 9007. REPLACED wholesale on
+        // every reroll and every swap, never appended - it describes the weapon's current state, never its
+        // history. See ACE.Server.WeaponMods.WeaponModManager.
+        WeaponModTinkerLog                  = 9009,
     }
 }

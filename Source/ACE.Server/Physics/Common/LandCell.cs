@@ -65,9 +65,9 @@ namespace ACE.Server.Physics.Common
             return objInfo.ValidateWalkable(checkPos, walkable.Plane, WaterType != LandDefs.WaterType.NotWater, waterDepth, transition, ID);
         }
 
-        public new static LandCell Get(uint cellID)
+        public new static LandCell Get(uint cellID, uint instance)
         {
-            return (LandCell)LScape.get_landcell(cellID);
+            return (LandCell)LScape.get_landcell(cellID, instance);
         }
 
         public new void Init()
@@ -79,7 +79,7 @@ namespace ACE.Server.Physics.Common
             for (var i = 0; i < 2; i++) Polygons.Add(null);
         }
 
-        public static void add_all_outside_cells(Position position, int numSphere, List<Sphere> spheres, CellArray cellArray)
+        public static void add_all_outside_cells(Position position, int numSphere, List<Sphere> spheres, CellArray cellArray, uint instance)
         {
             if (cellArray.AddedOutside) return;
 
@@ -102,8 +102,8 @@ namespace ACE.Server.Physics.Common
                     var lcoord = LandDefs.gid_to_lcoord(cellPoint);
                     if (lcoord != null)
                     {
-                        add_outside_cell(cellArray, lcoord.Value);
-                        check_add_cell_boundary(cellArray, point, lcoord.Value, minRad, maxRad);
+                        add_outside_cell(cellArray, lcoord.Value, instance);
+                        check_add_cell_boundary(cellArray, point, lcoord.Value, minRad, maxRad, instance);
                     }
                 }
             }
@@ -113,11 +113,11 @@ namespace ACE.Server.Physics.Common
 
                 var lcoord = LandDefs.gid_to_lcoord(position.ObjCellID);
                 if (lcoord != null)
-                    add_outside_cell(cellArray, lcoord.Value);
+                    add_outside_cell(cellArray, lcoord.Value, instance);
             }
         }
 
-        public static void add_all_outside_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray, uint id)
+        public static void add_all_outside_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray, uint id, uint instance)
         {
             if (cellArray.AddedOutside)
                 return;
@@ -176,11 +176,11 @@ namespace ACE.Server.Physics.Common
                     max_y = Math.Max(max_cy - ly, max_y);
                 }
 
-                add_cell_block(min_x + (int)lcoord.X, min_y + (int)lcoord.Y, max_x + (int)lcoord.X, max_y + (int)lcoord.Y, cellArray, id);
+                add_cell_block(min_x + (int)lcoord.X, min_y + (int)lcoord.Y, max_x + (int)lcoord.X, max_y + (int)lcoord.Y, cellArray, id, instance);
             }
         }
 
-        public static void add_cell_block(int min_x, int min_y, int max_x, int max_y, CellArray cellArray, uint id)
+        public static void add_cell_block(int min_x, int min_y, int max_x, int max_y, CellArray cellArray, uint id, uint instance)
         {
             for (var i = min_x; i <= max_x; i++)
             {
@@ -198,14 +198,14 @@ namespace ACE.Server.Physics.Common
                     if (id >> 16 != cellID >> 16)
                         continue;
 
-                    var cell = LScape.get_landcell(cellID);
+                    var cell = LScape.get_landcell(cellID, instance);
 
                     cellArray.add_cell(cellID, cell);
                 }
             }
         }
 
-        public static void add_outside_cell(CellArray cellArray, float _x, float _y)
+        public static void add_outside_cell(CellArray cellArray, float _x, float _y, uint instance)
         {
             var x = (uint)_x;
             var y = (uint)_y;
@@ -213,46 +213,46 @@ namespace ACE.Server.Physics.Common
             if (x >= 0 && y >= 0 && x < 2040 && y < 2040)
             {
                 var cellID = (((y >> 3) | 32 * (x & 0xFFFFFFF8)) << 16) | ((y & 7) + 8 * (x & 7) + 1);
-                var landCell = Get(cellID);
+                var landCell = Get(cellID, instance);
                 if (landCell != null)
                     cellArray.add_cell(cellID, landCell);
             }
         }
 
-        public static void add_outside_cell(CellArray cellArray, Vector2 lcoord)
+        public static void add_outside_cell(CellArray cellArray, Vector2 lcoord, uint instance)
         {
-            add_outside_cell(cellArray, lcoord.X, lcoord.Y);
+            add_outside_cell(cellArray, lcoord.X, lcoord.Y, instance);
         }
 
         /// <summary>
         /// Checks if this sphere exceeds the boundaries of the cell
         /// if it does, adds the neighboring cells to cellArray
         /// </summary>
-        public static void check_add_cell_boundary(CellArray cellArray, Vector2 point, Vector2 lcoord, float minRad, float maxRad)
+        public static void check_add_cell_boundary(CellArray cellArray, Vector2 point, Vector2 lcoord, float minRad, float maxRad, uint instance)
         {
             float x = lcoord.X, y = lcoord.Y;
 
             if (point.X > maxRad)
             {
-                add_outside_cell(cellArray, x + 1, y);
+                add_outside_cell(cellArray, x + 1, y, instance);
                 if (point.Y > maxRad)
-                    add_outside_cell(cellArray, x + 1, y + 1);
+                    add_outside_cell(cellArray, x + 1, y + 1, instance);
                 if (point.Y < minRad)
-                    add_outside_cell(cellArray, x + 1, y - 1);
+                    add_outside_cell(cellArray, x + 1, y - 1, instance);
             }
             if (point.X < minRad)
             {
-                add_outside_cell(cellArray, x - 1, y);
+                add_outside_cell(cellArray, x - 1, y, instance);
                 if (point.Y > maxRad)
-                    add_outside_cell(cellArray, x - 1, y + 1);
+                    add_outside_cell(cellArray, x - 1, y + 1, instance);
                 if (point.Y < minRad)
-                    add_outside_cell(cellArray, x - 1, y - 1);
+                    add_outside_cell(cellArray, x - 1, y - 1, instance);
             }
             if (point.Y > maxRad)
-                add_outside_cell(cellArray, x, y + 1);
+                add_outside_cell(cellArray, x, y + 1, instance);
 
             if (point.Y < minRad)
-                add_outside_cell(cellArray, x, y - 1);
+                add_outside_cell(cellArray, x, y - 1, instance);
         }
 
         public bool find_terrain_poly(Vector3 origin, ref Polygon walkable)
@@ -268,16 +268,16 @@ namespace ACE.Server.Physics.Common
             return false;
         }
 
-        public override void find_transit_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray)
+        public override void find_transit_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray, uint instance)
         {
-            add_all_outside_cells(numParts, parts, cellArray, ID);
-            base.find_transit_cells(numParts, parts, cellArray);
+            add_all_outside_cells(numParts, parts, cellArray, ID, instance);
+            base.find_transit_cells(numParts, parts, cellArray, instance);
         }
 
-        public override void find_transit_cells(Position position, int numSphere, List<Sphere> sphere, CellArray cellArray, SpherePath path)
+        public override void find_transit_cells(Position position, int numSphere, List<Sphere> sphere, CellArray cellArray, SpherePath path, uint instance)
         {
-            add_all_outside_cells(position, numSphere, sphere, cellArray);
-            base.find_transit_cells(position, numSphere, sphere, cellArray, path);
+            add_all_outside_cells(position, numSphere, sphere, cellArray, instance);
+            base.find_transit_cells(position, numSphere, sphere, cellArray, path, instance);
         }
 
         public override bool point_in_cell(Vector3 point)

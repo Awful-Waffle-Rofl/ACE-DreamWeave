@@ -74,7 +74,7 @@ namespace ACE.Server.WorldObjects
                 Fellowship.OnDeath(this);
 
             // if the player's lifestone is in a different landblock, also broadcast their demise to that landblock
-            if (PropertyManager.GetBool("lifestone_broadcast_death").Item && Sanctuary != null && Location.Landblock != Sanctuary.Landblock)
+            if (PropertyManager.GetBool("lifestone_broadcast_death").Item && Sanctuary != null && Location.InstancedLandblock != Sanctuary.InstancedLandblock)
             {
                 // ActionBroadcastKill might not work if other players around lifestone aren't aware of this player yet...
                 // this existing broadcast method is also based on the current visible objects to the player,
@@ -83,7 +83,7 @@ namespace ACE.Server.WorldObjects
 
                 // instead, we get all of the players in the lifestone landblock + adjacent landblocks,
                 // and possibly limit that to some radius around the landblock?
-                var lifestoneBlock = LandblockManager.GetLandblock(new LandblockId(Sanctuary.Landblock << 16 | 0xFFFF), true);
+                var lifestoneBlock = LandblockManager.GetLandblock(new LandblockId(Sanctuary.LandblockShort << 16 | 0xFFFF), Sanctuary.Instance, true);
 
                 // We enqueue the work onto the target landblock to ensure thread-safety. It's highly likely the lifestoneBlock is far away, and part of a different landblock group (and thus different thread).
                 lifestoneBlock.EnqueueAction(new ActionEventDelegate(() => lifestoneBlock.EnqueueBroadcast(excludePlayers, true, Sanctuary, LocalBroadcastRangeSq, broadcastMsg)));
@@ -151,6 +151,18 @@ namespace ACE.Server.WorldObjects
         {
             IsInDeathProcess = true;
 
+            // survival challenge (WaffleACE): a death inside the arena scores the run up front (before the penalties
+            // below are computed) and waives them for the rest of the death sequence - no vitae, no enchantment
+            // purge, no dropped items, and the player is returned to the arena entrance instead of their lifestone.
+            var survivalDeath = TryBeginSurvivalChallengeDeath();
+
+            // wave challenge (WaffleACE): a death inside the wave gauntlet gets the same penalty-free treatment.
+            // The score (the last wave fully cleared) was already banked as each wave cleared.
+            var waveDeath = TryBeginWaveChallengeDeath();
+
+            // either Proving Grounds run death waives the normal death penalties for the rest of the sequence
+            var arenaDeath = survivalDeath || waveDeath;
+
             if (topDamager?.Guid == Guid && IsPKType)
             {
                 var topDamagerOther = DamageHistory.GetTopDamager(false);
@@ -205,20 +217,31 @@ namespace ACE.Server.WorldObjects
 
             // update vitae
             // players who died in a PKLite fight do not accrue vitae
-            if (!IsPKLiteDeath(topDamager))
+            // Proving Grounds arena deaths (survival / wave) accrue no vitae either
+            // Mule (WaffleACE): a mule never accrues vitae at all. Vitae is only ever worked off through
+            // UpdateXpVitae on an XP grant, and a mule can never earn XP (GrantXP refuses it), so a penalty
+            // applied here would be permanent and would compound with every death - permanently cutting the
+            // carrying capacity the character exists for. hadVitae, read just above, is therefore always false
+            // for a mule, so corpse creation stays consistent with not having applied it. Mules still die and
+            // still leave corpses; nothing else about death or item drops changes.
+            if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule)
                 InflictVitaePenalty();
 
-            if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
+            // Proving Grounds arena deaths skip the enchantment purge entirely - the player keeps their buffs
+            if (!arenaDeath)
             {
-                var msgPurgeEnchantments = new GameEventMagicPurgeEnchantments(Session);
-                EnchantmentManager.RemoveAllEnchantments();
-                Session.Network.EnqueueSend(msgPurgeEnchantments);
-            }
-            else
-            {
-                var msgPurgeBadEnchantments = new GameEventMagicPurgeBadEnchantments(Session);
-                EnchantmentManager.RemoveAllBadEnchantments();
-                Session.Network.EnqueueSend(msgPurgeBadEnchantments, new GameMessageSystemChat("Your augmentation prevents the tides of death from ripping away your current enchantments!", ChatMessageType.Broadcast));
+                if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
+                {
+                    var msgPurgeEnchantments = new GameEventMagicPurgeEnchantments(Session);
+                    EnchantmentManager.RemoveAllEnchantments();
+                    Session.Network.EnqueueSend(msgPurgeEnchantments);
+                }
+                else
+                {
+                    var msgPurgeBadEnchantments = new GameEventMagicPurgeBadEnchantments(Session);
+                    EnchantmentManager.RemoveAllBadEnchantments();
+                    Session.Network.EnqueueSend(msgPurgeBadEnchantments, new GameMessageSystemChat("Your augmentation prevents the tides of death from ripping away your current enchantments!", ChatMessageType.Broadcast));
+                }
             }
 
             // wait for the death animation to finish
@@ -247,7 +270,18 @@ namespace ACE.Server.WorldObjects
         public void ThreadSafeTeleportOnDeath()
         {
             // teleport to sanctuary or best location
-            var newPosition = Sanctuary ?? Instantiation ?? Location;
+            // Proving Grounds arena deaths (survival / wave) return the player to the arena entrance
+            // (EphemeralRealmExitTo) instead of their lifestone, so a death simply drops them back outside the
+            // Proving Grounds portal
+            Position newPosition;
+            if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress)
+            {
+                var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
+                newPosition = (exitTo != null ? new Position(exitTo) : Sanctuary) ?? Instantiation ?? Location;
+                SetPosition(PositionType.EphemeralRealmExitTo, null);
+            }
+            else
+                newPosition = Sanctuary ?? Instantiation ?? Location;
 
             WorldManager.ThreadSafeTeleport(this, newPosition, new ActionEventDelegate(() =>
             {
@@ -282,6 +316,10 @@ namespace ACE.Server.WorldObjects
                     OnHealthUpdate();
 
                     IsInDeathProcess = false;
+
+                    // the arena death sequence is fully complete - clear the markers
+                    EndSurvivalChallengeDeath();
+                    EndWaveChallengeDeath();
 
                     if (IsLoggingOut)
                         LogOut_Final(true);
@@ -478,7 +516,11 @@ namespace ACE.Server.WorldObjects
             // if player dies on a No Drop landblock,
             // they don't drop any items
 
-            if (corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId))
+            // Proving Grounds arena deaths (survival / wave) are penalty-free: drop nothing (same as a no-drop landblock)
+            // server-wide switch: when player_death_no_item_loss is on, death costs nothing. This returns before
+            // the coin calculation below, so it suppresses the half-pyreal loss as well as items, for every
+            // death including PK deaths
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress)
                 return new List<WorldObject>();
 
             var numItemsDropped = GetNumItemsDropped(corpse);
@@ -517,6 +559,11 @@ namespace ACE.Server.WorldObjects
                 //Console.WriteLine($"Dropping {numCoinsDropped} pyreals");
             }
 
+            // the off-player save each removal below needs is collected rather than enqueued per item, then issued
+            // as one batched save after both loops - see Player.DeepSave. A death that drops many items would
+            // otherwise put one un-mergeable entry per item on the single shard queue.
+            var deferredSaves = NewDeferredSaveList();
+
             // Remove the items from inventory
             for (var i = 0; i < numItemsDropped && i < sorted.Inventory.Count; i++)
             {
@@ -545,7 +592,7 @@ namespace ACE.Server.WorldObjects
                 }
                 else
                 {
-                    if (TryRemoveFromInventoryWithNetworking(deathItem.WorldObject.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath) || TryDequipObjectWithNetworking(deathItem.WorldObject.Guid, out _, DequipObjectAction.ToCorpseOnDeath))
+                    if (TryRemoveFromInventoryWithNetworking(deathItem.WorldObject.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath, deferredSaves) || TryDequipObjectWithNetworking(deathItem.WorldObject.Guid, out _, DequipObjectAction.ToCorpseOnDeath, deferredSaves))
                     {
                         //Console.WriteLine("Dropping " + deathItem.WorldObject.Name);
                         dropItems.Add(deathItem.WorldObject);
@@ -562,9 +609,14 @@ namespace ACE.Server.WorldObjects
 
             foreach (var item in slipperyItems)
             {
-                if (TryRemoveFromInventoryWithNetworking(item.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath) || TryDequipObjectWithNetworking(item.Guid, out _, DequipObjectAction.ToCorpseOnDeath))
+                if (TryRemoveFromInventoryWithNetworking(item.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath, deferredSaves) || TryDequipObjectWithNetworking(item.Guid, out _, DequipObjectAction.ToCorpseOnDeath, deferredSaves))
                     dropItems.Add(item);
             }
+
+            // ORDERING: enqueued before the corpse-transfer loop below, which both destroys items
+            // (destroyCoins -> Destroy() -> RemoveBiotaFromDatabase) and re-parents the rest into the corpse.
+            // That is the same order the per-item saves ran in before: save first, then destroy / re-parent.
+            FlushDeferredSaves(deferredSaves);
 
             var destroyCoins = PropertyManager.GetBool("corpse_destroy_pyreals").Item;
 
@@ -1064,6 +1116,10 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public List<WorldObject> CalculateDeathItems_Olthoi(Corpse corpse, bool hadVitae, bool killerIsOlthoiPlayer, bool killerIsPkPlayer)
         {
+            // the same server-wide switch covers the Olthoi slag / PK-loot path
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item)
+                return new List<WorldObject>();
+
             if (killerIsOlthoiPlayer)
             {
                 var slag = LootGenerationFactory.RollSlag(this, hadVitae);

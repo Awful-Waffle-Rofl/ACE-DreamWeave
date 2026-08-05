@@ -171,6 +171,14 @@ namespace ACE.Server.Managers
         /// </summary>
         public void Update(string questFormat)
         {
+            // Mule (WaffleACE): a mule makes no quest progress. Update and SetQuestCompletions are the only
+            // two row-creating / advancing primitives here (Increment and SetQuestBits both route through
+            // them), and Decrement / Erase cannot advance a quest so they are deliberately not guarded.
+            // Silent, because emote scripts call this in bulk and a chat refusal per row would flood the
+            // player. QuestManager can also hold a plain Creature, so the guard only applies to a Player.
+            if (Creature is Player muleCheck && muleCheck.MuleBlocked(MuleAction.AdvanceQuest, notify: false))
+                return;
+
             var questName = GetQuestName(questFormat);
 
             var quest = GetOrCreateQuest(questName, out var questRegistryWasCreated);
@@ -189,6 +197,10 @@ namespace ACE.Server.Managers
                     player.CharacterChangesDetected = true;
 
                     player.ContractManager.NotifyOfQuestUpdate(quest.QuestName);
+
+                    // a brand new registry row is worth a quest stamp - only here, never on the update path
+                    // (see Player_QuestStamps)
+                    player.HandleQuestStampRowCreated(quest.QuestName, notify: true);
                 }
             }
             else
@@ -219,6 +231,10 @@ namespace ACE.Server.Managers
         /// </summary>
         public void SetQuestCompletions(string questFormat, int questCompletions = 0)
         {
+            // Mule (WaffleACE): see the note on Update above - same reasoning, silent for the same reason.
+            if (Creature is Player muleCheck && muleCheck.MuleBlocked(MuleAction.AdvanceQuest, notify: false))
+                return;
+
             var questName = GetQuestName(questFormat);
 
             var maxSolves = GetMaxSolves(questName);
@@ -241,6 +257,18 @@ namespace ACE.Server.Managers
                     player.CharacterChangesDetected = true;
 
                     player.ContractManager.NotifyOfQuestUpdate(quest.QuestName);
+
+                    // A brand new registry row is worth a quest stamp, and this path announces it like any
+                    // other first-time stamp. This looks like a silent bookkeeping path but is not: retail
+                    // content uses SetQuestCompletions as its "stamp at quest hand-out" mechanism (the
+                    // Facility Hub Wardens, e.g. wcid 42124, stamp fachubbanderlingcampportal_flag via
+                    // EmoteType.SetQuestCompletions when handing out the task), so staying silent here would
+                    // hide the acceptance stamp the player just earned. Stamps are player-visible events on
+                    // this server, and an internal-looking flag name in the message is acceptable noise -
+                    // players already see names like FacilityHubFound_1111 from the Update path.
+                    // SetQuestBits routes through here too, but only creates a row on the FIRST bit set, so a
+                    // bitfield quest produces at most one message ever.
+                    player.HandleQuestStampRowCreated(quest.QuestName, notify: true);
                 }
             }
             else

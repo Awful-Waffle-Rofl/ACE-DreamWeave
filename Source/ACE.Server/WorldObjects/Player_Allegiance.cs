@@ -65,6 +65,12 @@ namespace ACE.Server.WorldObjects
         /// <param name="targetGuid">The target this player is attempting to swear allegiance to</param>
         public void HandleActionSwearAllegiance(uint targetGuid)
         {
+            // Mule (WaffleACE): a mule cannot swear allegiance. Guarding this entry point covers the whole
+            // chain: SwearAllegiance below is only ever reached from here (directly via the moveto callback,
+            // or via Confirmation_SwearAllegiance, which SwearAllegiance itself is what enqueues).
+            if (MuleBlocked(MuleAction.SwearAllegiance))
+                return;
+
             var patron = PlayerManager.GetOnlinePlayer(targetGuid);
 
             if (patron == null) return;

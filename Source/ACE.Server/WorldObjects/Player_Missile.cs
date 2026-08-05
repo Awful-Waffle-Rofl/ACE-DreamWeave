@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 
 using ACE.Entity.Enum;
+using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics.Animation;
@@ -40,6 +43,14 @@ namespace ACE.Server.WorldObjects
         public void HandleActionTargetedMissileAttack(uint targetGuid, uint attackHeight, float accuracyLevel)
         {
             //log.Info($"-");
+
+            // Mule (WaffleACE): a mule never fights. OnAttackDone releases the client's attack sequence,
+            // matching the other refusal branches below.
+            if (MuleBlocked(MuleAction.MissileAttack))
+            {
+                OnAttackDone();
+                return;
+            }
 
             if (CombatMode != CombatMode.Missile)
             {
@@ -209,7 +220,7 @@ namespace ACE.Server.WorldObjects
             // calculate projectile spawn pos and velocity
             var localOrigin = GetProjectileSpawnOrigin(ammo.WeenieClassId, aimLevel);
 
-            var velocity = CalculateProjectileVelocity(localOrigin, target, projectileSpeed, out Vector3 origin, out Quaternion orientation);
+            var velocity = CalculateProjectileVelocity(localOrigin, target, projectileSpeed, out Vector3 origin, out Quaternion orientation, out _);
 
             //Console.WriteLine($"Velocity: {velocity}");
 
@@ -243,6 +254,53 @@ namespace ACE.Server.WorldObjects
 
                 var projectile = LaunchProjectile(launcher, ammo, target, origin, orientation, velocity);
                 UpdateAmmoAfterLaunch(ammo);
+
+                // PROTOTYPE: multi-shot - damage is still resolved directly (cleave-style) rather than via
+                // ProjectileCollisionHelper, so one acquired creature can never block another from being hit.
+                // See GetMultiShotTargets. Each extra target gets a real-flight-time cosmetic arrow, and damage
+                // is delayed to land when that arrow actually arrives (see LaunchCosmeticMultiShotProjectile's
+                // out flightTime) rather than the instant the shot is fired, so it doesn't look/feel like extra
+                // targets take damage before the arrow reaches them.
+                // PvP exclusion: multi-shot doesn't fire at all if the primary target is a player.
+                // Extra arrows come from two stacking sources: a multi-shot weapon and class abilities
+                // (e.g. Multishot). One damage multiplier per extra shot: weapon-granted arrows use
+                // the weapon's own multiplier, skill-granted arrows each supply their own.
+                var shotMultipliers = new List<float>();
+
+                for (var i = 0; i < weapon.MultiShotCount; i++)
+                    shotMultipliers.Add(weapon.MultiShotDamageMultiplier);
+
+                AddClassAbilityMissileShots(shotMultipliers);
+
+                // captured so a Double Volley re-fire can repeat the exact same extra-target spread
+                var volleyExtraShots = new List<(Creature target, float mult)>();
+
+                if (shotMultipliers.Count > 0 && creature != null && creature is not Player)
+                {
+                    var multiShotTargets = GetMultiShotTargets(creature, weapon, shotMultipliers.Count);
+
+                    var shotIndex = 0;
+                    foreach (var extraTarget in multiShotTargets)
+                    {
+                        var damageMultiplier = shotMultipliers[shotIndex];
+                        shotIndex++;
+
+                        FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, damageMultiplier);
+                        volleyExtraShots.Add((extraTarget, damageMultiplier));
+                    }
+                }
+
+                // class ability: Double Volley - a chance to immediately fire a full second volley at no
+                // ammo/stamina cost. The repeat is entirely cleave-style (a cosmetic primary arrow at the
+                // main target plus the same extra-target spread), so it never re-enters the attack state
+                // machine or consumes resources. PvP-excluded like multi-shot.
+                if (creature != null && creature is not Player && TryClassAbilityDoubleVolley())
+                {
+                    FireMultiShotArrow(launcher, ammo, creature, projectileSpeed, 1.0f);
+
+                    foreach (var (extraTarget, mult) in volleyExtraShots)
+                        FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, mult);
+                }
             });
 
             // ammo remaining?
@@ -307,6 +365,64 @@ namespace ACE.Server.WorldObjects
 
             if (UnderLifestoneProtection)
                 LifestoneProtectionDispel();
+        }
+
+        /// <summary>
+        /// PROTOTYPE: spawns a purely visual arrow flying at an extra multi-shot target, and returns it so the
+        /// caller can also use it as the damageSource for DamageTarget (it carries ProjectileSource/ProjectileLauncher/
+        /// ProjectileAmmo from LaunchProjectile, which DamageEvent.CalculateDamage requires to correctly resolve
+        /// missile combat/weapon - see the call site in LaunchMissile). Damage is NOT resolved by this projectile
+        /// colliding - ProjectileTarget is cleared (and IsCosmeticProjectile set) right after creation so
+        /// ProjectileCollisionHelper never applies a second, redundant hit or a hit/miss message for it, no matter
+        /// what it physically collides with (or fails to). Instead the caller delays its own DamageTarget call by
+        /// flightTime, so the extra target takes damage when the (visual) arrow actually arrives, not the instant
+        /// it's fired. The physics engine's own homing/target tracking (set inside LaunchProjectile, independent of
+        /// the WorldObject-level ProjectileTarget field) still points at the real extraTarget, so the flight itself
+        /// looks correct.
+        /// </summary>
+        /// <summary>
+        /// Fires one cleave-style multi-shot arrow at a target: spawns the cosmetic projectile and schedules
+        /// its delayed DamageTarget so damage lands when the (visual) arrow arrives. Shared by the normal
+        /// multi-shot spread and the Double Volley class-ability re-fire. No-op if the projectile can't spawn.
+        /// </summary>
+        private void FireMultiShotArrow(WorldObject launcher, WorldObject ammo, Creature target, float projectileSpeed, float damageMultiplier)
+        {
+            // The cosmetic projectile must be spawned BEFORE damage is calculated, and used as the
+            // damageSource - DamageEvent.CalculateDamage classifies CombatType.Missile (and resolves
+            // Weapon) purely from damageSource.ProjectileSource/ProjectileLauncher being set, which only
+            // a real (even if visual-only) projectile object carries.
+            var cosmeticProjectile = LaunchCosmeticMultiShotProjectile(launcher, ammo, target, projectileSpeed, out var flightTime);
+
+            if (cosmeticProjectile == null)
+                return;
+
+            var impactChain = new ActionChain();
+            impactChain.AddDelaySeconds(flightTime);
+            impactChain.AddAction(this, () => DamageTarget(target, cosmeticProjectile, damageMultiplier));
+            impactChain.EnqueueChain();
+        }
+
+        private WorldObject LaunchCosmeticMultiShotProjectile(WorldObject launcher, WorldObject ammo, WorldObject extraTarget, float projectileSpeed, out float flightTime)
+        {
+            var aimVelocity = GetAimVelocity(extraTarget, projectileSpeed);
+            var aimLevel = GetAimLevel(aimVelocity);
+
+            var localOrigin = GetProjectileSpawnOrigin(ammo.WeenieClassId, aimLevel);
+
+            var velocity = CalculateProjectileVelocity(localOrigin, extraTarget, projectileSpeed, out Vector3 origin, out Quaternion orientation, out flightTime);
+
+            if (velocity == Vector3.Zero)
+                return null;
+
+            var cosmeticProjectile = LaunchProjectile(launcher, ammo, extraTarget, origin, orientation, velocity);
+
+            if (cosmeticProjectile == null)
+                return null;
+
+            cosmeticProjectile.IsCosmeticProjectile = true;
+            cosmeticProjectile.ProjectileTarget = null;
+
+            return cosmeticProjectile;
         }
 
         // TODO: the damage pipeline currently uses the creature ammo instead of the projectile

@@ -8,6 +8,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
 using ACE.Server.Managers;
+using ACE.Server.Managers.Analytics;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
@@ -234,9 +235,14 @@ namespace ACE.Server.WorldObjects
             var myEscrow = new List<WorldObject>();
             var targetEscrow = new List<WorldObject>();
 
+            // the off-player save each removal below needs is collected rather than enqueued per item, then issued
+            // as one batched save after both loops, still inside this handler - see Player.DeepSave. This is
+            // separate from tradedItems, which is saved later (after the items land in their new owner's pack).
+            var deferredSaves = NewDeferredSaveList();
+
             foreach (ObjectGuid itemGuid in ItemsInTradeWindow)
             {
-                if (TryRemoveFromInventoryWithNetworking(itemGuid, out var wo, RemoveFromInventoryAction.TradeItem) || TryDequipObjectWithNetworking(itemGuid, out wo, DequipObjectAction.TradeItem))
+                if (TryRemoveFromInventoryWithNetworking(itemGuid, out var wo, RemoveFromInventoryAction.TradeItem, deferredSaves) || TryDequipObjectWithNetworking(itemGuid, out wo, DequipObjectAction.TradeItem, deferredSaves))
                 {
                     targetEscrow.Add(wo);
 
@@ -246,13 +252,17 @@ namespace ACE.Server.WorldObjects
 
             foreach (ObjectGuid itemGuid in target.ItemsInTradeWindow)
             {
-                if (target.TryRemoveFromInventoryWithNetworking(itemGuid, out var wo, RemoveFromInventoryAction.TradeItem) || target.TryDequipObjectWithNetworking(itemGuid, out wo, DequipObjectAction.TradeItem))
+                if (target.TryRemoveFromInventoryWithNetworking(itemGuid, out var wo, RemoveFromInventoryAction.TradeItem, deferredSaves) || target.TryDequipObjectWithNetworking(itemGuid, out wo, DequipObjectAction.TradeItem, deferredSaves))
                 {
                     myEscrow.Add(wo);
 
                     tradedItems.Add((wo.Biota, wo.BiotaDatabaseLock));
                 }
             }
+
+            // nothing between the loops and here mutates or destroys a traded item, and this still runs before the
+            // 0.5s action chain below re-adds them to their new owner - same order as the per-item saves it replaces.
+            FlushDeferredSaves(deferredSaves);
 
             var actionChain = new ActionChain();
             actionChain.AddDelaySeconds(0.5f);
@@ -263,6 +273,12 @@ namespace ACE.Server.WorldObjects
 
                 foreach (var wo in targetEscrow)
                     target.TryCreateInInventoryWithNetworking(wo);
+
+                // Analytics (Tier-2): record item flows in both directions for value-weighted mule detection.
+                foreach (var wo in targetEscrow)
+                    AnalyticsManager.RecordTradeItem(this, target, wo);   // my items -> target
+                foreach (var wo in myEscrow)
+                    AnalyticsManager.RecordTradeItem(target, this, wo);   // target's items -> me
 
                 Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.TradeComplete));
                 target.Session.Network.EnqueueSend(new GameEventWeenieError(target.Session, WeenieError.TradeComplete));

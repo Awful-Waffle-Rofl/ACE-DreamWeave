@@ -11,7 +11,7 @@ namespace ACE.Server.Network.GameMessages.Messages
             Writer.Write(worldObject.Sequences.GetNextSequence(Sequence.SequenceType.UpdateAttribute, creatureAttribute.Attribute));
             Writer.Write((uint)creatureAttribute.Attribute);
             Writer.Write(creatureAttribute.Ranks);
-            Writer.Write(creatureAttribute.StartingValue);
+            Writer.Write(creatureAttribute.NetworkStartingValue);
             Writer.Write(creatureAttribute.ExperienceSpent);
         }
     }

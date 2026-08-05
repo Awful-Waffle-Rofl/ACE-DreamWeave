@@ -93,6 +93,23 @@ namespace ACE.Server.Physics.Common
             PhysicsObj = obj;
         }
 
+        /// <summary>
+        /// ACRealms port: a landblock's instance copies (e.g. a realm-0 and a realm-1 view of
+        /// the same landblock) share 32-bit object guids, and every tracking table below is keyed
+        /// by that bare guid with no instance component. Two concurrently-loaded instances of one
+        /// landblock must never cross-populate each other's clients, so every insertion into these
+        /// tables is gated on the object sharing this owner's landblock instance.
+        ///
+        /// This is the single chokepoint that keeps the leak closed regardless of which path tries
+        /// to create the association - the per-instance cell arrival scan, the inverse KnownPlayers
+        /// population used for broadcast recipient selection, monster target acquisition, or a re-add
+        /// after an incomplete instance-transition flush. It is a cheap integer compare on a 60Hz path.
+        /// </summary>
+        private bool DifferentInstance(PhysicsObj obj)
+        {
+            return obj != null && PhysicsObj != null && obj.CurInstance != PhysicsObj.CurInstance;
+        }
+
 
         public PhysicsObj GetKnownObject(uint objectGuid)
         {
@@ -196,6 +213,10 @@ namespace ACE.Server.Physics.Common
             rwLock.EnterWriteLock();
             try
             {
+                // never associate an object from another landblock instance (see DifferentInstance)
+                if (DifferentInstance(obj))
+                    return false;
+
                 if (KnownObjects.ContainsKey(obj.ID))
                     return false;
 
@@ -432,6 +453,10 @@ namespace ACE.Server.Physics.Common
             rwLock.EnterWriteLock();
             try
             {
+                // never associate an object from another landblock instance (see DifferentInstance)
+                if (DifferentInstance(obj))
+                    return false;
+
                 if (VisibleObjects.ContainsKey(obj.ID))
                     return false;
 
@@ -750,6 +775,12 @@ namespace ACE.Server.Physics.Common
         /// <returns>true if previously an unknown object</returns>
         private bool AddKnownPlayer(PhysicsObj obj)
         {
+            // never associate a player from another landblock instance (see DifferentInstance) -
+            // this is the broadcast recipient list, so a cross-instance entry here would leak
+            // every CreateObject / motion / update to a client in the other instance
+            if (DifferentInstance(obj))
+                return false;
+
             // only tracking players who know about this object
             if (!obj.IsPlayer)
             {
@@ -913,6 +944,12 @@ namespace ACE.Server.Physics.Common
         /// </summary>
         private bool AddVisibleTarget(PhysicsObj obj, bool clamp = true, bool foeType = false)
         {
+            // never acquire a target (or its inverse) across a landblock instance boundary
+            // (see DifferentInstance) - keeps monsters/combat pets in one instance from
+            // targeting players/creatures in the other instance of the same landblock
+            if (DifferentInstance(obj))
+                return false;
+
             if (PhysicsObj.WeenieObj.IsCombatPet)
             {
                 // only tracking monsters
@@ -1052,6 +1089,10 @@ namespace ACE.Server.Physics.Common
             rwLock.EnterWriteLock();
             try
             {
+                // never retaliate against a target in another landblock instance (see DifferentInstance)
+                if (DifferentInstance(obj))
+                    return;
+
                 if (RetaliateTargets.ContainsKey(obj.ID))
                 {
                     //Console.WriteLine($"{PhysicsObj.Name}.AddRetaliateTarget({obj.Name}) - retaliate target already exists");

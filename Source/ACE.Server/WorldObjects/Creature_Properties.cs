@@ -1,6 +1,7 @@
 using System;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Managers;
 
 namespace ACE.Server.WorldObjects
@@ -205,7 +206,11 @@ namespace ACE.Server.WorldObjects
                 case ResistanceType.HealthBoost:
                     return (ResistHealthBoost ?? 1.0) * GetHealingRatingMod();
                 case ResistanceType.HealthDrain:
-                    return (ResistHealthDrain ?? 1.0) * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod();
+                    // FORK CHANGE: retail dropped weaponResistanceMod on this branch, so life damage was the
+                    // only damage school with no weapon cleave/rend path at all - callers computed the
+                    // modifier and it was silently discarded here. See GetLifeVulnerabilityMod.
+                    return (ResistHealthDrain ?? 1.0) * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod()
+                           * GetLifeVulnerabilityMod(weaponResistanceMod);
                 case ResistanceType.StaminaBoost:
                     return (ResistStaminaBoost ?? 1.0) * GetHealingRatingMod();     // does healing rating affect these?
                 case ResistanceType.StaminaDrain:
@@ -217,6 +222,39 @@ namespace ACE.Server.WorldObjects
                 default:
                     return 1.0;
             }
+        }
+
+        /// <summary>
+        /// FORK ADDITION - the single "life vulnerability" axis.
+        ///
+        /// Life damage (Harm, Drain, Martyr's Hecatomb, Curse of Raven Fury) resolves through
+        /// ResistanceType.HealthDrain, which in retail never reaches the
+        /// GetResistanceMod(DamageType, ...) overload and therefore never saw either a weapon
+        /// resistance modifier or a vulnerability enchantment. This restores both, deliberately using
+        /// the SAME combining rule that overload uses for the elemental schools
+        /// (see the "whichever is more powerful" MAX in GetResistanceMod(DamageType, ...)):
+        ///
+        ///     every contributor to life vulnerability takes the MAXIMUM, never the product.
+        ///
+        /// That is what keeps "Resistance Cleaving: Health", Blood Rending, and the Blood Mage's cast life
+        /// vulnerability (Weakened Blood) on ONE axis, exactly as a war caster's rending wand
+        /// and a cast Fire Vulnerability do not multiply. New contributors belong in the Math.Max chain
+        /// here, NOT as separate multipliers at the damage sites - a separate multiplier would silently
+        /// re-open the stacking this method exists to prevent.
+        ///
+        /// Returns 1.0 (no change) when nothing applies, so untouched callers keep retail behaviour.
+        /// </summary>
+        public virtual float GetLifeVulnerabilityMod(float weaponResistanceMod = 1.0f)
+        {
+            // a rend/cleave below 1.0 would be a resistance, not a vulnerability - clamp it out.
+            // Weakened Blood (Blood Mage T2) joins the SAME max, never a product - see
+            // Creature_ClassAbilityDebuffs.cs.
+            //
+            // DRAIN DOES NOT ENTER HERE. It is excluded by ruling, and the exclusion is enforced at the
+            // call site rather than here: HandleCastSpell_Transfer reads GetHealthDrainResistanceOnly()
+            // instead of GetResistanceMod(HealthDrain), so it never reaches this method at all. See
+            // WeakenedBloodMath.DamageBenefits.
+            return WeakenedBloodMath.VulnerabilityMod(weaponResistanceMod, GetWeakenedBloodMod());
         }
 
         public double? HealthRate

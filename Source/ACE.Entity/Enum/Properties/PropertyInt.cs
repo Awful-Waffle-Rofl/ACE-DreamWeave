@@ -650,6 +650,112 @@ namespace ACE.Entity.Enum.Properties
         VisualClothingPriority                   = 9013,
         SquelchGlobal                            = 9014,
         InventoryOrder                           = 9015,
+        // PROTOTYPE: number of additional targets for a multi-shot missile weapon - see WorldObject_Weapon.MultiShotCount
+        MultiShotCount                           = 9016,
+        // Class ability system (see ACE.Server.Entity.ClassAbilityRegistry) - point balances on the player biota
+        AvailableClassAbilityPoints                = 9017,
+        TotalClassAbilityPointsEarned              = 9018,
+        ClassAbilityPointsPurchasedWithLum         = 9019,
+        // on a consumable item (Gem): class ability points granted when used
+        ClassAbilityPointValue                     = 9020,
+        // on a consumable class-ability token (Gem): the class ability it teaches (value = ClassAbilityId)
+        // (9021/9022 are taken by PortalInstancing/PortalRealm below - stay in the free 9023+ range)
+        ClassAbilityTokenId                        = 9023,
+        // on a consumable class-ability token (Gem): the exact rank/tier it teaches (1..MaxRank);
+        // using it learns that rank (must be current rank + 1) and spends the normal point cost
+        ClassAbilityTokenTier                      = 9024,
+        // on the player biota: how many level-milestone class ability points have been paid out so far
+        // (DESIGN.md sec 2a). Idempotent catch-up compares this to the entitlement derived from Level,
+        // so the grant is retroactive-safe for existing characters and immune to missed level-ups.
+        // LIFETIME total - must NEVER be reset (incl. by enlightenment, which sets Level back to 1): a
+        // re-leveling character then computes owed = entitled - this <= 0 and is never paid a milestone
+        // point twice. See Player.GrantMilestoneClassAbilityPoints.
+        MilestoneClassAbilityPointsGranted         = 9026,
+        // (9025 and 9027-9031 are taken by PortalExitInstance and the challenge-portal properties below - next free id is 9033)
+        // on the player biota: how many enlightenment-milestone class ability points have been paid out so
+        // far (DESIGN.md sec 2c). Idempotent catch-up compares this to the entitlement derived from the
+        // Enlightenment count, so the grant is retroactive-safe for characters enlightened before this lane
+        // existed. LIFETIME total - must NEVER be reset (incl. by enlightenment, which sets Level back to 1
+        // but must leave this counter and the earned points intact): a re-leveling character then computes
+        // owed = entitled - this and is never paid a milestone point twice. See
+        // Player.GrantEnlightenmentClassAbilityPoints.
+        EnlightenmentClassAbilityPointsGranted     = 9032,
+
+        // ACRealms port (id matches ACRealms): the realm a character calls home;
+        // portals and recalls resolve their destination instance from this
+        HomeRealm                                = 42000,
+
+        // WaffleACE (custom band): when 1 on a portal, each use routes the player into
+        // a fresh ephemeral instance of the destination dungeon
+        PortalInstancing                         = 9021,
+
+        // WaffleACE (custom band): routes portal users into this realm's default
+        // instance (per-realm content overrides make it a different experience);
+        // composes with PortalInstancing (= private ephemeral copy of the realm)
+        PortalRealm                              = 9022,
+
+        // WaffleACE (custom band): when 1 on a portal, using it inside an ephemeral
+        // instance sends the player to their stored EphemeralRealmExitTo instead of a
+        // static Destination - i.e. an exit portal whose target is per-player. Used by
+        // the DreamWeave Loomstone, whose exit is the character's own training hall.
+        PortalExitInstance                       = 9025,
+
+        // WaffleACE (custom band): on a portal weenie, the length in seconds of the DPS-challenge
+        // run it arms; > 0 marks the portal as a DPS-challenge portal (drops the player into a
+        // strictly single-player ephemeral arena and starts the timed damage trial on arrival).
+        DpsChallengeDuration                     = 9027,
+
+        // WaffleACE (custom band): on a portal weenie, the seconds between escalation tiers of the survival
+        // challenge it arms; > 0 marks the portal as a survival-challenge portal (drops the player into a
+        // strictly single-player ephemeral arena where enemies get stronger each tier until the player dies).
+        SurvivalChallengeInterval                = 9028,
+
+        // WaffleACE (custom band): on a portal weenie, the total number of waves in the gauntlet it arms; > 0
+        // marks the portal as a wave-challenge portal (drops the player into a strictly single-player ephemeral
+        // dungeon and runs a wave-by-wave survival gauntlet - see Player_WaveChallenge.cs).
+        WaveChallengeWaves                       = 9029,
+
+        // WaffleACE (custom band): on a wave-roster weenie, which wave (1-based) that roster defines. Content-set
+        // and purely a safety net - the engine addresses rosters by wcid arithmetic and only sanity-checks this
+        // value against the wave it is spawning, logging a mismatch without changing behavior.
+        WaveChallengeWaveIndex                   = 9030,
+
+        // WaffleACE (custom band): on a wave-challenge portal weenie, the wcid of the wave 1 roster weenie. The
+        // roster weenie for wave N is WaveChallengeRosterBaseWcid + N - 1, so a gauntlet's rosters must occupy a
+        // contiguous wcid block. A roster weenie carries no behavior of its own: the engine reads its generator
+        // table (weenie_properties_generator) as the wave's spawn list.
+        WaveChallengeRosterBaseWcid              = 9031,
+
+        // WaffleACE (custom band): on an equipment-mod-eligible item, how many equipment mods that item
+        // can carry. Written once when the item is first modded (the value is the rating count the item
+        // was born with; an unrated item caps at 1) and never grown afterwards. Absent = never modded.
+        // The mod values themselves live in the reserved PropertyFloat band 8100-8199 as potency scalars -
+        // see ACE.Server.EquipmentMods.EquipmentModRegistry.
+        // (9032 is taken by EnlightenmentClassAbilityPointsGranted, allocated in the PropertyInt 9028 collision fix - next free id is 9034)
+        GearModCapacity                          = 9033,
+
+        // WaffleACE (custom band): on a weapon managed by the weapon-mod system, how many of its ten
+        // tinker slots are currently filled by layer 1 tinkers (the rest being preserved imbues and
+        // Tier A special modifiers). PRESENCE marks the weapon as managed by that system, which is what
+        // suppresses the retail TinkerLog integrity gate on our own items - see
+        // ACE.Server.WeaponMods.WeaponModManager. Absent = never rerolled or swapped.
+        // (next free id is 9035)
+        WeaponModTinkerCount                     = 9034,
+
+        // WaffleACE (custom band): a multi-use salvage tool's fixed CAPACITY - how many applications it holds
+        // when new. Authored on the weenie and never changed in play. The LIVE count is PropertyInt.Structure,
+        // decremented once per application, with MaxStructure equal to this value; that is what lets the client
+        // draw its own uses-remaining bar. See ACE.Server.Entity.SalvageTool.
+        //
+        // PRESENCE with a value above 0 is what MARKS an item as a multi-use salvage tool rather than an
+        // ordinary salvage bag, and that distinction is load-bearing: without it a tool at 7 of 10 would be
+        // indistinguishable from a PARTIAL bag at 70 of 100, and a partial bag is deliberately refused by both
+        // mod systems. Absent on every ordinary bag, which is destroyed outright by its single use.
+        //
+        // Deliberately carries no [AssessmentProperty]: the client does not know this id and the value must
+        // never be sent to it, so the appraisal line is the only player-facing surface for the capacity.
+        // (next free id is 9036)
+        SalvageToolCharges                       = 9035,
     }
 
     public static class PropertyIntExtensions

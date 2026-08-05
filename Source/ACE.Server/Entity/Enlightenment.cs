@@ -2,120 +2,206 @@ using System;
 using System.Linq;
 
 using ACE.DatLoader;
+using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.WorldObjects;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 
 namespace ACE.Server.Entity
 {
+    /// <summary>
+    /// DreamWeave enlightenment rework: an unlimited endgame prestige loop that also raises the character's
+    /// personal level cap. Each enlightenment costs 1,000,000 luminance times the next enlightenment number,
+    /// requires the character to be at its personal maximum level (275 + 5 per enlightenment), and:
+    ///
+    /// RESETS  level -> 1, total experience -> 0, unassigned experience -> 0, all skills untrained (skill
+    ///         credits refunded, spent XP is NOT refunded), equipped items moved to the pack, enchantments dispelled.
+    /// KEEPS   attribute ranks/XP, vital ranks/XP, aetheria, luminance auras, societies, banked luminance,
+    ///         quest flags, class abilities.
+    /// GRANTS  a permanent, non-redistributable +1 to all six attributes and +1 to all specialized skills
+    ///         (folded in getter-only via CreatureAttribute/CreatureSkill so an attribute reset cannot touch
+    ///         it), plus +5 to the personal maximum level.
+    ///
+    /// Triggered by the /enl player command or an Enlightenment emote; both route through
+    /// <see cref="HandleEnlightenmentRequest"/>, which gates, confirms, re-verifies, and executes.
+    /// </summary>
     public class Enlightenment
     {
-        // https://asheron.fandom.com/wiki/Enlightenment
+        /// <summary>The luminance cost of the player's next enlightenment: 1,000,000 x the next enlightenment number.</summary>
+        public static long GetCost(Player player) => 1_000_000L * (player.Enlightenment + 1);
 
-        // Reset your character to level 1, losing all experience and luminance but gaining a title, two points in vitality and one point in all of your skills.
-        // In order to be eligible for enlightenment, you must be level 275, Master rank in a Society, and have all luminance auras with the exception of the skill credit auras.
-
-        // As stated in the Spring 2014 patch notes, Enlightenment is a process for the most devoted players of Asheron's Call to continue enhancing characters which have been "maxed out" in terms of experience and abilities.
-        // It was not intended to be a quest that every player would undertake or be interested in.
-
-        // Requirements:
-        // - Level 275
-        // - Have all luminance auras (crafting aura included) except the 2 skill credit auras. (20 million total luminance)
-        // - Have mastery rank in a society
-        // - Have 25 unused pack spaces
-        // - Max # of times for enlightenment: 5
-
-        // You lose:
-        // - All experience, reverting to level 1.
-        // - All luminance, and luminance auras with the exception of the skill credit auras.
-        // - The ability to use aetheria (until you attain sufficient level and re-open aetheria slots).
-        // - The ability to gain luminance (until you attain level 200 and re-complete Nalicana's Test).
-        // - The ability to equip and use items which have skill and level requirements beyond those of a level 1 character.
-        //   Any equipped items are moved to your pack automatically.
-
-        // You keep:
-        // - All augmentations obtained through Augmentation Gems.
-        // - Skill credits from luminance auras, Aun Ralirea, and Chasing Oswald quests.
-        // - All quest flags with the exception of aetheria and luminance.
-
-        // You gain:
-        // - A new title each time you enlighten
-        // - +2 to vitality
-        // - +1 to all of your skills
-        // - An attribute reset certificate
-
-        public static void HandleEnlightenment(WorldObject npc, Player player)
+        /// <summary>
+        /// Entry point for both the /enl command and the Enlightenment emote. Gates on
+        /// <see cref="VerifyRequirements"/>, shows a confirmation dialog, and on confirm re-verifies (state can
+        /// change while the dialog is open) before running the reset.
+        /// </summary>
+        public static void HandleEnlightenmentRequest(Player player, bool confirmed)
         {
             if (!VerifyRequirements(player))
                 return;
 
-            DequipAllItems(player);
+            if (!confirmed)
+            {
+                var cost = GetCost(player);
+                var enlNext = player.Enlightenment + 1;
+                var newMaxLevel = EnlightenmentXpCurve.GetMaxLevelForEnlightenment(enlNext);
 
-            RemoveAbility(player);
+                // class-ability-point outcome of THIS enlightenment (DESIGN.md sec 2c), shown only when the
+                // lane is active. owed can exceed 1 for a character being caught up from before this lane existed.
+                // Kept short: the AC client's confirmation panel is fixed-size and silently CLIPS trailing
+                // text past ~560 chars, so the worst-case variant must stay under that.
+                var capLine = "";
+                if (PropertyManager.GetBool("class_abilities_enabled").Item)
+                {
+                    var owed = EnlightenmentCapMilestones.EntitledCount(enlNext) - player.EnlightenmentClassAbilityPointsGranted;
+                    if (owed > 0)
+                        capLine = $"You will receive {owed} class ability point{(owed == 1 ? "" : "s")}.\n\n";
+                    else
+                        capLine = $"Next class ability point: Enlightenment {EnlightenmentCapMilestones.NextMilestoneAfter(enlNext)}.\n\n";
+                }
 
-            AddPerks(npc, player);
+                var msg = $"Are you sure you want to attain Enlightenment {enlNext}?\n\n" +
+                    $"Cost: {cost:N0} luminance.\n\n" +
+                    "You will reset to level 1 with 0 XP (unassigned XP included). All skills are untrained: skill credits refunded, experience not. Equipment moves to your pack; enchantments are dispelled.\n\n" +
+                    "You KEEP attributes, vitals, aetheria, luminance auras, societies, banked luminance, and quest flags.\n\n" +
+                    $"You gain permanently: +1 all attributes, +1 all specialized skills, +5 max level (new cap: {newMaxLevel}).\n\n" +
+                    capLine +
+                    "You will be returned to your lifestone.";
 
-            player.SaveBiotaToDatabase();
+                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Custom(player.Guid, () => HandleEnlightenmentRequest(player, true)), msg))
+                    player.SendWeenieError(WeenieError.ConfirmationInProgress);
+
+                return;
+            }
+
+            // re-verify at confirm time - level, luminance, combat state etc. may have changed while the dialog was open
+            if (!VerifyRequirements(player))
+                return;
+
+            Execute(player);
         }
 
         public static bool VerifyRequirements(Player player)
         {
-            if (player.Level < 275)
+            var maxLevel = player.GetPlayerMaxLevel();
+            if (player.Level < maxLevel)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You must be level 275 for enlightenment.", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You must be level {maxLevel} for your next enlightenment.", ChatMessageType.Broadcast));
                 return false;
             }
 
-            if (!VerifyLumAugs(player))
+            if (player.IsBusy || player.Teleporting || player.suicideInProgress)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You must have all luminance auras for enlightenment.", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("You cannot enlighten while teleporting or otherwise busy.", ChatMessageType.Broadcast));
                 return false;
             }
 
-            if (!VerifySocietyMaster(player))
+            if (player.CombatMode != CombatMode.NonCombat)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You must be a Master of one of the Societies of Dereth for enlightenment.", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("You must be in non-combat mode for enlightenment.", ChatMessageType.Broadcast));
+                return false;
+            }
+
+            if (player.IsTrading)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("You cannot enlighten while trading.", ChatMessageType.Broadcast));
+                return false;
+            }
+
+            if (player.HasVitae)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("You cannot enlighten while you have a Vitae penalty.", ChatMessageType.Broadcast));
                 return false;
             }
 
             if (player.GetFreeInventorySlots() < 25)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You must have at least 25 free inventory slots in your main pack for enlightenment.", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("You must have at least 25 free inventory slots in your main pack for enlightenment.", ChatMessageType.Broadcast));
                 return false;
             }
 
-            if (player.Enlightenment >= 5)
+            var cost = GetCost(player);
+            if ((player.AvailableLuminance ?? 0) + player.BankedLuminance < cost)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You have already reached the maximum enlightenment level!", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"Enlightenment {player.Enlightenment + 1} costs {cost:N0} luminance.", ChatMessageType.Broadcast));
                 return false;
             }
+
             return true;
         }
 
-        public static bool VerifySocietyMaster(Player player)
+        private static void Execute(Player player)
         {
-            return player.SocietyRankCelhan == 1001 || player.SocietyRankEldweb == 1001 || player.SocietyRankRadblo == 1001;
-        }
+            var cost = GetCost(player);
 
-        public static bool VerifyLumAugs(Player player)
-        {
-            var lumAugCredits = 0;
+            // 1. pay the luminance cost (available first, then bank) - abort without any changes if it fails
+            if (!player.TrySpendLuminanceIncludingBank(cost))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"Enlightenment {player.Enlightenment + 1} costs {cost:N0} luminance.", ChatMessageType.Broadcast));
+                return;
+            }
 
-            lumAugCredits += player.LumAugAllSkills;
-            lumAugCredits += player.LumAugSurgeChanceRating;
-            lumAugCredits += player.LumAugCritDamageRating;
-            lumAugCredits += player.LumAugCritReductionRating;
-            lumAugCredits += player.LumAugDamageRating;
-            lumAugCredits += player.LumAugDamageReductionRating;
-            lumAugCredits += player.LumAugItemManaUsage;
-            lumAugCredits += player.LumAugItemManaGain;
-            lumAugCredits += player.LumAugHealingRating;
-            lumAugCredits += player.LumAugSkilledCraft;
-            lumAugCredits += player.LumAugSkilledSpec;
+            // 2. move equipped items to the pack before skill loss invalidates their wield requirements
+            DequipAllItems(player);
 
-            return lumAugCredits == 65;
+            // 3. dispel active enchantments
+            player.EnchantmentManager.DispelAllEnchantments();
+
+            // 4. untrain all skills (refunds credits, not XP), recompute available + total skill credits
+            RemoveSkills(player);
+
+            // 5. reset level and total experience (AvailableExperience already zeroed inside RemoveSkills)
+            RemoveLevel(player);
+
+            // 6. increment the enlightenment count - this is what raises the +1/enl stat floor and the personal cap
+            player.Enlightenment += 1;
+            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.Enlightenment, player.Enlightenment));
+
+            // 7. refresh the client: the +1/enl attribute floor rides NetworkStartingValue (attributes cascade
+            //    into derived skills/vitals), vitals rebuild from the raised attributes, and the +1/enl floor on
+            //    specialized skills is resent (no skills are specialized right after a reset, but this keeps the
+            //    path correct and mirrors the class-ability SendEnhancedStatUpdate precedent)
+            foreach (var attribute in player.Attributes.Values)
+                player.Session.Network.EnqueueSend(new GameMessagePrivateUpdateAttribute(player, attribute));
+
+            player.SetMaxVitals();
+
+            // the client's own max-health formula adds Enlightenment * 2, and the count above just raised it;
+            // resend the corrected GearMaxHealth (see Player.GetNetworkGearMaxHealth) so the health bar's
+            // maximum stays on the server's value instead of drifting 2 higher with every enlightenment
+            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.GearMaxHealth, player.GetNetworkGearMaxHealth()));
+
+            foreach (var kvp in player.Skills)
+            {
+                if (kvp.Value.AdvancementClass == SkillAdvancementClass.Specialized)
+                    player.Session.Network.EnqueueSend(new GameMessagePrivateUpdateSkill(player, kvp.Value));
+            }
+
+            // 8. notify the player, and optionally announce server-wide (tunable)
+            player.SendMessage($"You have attained Enlightenment {player.Enlightenment} and view the world with new eyes.", ChatMessageType.Broadcast);
+            player.SendMessage("Your available skill credits have been restored.", ChatMessageType.Broadcast);
+
+            if (PropertyManager.GetBool("enlightenment_broadcast_enabled").Item)
+            {
+                var broadcast = $"{player.Name} has attained Enlightenment {player.Enlightenment}!";
+                PlayerManager.BroadcastToAll(new GameMessageSystemChat(broadcast, ChatMessageType.WorldBroadcast));
+                PlayerManager.LogBroadcastChat(Channel.AllBroadcast, null, broadcast);
+            }
+
+            // 9. pay out any enlightenment-milestone class ability points now owed (DESIGN.md sec 2c); the new
+            //    Enlightenment count above may have crossed a schedule milestone. Idempotent + gated internally.
+            player.GrantEnlightenmentClassAbilityPoints();
+
+            // 10. send the player to their lifestone - an immediate teleport, not the standard lifestone-recall
+            //    wind-up (no motion animation, no delay chain). Skip silently for a character that never attuned.
+            if (player.Sanctuary != null)
+                player.Teleport(new Position(player.Sanctuary));
+
+            // 11. persist
+            player.SaveBiotaToDatabase();
         }
 
         public static void DequipAllItems(Player player)
@@ -126,43 +212,6 @@ namespace ACE.Server.Entity
                 player.HandleActionPutItemInContainer(equippedObject.Full, player.Guid.Full, 0);
         }
 
-        public static void RemoveAbility(Player player)
-        {
-            RemoveSociety(player);
-            RemoveLuminance(player);
-            RemoveAetheria(player);
-            RemoveAttributes(player);
-            RemoveSkills(player);
-            RemoveLevel(player);
-        }
-
-        public static void RemoveSociety(Player player)
-        {
-            player.QuestManager.Erase("SocietyMember");
-            player.QuestManager.Erase("CelestialHandMember");
-            player.QuestManager.Erase("EnlightenedCelestialHandMaster");
-            player.QuestManager.Erase("EldrytchWebMember");
-            player.QuestManager.Erase("EnlightenedEldrytchWebMaster");
-            player.QuestManager.Erase("RadiantBloodMember");
-            player.QuestManager.Erase("EnlightenedRadiantBloodMaster");
-
-            if (player.SocietyRankCelhan == 1001)
-                player.QuestManager.Stamp("EnlightenedCelestialHandMaster"); // after rejoining society, player can get promoted instantly to master when speaking to promotions officer
-            if (player.SocietyRankEldweb == 1001)
-                player.QuestManager.Stamp("EnlightenedEldrytchWebMaster");   // after rejoining society, player can get promoted instantly to master when speaking to promotions officer
-            if (player.SocietyRankRadblo == 1001)
-                player.QuestManager.Stamp("EnlightenedRadiantBloodMaster");  // after rejoining society, player can get promoted instantly to master when speaking to promotions officer
-
-            player.Faction1Bits = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.Faction1Bits, 0));
-            player.SocietyRankCelhan = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.SocietyRankCelhan, 0));
-            player.SocietyRankEldweb = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.SocietyRankEldweb, 0));
-            player.SocietyRankRadblo = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.SocietyRankRadblo, 0));
-        }
-
         public static void RemoveLevel(Player player)
         {
             player.TotalExperience = 0;
@@ -170,57 +219,6 @@ namespace ACE.Server.Entity
 
             player.Level = 1;
             player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.Level, player.Level ?? 0));
-        }
-
-        public static void RemoveAetheria(Player player)
-        {
-            player.QuestManager.Erase("EFULNorthManaFieldUsed");
-            player.QuestManager.Erase("EFULSouthManaFieldUsed");
-            player.QuestManager.Erase("EFULEastManaFieldUsed");
-            player.QuestManager.Erase("EFULWestManaFieldUsed");
-            player.QuestManager.Erase("EFULCenterManaFieldUsed");
-
-            player.QuestManager.Erase("EFMLNorthManaFieldUsed");
-            player.QuestManager.Erase("EFMLSouthManaFieldUsed");
-            player.QuestManager.Erase("EFMLEastManaFieldUsed");
-            player.QuestManager.Erase("EFMLWestManaFieldUsed");
-            player.QuestManager.Erase("EFMLCenterManaFieldUsed");
-
-            player.QuestManager.Erase("EFLLNorthManaFieldUsed");
-            player.QuestManager.Erase("EFLLSouthManaFieldUsed");
-            player.QuestManager.Erase("EFLLEastManaFieldUsed");
-            player.QuestManager.Erase("EFLLWestManaFieldUsed");
-            player.QuestManager.Erase("EFLLCenterManaFieldUsed");
-
-            player.AetheriaFlags = AetheriaBitfield.None;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.AetheriaBitfield, 0));
-
-            player.SendMessage("Your mastery of Aetheric magics fades.", ChatMessageType.Broadcast);
-        }
-
-        public static void RemoveAttributes(Player player)
-        {
-            var propertyCount = Enum.GetNames(typeof(PropertyAttribute)).Length;
-            for (var i = 1; i < propertyCount; i++)
-            {
-                var attribute = (PropertyAttribute)i;
-
-                player.Attributes[attribute].Ranks = 0;
-                player.Attributes[attribute].ExperienceSpent = 0;
-                player.Session.Network.EnqueueSend(new GameMessagePrivateUpdateAttribute(player, player.Attributes[attribute]));
-            }
-
-            propertyCount = Enum.GetNames(typeof(PropertyAttribute2nd)).Length;
-            for (var i = 1; i < propertyCount; i += 2)
-            {
-                var attribute = (PropertyAttribute2nd)i;
-
-                player.Vitals[attribute].Ranks = 0;
-                player.Vitals[attribute].ExperienceSpent = 0;
-                player.Session.Network.EnqueueSend(new GameMessagePrivateUpdateVital(player, player.Vitals[attribute]));
-            }
-
-            player.SendMessage("Your attribute training fades.", ChatMessageType.Broadcast);
         }
 
         public static void RemoveSkills(Player player)
@@ -248,107 +246,12 @@ namespace ACE.Server.Entity
             player.AvailableSkillCredits = availableSkillCredits;
 
             player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.AvailableSkillCredits, player.AvailableSkillCredits ?? 0));
-        }
 
-        public static void RemoveLuminance(Player player)
-        {
-            player.QuestManager.Erase("OracleLuminanceRewardsAccess_1110");
-            player.QuestManager.Erase("LoyalToShadeOfLadyAdja");
-            player.QuestManager.Erase("LoyalToKahiri");
-            player.QuestManager.Erase("LoyalToLiamOfGelid");
-            player.QuestManager.Erase("LoyalToLordTyragar");
-
-            player.LumAugDamageRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugDamageRating, 0));
-            player.LumAugDamageReductionRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugDamageReductionRating, 0));
-            player.LumAugCritDamageRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugCritDamageRating, 0));
-            player.LumAugCritReductionRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugCritReductionRating, 0));
-            //player.LumAugSurgeEffectRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugSurgeEffectRating, 0));
-            player.LumAugSurgeChanceRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugSurgeChanceRating, 0));
-            player.LumAugItemManaUsage = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugItemManaUsage, 0));
-            player.LumAugItemManaGain = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugItemManaGain, 0));
-            player.LumAugVitality = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugVitality, 0));
-            player.LumAugHealingRating = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugHealingRating, 0));
-            player.LumAugSkilledCraft = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugSkilledCraft, 0));
-            player.LumAugSkilledSpec = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugSkilledSpec, 0));
-            player.LumAugAllSkills = 0;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.LumAugAllSkills, 0));
-
-            player.AvailableLuminance = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt64(player, PropertyInt64.AvailableLuminance, 0));
-            player.MaximumLuminance = null;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt64(player, PropertyInt64.MaximumLuminance, 0));
-
-            player.SendMessage("Your Luminance and Luminance Auras fade from your spirit.", ChatMessageType.Broadcast);
-        }
-
-        public static uint AttributeResetCertificate => 46421;
-
-        public static void AddPerks(WorldObject npc, Player player)
-        {
-            // +1 to all skills
-            // this could be handled through InitLevel, since we are always using deltas when modifying that field
-            // (ie. +5/-5, instead of specifically setting to 5 trained / 10 specialized in SkillAlterationDevice)
-            // however, it just feels safer to handle this dynamically in CreatureSkill, based on Enlightenment (similar to augs)
-            //var enlightenment = player.Enlightenment + 1;
-            //player.UpdateProperty(player, PropertyInt.Enlightenment, enlightenment);
-
-            player.Enlightenment += 1;
-            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.Enlightenment, player.Enlightenment));
-
-            player.SendMessage("You have become enlightened and view the world with new eyes.", ChatMessageType.Broadcast);
-            player.SendMessage("Your available skill credits have been adjusted.", ChatMessageType.Broadcast);
-            player.SendMessage("You have risen to a higher tier of enlightenment!", ChatMessageType.Broadcast);
-
-            var lvl = "";
-
-            // add title
-            switch (player.Enlightenment)
-            {
-                case 1:
-                    player.AddTitle(CharacterTitle.Awakened);
-                    lvl = "1st";
-                    break;
-                case 2:
-                    player.AddTitle(CharacterTitle.Enlightened);
-                    lvl = "2nd";
-                    break;
-                case 3:
-                    player.AddTitle(CharacterTitle.Illuminated);
-                    lvl = "3rd";
-                    break;
-                case 4:
-                    player.AddTitle(CharacterTitle.Transcended);
-                    lvl = "4th";
-                    break;
-                case 5:
-                    player.AddTitle(CharacterTitle.CosmicConscious);
-                    lvl = "5th";
-                    break;
-            }
-
-            player.GiveFromEmote(npc, AttributeResetCertificate, 1);
-
-            var msg = $"{player.Name} has achieved the {lvl} level of Enlightenment!";
-            PlayerManager.BroadcastToAll(new GameMessageSystemChat(msg, ChatMessageType.WorldBroadcast));
-            PlayerManager.LogBroadcastChat(Channel.AllBroadcast, null, msg);
-
-            // +2 vitality
-            // handled automatically via PropertyInt.Enlightenment * 2
-
-            /*var vitality = player.LumAugVitality + 2;
-            player.UpdateProperty(player, PropertyInt.LumAugVitality, vitality);*/
+            // TotalSkillCredits must be reset to the same recomputed value. CheckForLevelup increments BOTH
+            // AvailableSkillCredits and TotalSkillCredits at each credit-granting level; resetting only Available
+            // would let every enlightenment cycle permanently inflate TotalSkillCredits as the character re-levels.
+            player.TotalSkillCredits = availableSkillCredits;
+            player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.TotalSkillCredits, player.TotalSkillCredits ?? 0));
         }
     }
 }

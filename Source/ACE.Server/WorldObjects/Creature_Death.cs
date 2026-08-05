@@ -39,6 +39,19 @@ namespace ACE.Server.WorldObjects
             IsTurning = false;
             IsMoving = false;
 
+            // class abilities that react to landing a killing blow (e.g. Nether Bloom). The onDeathEntered
+            // guard above makes this fire exactly once per death; the Player dispatch owns the shared
+            // preconditions (system enabled, PvP/pet/self exclusion).
+            if (lastDamager?.TryGetAttacker() is Player killingPlayer)
+            {
+                killingPlayer.ApplyCreatureDeathClassAbilities(this);
+
+                // Tier B weapon mods: Second Wind restores a fraction of the killer's maximum vitals. Same
+                // once-per-death guarantee from onDeathEntered above, and the Player-side method owns the
+                // shared preconditions (gate, PvP/pet/self exclusion). See Player_WeaponMods.cs.
+                killingPlayer.ApplyWeaponModCreatureDeath(this);
+            }
+
             //QuestManager.OnDeath(lastDamager?.TryGetAttacker());
 
             if (KillQuest != null)
@@ -96,6 +109,12 @@ namespace ACE.Server.WorldObjects
             if (dieEntered) return;
 
             dieEntered = true;
+
+            // wave challenge (WaffleACE): a wave-gauntlet creature reports its death to the run that spawned it,
+            // which advances the gauntlet once every creature in the live wave is down. Sits after the
+            // exactly-once dieEntered guard so a wave creature can never be counted twice.
+            if (GetProperty(PropertyBool.WaveChallengeCreature) == true)
+                P_WaveOwner?.OnWaveCreatureDied(this);
 
             UpdateVital(Health, 0);
 
@@ -174,6 +193,11 @@ namespace ACE.Server.WorldObjects
             if (totalHealth == 0)
                 return;
 
+            // Aggregate damage per awarded player first, so a player and their own pet(s) count as a
+            // single contributor. Otherwise the owner could collect XP on their own damage slice AND
+            // each pet slice; combined with an unclamped ratio that lets the owner exceed 100%.
+            var damageByPlayer = new Dictionary<Player, float>();
+
             foreach (var kvp in DamageHistory.TotalDamage)
             {
                 var damager = kvp.Value.TryGetAttacker();
@@ -186,9 +210,19 @@ namespace ACE.Server.WorldObjects
                 if (playerDamager == null)
                     continue;
 
-                var totalDamage = kvp.Value.TotalDamage;
+                if (damageByPlayer.TryGetValue(playerDamager, out var existing))
+                    damageByPlayer[playerDamager] = existing + kvp.Value.TotalDamage;
+                else
+                    damageByPlayer[playerDamager] = kvp.Value.TotalDamage;
+            }
 
-                var damagePercent = totalDamage / totalHealth;
+            foreach (var kvp in damageByPlayer)
+            {
+                var playerDamager = kvp.Key;
+
+                // Clamp to 1.0 so overkill / heal-during-fight (recorded damage exceeding max health)
+                // can never award a single contributor more than 100% of the creature's XP.
+                var damagePercent = Math.Min(kvp.Value / totalHealth, 1.0f);
 
                 var totalXP = (XpOverride ?? 0) * damagePercent;
 
@@ -490,7 +524,7 @@ namespace ACE.Server.WorldObjects
 
             // use the physics location for accuracy,
             // especially while jumping
-            corpse.Location = PhysicsObj.Position.ACEPosition();
+            corpse.Location = PhysicsObj.Position.ACEPosition(PhysicsObj.CurInstance);
 
             corpse.VictimId = Guid.Full;
             corpse.Name = $"{prefix} of {Name}";

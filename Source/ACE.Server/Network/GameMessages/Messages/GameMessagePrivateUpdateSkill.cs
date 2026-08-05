@@ -18,7 +18,7 @@ namespace ACE.Server.Network.GameMessages.Messages
             Writer.Write((uint)creatureSkill.AdvancementClass);
             Writer.Write(creatureSkill.ExperienceSpent);
 
-            Writer.Write(creatureSkill.InitLevel);            // starting point for advancement of the skill (eg. bonus points)
+            Writer.Write(creatureSkill.NetworkInitLevel);     // starting point for advancement (+ Enhanced <skill> class ability bonus)
             Writer.Write(creatureSkill.PropertiesSkill.ResistanceAtLastCheck);
             Writer.Write(creatureSkill.PropertiesSkill.LastUsedTime);
         }

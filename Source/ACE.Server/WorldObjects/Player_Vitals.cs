@@ -205,6 +205,27 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The GearMaxHealth value reported to the CLIENT, which is deliberately not the server's gear
+        /// rating. The client rebuilds max health itself as
+        /// InitLevel + Ranks + Endurance/2 + Enlightenment * 2 + GearMaxHealth, and that Enlightenment * 2
+        /// term is baked into the client - the server dropped its own copy of it when enlightenment became
+        /// unlimited (see CreatureVital.GetMaxValue), so an enlightened player is shown a max 2 per
+        /// enlightenment above the one the server will actually heal them to. GearMaxHealth is the only
+        /// signed term of that sum the server controls, so folding -2/enl through it cancels the phantom.
+        ///
+        /// Server-side health math is unaffected: CreatureVital reads GetGearMaxHealth() (the equipped-items
+        /// sum) directly, and never this value nor the stored PropertyInt. The real rating is still carried
+        /// by the difference, so gear that genuinely grants max health (the Vigor weapon mod, tier-8 looted
+        /// clothing) continues to read correctly.
+        ///
+        /// VERIFIED IN GAME 2026-08-02: the client honours a NEGATIVE GearMaxHealth rather than clamping it
+        /// at zero. Measured on an Enlightenment 8 character with base 325 - the displayed maximum went from
+        /// 341 to 325 once this shipped. That was the one behaviour that could not be settled from source,
+        /// so treat it as the reason this lever is available at all, not as an incidental detail.
+        /// </summary>
+        public int GetNetworkGearMaxHealth() => GetGearMaxHealth() - 2 * Enlightenment;
+
+        /// <summary>
         /// Called when a player equips/dequips an item w/ GearMaxHealth
         /// </summary>
         public void HandleMaxHealthUpdate()
@@ -216,7 +237,8 @@ namespace ACE.Server.WorldObjects
             else
                 GearMaxHealth = gearMaxHealth;
 
-            Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.GearMaxHealth, gearMaxHealth));
+            // stored property keeps the true rating; only the wire value carries the enlightenment correction
+            Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.GearMaxHealth, GetNetworkGearMaxHealth()));
 
             if (Health.Current > Health.MaxValue)
                 Health.Current = Health.MaxValue;

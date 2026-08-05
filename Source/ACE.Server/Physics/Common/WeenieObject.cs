@@ -108,11 +108,11 @@ namespace ACE.Server.Physics.Common
             if (player == null)
                 return null;
 
-            var strength = (int)player.Strength.Current;
-
-            var numAugs = player.AugmentationIncreasedCarryingCapacity;
-
-            var capacity = EncumbranceSystem.EncumbranceCapacity(strength, numAugs);
+            // Capacity comes from Player.GetEncumbranceCapacity, the single authority for a Player (see its
+            // summary). No new dependency: this method already resolves WorldObject to a Player and returns
+            // null for anything else, so it was always a player-only path. Numerically identical to the old
+            // inline call for every normal character; it additionally honours the mule capacity override.
+            var capacity = player.GetEncumbranceCapacity();
 
             var encumbrance = player.EncumbranceVal ?? 0;
 

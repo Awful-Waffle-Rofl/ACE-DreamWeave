@@ -221,5 +221,169 @@ namespace ACE.Entity.Enum.Properties
         PCAPRecordeOmegaX              = 8016,
         PCAPRecordeOmegaY              = 8017,
         PCAPRecordeOmegaZ              = 8018,
+        // PROTOTYPE: multi-shot missile weapon tuning - see WorldObject_Weapon.MultiShotSpreadAngle / MultiShotDamageMultiplier
+        MultiShotSpreadAngle           = 8019,
+        MultiShotDamageMultiplier      = 8020,
+
+        /* Equipment mods (WaffleACE) - the band 8100-8199 is RESERVED WHOLESALE for equipment mods.
+         * One id per mod type; append only, never renumber (live item rows carry these ids).
+         *
+         * Each value stored on an item is a POTENCY SCALAR in [0, 1], NOT the mod's final magnitude.
+         * The magnitude is resolved at read time as potency x EquipmentModRegistry max x the
+         * equipment_mod_potency_scale tunable, so rebalancing a mod rescales every existing item in
+         * the world instantly - no shard migration, and the clamp is trivially [0, 1].
+         *
+         * Deliberately NO [AssessmentProperty] and NO [SendOnLogin]: a raw potency scalar is
+         * meaningless to the client and must never be sent. Display goes through the
+         * "Property Details:" block in AppraiseInfo, which renders the resolved magnitude instead.
+         * See ACE.Server.EquipmentMods.EquipmentModRegistry for the one-row-per-mod table. */
+        GearModDeadeye                 = 8100,
+        GearModEagleEye                = 8101,
+        GearModLongDraw                = 8102,
+        GearModHeavyDraw               = 8103,
+        GearModSplitshot               = 8104,
+        GearModDoubleVolley            = 8105,
+        GearModVenom                   = 8106,
+        GearModAcidProc                = 8107,
+        GearModCaustic                 = 8108,
+        GearModRiposte                 = 8109,
+        GearModAttackSpeed             = 8110,
+        GearModThorns                  = 8111,
+        GearModShieldCheck             = 8112,
+        GearModBulwark                 = 8113,
+        GearModFrenziedPace            = 8114,
+        GearModLingeringFury           = 8115,
+        GearModSavageBlows             = 8116,
+        GearModBloodFury               = 8117,
+        GearModExecutioner             = 8118,
+        GearModBloodlust               = 8119,
+        GearModOverchannel             = 8120,
+        GearModEchoCast                = 8121,
+        GearModElementalRend           = 8122,
+        GearModResonance               = 8123,
+        GearModVoidDamage              = 8124,
+        GearModWithering               = 8125,
+        GearModEmpoweredSummons        = 8126,
+        GearModManaBarrier             = 8127,
+        GearModNetherBloom             = 8128,
+        GearModSoulTether              = 8129,
+
+        /* Equipment mods, class-catalog reconciliation (WaffleACE, 2026-08-04) - closes the gap for
+         * BloodMage and Spellsword (zero mods each) plus the Vanguard Provoke/Bellow/Shield Wall
+         * correction. All 19 are machinery: every linked ability returns 0 or the identity value at rank 0,
+         * so none of them has a rank-0 formula for a standalone term to stand alone in
+         * (Docs/EquipmentMods/DESIGN.md section 2.3). 8168 (GearModShieldWall) shipped last, once its
+         * prerequisite landed: ShieldBlockAbility.BlockChance now clamps its Armor Tinkering rider with
+         * class_ability_affinity_chance_cap, so the pooled avoidance cap no longer absorbs the mod. */
+        GearModBloodCharge             = 8150,
+        GearModTransfusion             = 8151,
+        GearModHemorrhage              = 8152,
+        GearModDeepen                  = 8153,
+        GearModBloodletting            = 8154,
+        GearModSanguinate              = 8155,
+        GearModBloodPrice              = 8156,
+        GearModClotting                = 8157,
+        GearModSpellblade              = 8158,
+        GearModHarmonics               = 8159,
+        GearModRuneblade               = 8160,
+        GearModSundermark              = 8161,
+        GearModSurge                   = 8162,
+        GearModSpellstorm              = 8163,
+        GearModCascade                 = 8164,
+        GearModDispellingEdge          = 8165,
+        GearModProvoke                 = 8166,
+        GearModBellow                  = 8167,
+        GearModShieldWall              = 8168,
+
+        /* Weapon mods (WaffleACE) - Tier A special modifiers, split out of the 8100-8199 band.
+         *
+         * DELIBERATELY UNLIKE the GearMod* ids above: each of these stores the APPLIED MAGNITUDE that
+         * this system added to a native property, NOT a potency scalar. Tier A writes to native
+         * properties (the Gear* ratings, Cleaving, IgnoreShield, MaximumVelocity) that may already
+         * carry a loot-generated value, so reversal has to subtract exactly what was added. A potency
+         * scalar would go wrong the moment weapon_mod_magnitude_scale moved between application and
+         * reversal, and the native property would drift permanently.
+         *
+         * Deliberately NO [AssessmentProperty] and NO [SendOnLogin]: these are bookkeeping rows for the
+         * reversal arithmetic and must never reach the client. Display goes through the
+         * "Property Details:" block in AppraiseInfo.
+         * See ACE.Server.WeaponMods.WeaponModRegistry for the one-row-per-modifier table.
+         *
+         * 8136-8140 ARE RETIRED AND MUST NEVER BE REUSED. They held WeaponModWarding, WeaponModCritWard,
+         * WeaponModResolute, WeaponModVigor and WeaponModMending until 2026-07-30, when the Tier A pool was
+         * cut to damage-oriented modifiers only and those five defensive/sustain rows were removed. The
+         * members are gone rather than renamed so nothing can write them again, but weapons on dev shards
+         * still carry records at those ids. Registered as RETIRED_DO_NOT_REUSE in Source/property-registry.tsv
+         * and guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated. */
+        WeaponModDevastation           = 8130,
+        WeaponModWeakPoint             = 8131,
+        WeaponModBloodthirst           = 8132,
+        WeaponModCleave                = 8133,
+        WeaponModShieldBypass          = 8134,
+        WeaponModSwiftFlight           = 8135,
+
+        /* Weapon mods (WaffleACE) - Tier B special modifiers, v2.
+         *
+         * STORAGE IS SIMPLER HERE THAN IN TIER A, AND THE DIFFERENCE MATTERS. Tier A stores an applied
+         * magnitude because it WRITES a native property that has to be reversed exactly. Tier B writes no
+         * native property at all - every effect is read live at combat time off the equipped weapon - so
+         * these ids hold the applied magnitude as a FRACTION (0.04 = 4%, 0.15 = 15%), reversal is a bare
+         * RemoveProperty, and none of Tier A's subtract-what-you-added machinery applies.
+         *
+         * Same client rules as Tier A: no [AssessmentProperty], no [SendOnLogin]. Display goes through the
+         * "Property Details:" block in AppraiseInfo.
+         *
+         * 8148 and 8149 are RESERVED for Sunder and Rampage, which are phase 2 and deliberately have no
+         * enum member yet: Sunder needs a new enchantment/spell row and Rampage needs per-target stack
+         * state, neither of which exists. They are registered as reserved in Source/property-registry.tsv
+         * so nothing else can take them in the meantime. */
+        WeaponModLifeLeech             = 8141,
+        WeaponModManaLeech             = 8142,
+        WeaponModStaminaLeech          = 8143,
+        WeaponModAmbush                = 8144,
+        WeaponModQuickening            = 8145,
+        WeaponModOverload              = 8146,
+        WeaponModSecondWind            = 8147,
+
+        /* Offline experience bonus (WaffleACE) */
+        // Banked "offline bonus" time, in seconds, for this character. Accrues 1:1 with time spent
+        // offline (capped by offline_bonus_max_seconds), drains 1:1 with time spent online. While
+        // this is > 0, the character's own combat XP/Luminance is boosted by offline_bonus_multiplier.
+        OfflineExperienceBonusRemaining = 9000,
+
+        /* Survival challenge (WaffleACE) */
+        // On a survival-challenge portal weenie: the per-tier multiplier applied in-place to arena creatures' raw
+        // power - their six attributes and combat skills - each escalation tier. Because attribute/skill values feed
+        // the standard combat formulas (the melee attribute-damage mod, evade checks, and spell-resist checks), this
+        // ramps the creatures' accuracy, resist penetration and melee attribute damage through the native flows.
+        // Default 1.3 when absent. (Guaranteed damage growth for both melee and spells rides SurvivalChallenge
+        // RatingPerTier instead, since monster war-spell base damage is flat and does not scale with caster stats.)
+        SurvivalChallengeRampRate       = 9001,
+        // On a survival-challenge portal weenie: the flat DamageRating (PropertyInt 307) increment added in-place to
+        // every arena creature each tier. DamageRating feeds the standard (100 + rating)/100 rating mod in BOTH the
+        // melee DamageEvent path and the spell-projectile damage path, so this is the uniform per-tier damage lever
+        // for zefir melee and wisp bolts alike. Additive: at +N/tier the damage factor is (100 + N*tier)/100 (linear
+        // in tier, not exponential). Default 15 when absent.
+        SurvivalChallengeRatingPerTier  = 9002,
+
+        // 9003 is deliberately left unused - it was allocated and then retired, and stale rows may still exist
+        // in shipped content. Do not reuse it.
+
+        /* Wave challenge (WaffleACE) */
+        // On a wave-challenge portal weenie: the breathing room, in seconds, between one wave being fully cleared
+        // and the next wave spawning. Default 10 when absent.
+        WaveChallengeInterWaveDelay     = 9004,
+        // On a wave-challenge portal weenie: how many seconds of ZERO damage dealt to the live wave end the run as
+        // stalled (scoring the last fully-cleared wave). Damage-based rather than an absolute per-wave time limit,
+        // because a late boss wave legitimately takes tens of minutes to grind down. 0 disables the watchdog
+        // entirely. Default 150 when absent.
+        WaveChallengeStallTimeout       = 9005,
+        // On a wave-challenge portal weenie: how many seconds a single wave may stay alive before the run ends,
+        // scoring the last fully-cleared wave. Unlike WaveChallengeStallTimeout this is an ABSOLUTE limit - it
+        // expires even while the player is landing damage - and the two watchdogs run side by side: the stall
+        // timeout catches an idle player, this catches a wave that is being fought but cannot be finished. The
+        // player is warned at 2 minutes, 1 minute and 30 seconds remaining. 0 or less disables it entirely.
+        // Default 300 when absent.
+        WaveChallengeWaveTimeLimit      = 9006,
     }
 }

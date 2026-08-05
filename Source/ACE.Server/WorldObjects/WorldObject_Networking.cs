@@ -298,8 +298,20 @@ namespace ACE.Server.WorldObjects
                 physicsState &= ~PhysicsState.Cloaked;
             }
 
-            if (this is SpellProjectile && PropertyManager.GetBool("spell_projectile_ethereal").Item)
-                physicsState |= PhysicsState.Ethereal;
+            if (this is SpellProjectile spellProjectile)
+            {
+                // ethereal is applied to the serialized copy only - the server's own PhysicsObj.State stays
+                // non-ethereal, so server-side collision, wall blocking and damage are unchanged.
+
+                // 360-degree spread spells always put one projectile on a vector straight through the
+                // third-person camera. The client's viewer transition (ObjectInfoState.IsViewer) exempts
+                // creatures from obstructing the camera but not missiles, so a non-ethereal ring projectile
+                // pulls the camera in on every cast. Ethereal objects never obstruct anything, viewer included.
+                var ethereal360 = spellProjectile.Spell?.SpreadAngle == 360 && PropertyManager.GetBool("spell_projectile_ethereal_360").Item;
+
+                if (ethereal360 || PropertyManager.GetBool("spell_projectile_ethereal").Item)
+                    physicsState |= PhysicsState.Ethereal;
+            }
 
             writer.Write((uint)physicsState);
 
@@ -913,6 +925,26 @@ namespace ACE.Server.WorldObjects
 
             AddBaseModelData(objDesc);
 
+            // Apply any ObjDesc overrides defined on the weenie itself: AnimPart (per-part model
+            // swaps), TextureMap (per-part texture swaps) and Palette (sub-palette recolours).
+            //
+            // Creature already does this (Creature_Networking), but nothing else did - so on a
+            // Portal, a Generic, or anything else that is not a Creature, weenie_properties_anim_part
+            // / _texture_map / _palette rows were silently ignored. The object rendered its raw
+            // setup and the rows looked broken rather than unsupported. That is what made a
+            // texture-swapped Generic lose its textures, and an AnimPart'd Portal render as the wrong
+            // model entirely.
+            if (Biota.PropertiesAnimPart.GetCount(BiotaDatabaseLock) > 0
+                || Biota.PropertiesPalette.GetCount(BiotaDatabaseLock) > 0
+                || Biota.PropertiesTextureMap.GetCount(BiotaDatabaseLock) > 0)
+            {
+                Biota.PropertiesAnimPart.CopyTo(objDesc.AnimPartChanges, BiotaDatabaseLock);
+                Biota.PropertiesPalette.CopyTo(objDesc.SubPalettes, BiotaDatabaseLock);
+                Biota.PropertiesTextureMap.CopyTo(objDesc.TextureChanges, BiotaDatabaseLock);
+
+                return objDesc;
+            }
+
             if (ClothingBase.HasValue)
                 item = DatManager.PortalDat.ReadFromDat<ClothingTable>((uint)ClothingBase);
             else
@@ -1354,7 +1386,7 @@ namespace ACE.Server.WorldObjects
 
             foreach (var player in PhysicsObj.ObjMaint.GetKnownPlayersValuesAsPlayer())
             {
-                if (isDungeon && Location.Landblock != player.Location.Landblock)
+                if (isDungeon && Location.InstancedLandblock != player.Location.InstancedLandblock)
                     continue;
 
                 if (Visibility && !player.Adminvision)
@@ -1393,7 +1425,7 @@ namespace ACE.Server.WorldObjects
                 if (self != null && squelchType != null && player.SquelchManager.Squelches.Contains(self, squelchType.Value))
                     continue;
 
-                if (isDungeon && Location.Landblock != player.Location.Landblock)
+                if (isDungeon && Location.InstancedLandblock != player.Location.InstancedLandblock)
                     continue;
 
                 if (Visibility && !player.Adminvision)

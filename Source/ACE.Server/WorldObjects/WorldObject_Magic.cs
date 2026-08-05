@@ -13,7 +13,10 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities;
+using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
+using ACE.Server.EquipmentMods;
 using ACE.Server.Factories;
 using ACE.Server.Factories.Entity;
 using ACE.Server.Network.GameEvent.Events;
@@ -488,7 +491,60 @@ namespace ACE.Server.WorldObjects
             var resistanceType = minBoostValue > 0 ? GetBoostResistanceType(spell.VitalDamageType) : GetDrainResistanceType(spell.VitalDamageType);
 
             int tryBoost = ThreadSafeRandom.Next(minBoostValue, maxBoostValue);
-            tryBoost = (int)Math.Round(tryBoost * targetCreature.GetResistanceMod(resistanceType));
+
+            // FORK: a harmful life boost (Harm) now rides the caster's two weapon levers, the same way a war
+            // bolt does at SpellProjectile.CalculateDamage. Retail applied ONLY the target's resistance here,
+            // which is why Harm was the one nuke in the game that no weapon could improve.
+            var isHarmfulLifeBoost = minBoostValue < 0 && spell.VitalDamageType == DamageType.Health;
+
+            var lifeElementalMod = 1.0f;
+            var lifeWeaponResistMod = 1.0f;
+
+            if (isHarmfulLifeBoost)
+                GetLifeCasterMods(targetCreature, spell, out lifeElementalMod, out lifeWeaponResistMod);
+
+            // The Harm base-damage retune is DATA, not code - Content/sql/patches/harm_damage_retune.sql
+            // raises spell.boost / boost_Variance directly, so it applies to monster casts too (accepted,
+            // user 2026-08-02). Nothing to do here.
+
+            // FORK: Harm can now CRITICALLY HIT. Retail never rolled a crit here at all - HandleCastSpell_Boost
+            // resolves entirely outside SpellProjectile, so the crit branch that every war bolt and Martyr's
+            // Hecatomb passes through was simply not on Harm's path. With CriticalStrike/CripplingBlow imbues
+            // that is not a rounding error: a maxed magic imbue is 50% crit chance at 6.0x crit damage
+            // (GetCriticalStrikeMod / GetCripplingBlowMod), so Harm was giving up roughly 150% expected damage
+            // against a war bolt purely by which method resolved it.
+            //
+            // Applied to the ROLL, before the cloak proc below, so a cloak reduces the critted number - the
+            // same order SpellProjectile uses.
+            var lifeCritMultiplier = 1.0f;
+
+            if (isHarmfulLifeBoost && TryLifeCriticalHit(targetCreature, spell, out var harmCritDamageMod))
+                lifeCritMultiplier = 1.0f + 0.5f * harmCritDamageMod;
+
+            // FORK: the Blood Mage life-strike package on Harm - Blood Price (paid at cast time) and the
+            // Sanguine Reserve charge ramp. Harm still BUILDS the pool; it no longer spends it.
+            //
+            // HARM IS NOT EXSANGUINATE-ELIGIBLE (user ruling, live test 2026-08-03: "Exsanguinate should be
+            // specifically for Hecatomb or Raven Fury"). This supersedes BLOOD-MAGE-DESIGN sec 3's "Harm or
+            // Hecatomb" row. The burst belongs entirely to the two life projectiles now, and
+            // ApplyHarmClassAbilityDamage is structurally unable to fire it - see that method.
+            //
+            // PLAYER-CAST AND PvE ONLY, the same gate as GetLifeCasterMods / TryLifeCriticalHit above.
+            // The Weakened Blood mark this cast applies is deliberately NOT part of this multiplier: it
+            // rides Creature.GetLifeVulnerabilityMod inside the GetResistanceMod call below, so it takes
+            // MAX against weapon rending instead of multiplying with it.
+            var lifeClassAbilityMod = 1.0f;
+
+            if (isHarmfulLifeBoost && this is Player bloodMage && targetCreature is not Player)
+                lifeClassAbilityMod = bloodMage.ApplyHarmClassAbilityDamage();
+
+            // tryBoost is NEGATIVE for Harm, so this is a multiply rather than an add - a bonus added to a
+            // negative roll would heal the target.
+            tryBoost = (int)Math.Round(tryBoost
+                * targetCreature.GetResistanceMod(resistanceType, this, null, lifeWeaponResistMod)
+                * lifeElementalMod
+                * lifeCritMultiplier
+                * lifeClassAbilityMod);
 
             int boost = tryBoost;
 
@@ -574,6 +630,12 @@ namespace ACE.Server.WorldObjects
                 targetPlayer.SendChatMessage(player, targetMessage, ChatMessageType.Magic);
             }
 
+            // FORK: a LANDED Harm leaves Weakened Blood on the target (Blood Mage T2). Applied here, after
+            // the damage has resolved, so the applying strike does not amplify itself - the mark is for
+            // every life hit that follows, from any caster.
+            if (isHarmfulLifeBoost && boost < 0 && targetCreature != this && targetCreature is not Player && this is Player weakeningCaster)
+                weakeningCaster.TryApplyWeakenedBlood(targetCreature);
+
             if (targetCreature != this && targetCreature.IsAlive && spell.VitalDamageType == DamageType.Health && boost < 0)
             {
                 // handle cloak spell proc
@@ -616,6 +678,312 @@ namespace ACE.Server.WorldObjects
                 default:
                     return ResistanceType.Undef;
             }
+        }
+
+        /// <summary>
+        /// FORK ADDITION - the two caster-weapon damage levers, for LIFE magic.
+        ///
+        /// A war caster gets both of these at SpellProjectile.CalculateDamage. Martyr's Hecatomb and Curse of
+        /// Raven Fury go through SpellProjectile and pick them up there; HARM does not - it resolves entirely
+        /// inside HandleCastSpell_Boost - so this method exists for Harm.
+        ///
+        /// DRAIN is deliberately NOT a caller: it is excluded from the life-vulnerability axis (user,
+        /// 2026-08-02) because its TransferCap makes the multiplier misbehave. See the comment in
+        /// HandleCastSpell_Transfer.
+        ///
+        /// The two levers are deliberately separate axes and DO multiply with each other:
+        ///   - elementalMod    = "Damage bonus for Blood spells" (PropertyFloat.ElementalDamageMod), the
+        ///                       conservative flat multiplier, halved against players by the caster helper.
+        ///   - weaponResistMod = "Resistance Cleaving: Health" / Blood Rending, the large multiplier. This one
+        ///                       is folded into the single life-vulnerability axis by
+        ///                       Creature.GetLifeVulnerabilityMod, so it takes MAX against any other
+        ///                       vulnerability rather than multiplying with it.
+        ///
+        /// Player-cast and PvE only, matching the class-ability and weapon-mod gates in SpellProjectile:
+        /// monsters casting Harm at players must not start scaling off gear.
+        /// </summary>
+        private void GetLifeCasterMods(Creature targetCreature, Spell spell, out float elementalMod, out float weaponResistMod)
+        {
+            elementalMod = 1.0f;
+            weaponResistMod = 1.0f;
+
+            if (this is not Player player || targetCreature == null || targetCreature is Player)
+                return;
+
+            var wand = player.GetEquippedWand();
+
+            if (wand == null)
+                return;
+
+            var attackSkill = player.GetCreatureSkill(spell.School);
+
+            elementalMod = GetCasterElementalDamageModifier(wand, player, targetCreature, DamageType.Health);
+            weaponResistMod = GetWeaponResistanceModifier(wand, player, attackSkill, DamageType.Health);
+        }
+
+        /// <summary>
+        /// FORK ADDITION - critical hits for the two life spells that resolve OUTSIDE SpellProjectile.
+        ///
+        /// WHY THIS EXISTS. Every other damage source in the game can crit. War bolts, Martyr's Hecatomb and
+        /// Curse of Raven Fury all roll one at SpellProjectile.CalculateDamage:468, which is computed BEFORE
+        /// the life/war branch split and so is already shared - Hecatomb has always critted. Harm and Drain
+        /// never reach that method, so they were the only damaging spells in the game that could not crit at
+        /// all. That is a mechanism gap, not a balance decision.
+        ///
+        /// NOTE FOR ANYONE READING ace_world.spell: `crit_Freq` DOES NOT GATE THIS, and does not gate spell
+        /// crits anywhere. Spell.CritFrequency (Entity/SpellProperties.cs) has ZERO consumers in the whole
+        /// server - it is dead data, and its own definition carries the author's "// default: 0, 1, or 0.03?"
+        /// hedge. Reading `crit_Freq = 0` off Hecatomb and concluding it cannot crit is a real and repeated
+        /// mistake; the only thing that decides a spell crit is GetWeaponMagicCritFrequency.
+        ///
+        /// MAGNITUDE - and the two systems that feed it, which are easy to conflate:
+        ///
+        ///   - IMBUES (ImbuedEffectType.CriticalStrike 0x1 / CripplingBlow 0x2) are the strong versions:
+        ///     GetCriticalStrikeMod = (baseSkill - 60) / 600 caps at 50% crit chance; GetCripplingBlowMod
+        ///     = baseSkill / 60 caps at MaxCripplingBlowMod = 6.0x crit damage.
+        ///   - "Biting Strike" and "Crushing Blow" are the WEAKER NON-IMBUE versions, and they are the plain
+        ///     properties PropertyFloat.CriticalFrequency 147 and CriticalMultiplier 136 - obtained by
+        ///     TINKERING, not imbuing. Both consumers combine property and imbue with Math.Max, so an item
+        ///     never benefits from carrying both forms of the same effect.
+        ///
+        /// The two forms compete for the same weapon: an imbue slot spent on Critical Strike is a slot NOT
+        /// spent on a rend, so the typical build imbues a REND and tinkers Crushing Blow / Biting Strike.
+        /// A Sanguine caster wants Blood Rending in that slot, so it should be assumed to carry the TINKERED
+        /// crit values, not the imbued ones. Do not model this at 50% / 6.0x.
+        ///
+        /// Expected damage multiplier is `1 + critChance * 0.5 * critDamageMod`. Measured against ace_world
+        /// (WeenieType.Caster = 35): of 435 casters, **66 carry CriticalFrequency 147** (0.06 to 0.75) and
+        /// **15 carry CriticalMultiplier 136** (1.7 to 3.5). So the values are NOT rare and a caster does not
+        /// start from the 5% default - the ledger's own endgame reference caster, ace51989-rynthidtentaclewand,
+        /// ships CriticalFrequency 0.30. At 0.30 crit and a 3.0 multiplier the expected damage multiplier is
+        /// ~1.45, which is what Harm and Drain were giving up entirely before this change.
+        ///
+        /// PLAYER-CAST AND PvE ONLY, matching GetLifeCasterMods. 409 creature weenies cast Harm (315 on live
+        /// landblocks) and monsters cast Drain too - letting them crit would silently retune a wide swathe of
+        /// content that nobody asked to change. The PvE gate also means AugmentationCriticalDefense never
+        /// needs consulting here: it only ever mitigates crits taken by a player.
+        /// </summary>
+        private bool TryLifeCriticalHit(Creature targetCreature, Spell spell, out float critDamageMod)
+        {
+            critDamageMod = 1.0f;
+
+            if (this is not Player player || targetCreature == null || targetCreature is Player)
+                return false;
+
+            var wand = player.GetEquippedWand();
+            var attackSkill = player.GetCreatureSkill(spell.School);
+
+            var criticalChance = GetWeaponMagicCritFrequency(wand, player, attackSkill, targetCreature);
+
+            if (ThreadSafeRandom.Next(0.0f, 1.0f) >= criticalChance)
+                return false;
+
+            critDamageMod = GetWeaponCritDamageMod(wand, player, attackSkill, targetCreature);
+
+            return true;
+        }
+
+        /// <summary>
+        /// FORK ADDITION - how far a fellow or summon may stand from a blood mage and still catch the Drain
+        /// surplus. Deliberately short: this is a "stand with your healer" range, not a fellowship-wide aura.
+        /// </summary>
+        private const float DrainSurplusRange = 10.0f;
+
+        /// <summary>
+        /// FORK ADDITION - the visual played on anyone a Drain Health returns health to: the CASTER, once
+        /// per cast, and every fellow or summon who catches part of the surplus. Both read this one constant
+        /// so the two can never drift to different scripts.
+        ///
+        /// VERIFIED AGAINST portal.dat, NOT INFERRED FROM THE ENUM NAME. Nothing in this repo plays any
+        /// HealthUp* script - even Healer.cs's healing-kit path plays no effect at all - so there was no
+        /// in-repo precedent to copy, and the Red/Blue/Yellow suffixes look like arbitrary colours.
+        ///
+        /// Probing DatManager.PortalDat.SpellTable settles it. All twelve retail Heal Self / Heal Other
+        /// tiers (spellIds 5, 6, 1157-1166) carry SpellBase.TargetEffect = 0x1F, which is exactly
+        /// PlayScript.HealthUpRed - so this is the script the client already plays for a heal.
+        ///
+        /// The same probe also shows the suffix is the VITAL, not a palette choice, which is why the
+        /// neighbouring values would be wrong here:
+        ///   0x1F HealthUpRed      Heal Self / Heal Other          (health up)   &lt;- this one
+        ///   0x20 HealthDownRed    Harm and Drain Health Other     (health down)
+        ///   0x21 HealthUpBlue     Infuse Mana Other               (mana up)
+        ///   0x23 HealthUpYellow   Revitalize Self / Other         (stamina up)
+        /// </summary>
+        private const PlayScript DrainSurplusHealEffect = PlayScript.HealthUpRed;
+
+        /// <summary>
+        /// FORK ADDITION - the eligibility half of Drain Health's surplus cascade (user, 2026-08-03).
+        /// See <see cref="DrainSurplusDistribution"/> for the allocation math, and the comment at the
+        /// maxDestVitalChange site in HandleCastSpell_Transfer for why the surplus exists at all.
+        ///
+        /// RECIPIENTS ARE FELLOWS **AND THE CASTER'S OWN SUMMONS** (user, 2026-08-03: "Transfusion should
+        /// also work on player summons in range"). That is why this returns List&lt;Creature&gt; rather than
+        /// List&lt;Player&gt;: a Pet is a Creature, not a Player, and it has no session to send chat to - see
+        /// the payout loop in HandleCastSpell_Transfer, which routes a summon's heal notice to its OWNER.
+        /// A summon is subject to exactly the same per-recipient filters as a fellow (alive, caster's own
+        /// landblock, within <see cref="DrainSurplusRange"/> of the caster, actually missing health).
+        ///
+        /// ONLY THE CASTER'S OWN SUMMONS, never a fellow's. The only reads are Player.CurrentActivePet and
+        /// Player.SecondaryActivePet off the CASTER; SecondaryActivePet is usually null because it exists
+        /// only for holders of the separate Summon 2x ability.
+        ///
+        /// THE CASCADE IS A CLASS ABILITY, NOT BASE BEHAVIOUR (user, 2026-08-03). It is gated on the Blood
+        /// Mage skill "Transfusion" (<see cref="ClassAbilityId.Transfusion"/>), a T1 entry with 3 ranks at
+        /// cost 1/1/1. Rank does NOT change the drain: it sets the DELIVERY FRACTION of the surplus
+        /// (40/70/100%), plus an additive, deliberately uncapped Healing rider. See
+        /// <see cref="DrainSurplusDistribution.ShareFraction"/> for why a share above 100% is safe.
+        ///
+        /// DO NOT "FIX" THE ZERO-DRAIN CASE FOR EVERYONE. Retail bounds the transfer by the caster's own
+        /// missing health, so a life caster at full health drains for ZERO - the scalar in
+        /// HandleCastSpell_Transfer is literally 0. That looks like a bug and it is not: it is retail, and
+        /// as of this ruling it is the intended baseline. Transfusion is the Blood Mage's answer to it, and
+        /// lifting the restriction school-wide would delete the entire reason the ability exists. If a
+        /// future session wants full-value Drain for non-Blood-Mages, that is a design decision for the
+        /// repo owner, not a cleanup.
+        ///
+        /// Returns null - meaning "behave exactly as retail" - unless ALL of the following hold. A caster
+        /// without Transfusion, with neither a fellowship nor a summon, or with recipients present but none
+        /// of them eligible, takes the null path and is byte-identical to the old behaviour.
+        ///
+        ///  - the spell is a Health drain whose destination is also Health. The Source check matches the
+        ///    existing crit gate in this method; the Destination check is what makes it safe to add MISSING
+        ///    HEALTH to maxDestVitalChange, which is otherwise a missing-mana or missing-stamina figure.
+        ///    Stamina and Mana drains keep retail behaviour untouched.
+        ///  - PLAYER-CAST AND PvE ONLY, the same gate as TryLifeCriticalHit / GetLifeCasterMods: the caster
+        ///    is a Player, the caster is the transfer destination, and the drained target is NOT a Player.
+        ///    Monsters casting Drain are completely unaffected, and this never becomes a PvP lever.
+        ///  - the caster has learned Transfusion (rank >= 1). Rank 0 is the retail path; rank 1+ scales the
+        ///    delivered share, never the drain, via the shareFraction out parameter.
+        ///
+        /// NOTE THAT THE CRIT WORK IS DELIBERATELY NOT GATED. TryLifeCriticalHit, the Harm crit and the
+        /// crit-raised Drain TransferCap are SCHOOL-WIDE mechanism fixes for life magic - Harm and Drain
+        /// were the only damaging spells in the game that could not crit at all - and they are not class
+        /// abilities. Only the cascade is behind Transfusion.
+        ///
+        /// A recipient is eligible when they are in the caster's fellowship OR are one of the caster's own
+        /// summons, are not the caster, are alive, are on the CASTER'S OWN LANDBLOCK, and are within
+        /// <see cref="DrainSurplusRange"/> of the caster.
+        ///
+        /// THE LANDBLOCK FILTER IS A DELIBERATE APPROXIMATION, NOT A BUG (user-accepted, 2026-08-03). A
+        /// fellow standing 5m away but across a landblock boundary is excluded. It is filtered FIRST, before
+        /// any distance math, so every Location read stays on this landblock's own tick thread. Do not
+        /// "fix" it by widening the check - reading a position owned by another landblock's thread is the
+        /// thing this is avoiding, and the lost edge case is worth far less than that.
+        ///
+        /// Cost: one pass over the fellowship roster per Drain cast, plus two direct property reads for the
+        /// summons. Fellowship.MaxFellows defaults to 20 and is hard-clamped to 100 (Entity/Fellowship.cs),
+        /// so the worst case is a 102-element scan on a spell that already does far more work than that.
+        /// No caching, and none is wanted.
+        ///
+        /// NAMING: the out parameters stay fellowMissing / fellowMissingTotal, and the returned list is
+        /// still the "fellows" list at the call site, because that accounting is what feeds
+        /// <see cref="DrainSurplusDistribution.Distribute"/> unchanged. Read "fellow" throughout this
+        /// mechanic as "surplus recipient" - a fellowship member or one of the caster's own summons.
+        /// </summary>
+        private List<Creature> GetDrainSurplusFellows(Spell spell, bool isDrain, Creature destination, Creature targetCreature, out List<uint> fellowMissing, out ulong fellowMissingTotal, out double shareFraction)
+        {
+            fellowMissing = null;
+            fellowMissingTotal = 0;
+            shareFraction = 0.0;
+
+            // spell shape first, so a non-drain transfer never pays for a class-ability or fellowship lookup
+            if (!DrainSurplusEligibility.SpellQualifies(isDrain, spell.Source, spell.Destination))
+                return null;
+
+            var caster = this as Player;
+
+            // THE CLASS GATE lives in here: transfusionRank. The cascade is the Blood Mage ability
+            // "Transfusion", not base life magic. Rank 0 returns null and Drain behaves exactly as retail -
+            // see the doc comment above for why that baseline is intended, not a bug to fix school-wide.
+            //
+            // A null caster (a monster) short-circuits both lookups below to their defaults, so a monster
+            // casting Drain still touches neither the class-ability cache nor a fellowship.
+            var transfusionRank = caster?.GetClassAbilityRank(ClassAbilityId.Transfusion) ?? 0;
+
+            // hasFellowship OR hasSummon: a solo Blood Mage with a hurt pet beside them is a real cascade
+            // target, so a fellowship is no longer required (user, 2026-08-03). Both are PRESENCE checks -
+            // the alive/landblock/range/missing filters run below on fellows and summons alike.
+            if (!DrainSurplusEligibility.CasterQualifies(
+                    casterIsPlayer: caster != null,
+                    casterIsTransferDestination: caster != null && destination == caster,
+                    targetIsEligibleVictim: targetCreature != null && targetCreature is not Player,
+                    transfusionRank: transfusionRank,
+                    hasFellowship: caster?.Fellowship != null,
+                    hasSummon: caster?.CurrentActivePet != null || caster?.SecondaryActivePet != null))
+                return null;
+
+            // How much of the surplus is DELIVERED. Rank sets the base fraction (40/70/100%); the Healing
+            // rider is additive on top and uncapped, so a skilled healer passes on more than the drain
+            // produced. This is delivery only - it never touches srcVitalChange, TransferCap or the caster's
+            // own share, which is exactly why Drain damage is identical at every rank of Transfusion.
+            shareFraction = TransfusionAbility.ShareFraction(caster, transfusionRank);
+
+            var casterLandblock = caster.CurrentLandblock;
+            var casterLocation = caster.Location;
+
+            if (casterLandblock == null || casterLocation == null)
+                return null;
+
+            List<Creature> results = null;
+            List<uint> missingByRecipient = null;
+            ulong missingTotal = 0;
+
+            // The per-recipient filter, identical for fellows and summons. A local function rather than a
+            // method because it closes over the caster's landblock and location, which are read exactly once
+            // above; note it cannot capture the out parameters directly (C# forbids that), so the totals are
+            // accumulated into locals and handed to the out parameters at the end.
+            void TryAddRecipient(Creature recipient)
+            {
+                if (recipient == null || recipient == caster || !recipient.IsAlive)
+                    return;
+
+                // landblock first - see the approximation note above
+                if (recipient.CurrentLandblock != casterLandblock)
+                    return;
+
+                if (recipient.Location == null || casterLocation.DistanceTo(recipient.Location) > DrainSurplusRange)
+                    return;
+
+                var missing = recipient.Health.Missing;
+
+                if (missing == 0)
+                    return;
+
+                // a recipient must never appear twice, or Distribute would hand them two shares against one
+                // pool of missing health. Fellowship members are unique by construction; the summon slots are
+                // the case this actually guards, since nothing structurally forbids the same Pet object
+                // sitting in both CurrentActivePet and SecondaryActivePet.
+                if (results != null && results.Contains(recipient))
+                    return;
+
+                results ??= new List<Creature>();
+                missingByRecipient ??= new List<uint>();
+
+                results.Add(recipient);
+                missingByRecipient.Add(missing);
+
+                missingTotal += missing;
+            }
+
+            // fellows first, then summons. The order is what Distribute's largest-remainder tie-break reads,
+            // so it must stay deterministic - it is index order, not an arbitrary enumeration.
+            var fellowship = caster.Fellowship;
+
+            if (fellowship != null)
+            {
+                foreach (var fellow in fellowship.GetFellowshipMembers().Values)
+                    TryAddRecipient(fellow);
+            }
+
+            // THE CASTER'S OWN SUMMONS ONLY. Never a fellow's pet - these two properties are read off the
+            // caster and nowhere else. SecondaryActivePet is null unless the caster holds Summon 2x.
+            TryAddRecipient(caster.CurrentActivePet);
+            TryAddRecipient(caster.SecondaryActivePet);
+
+            fellowMissing = missingByRecipient;
+            fellowMissingTotal = missingTotal;
+
+            return results;
         }
 
         /// <summary>
@@ -694,7 +1062,15 @@ namespace ACE.Server.WorldObjects
         /// Handles casting SpellType.Transfer spells
         /// usually for Life Magic, ie. Stamina to Mana, Drain
         /// </summary>
-        private void HandleCastSpell_Transfer(Spell spell, Creature targetCreature)
+        /// <param name="isSecondaryStrike">
+        /// TRUE for one of Crimson Harvest's extra targets. It is the RE-ENTRY GUARD as well as a flag: a
+        /// secondary strike never fans out again (so a pack cannot chain into an unbounded harvest) and
+        /// never grants a second Blood Charge, which is what makes "at most one charge per cast" true no
+        /// matter how many creatures the drain touches. Everything else about a secondary strike - its own
+        /// TransferCap, its own resistance roll, its own heal back to the caster, its own Weakened Blood
+        /// mark - is deliberately identical to a primary one.
+        /// </param>
+        private void HandleCastSpell_Transfer(Spell spell, Creature targetCreature, bool isSecondaryStrike = false)
         {
             var player = this as Player;
             var creature = this as Creature;
@@ -716,15 +1092,77 @@ namespace ACE.Server.WorldObjects
 
             // Drain Resistances - allows one to partially resist drain health/stamina/mana and harm attacks (not including other life transfer spells).
             var isDrain = spell.TransferFlags.HasFlag(TransferFlags.TargetSource | TransferFlags.CasterDestination);
-            var drainMod = isDrain ? (float)transferSource.GetResistanceMod(GetDrainResistanceType(spell.Source)) : 1.0f;
+
+            // DELIBERATELY RETAIL - Drain is EXCLUDED from the life-vulnerability axis (user, 2026-08-02):
+            // "Lets exclude drains from the blood rend/vuln. I have thoughts for making drains better, but I
+            // think the multiplier is too much. Blood rend/vuln should apply to harm, heca, raven."
+            //
+            // Blood Rending, "Resistance Cleaving: Health" and Weakened Blood apply to Harm, Martyr's
+            // Hecatomb and Curse of Raven Fury only. Drain is left alone because its TransferCap makes the
+            // multiplier behave unlike every other spell: the cap binds against anything worth draining, so
+            // scaling the roll alone is invisible and scaling the CAP turns a 200-point filler into a
+            // 775-point primary nuke that also heals. Modelling put a cap-scaled Drain slightly AHEAD of a
+            // war bolt per cast while still returning 35% of itself as health - the wrong shape for the
+            // builder spell in the kit. Drain gets its own treatment separately.
+            //
+            // A LANDED DRAIN STILL APPLIES THE MARK - see the Weakened Blood block at the end of this
+            // method. The ruling is about who the multiplier reaches, not about who can apply it, so a blood
+            // mage's Drain still sets up every Harm and Hecatomb that follows, including a fellow's.
+            //
+            // THE WEAPON HALF NEEDS NO GATE, THE CAST HALF DOES. GetLifeVulnerabilityMod defaults its
+            // weaponResistanceMod to 1.0, so simply not passing one leaves Blood Rending out - that much was
+            // always true. Weakened Blood lives INSIDE that method and would therefore arrive uninvited, so
+            // the Health branch reads GetHealthDrainResistanceOnly() instead: the same
+            // ResistHealthDrain * natural * LifeResistRating product, with the vulnerability term left off.
+            // That is byte-identical to what GetResistanceMod(HealthDrain) returned before the mark existed.
+            // Mana and Stamina drains never touch the axis at all, so they keep the plain call.
+            var drainMod = 1.0f;
+
+            if (isDrain)
+            {
+                drainMod = !WeakenedBloodMath.DamageBenefits(spell.MetaSpellType) && spell.Source == PropertyAttribute2nd.Health
+                    ? (float)transferSource.GetHealthDrainResistanceOnly()
+                    : (float)transferSource.GetResistanceMod(GetDrainResistanceType(spell.Source));
+            }
 
             srcVitalChange = (uint)Math.Round(transferSource.GetCreatureVital(spell.Source).Current * spell.Proportion * drainMod);
 
+            // FORK: Drain can now CRITICALLY HIT, and a crit RAISES ITS CAP (user, 2026-08-03).
+            //
+            // The cap is the whole mechanism for Drain - the proportional roll binds against it on anything
+            // worth draining, so a crit that scaled only the roll would be invisible. Scaling the cap is what
+            // a Drain crit has to mean.
+            //
+            // The multiplier matches the Harm/Hecatomb crit formula exactly (1 + 0.5 * critDamageMod), so all
+            // four life spells crit by the same rule.
+            //
+            // NOTE THIS IS NOT THE 2026-08-02 RULING BEING REVERSED. That ruling excluded Drain from the
+            // life-VULNERABILITY axis - an always-on multiplier from Blood Rending / Weakened Blood - because a
+            // permanently cap-scaled Drain becomes a primary nuke that also heals. A crit is probabilistic and
+            // costs the player nothing to build around, so the sustained value moves by the crit RATE, not by
+            // the full multiplier. Drain remains off the vulnerability axis: drainMod above is still retail.
+            var drainCritCapMod = 1.0f;
+
+            if (isDrain && spell.Source == PropertyAttribute2nd.Health
+                && TryLifeCriticalHit(targetCreature, spell, out var drainCritDamageMod))
+            {
+                drainCritCapMod = 1.0f + 0.5f * drainCritDamageMod;
+            }
+
             // TransferCap caps both srcVitalChange and destVitalChange
             // https://asheron.fandom.com/wiki/Announcements_-_2003/01_-_The_Slumbering_Giant#Letter_to_the_Players
+            //
+            // The crit-raised cap MUST be used at BOTH cap sites. The destination cap below feeds an overflow
+            // rescale that drags srcVitalChange back down with it, so raising only the source cap would be
+            // silently undone by that rescale on any target worth critting. The heal is still bounded by the
+            // caster's ACTUAL missing health (maxDestVitalChange takes the min), so a healthy blood mage gains
+            // damage from the crit without gaining a windfall heal.
+            var effectiveTransferCap = spell.TransferCap != 0
+                ? (int)Math.Round(spell.TransferCap * drainCritCapMod)
+                : 0;
 
-            if (spell.TransferCap != 0 && srcVitalChange > spell.TransferCap)
-                srcVitalChange = (uint)spell.TransferCap;
+            if (effectiveTransferCap != 0 && srcVitalChange > effectiveTransferCap)
+                srcVitalChange = (uint)effectiveTransferCap;
 
             // should healing resistances be applied here?
             var boostMod = isDrain ? (float)destination.GetResistanceMod(GetBoostResistanceType(spell.Destination)) : 1.0f;
@@ -734,9 +1172,30 @@ namespace ACE.Server.WorldObjects
             // scale srcVitalChange to destVitalChange?
             var missingDest = destination.GetCreatureVital(spell.Destination).Missing;
 
+            // FORK: a Health drain's SURPLUS now flows to nearby fellows AND to the caster's own summons
+            // instead of being thrown away (user, 2026-08-03).
+            //
+            // Retail bounds maxDestVitalChange by the caster's OWN missing health, and the overflow branch
+            // below scales srcVitalChange down by the same ratio - so a caster at full health has
+            // missingDest == 0, the scalar is 0, and DRAIN DEALS ZERO DAMAGE. That is the bug: the spell is
+            // dead weight exactly when the blood mage is healthy.
+            //
+            // The fix widens the RECEIVING capacity to the caster plus their eligible fellows and summons, so
+            // the drain stops being scaled away. A SOLO caster at full health with one hurt pet in range is
+            // the case this must reach: fellowMissingTotal carries the summon's missing health exactly as it
+            // carries a fellow's, or the transfer would still be capped to zero and the drain would do
+            // nothing. It does NOT widen the ceiling: effectiveTransferCap still clamps
+            // maxDestVitalChange immediately below, so the most a single cast can ever move is unchanged.
+            // The drain simply reaches that cap more often.
+            var drainFellows = GetDrainSurplusFellows(spell, isDrain, destination, targetCreature, out var fellowMissing, out var fellowMissingTotal, out var drainShareFraction);
+
             var maxDestVitalChange = missingDest;
-            if (spell.TransferCap != 0 && maxDestVitalChange > spell.TransferCap)
-                maxDestVitalChange = (uint)spell.TransferCap;
+
+            if (fellowMissingTotal > 0)
+                maxDestVitalChange = (uint)Math.Min(uint.MaxValue, (ulong)missingDest + fellowMissingTotal);
+
+            if (effectiveTransferCap != 0 && maxDestVitalChange > effectiveTransferCap)
+                maxDestVitalChange = (uint)effectiveTransferCap;
 
             if (destVitalChange > maxDestVitalChange)
             {
@@ -762,6 +1221,29 @@ namespace ACE.Server.WorldObjects
                     srcVitalChange = reduced;
                     destVitalChange = (uint)Math.Round(srcVitalChange * (1.0f - spell.LossPercent) * boostMod);
                 }
+            }
+
+            // FORK: split the (already capped) destination transfer between the caster and their recipients
+            // (fellows and their own summons).
+            //
+            // This sits AFTER the cloak proc block on purpose - that block can recompute destVitalChange
+            // downward, and the caster must be paid out of the FINAL number. The caster is served first, up
+            // to their own missing health; only what they cannot absorb is offered to the fellows.
+            //
+            // The Transfusion share fraction is applied HERE and nowhere else - after effectiveTransferCap,
+            // after the destination cap, after the overflow rescale and after the cloak proc. Every cap has
+            // already run against the full surplus, so the caster's own share and srcVitalChange (the actual
+            // drain damage) are byte-identical at every rank of the ability. The rank changes only how much
+            // of what the caster COULD NOT USE gets passed on.
+            uint[] fellowShares = null;
+
+            if (drainFellows != null && destVitalChange > missingDest)
+            {
+                var deliveredSurplus = DrainSurplusDistribution.ApplyShare(destVitalChange - missingDest, drainShareFraction);
+
+                fellowShares = DrainSurplusDistribution.Distribute(deliveredSurplus, fellowMissing);
+
+                destVitalChange = missingDest;
             }
 
             string srcVital, destVital;
@@ -812,6 +1294,71 @@ namespace ACE.Server.WorldObjects
                         //destPlayer.Fellowship.OnVitalUpdate(destPlayer);
 
                     break;
+            }
+
+            // FORK: the caster sees the health a Drain returned to them (user, 2026-08-03: "Heal visual on
+            // caster and allies"). Retail plays nothing here - the drain's own CasterEffect fires once at
+            // the cast and says nothing about whether it fed you - so this is the caster-side half of the
+            // same feedback gap the per-fellow broadcast below already closes.
+            //
+            // SAME SCRIPT AS THE FELLOWS GET, deliberately the shared DrainSurplusHealEffect constant rather
+            // than a second reference to PlayScript.HealthUpRed: the suffix on those PlayScript values is
+            // the VITAL, not a colour (0x1F HealthUpRed is health UP, 0x20 HealthDownRed is what this very
+            // spell plays on its victim), so the two must never be able to drift to different values.
+            //
+            // ONCE PER CAST, NOT ONCE PER STRIKE. Crimson Harvest re-enters this method for every secondary
+            // target, and each of those strikes heals the caster too - so without the isSecondaryStrike
+            // guard a four-target harvest would flash the caster four times in a fraction of a second. The
+            // primary strike is the one that reports.
+            //
+            // ZERO HEALS PLAY NOTHING. destVitalChange is the amount UpdateVitalDelta ACTUALLY applied by
+            // this point, so a caster already at full health (missingDest == 0, the retail case the
+            // Transfusion cascade exists to answer) gets no flash rather than a misleading one.
+            if (isDrain && !isSecondaryStrike && spell.Destination == PropertyAttribute2nd.Health
+                && destVitalChange > 0 && destination is Player)
+            {
+                destination.EnqueueBroadcast(new GameMessageScript(destination.Guid, DrainSurplusHealEffect, spell.Formula.Scale));
+            }
+
+            // FORK: pay the surplus out to the recipients - fellows and the caster's own summons - weighted
+            // to the most hurt.
+            //
+            // A recipient with a zero share is skipped entirely - no vital change, no visual, no message. The
+            // only way to be in this list at all is to have been missing health at the top of the method, so
+            // a zero share means the surplus was too small to reach them, and a silent skip is correct.
+            if (fellowShares != null)
+            {
+                for (var i = 0; i < fellowShares.Length; i++)
+                {
+                    if (fellowShares[i] == 0)
+                        continue;
+
+                    var fellow = drainFellows[i];
+
+                    var fellowGain = (uint)fellow.UpdateVitalDelta(fellow.Health, fellowShares[i]);
+
+                    if (fellowGain == 0)
+                        continue;
+
+                    fellow.DamageHistory.OnHeal(fellowGain);
+
+                    // BROADCAST, not a direct send: everyone nearby should see that the blood mage's drain
+                    // fed this recipient. The Wielder indirection DoSpellEffects uses at the TargetEffect
+                    // site is for WIELDED targets and is vacuous here - neither a Player nor a Pet is ever
+                    // wielded - so the recipient broadcasts for itself. This is the half that works
+                    // unchanged for a summon: EnqueueBroadcast is a WorldObject concern, not a session one.
+                    fellow.EnqueueBroadcast(new GameMessageScript(fellow.Guid, DrainSurplusHealEffect, spell.Formula.Scale));
+
+                    // CHAT IS THE HALF THAT DOES NOT. SendChatMessage is a Player method backed by a session,
+                    // and a summon has neither - calling it on a Pet would not compile, and reaching for the
+                    // Pet's own "session" would be a null dereference at runtime. A summon's notice therefore
+                    // goes to its OWNER, which is always this caster (only the caster's own summons are ever
+                    // in this list), worded so the owner can tell it apart from their own heal line.
+                    if (fellow is Player fellowPlayer)
+                        fellowPlayer.SendChatMessage(this, $"You gain {fellowGain} points of health due to {Name} casting {spell.Name} on {targetCreature.Name}", ChatMessageType.Magic);
+                    else if (fellow is Pet summon && summon.P_PetOwner != null)
+                        summon.P_PetOwner.SendChatMessage(this, $"Your {summon.Name} gains {fellowGain} points of health due to your {spell.Name} on {targetCreature.Name}", ChatMessageType.Magic);
+                }
             }
 
             // You gain 52 points of health due to casting Drain Health Other I on Olthoi Warrior
@@ -886,7 +1433,138 @@ namespace ACE.Server.WorldObjects
                 emoteChain.EnqueueChain();
             }
 
+            // FORK: the Blood Mage's three Drain-side entries. PLAYER-CAST AND PvE ONLY, the same gate as
+            // GetLifeCasterMods / TryLifeCriticalHit, and only on a Health drain that actually took health.
+            //
+            // Drain deliberately takes NO damage multiplier from Sanguine Reserve or Blood Price - it grants
+            // a charge without spending one. Its damage is bounded by effectiveTransferCap, so a multiplier
+            // on its roll is invisible against anything worth draining, and a multiplier on its cap is the
+            // exact shape the drainMod comment above rejects. What Drain contributes to the kit is the ramp
+            // and the mark, not its own damage.
+            if (isDrain && spell.Source == PropertyAttribute2nd.Health && srcVitalChange > 0
+                && this is Player drainCaster && targetCreature is not Player)
+            {
+                // Sanguine Reserve: one charge per CAST. A Crimson Harvest secondary strike is part of the
+                // same cast, so it is skipped here rather than granting a fifth charge from one drain.
+                if (!isSecondaryStrike)
+                    drainCaster.TryGrantBloodCharge();
+
+                // Weakened Blood: applied by EVERY strike, primary and secondary alike, which is what
+                // "applies Weakened Blood to every target it lands on" means for Crimson Harvest.
+                drainCaster.TryApplyWeakenedBlood(targetCreature);
+
+                if (!isSecondaryStrike)
+                    TryCrimsonHarvest(drainCaster, spell, targetCreature);
+            }
+
             HandleBoostTransferDeath(creature, targetCreature);
+        }
+
+        /// <summary>
+        /// FORK ADDITION - CRIMSON HARVEST (Blood Mage T2): the caster's Drain spells strike up to 4 more
+        /// creatures within 8m of the primary target.
+        ///
+        /// Each secondary target is drained by RE-ENTERING <see cref="HandleCastSpell_Transfer"/> with
+        /// isSecondaryStrike set, rather than by copying a reduced-damage version of the transfer math.
+        /// That is the whole design: every secondary drain resolves independently - its own proportional
+        /// roll, its own resistance, its own TransferCap clamp, its own crit, its own Transfusion cascade -
+        /// and the healing from all of them returns to the caster. Nothing is scaled down for being
+        /// secondary; the target count IS the effect (BLOOD-MAGE-DESIGN sec 3 / 4c).
+        ///
+        /// THE RECOUP IS DELIBERATELY UNCAPPED (user, 2026-08-03): four independent drains can return four
+        /// full heals to a caster who is missing enough health to absorb them. That is to be observed in
+        /// play before it is tuned. Do NOT add a limiter here without a ruling - the per-cast ceiling that
+        /// does exist is each individual strike's own TransferCap, which is untouched.
+        ///
+        /// Selection mirrors Spell AOE's radiated blasts: the same visible-objects source, the same
+        /// hostile-creature filters, and the radius measured from the PRIMARY TARGET rather than the
+        /// caster. The only addition is the cap, applied nearest-first by
+        /// <see cref="CrimsonHarvestMath.SelectSecondaryTargets"/>.
+        ///
+        /// The candidate list is materialised before any strike is resolved, because a drain can kill and
+        /// a death mutates the landblock's object collections mid-enumeration.
+        /// </summary>
+        private void TryCrimsonHarvest(Player caster, Spell spell, Creature primaryTarget)
+        {
+            if (!caster.TryGetClassAbility(ClassAbilityId.CrimsonHarvest, out _))
+                return;
+
+            // BLOODLETTING (EquipmentModId.Bloodletting) extends the RADIUS only, additively, inside the
+            // ability's own reach figure. The TryGetClassAbility early return directly above is what makes
+            // this machinery mod inert without Crimson Harvest, so the plain equipped-value read is correct
+            // here rather than the ownership-testing GetMachineryEquipmentModValue.
+            //
+            // THE TARGET COUNT DELIBERATELY TAKES NO GEAR TERM. maxTargets is an integer cap and a
+            // fractional addition to it would round away to nothing (DESIGN.md 2.3, "two discrete numbers
+            // are deliberately NOT moddable"); the radius is the continuous half, and widening it only
+            // helps a caster reach a cap that still binds.
+            var radius = PropertyManager.GetDouble("class_ability_crimsonharvest_radius").Item
+                + caster.GetEquippedModValue(EquipmentModId.Bloodletting);
+
+            var maxTargets = (int)PropertyManager.GetLong("class_ability_crimsonharvest_max_targets").Item;
+
+            if (radius <= 0.0 || maxTargets <= 0)
+                return;
+
+            // the primary may have just died from the drain; its WorldObject lingers (removal is deferred)
+            // but guard against a torn-down Location/PhysicsObj before reading them
+            if (caster.PhysicsObj == null || primaryTarget.Location == null)
+                return;
+
+            var visible = caster.PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
+
+            var candidates = new List<Creature>();
+            var distances = new List<double>();
+
+            foreach (var obj in visible)
+            {
+                if (obj.WeenieObj.WorldObject is not Creature creature)
+                    continue;
+
+                if (creature == primaryTarget || creature == caster)
+                    continue;
+
+                if (creature.IsDead || creature.Teleporting || creature.Location == null)
+                    continue;
+
+                // PvE exclusion: the harvest never spreads to players or to the caster's own pets
+                if (creature is Player || creature is CombatPet)
+                    continue;
+
+                if (!caster.CanDamage(creature) || caster.CheckPKStatusVsTarget(creature, null) != null)
+                    continue;
+
+                candidates.Add(creature);
+                distances.Add(primaryTarget.Location.DistanceTo(creature.Location));
+            }
+
+            if (candidates.Count == 0)
+                return;
+
+            foreach (var index in CrimsonHarvestMath.SelectSecondaryTargets(distances, radius, maxTargets))
+            {
+                var secondary = candidates[index];
+
+                if (secondary.IsDead)
+                    continue;
+
+                HandleCastSpell_Transfer(spell, secondary, isSecondaryStrike: true);
+
+                // FORK: play the drain visual on every harvested target, not just the primary (user, live
+                // test 2026-08-03: "should show the same health drain animation on all of the enemies it
+                // applies to").
+                //
+                // The primary gets this from DoSpellEffects, which runs once per CAST at the end of
+                // HandleCastSpell and therefore never sees a secondary. Re-broadcasting the SPELL'S OWN
+                // TargetEffect is what makes "the same animation" literally true - for Drain Health Other
+                // that is HealthDownRed, read from portal.dat rather than named here, so the two can never
+                // drift apart. Only the target half is replayed: the caster effect belongs to the cast and
+                // has already played once.
+                //
+                // Ordered after the strike, matching DoSpellEffects running after the handler.
+                if (spell.TargetEffect != 0)
+                    secondary.EnqueueBroadcast(new GameMessageScript(secondary.Guid, spell.TargetEffect, spell.Formula.Scale));
+            }
         }
 
         /// <summary>
@@ -914,9 +1592,33 @@ namespace ACE.Server.WorldObjects
                 }
                 else if (spell.DamageType.HasFlag(DamageType.Health))
                 {
-                    var tryDamage = (int)Math.Round(caster.GetCreatureVital(PropertyAttribute2nd.Health).Current * spell.DrainPercentage);
-                    damage = (uint)-caster.UpdateVitalDelta(caster.Health, -tryDamage);
-                    caster.DamageHistory.Add(this, DamageType.Health, damage);
+                    var healthBefore = caster.GetCreatureVital(PropertyAttribute2nd.Health).Current;
+                    var tryDamage = (int)Math.Round(healthBefore * spell.DrainPercentage);
+
+                    // Sanguine Ward (Blood Mage T3) decouples what the caster PAYS from what the spell is
+                    // WORTH: the damage basis stays the full amount, only the health deduction shrinks, to
+                    // 80/65/50% by rank. GetSanguineWardSelfCostFraction returns 1.0 for anyone without the
+                    // ability, so this applies unconditionally and is retail-identical when unlearned.
+                    //
+                    // CLAMP THE BASIS - this is the one way the split can go silently wrong. Before it,
+                    // `damage` was whatever UpdateVital actually removed, and UpdateVital clamps to
+                    // [0, MaxValue] (Creature_Vitals.cs:53), so a basis larger than the caster's pool was
+                    // impossible by construction. Paying only a fraction removes that guard: a rank 3 caster
+                    // whose pool is short of tryDamage would otherwise bill damage against health that was
+                    // never there. min(tryDamage, healthBefore) reproduces the old implicit clamp exactly.
+                    damage = (uint)Math.Min(Math.Max(tryDamage, 0), (long)healthBefore);
+
+                    var casterPlayer = caster as Player;
+
+                    var selfCost = SanguineWardAbility.SelfCost(casterPlayer, damage);
+
+                    var paid = (uint)-caster.UpdateVitalDelta(caster.Health, -(int)selfCost);
+
+                    casterPlayer?.GrantSanguineWard(paid);
+
+                    // self-attribution tracks the health the caster ACTUALLY lost, which is what this line
+                    // recorded before the split; the damage basis is not what was taken out of the pool
+                    caster.DamageHistory.Add(this, DamageType.Health, paid);
                     damageType = DamageType.Health;
 
                     //if (player != null && player.Fellowship != null)
@@ -933,6 +1635,17 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
             }
+
+            // FORK: resolve the Blood Mage's Blood Charge pool for this cast BEFORE its projectiles exist.
+            //
+            // Curse of Raven Fury launches eight projectiles from one cast and Exsanguinate empties the pool
+            // when it fires, so the read has to happen here, once, rather than at each projectile's own
+            // collision - otherwise the first projectile to land takes the burst and the other seven find
+            // nothing. The whole ring carries it (user, 2026-08-03: "whole ring on raven fury +
+            // exsanguinate"); see Player.ApplyLifeProjectileBloodCharge for the ledger warning that
+            // decision carries. Self-gating and self-resetting, so it is safe to call for every projectile
+            // cast including war and void ones.
+            (this as Player)?.ApplyLifeProjectileBloodCharge(spell, target);
 
             CreateSpellProjectiles(spell, target, weapon, isWeaponSpell, fromProc, damage);
 
@@ -1694,7 +2407,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public Vector3 CalculateProjectileVelocity(Spell spell, WorldObject target, ProjectileSpellType spellType, Vector3 origin)
         {
-            var casterLoc = PhysicsObj.Position.ACEPosition();
+            var casterLoc = PhysicsObj.Position.ACEPosition(PhysicsObj.CurInstance);
 
             var speed = GetProjectileSpeed(spell);
 
@@ -1707,11 +2420,11 @@ namespace ACE.Server.WorldObjects
                 return Vector3.Transform(Vector3.UnitY, casterLoc.Rotation) * speed;
             }
 
-            var targetLoc = target.PhysicsObj.Position.ACEPosition();
+            var targetLoc = target.PhysicsObj.Position.ACEPosition(target.PhysicsObj.CurInstance);
 
             var strikeSpell = spellType == ProjectileSpellType.Strike;
 
-            var crossLandblock = !strikeSpell && casterLoc.Landblock != targetLoc.Landblock;
+            var crossLandblock = !strikeSpell && casterLoc.InstancedLandblock != targetLoc.InstancedLandblock;
 
             var qDir = PhysicsObj.Position.GetOffset(target.PhysicsObj.Position);
             var rotate = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, (float)Math.Atan2(-qDir.X, qDir.Y));
@@ -1764,8 +2477,8 @@ namespace ACE.Server.WorldObjects
 
             var spellProjectiles = new List<SpellProjectile>();
 
-            var casterLoc = PhysicsObj.Position.ACEPosition();
-            var targetLoc = target?.PhysicsObj.Position.ACEPosition();
+            var casterLoc = PhysicsObj.Position.ACEPosition(PhysicsObj.CurInstance);
+            var targetLoc = target?.PhysicsObj.Position.ACEPosition(target.PhysicsObj.CurInstance);
 
             for (var i = 0; i < origins.Count; i++)
             {
@@ -1808,6 +2521,7 @@ namespace ACE.Server.WorldObjects
 
                 sp.ProjectileSource = this;
                 sp.FromProc = fromProc;
+                sp.IsClassAbilityProc = (this as Player)?.ClassAbilityProcCastActive ?? false;
 
                 // side projectiles always untargeted?
                 if (i == 0)

@@ -105,6 +105,10 @@ namespace ACE.Server.WorldObjects
             if (!(activator is Player player))
                 return;
 
+            // Mule (WaffleACE): a mule cannot change its player killer status.
+            if (player.MuleBlocked(MuleAction.ChangePkStatus))
+                return;
+
             if (IsBusy)
             {
                 player.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(player.Session, WeenieErrorWithString.The_IsCurrentlyInUse, Name));

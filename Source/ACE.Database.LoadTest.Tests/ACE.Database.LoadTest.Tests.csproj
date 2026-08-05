@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the ACE.Database.LoadTest benchmark comparison logic. Deliberately its own project rather
+    than a folder inside ACE.Database.Tests: referencing the LoadTest executable transitively copies that
+    project's content files into the referencing project's output directory (verified - its Config.js lands
+    next to the test assembly), and ACE.Database.Tests resolves its own Config.js from exactly that directory.
+    Hosting these tests there would therefore have silently repointed the existing MySQL-backed tests at
+    whichever database the load-test harness happens to be configured for. Nothing in this project reads a
+    Config.js, so the same transitive copy is harmless here.
+
+    Nothing here touches a database, a file or the network - the comparison logic is a pure function of two
+    deserialized reports, so every test in this project runs anywhere, including CI with no MySQL.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+
+    <IsPackable>false</IsPackable>
+
+    <Platforms>x64</Platforms>
+
+    <Authors>ACEmulator Contributors</Authors>
+
+    <Company>ACEmulator</Company>
+
+    <Description>Asheron's Call server emulator</Description>
+
+    <Copyright>© 2017-2026 ACEmulator Team and Contributors</Copyright>
+
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+
+    <RepositoryUrl>https://github.com/ACEmulator/ACE</RepositoryUrl>
+
+    <PackageProjectUrl>https://emulator.ac</PackageProjectUrl>
+
+    <RepositoryType>git</RepositoryType>
+
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Appveyor.TestLogger" Version="2.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="MSTest.TestAdapter" Version="4.3.2" />
+    <PackageReference Include="MSTest.TestFramework" Version="4.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ACE.Database.LoadTest\ACE.Database.LoadTest.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE">
+      <Pack>True</Pack>
+      <PackagePath></PackagePath>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-4f7c-pmjv-c25w" />
+  </ItemGroup>
+
+</Project>

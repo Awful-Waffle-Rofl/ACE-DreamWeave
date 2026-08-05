@@ -7,8 +7,10 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
+using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.Network.Enum;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Network.Structure
@@ -317,11 +319,68 @@ namespace ACE.Server.Network.Structure
                 PropertiesString[PropertyString.Use] = useMessage;
             }
 
-            if (wo is CraftTool && (wo.ItemType == ItemType.TinkeringMaterial || wo.WeenieClassId >= 36619 && wo.WeenieClassId <= 36628 || wo.WeenieClassId >= 36634 && wo.WeenieClassId <= 36636))
+            // A multi-charge salvage tool (WaffleACE - the Hammers) is EXEMPT from this suppression, and the
+            // reason is that Structure means something different on each. On a salvage bag it is a FRACTION of
+            // one unit of salvage, which retail deliberately hides; on a salvage tool it is a COUNT of
+            // remaining applications, which is exactly what the client's green uses-remaining bar is for (the
+            // same bar a summoning device or healing kit draws). Tested with SalvageTool.IsSalvageTool rather
+            // than a wcid list on purpose: a list would silently fail to cover the next tool added.
+            if (wo is CraftTool && !SalvageTool.IsSalvageTool(wo) && (wo.ItemType == ItemType.TinkeringMaterial || wo.WeenieClassId >= 36619 && wo.WeenieClassId <= 36628 || wo.WeenieClassId >= 36634 && wo.WeenieClassId <= 36636))
             {
                 if (PropertiesInt.ContainsKey(PropertyInt.Structure))
                     PropertiesInt.Remove(PropertyInt.Structure);
             }
+
+            // PROTOTYPE: custom ACE-only mechanics (MultiShot today, more planned per the user's broader custom-
+            // gameplay project - chain spells, thorns, summon-on-kill pets, etc.) have no client-side renderer,
+            // so they're surfaced the same way a reference player-run server does it (confirmed via a live
+            // screenshot of their identify panel): a "Property Details:" section with one "- Name: effect" bullet
+            // per mechanic, so it reads as a continuation of the client's own auto-rendered "Properties:"/
+            // imbue-lock line rather than as ordinary flavor text. Computed live from current property values on
+            // every appraisal, never a stored string, so a future crafting/imbue mechanic that adjusts these
+            // values stays accurate without re-authoring the item's description.
+            //
+            // This runs LAST, after every type-specific branch above, because the slot it writes is shared: see
+            // WritePropertyDetails for which slot and why, and for the ManaStone interaction the ordering closes.
+            var propertyDetails = new List<string>();
+
+            // Life ("blood") casters go FIRST: these lines replace client lines that would otherwise sit at
+            // the top of the panel, so they read best in the same position. The client cannot label
+            // DamageType.Health, so its own versions are suppressed just below and re-rendered here.
+            propertyDetails.AddRange(LifeCasterDisplay.GetAppraisalLines(wo));
+            LifeCasterDisplay.SuppressUnlabelledClientLines(wo, PropertiesInt, PropertiesFloat);
+
+            if (wo.IsMultiShot)
+            {
+                var arc = wo.MultiShotSpreadAngle * 2;
+                propertyDetails.Add($"- Multi Shot: Fires {wo.MultiShotCount} additional arrow{(wo.MultiShotCount == 1 ? "" : "s")} in a {arc:0}° arc.");
+            }
+
+            // Equipment mods (WaffleACE) ride the same block. The item stores only a POTENCY scalar 0-1 on a
+            // custom PropertyFloat in the reserved 8100-8199 band; those ids carry no [AssessmentProperty], so
+            // the raw scalar is never sent to the client and this is the only surface a player sees. The
+            // magnitude shown is resolved live through the registry (potency x max x equipment_mod_potency_scale),
+            // which is exactly why retuning a mod's magnitude - or the global scale - instantly retunes every
+            // existing item in the world without touching a single shard row.
+            if (PropertyManager.GetBool("equipment_mods_enabled").Item)
+                propertyDetails.AddRange(EquipmentModDisplay.GetAppraisalLines(wo));
+
+            // Weapon mods (WaffleACE) ride the same block. Unlike the equipment mods above, these entries write
+            // to NATIVE properties the client already renders elsewhere - the Gear* ratings, Cleaving,
+            // IgnoreShield, MaximumVelocity - so this block is what tells a player which part of those numbers
+            // came from this system. The 8130-8135 records themselves carry no [AssessmentProperty] and are
+            // never sent; the magnitudes shown here are read straight off them server side.
+            if (PropertyManager.GetBool("weapon_mods_enabled").Item)
+                propertyDetails.AddRange(WeaponModDisplay.GetAppraisalLines(wo));
+
+            // Multi-charge salvage tools (WaffleACE) - the Hammer items. UNGATED on purpose: unlike the two
+            // blocks above, the remaining charge count is the item's OWN state rather than a rendering of a
+            // feature's effect, so a player must be able to read what they are holding regardless of which of
+            // equipment_mods_enabled / weapon_mods_enabled happens to be on. PropertyInt 9035 carries no
+            // [AssessmentProperty], so this line is the only place the count reaches the client.
+            propertyDetails.AddRange(SalvageTool.GetAppraisalLines(wo));
+
+            WritePropertyDetails(PropertiesString, propertyDetails);
 
             if (!Success)
             {
@@ -337,6 +396,44 @@ namespace ACE.Server.Network.Structure
             }
 
             BuildFlags();
+        }
+
+        /// <summary>
+        /// Writes the "Property Details:" block into PropertyString.Use, appending to whatever Use string the
+        /// item (or an earlier branch) already supplied. Does nothing when there are no lines to show.
+        ///
+        /// WHY Use, AND NOT LongDesc. VERIFIED 2026-07-30 by a live client probe (@appraiseprobe in
+        /// Command/Handlers/WeaponModTestCommands.cs, run by the repo owner): the command stamps a distinct
+        /// two-line marker into each of the three free-text slots AppraiseInfo can write - ShortDesc, LongDesc
+        /// and Use - and one examine then shows where the client draws each. The result was that Use renders
+        /// HIGHEST of the three, and that both of its marker lines rendered, so the slot preserves embedded
+        /// newlines. This block was previously appended to LongDesc, which the client draws at the BOTTOM of the
+        /// panel, below the spell list - far from the "Properties:" lines it annotates.
+        ///
+        /// WHY THE CALL SITE RUNS LAST. `wo is ManaStone` overwrites Use unconditionally, and it is the only
+        /// other writer of this slot. The two are kept apart by ORDER rather than by a type test: this write
+        /// happens after every type-specific branch, so a mana stone that somehow carried a mod line would show
+        /// its own use message first and the block appended below it, instead of the block being silently eaten.
+        /// Do not move this call back above the ManaStone branch.
+        /// </summary>
+        internal static void WritePropertyDetails(Dictionary<PropertyString, string> propertiesString, IReadOnlyList<string> details)
+        {
+            if (propertiesString == null || details == null || details.Count == 0)
+                return;
+
+            var detailsBlock = "Property Details:\n" + string.Join("\n", details);
+
+            // NO padding newlines of our own around the block (both removed 2026-08-02 after seeing them
+            // rendered live). The client already draws its own gap between the Use slot and the section above
+            // it, so a leading "\n" produced a DOUBLE gap under "Properties:", and a trailing "\n" drew a
+            // stray empty line under the last bullet with nothing after it.
+            //
+            // The one separator that IS ours to add is between an item's own Use text and the block, since
+            // those two share this slot and the client puts nothing between them.
+            if (propertiesString.TryGetValue(PropertyString.Use, out var use) && !string.IsNullOrEmpty(use))
+                propertiesString[PropertyString.Use] = use + "\n\n" + detailsBlock;
+            else
+                propertiesString[PropertyString.Use] = detailsBlock;
         }
 
         private void BuildProperties(WorldObject wo)
@@ -650,6 +747,28 @@ namespace ACE.Server.Network.Structure
                 PropertiesInt[PropertyInt.PKDamageResistRating] = pkDamageResistRating;
 
             // add ratings from equipped items?
+
+            // CLIENT DISPLAY, VERIFIED 2026-08-03 by disassembling acclient.exe. Of everything sent above,
+            // the assess panel prints exactly five paired lines: 307/314 "Dmg/CritDmg Rating", 308/316
+            // "Dmg/CritDmg Resist", 381/382 "PK Dmg/Res", 386/387 "Overpower %", 350/351 "DoT/Life".
+            // CritRating 313 and CritResistRating 315 are read ONLY as visibility gates for the first two
+            // of those lines and are never printed; HealingBoostRating 323 is read into a stack slot the
+            // client never reads back. NetherResistRating 331 is not referenced anywhere in .text, so it is
+            // sent and dropped as well; DotResistRating 350 and LifeResistRating 351 do print, as the pair.
+            //
+            // Do NOT try to route those three through their Gear* partners (GearCrit 372, GearCritResist
+            // 373, GearHealingBoost 376). The renderer that draws the Gear* "Ratings:" block is chosen only
+            // when the appraisal carries NO CreatureProfile, and BuildCreature always sends one for a
+            // creature, so that renderer never runs for a player and the ids are a silent no-op. The full
+            // trace, with addresses, is in RatingAbility.GenerateAll.
+            //
+            // GearMaxHealth 379 just above is the one member of the Gear* family that is not display-only:
+            // the client also reads it in its vital-max computation at 0x00592D20 (alongside Enlightenment
+            // 390), which is why Player_Vitals.GetNetworkGearMaxHealth sends a compensated value on the
+            // property-update path. That computation is reached only from call sites outside the assess
+            // panel's code range, so the raw value sent here is display data and does not feed it.
+            // GearCrit 372, GearCritResist 373 and GearHealingBoost 376 have no such second site at all:
+            // each appears exactly once in .text, inside the Gear* renderer.
         }
 
         private void BuildWeapon(WorldObject weapon)

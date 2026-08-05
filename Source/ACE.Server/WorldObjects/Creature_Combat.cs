@@ -501,7 +501,13 @@ namespace ACE.Server.WorldObjects
 
 
         private static double MinAttackSpeed = 0.5;
-        private static double MaxAttackSpeed = 2.0;
+        /// <summary>
+        /// The saturating base anim speed the class-ability attack-speed ceiling is written against.
+        /// INTERNAL rather than private so the /abilities readout can reference this one value instead of
+        /// duplicating the literal: it is not a const, so a copy elsewhere would drift silently the moment
+        /// this is retuned.
+        /// </summary>
+        internal static double MaxAttackSpeed = 2.0;
 
         /// <summary>
         /// Returns the animation speed for an attack,
@@ -513,10 +519,14 @@ namespace ACE.Server.WorldObjects
             var weaponSpeed = GetWeaponSpeed(this);
 
             var divisor = 1.0 - (quickness / 300.0) + (weaponSpeed / 150.0);
-            if (divisor <= 0)
-                return (float)MaxAttackSpeed;
+            var animSpeed = divisor <= 0
+                ? (float)MaxAttackSpeed
+                : (float)Math.Clamp((1.0 / divisor), MinAttackSpeed, MaxAttackSpeed);
 
-            var animSpeed = (float)Math.Clamp((1.0 / divisor), MinAttackSpeed, MaxAttackSpeed);
+            // class abilities: Frenzy (stacking) + Attack Speed (constant) multiply attack speed on top of
+            // the base cap, together up to their shared ceiling
+            if (this is Player player)
+                animSpeed = player.ApplyClassAbilityAttackSpeed(animSpeed);
 
             return animSpeed;
         }

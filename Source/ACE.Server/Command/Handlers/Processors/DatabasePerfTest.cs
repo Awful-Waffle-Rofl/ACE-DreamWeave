@@ -6,8 +6,9 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using ACE.Database;
-using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.Factories;
 using ACE.Server.Network;
 
@@ -60,8 +61,7 @@ namespace ACE.Server.Command.Handlers.Processors
             for (int i = 0; i < biotasPerTest; i++)
             {
                 var worldObject = WorldObjectFactory.CreateNewWorldObject(testWeenies[i % testWeenies.Count]);
-                // TODO fix this
-                //biotas.Add((worldObject.Biota, worldObject.BiotaDatabaseLock));
+                biotas.Add((worldObject.Biota, worldObject.BiotaDatabaseLock));
             }
 
 
@@ -73,7 +73,6 @@ namespace ACE.Server.Command.Handlers.Processors
             var totalQueryExecutionTime = TimeSpan.Zero;
             foreach (var biota in biotas)
             {
-                /* todo
                 DatabaseManager.Shard.SaveBiota(biota.biota, biota.rwLock, result =>
                 {
                     if (result)
@@ -86,7 +85,7 @@ namespace ACE.Server.Command.Handlers.Processors
                         initialQueueWaitTime = queueWaitTime;
 
                     totalQueryExecutionTime += queryExecutionTime;
-                });*/
+                });
             }
 
             while (Interlocked.Read(ref trueResults) + Interlocked.Read(ref falseResults) < biotas.Count)
@@ -109,7 +108,6 @@ namespace ACE.Server.Command.Handlers.Processors
 
                 foreach (var biota in biotas)
                 {
-                    /* todo
                     DatabaseManager.Shard.SaveBiota(biota.biota, biota.rwLock, result =>
                     {
                         if (result)
@@ -122,7 +120,7 @@ namespace ACE.Server.Command.Handlers.Processors
                             initialQueueWaitTime = queueWaitTime;
 
                         totalQueryExecutionTime += queryExecutionTime;
-                    });*/
+                    });
                 }
 
                 while (Interlocked.Read(ref trueResults) + Interlocked.Read(ref falseResults) < biotas.Count)
@@ -173,8 +171,7 @@ namespace ACE.Server.Command.Handlers.Processors
             for (int i = 0; i < biotasPerTest; i++)
             {
                 var worldObject = WorldObjectFactory.CreateNewWorldObject(testWeenies[i % testWeenies.Count]);
-                // TODO fix this
-                //biotas.Add((worldObject.Biota, worldObject.BiotaDatabaseLock));
+                biotas.Add((worldObject.Biota, worldObject.BiotaDatabaseLock));
             }
 
 
@@ -184,7 +181,6 @@ namespace ACE.Server.Command.Handlers.Processors
             startTime = DateTime.UtcNow;
             initialQueueWaitTime = TimeSpan.Zero;
             totalQueryExecutionTime = TimeSpan.Zero;
-            /* todo
             DatabaseManager.Shard.SaveBiotasInParallel(biotas, result =>
             {
                 if (result)
@@ -197,7 +193,7 @@ namespace ACE.Server.Command.Handlers.Processors
                     initialQueueWaitTime = queueWaitTime;
 
                 totalQueryExecutionTime += queryExecutionTime;
-            });*/
+            });
 
             while (Interlocked.Read(ref trueResults) + Interlocked.Read(ref falseResults) < 1)
                 Thread.Sleep(1);
@@ -216,7 +212,6 @@ namespace ACE.Server.Command.Handlers.Processors
                 startTime = DateTime.UtcNow;
                 initialQueueWaitTime = TimeSpan.Zero;
                 totalQueryExecutionTime = TimeSpan.Zero;
-                /* todo
                 DatabaseManager.Shard.SaveBiotasInParallel(biotas, result =>
                 {
                     if (result)
@@ -229,7 +224,7 @@ namespace ACE.Server.Command.Handlers.Processors
                         initialQueueWaitTime = queueWaitTime;
 
                     totalQueryExecutionTime += queryExecutionTime;
-                });*/
+                });
 
                 while (Interlocked.Read(ref trueResults) + Interlocked.Read(ref falseResults) < 1)
                     Thread.Sleep(1);
@@ -275,72 +270,79 @@ namespace ACE.Server.Command.Handlers.Processors
             CommandHandlerHelper.WriteOutputInfo(session, "Database Performance Tests Completed");
         }
 
+        // Sentinel properties reserved for internal/debug use, never touched by normal gameplay - safe to churn here.
+        private const PropertyInt SentinelInt = PropertyInt.PCAPRecordedPlacement;
+        private const PropertyInt64 SentinelInt64 = PropertyInt64.VerifyXp;
+        private const PropertyInstanceId SentinelIID = PropertyInstanceId.PCAPRecordedObjectIID;
+        private const PropertyDataId SentinelDID = PropertyDataId.PCAPRecordedWeenieHeader;
+        private const PropertyFloat SentinelFloat = PropertyFloat.PCAPRecordedWorkmanship;
+        private const PropertyBool SentinelBool = PropertyBool.HouseEvicted;
+        private const PropertyString SentinelString = PropertyString.PCAPRecordedCurrentMotionState;
+
         private static void ModifyBiotas(ICollection<(Biota biota, ReaderWriterLockSlim rwLock)> biotas)
         {
-            foreach (var entry in biotas)
+            foreach (var (biota, rwLock) in biotas)
             {
-                var biota = entry.biota;
+                // Update an existing record (if this weenie happens to have one of that property type)
+                if (biota.PropertiesInt?.Count > 0)
+                {
+                    var key = biota.PropertiesInt.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesInt[key] + 1, rwLock, out _);
+                }
 
-                // Change the first record
-                if (biota.BiotaPropertiesInt.Count > 0)
-                    biota.BiotaPropertiesInt.First().Value++;
+                if (biota.PropertiesInt64?.Count > 0)
+                {
+                    var key = biota.PropertiesInt64.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesInt64[key] + 1, rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesInt64.Count > 0)
-                    biota.BiotaPropertiesInt64.First().Value++;
+                if (biota.PropertiesIID?.Count > 0)
+                {
+                    var key = biota.PropertiesIID.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesIID[key] + 1, rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesIID.Count > 0)
-                    biota.BiotaPropertiesIID.First().Value++;
+                if (biota.PropertiesDID?.Count > 0)
+                {
+                    var key = biota.PropertiesDID.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesDID[key] + 1, rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesDID.Count > 0)
-                    biota.BiotaPropertiesDID.First().Value++;
+                if (biota.PropertiesFloat?.Count > 0)
+                {
+                    var key = biota.PropertiesFloat.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesFloat[key] + 1, rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesFloat.Count > 0)
-                    biota.BiotaPropertiesFloat.First().Value++;
+                if (biota.PropertiesBool?.Count > 0)
+                {
+                    var key = biota.PropertiesBool.Keys.First();
+                    biota.SetProperty(key, !biota.PropertiesBool[key], rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesBool.Count > 0)
-                    biota.BiotaPropertiesBool.First().Value = !biota.BiotaPropertiesBool.First().Value;
+                if (biota.PropertiesString?.Count > 0)
+                {
+                    var key = biota.PropertiesString.Keys.First();
+                    biota.SetProperty(key, biota.PropertiesString[key] + " test", rwLock, out _);
+                }
 
-                if (biota.BiotaPropertiesString.Count > 0)
-                    biota.BiotaPropertiesString.First().Value += " test";
-
-
-                // Remove the last record
-                if (biota.BiotaPropertiesInt.Count > 0)
-                    biota.BiotaPropertiesInt.Remove(biota.BiotaPropertiesInt.Last());
-
-                if (biota.BiotaPropertiesInt64.Count > 0)
-                    biota.BiotaPropertiesInt64.Remove(biota.BiotaPropertiesInt64.Last());
-
-                if (biota.BiotaPropertiesIID.Count > 0)
-                    biota.BiotaPropertiesIID.Remove(biota.BiotaPropertiesIID.Last());
-
-                if (biota.BiotaPropertiesDID.Count > 0)
-                    biota.BiotaPropertiesDID.Remove(biota.BiotaPropertiesDID.Last());
-
-                if (biota.BiotaPropertiesFloat.Count > 0)
-                    biota.BiotaPropertiesFloat.Remove(biota.BiotaPropertiesFloat.Last());
-
-                if (biota.BiotaPropertiesBool.Count > 0)
-                    biota.BiotaPropertiesBool.Remove(biota.BiotaPropertiesBool.Last());
-
-                if (biota.BiotaPropertiesString.Count > 0)
-                    biota.BiotaPropertiesString.Remove(biota.BiotaPropertiesString.Last());
-
+                // Remove a sentinel record, in case a prior pass through this method left one behind
+                biota.TryRemoveProperty(SentinelInt, rwLock);
+                biota.TryRemoveProperty(SentinelInt64, rwLock);
+                biota.TryRemoveProperty(SentinelIID, rwLock);
+                biota.TryRemoveProperty(SentinelDID, rwLock);
+                biota.TryRemoveProperty(SentinelFloat, rwLock);
+                biota.TryRemoveProperty(SentinelBool, rwLock);
+                biota.TryRemoveProperty(SentinelString, rwLock);
 
                 // Add a new record
-                biota.BiotaPropertiesInt.Add(new BiotaPropertiesInt { ObjectId = biota.Id, Type = ushort.MaxValue, Value = 0, Object = biota });
-
-                biota.BiotaPropertiesInt64.Add(new BiotaPropertiesInt64 { ObjectId = biota.Id, Type = ushort.MaxValue, Value = 0, Object = biota });
-
-                biota.BiotaPropertiesIID.Add(new BiotaPropertiesIID { ObjectId = biota.Id, Type = ushort.MaxValue, Value = 0, Object = biota });
-
-                biota.BiotaPropertiesDID.Add(new BiotaPropertiesDID { ObjectId = biota.Id, Type = ushort.MaxValue, Value = 0, Object = biota });
-
-                biota.BiotaPropertiesFloat.Add(new BiotaPropertiesFloat { ObjectId = biota.Id, Type = ushort.MaxValue, Value = 0, Object = biota });
-
-                biota.BiotaPropertiesBool.Add(new BiotaPropertiesBool { ObjectId = biota.Id, Type = ushort.MaxValue, Value = false, Object = biota });
-
-                biota.BiotaPropertiesString.Add(new BiotaPropertiesString { ObjectId = biota.Id, Type = ushort.MaxValue, Value = "", Object = biota });
+                biota.SetProperty(SentinelInt, 0, rwLock, out _);
+                biota.SetProperty(SentinelInt64, 0L, rwLock, out _);
+                biota.SetProperty(SentinelIID, 0u, rwLock, out _);
+                biota.SetProperty(SentinelDID, 0u, rwLock, out _);
+                biota.SetProperty(SentinelFloat, 0d, rwLock, out _);
+                biota.SetProperty(SentinelBool, false, rwLock, out _);
+                biota.SetProperty(SentinelString, "", rwLock, out _);
             }
         }
 

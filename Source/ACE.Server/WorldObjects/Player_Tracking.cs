@@ -219,6 +219,57 @@ namespace ACE.Server.WorldObjects
             actionChain.EnqueueChain();
         }
 
+        /// <summary>
+        /// ACRealms port: a landblock and its per-realm instance copies share 32-bit object guids
+        /// and client-side cell ids. A teleport that leaves a landblock must tell the client to
+        /// delete that origin landblock's objects (see <see cref="FlushKnownObjectsForInstanceChange"/>);
+        /// otherwise entering a *different instance* of the same landblock id later re-renders the
+        /// origin instance's objects as un-interactable ghosts. Returns true when the origin and
+        /// destination are different server-side landblock instances - i.e. the teleport changes the
+        /// 64-bit (instance, landblock) pair.
+        ///
+        /// The decision must be made from the origin instanced-landblock captured *before* physics
+        /// relocation, never from CurrentLandblock: a command-initiated teleport (lifestone / house /
+        /// marketplace / Drift Network recall, /teleto, /telepoi) runs with <see cref="InUpdate"/> == false,
+        /// so UpdatePlayerPosition has already relocated CurrentLandblock to the destination by the time
+        /// the caller evaluates this - making a CurrentLandblock-vs-destination instance compare falsely
+        /// equal and skipping the flush. That skip is what let realm-specific objects linger on the client
+        /// as ghosts. The client's own 25s occlusion cull does not cover it either: an intermediate hop
+        /// through another landblock (a lifestone recall between the two visits) drops the objects from the
+        /// origin's PVS well before the eventual cross-instance arrival, so nothing ever deletes them.
+        /// </summary>
+        public static bool TeleportRequiresClientObjectFlush(ulong originInstancedLandblock, ulong destinationInstancedLandblock)
+        {
+            return originInstancedLandblock != destinationInstancedLandblock;
+        }
+
+        /// <summary>
+        /// ACRealms port: a landblock and its instance copies share 32-bit object guids,
+        /// so when a player moves between instances the client must fully forget the old
+        /// instance's objects before the new instance's (same-guid) objects can be
+        /// created for it. Clears both sides of the object tracking tables and sends
+        /// DeleteObject for everything known.
+        /// </summary>
+        public void FlushKnownObjectsForInstanceChange()
+        {
+            if (PhysicsObj?.ObjMaint == null)
+                return;
+
+            foreach (var knownObj in GetKnownObjects())
+            {
+                if (knownObj.PhysicsObj != null)
+                {
+                    knownObj.PhysicsObj.ObjMaint.RemoveObject(PhysicsObj);
+                    ObjMaint.RemoveObject(knownObj.PhysicsObj);
+                }
+
+                if (knownObj is Player knownPlayer)
+                    knownPlayer.RemoveTrackedObject(this, false);
+
+                RemoveTrackedObject(knownObj, false);
+            }
+        }
+
         public void HandlePreTeleportVisibility(ACE.Entity.Position newPosition)
         {
             // repro steps without this function:

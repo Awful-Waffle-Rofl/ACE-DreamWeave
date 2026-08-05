@@ -13,6 +13,56 @@ namespace ACE.Entity.Enum
     /// </summary>
     public enum ChatMessageType: uint
     {
+        /* Client-verified rendering 2026-07-24 (retail client, /chatcolors probe; screenshot
+         * Content/preview/quest_stamps/clipboard_chatcolors_palette.png, pixel-sampled):
+         *
+         *   0x00  Broadcast        UNVERIFIED - see note below
+         *   0x01  AllChannels      RGB(127,255,126)  pale green
+         *   0x02  Speech           RGB(255,255,255)  white
+         *   0x03  Tell             RGB(255,255, 62)  yellow
+         *   0x04  OutgoingTell     RGB(210,210, 99)  dull yellow
+         *   0x05  System           RGB(255,126,255)  pink / magenta
+         *   0x06  Combat           RGB(255, 62, 62)  red
+         *   0x07  Magic            RGB( 62,190,255)  bright blue
+         *   0x08  Channel          RGB(255,149,149)  light pink
+         *   0x09  ChannelSend      RGB(255,149,149)  light pink
+         *   0x0A  Social           RGB(255,255, 62)  yellow
+         *   0x0B  SocialSend       RGB(210,210, 99)  dull yellow
+         *   0x0C  Emote            RGB(210,210,199)  pale gray
+         *   0x0D  Advancement      RGB( 62,220,220)  TEAL - the only true teal in the client
+         *   0x0E  Abuse            RGB(180,220,239)  pale steel-blue
+         *   0x0F  Help             RGB(255, 62, 62)  red
+         *   0x10  Appraisal        RGB(127,255,126)  pale green
+         *   0x11  Spellcasting     RGB( 62,190,255)  bright blue
+         *   0x12  Allegiance       RGB(237,146, 30)  orange
+         *   0x13  Fellowship       RGB(255,255, 62)  yellow
+         *   0x14  WorldBroadcast   RGB(127,255,126)  pale green
+         *   0x15  CombatEnemy      RGB(255, 62, 62)  red
+         *   0x16  CombatSelf       RGB(244,117,113)  salmon
+         *   0x17  Recall           RGB(127,255,126)  pale green
+         *   0x18  Craft            RGB(127,255,126)  pale green
+         *   0x19  Salvaging        RGB(127,255,126)  pale green
+         *   0x1A  (not a member - commented out below; client displays nothing)
+         *   0x1B  x1B              RGB(180,220,239)  pale steel-blue
+         *   0x1C  x1C              RGB(180,220,239)  pale steel-blue
+         *   0x1D  x1D              RGB(180,220,239)  pale steel-blue
+         *   0x1E  x1E              RGB(180,220,239)  pale steel-blue
+         *   0x1F  AdminTell        RGB(255,255, 62)  yellow
+         *
+         * WHY THIS TABLE EXISTS: the per-member doc comments below describe the channel each type is used
+         * for, and their color claims are NOT reliable for GameMessageSystemChat. The client picks a color
+         * from the message-carrying opcode as well as the type byte, so a type documented from one opcode can
+         * render differently through another. Two claims here were wrong by direct observation: 0x1E,
+         * documented "Light Cyan", renders dark navy; 0x03 Tell renders yellow even though a real NPC tell
+         * (sent via a different opcode) renders bright cyan. Trust this table for GameMessageSystemChat and
+         * the member comments for channel semantics. Re-probe with the Developer "/chatcolors" command
+         * rather than reasoning from the names.
+         *
+         * 0x00 Broadcast is UNVERIFIED. /chatcolors does send it (it is a defined member and the loop is
+         * ordered from 0x00), but no line for it was observed in the probe output, so the client most likely
+         * displays nothing for it through this opcode - the same behavior already documented for 0x1A. It
+         * could equally have scrolled out of the capture. Confirm before relying on it. */
+
         /// <summary>
         /// allegiance MOTD
         /// 
@@ -163,6 +213,7 @@ namespace ACE.Entity.Enum
 
         /// <summary>
         /// Light Cyan (skyblue?) Text - Would seem to be associated with the following channel: Abuse
+        /// (client-verified: pale steel-blue RGB(180,220,239), not cyan - see the table at the top)
         /// output: You say on the Abuse channel, "message here"
         /// 
         /// LogTextTypeEnumMapper: Abuse
@@ -226,7 +277,9 @@ namespace ACE.Entity.Enum
 
         /// <summary>
         /// Pink Text
-        /// 
+        /// (client-verified: salmon RGB(244,117,113) - a different pink from 0x05 System's magenta
+        /// RGB(255,126,255), which the shared "Pink" wording hides)
+        ///
         /// LogTextTypeEnumMapper: Combat_Self
         /// </summary>
         CombatSelf          = 0x16,
@@ -260,6 +313,7 @@ namespace ACE.Entity.Enum
 
         /// <summary>
         /// Light cyan(sky blue) - Unknown purpose/filter?
+        /// (client-verified: 0x1B, 0x1C and 0x1D all render pale steel-blue RGB(180,220,239), not cyan)
         /// </summary>
         x1B                 = 0x1B,
         x1C                 = 0x1C,
@@ -267,8 +321,11 @@ namespace ACE.Entity.Enum
 
         /// <summary>
         /// Light Cyan (skyblue?) Text - Unknown purpose/filter?
+        /// (client-verified: pale steel-blue RGB(180,220,239). Sent through GameMessageSystemChat it reads
+        /// as dark navy against the chat background - this claim is what sent the quest stamp message
+        /// hunting for a readable teal in the first place.)
         /// </summary>
-        x1E                 = 0x1E, 
+        x1E                 = 0x1E,
 
         /// <summary>
         /// Bright Yellow Text

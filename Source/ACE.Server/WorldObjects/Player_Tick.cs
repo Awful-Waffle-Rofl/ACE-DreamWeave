@@ -83,7 +83,9 @@ namespace ACE.Server.WorldObjects
 
             if (FellowVitalUpdate && Fellowship != null)
             {
-                Fellowship.OnVitalUpdate(this);
+                // only flags this member as dirty; FellowshipManager.Tick() does the actual sending on a
+                // fixed cadence, so vitals traffic no longer scales with the 60Hz world tick
+                Fellowship.MarkVitalDirty(this);
                 FellowVitalUpdate = false;
             }
 
@@ -122,6 +124,12 @@ namespace ACE.Server.WorldObjects
             PK_DeathTick();
 
             GagsTick();
+
+            ClassAbilityBuffsHeartbeat();
+
+            // drain banked offline bonus time 1:1 with time spent online, so the persisted value stays
+            // current between saves (and across a crash) rather than only reconciling at logout
+            UpdateOfflineBonus();
 
             PhysicsObj.ObjMaint.DestroyObjects();
 
@@ -287,6 +295,15 @@ namespace ACE.Server.WorldObjects
             minterp.apply_raw_movement(true, allowJump);
         }
 
+        /// <summary>
+        /// True only while UpdateObjectPhysics() is running on the world-thread tick.
+        /// Load-bearing for teleports: command-initiated teleports (recalls, /teleto, etc.)
+        /// run in action chains with InUpdate == false, which makes UpdatePlayerPosition()
+        /// relocate the player immediately - any teleport logic comparing origin vs destination
+        /// state must capture the origin BEFORE that relocation (see Player_Location.Teleport;
+        /// a post-relocation compare here silently skipped the cross-instance client object
+        /// flush until PR #174).
+        /// </summary>
         public bool InUpdate;
 
         public override bool UpdateObjectPhysics()
@@ -337,7 +354,7 @@ namespace ACE.Server.WorldObjects
             //Console.WriteLine($"{PhysicsObj.Position.Frame.Origin}");
             //Console.WriteLine($"{PhysicsObj.Position.Frame.get_heading()}");
 
-            PhysicsObj.update_object();
+            PhysicsObj.update_object(Location.Instance);
 
             // sync ace position?
             Location.Rotation = PhysicsObj.Position.Frame.Orientation;
@@ -440,7 +457,7 @@ namespace ACE.Server.WorldObjects
                         var dist = PhysicsObj.Position.Distance(p);
                         Console.WriteLine($"Dist: {dist}");*/
 
-                        if (newPosition.Landblock == 0x18A && Location.Landblock != 0x18A)
+                        if (newPosition.LandblockShort == 0x18A && Location.LandblockShort != 0x18A)
                             log.Info($"{Name} is getting swanky");
 
                         if (!Teleporting)
@@ -460,17 +477,17 @@ namespace ACE.Server.WorldObjects
                                 verifyContact = true;
                         }
 
-                        var curCell = LScape.get_landcell(newPosition.Cell);
+                        var curCell = LScape.get_landcell(newPosition.Cell, newPosition.Instance);
                         if (curCell != null)
                         {
                             //if (PhysicsObj.CurCell == null || curCell.ID != PhysicsObj.CurCell.ID)
                                 //PhysicsObj.change_cell_server(curCell);
 
-                            PhysicsObj.set_request_pos(newPosition.Pos, newPosition.Rotation, curCell, Location.LandblockId.Raw);
+                            PhysicsObj.set_request_pos(newPosition.Pos, newPosition.Rotation, curCell, Location.LandblockId.Raw, newPosition.Instance);
                             if (FastTick)
-                                success = PhysicsObj.update_object_server_new();
+                                success = PhysicsObj.update_object_server_new(newPosition.Instance);
                             else
-                                success = PhysicsObj.update_object_server();
+                                success = PhysicsObj.update_object_server(newPosition.Instance);
 
                             if (PhysicsObj.CurCell == null && curCell.ID >> 16 != 0x18A)
                             {
@@ -503,7 +520,7 @@ namespace ACE.Server.WorldObjects
 
                 if (!success) return false;
 
-                var landblockUpdate = Location.Cell >> 16 != newPosition.Cell >> 16;
+                var landblockUpdate = Location.InstancedLandblock != newPosition.InstancedLandblock;
 
                 Location = newPosition;
 
@@ -545,7 +562,7 @@ namespace ACE.Server.WorldObjects
             if (CurrentLandblock == null)
                 return false;
 
-            if (!Teleporting && Location.Landblock != newPosition.Cell >> 16)
+            if (!Teleporting && Location.LandblockShort != newPosition.Cell >> 16)
             {
                 if ((Location.Cell & 0xFFFF) >= 0x100 && (newPosition.Cell & 0xFFFF) >= 0x100)
                 {
@@ -555,7 +572,7 @@ namespace ACE.Server.WorldObjects
 
                 if (CurrentLandblock.IsDungeon)
                 {
-                    var destBlock = LScape.get_landblock(newPosition.Cell);
+                    var destBlock = LScape.get_landblock(newPosition.Cell, newPosition.Instance);
                     if (destBlock != null && destBlock.IsDungeon)
                         return false;
                 }
@@ -576,9 +593,9 @@ namespace ACE.Server.WorldObjects
             var pos = PhysicsObj.Position.Frame.Origin;
             var rotate = PhysicsObj.Position.Frame.Orientation;
 
-            var landblockUpdate = blockcell << 16 != CurrentLandblock.Id.Landblock;
+            var landblockUpdate = blockcell << 16 != CurrentLandblock.Id.Landblock || Location.Instance != CurrentLandblock.Instance;
 
-            Location = new ACE.Entity.Position(blockcell, pos, rotate);
+            Location = new ACE.Entity.Position(blockcell, pos, rotate) { Instance = Location.Instance };
 
             return landblockUpdate;
         }

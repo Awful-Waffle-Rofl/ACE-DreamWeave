@@ -94,6 +94,12 @@ namespace ACE.Server.WorldObjects
 
         public bool HitMsg;     // FIXME: find a better way to do this for projectiles
 
+        // PROTOTYPE: multi-shot's extra targets are hit instantly (see Creature_Missile.GetMultiShotTargets) -
+        // this flags a purely visual projectile (ProjectileTarget intentionally left null so
+        // ProjectileCollisionHelper never applies damage for it) so it doesn't also spam a
+        // "hit the environment" message when its cosmetic flight ends.
+        public bool IsCosmeticProjectile;
+
         public WorldObject Wielder;
 
         public WorldObject() { }
@@ -165,7 +171,7 @@ namespace ACE.Server.WorldObjects
                 PhysicsObj.makeAnimObject(SetupTableId, true);
             }
 
-            PhysicsObj.set_object_guid(Guid);
+            PhysicsObj.set_object_guid(Guid, Location?.Instance ?? 0);
 
             PhysicsObj.set_weenie_obj(new WeenieObject(this));
 
@@ -191,7 +197,7 @@ namespace ACE.Server.WorldObjects
             // exclude linkspots from spawning
             if (WeenieClassId == 10762) return true;
 
-            var cell = LScape.get_landcell(Location.Cell);
+            var cell = LScape.get_landcell(Location.Cell, Location.Instance);
             if (cell == null)
             {
                 PhysicsObj.DestroyObject();
@@ -206,7 +212,7 @@ namespace ACE.Server.WorldObjects
             location.Frame.Origin = Location.Pos;
             location.Frame.Orientation = Location.Rotation;
 
-            var success = PhysicsObj.enter_world(location);
+            var success = PhysicsObj.enter_world(location, Location.Instance);
 
             if (!success || PhysicsObj.CurCell == null)
             {
@@ -746,12 +752,12 @@ namespace ACE.Server.WorldObjects
         {
             if (pos == null) return false;
 
-            var landblock = LScape.get_landblock(pos.Cell);
+            var landblock = LScape.get_landblock(pos.Cell, pos.Instance);
             if (landblock == null || !landblock.HasDungeon) return false;
 
             var dungeonID = pos.Cell >> 16;
 
-            var adjustCell = AdjustCell.Get(dungeonID);
+            var adjustCell = AdjustCell.Get(dungeonID, pos.Instance);
             var cellID = adjustCell.GetCell(pos.Pos);
 
             if (cellID != null && pos.Cell != cellID.Value)
@@ -767,7 +773,7 @@ namespace ACE.Server.WorldObjects
         {
             if (pos == null) return false;
 
-            var landblock = LScape.get_landblock(pos.Cell);
+            var landblock = LScape.get_landblock(pos.Cell, pos.Instance);
             if (landblock == null || !landblock.HasDungeon) return false;
 
             var dungeonID = pos.Cell >> 16;
@@ -862,9 +868,28 @@ namespace ACE.Server.WorldObjects
             {
                 if (pet.P_PetOwner?.CurrentActivePet == this)
                     pet.P_PetOwner.CurrentActivePet = null;
+                else if (pet.P_PetOwner?.SecondaryActivePet == this)   // Summon 2x second slot
+                    pet.P_PetOwner.SecondaryActivePet = null;
 
                 if (pet.P_PetDevice?.Pet == Guid.Full)
-                    pet.P_PetDevice.Pet = null;
+                {
+                    // PetDevice.Pet is a single slot, but Summon 2x puts TWO pets in the world from one
+                    // device, so clearing it outright here would drop the "a pet from this device is still
+                    // out" signal while the other one is still alive - and that signal is what the
+                    // drop/trade/give guards in Player_Inventory + Player_Trade key off. This pet's own slot
+                    // was just cleared above, so anything left in either slot is the other pet; re-point the
+                    // device at it when it came from this same device, and only clear when none remain.
+                    //
+                    // Correctness tidying, not an exploit fix: every CombatPet weenie carries Lifespan 43
+                    // against the device's flat 45s cooldown, so the survivor is seconds from expiring
+                    // anyway and the guard has very little left to protect by this point.
+                    var survivor = pet.P_PetOwner?.CurrentActivePet ?? pet.P_PetOwner?.SecondaryActivePet;
+
+                    if (survivor != null && survivor != pet && survivor.P_PetDevice == pet.P_PetDevice)
+                        pet.P_PetDevice.Pet = survivor.Guid.Full;
+                    else
+                        pet.P_PetDevice.Pet = null;
+                }
             }
 
             if (this is Vendor vendor)

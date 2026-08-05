@@ -137,7 +137,9 @@ namespace ACE.Server.WorldObjects
                             targetProc = true;
                         }
                     }
-                    else
+                    else if (!damageEvent.Blocked && !damageEvent.Parried)
+                        // a class-ability block/parry is not an evade: it sends its own message and must not
+                        // train Melee/Missile Defense proficiency, so skip the evade path for those
                         target.OnEvade(this, CombatType.Melee);
 
                     if (combatPet != null)

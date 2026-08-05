@@ -918,6 +918,34 @@ namespace ACE.Server.Command.Handlers
             "Example: @teleloc 7F0401AD 12.319900 -28.482000 0.005000")]
         public static void HandleTeleportLOC(Session session, params string[] parameters)
         {
+            if (TryParseLocPosition(parameters, session.Player.Location.Instance, out var position, out _))
+            {
+                session.Player.Teleport(position);
+            }
+            else
+            {
+                ChatPacket.SendServerMessage(session, "Invalid arguments for @teleloc", ChatMessageType.Broadcast);
+                ChatPacket.SendServerMessage(session, "Hint: @teleloc follows the same number order as displayed from @loc output", ChatMessageType.Broadcast);
+                ChatPacket.SendServerMessage(session, "Usage: @teleloc cell [x y z] (qw qx qy qz)", ChatMessageType.Broadcast);
+                ChatPacket.SendServerMessage(session, "Example: @teleloc 0x7F0401AD [12.319900 -28.482000 0.005000] -0.338946 0.000000 0.000000 -0.940806", ChatMessageType.Broadcast);
+                ChatPacket.SendServerMessage(session, "Example: @teleloc 0x7F0401AD 12.319900 -28.482000 0.005000 -0.338946 0.000000 0.000000 -0.940806", ChatMessageType.Broadcast);
+                ChatPacket.SendServerMessage(session, "Example: @teleloc 7F0401AD 12.319900 -28.482000 0.005000", ChatMessageType.Broadcast);
+            }
+        }
+
+        /// <summary>
+        /// WaffleACE: shared loc-string parser, factored out of <see cref="HandleTeleportLOC"/> so other
+        /// callers (the mule system's lifestone bind, Player_Mule.ApplyMuleConversion) can parse the exact
+        /// same "cell [x y z] (qw qx qy qz)" format /teleloc accepts, from a config-supplied string, without
+        /// duplicating the parsing logic. <paramref name="parameters"/> is the token array in the same order
+        /// as /teleloc's own args (cell, x, y, z, qw, qx, qy, qz) - the caller is responsible for splitting a
+        /// raw string on whitespace first.
+        /// </summary>
+        public static bool TryParseLocPosition(string[] parameters, uint instance, out Position position, out string error)
+        {
+            position = null;
+            error = null;
+
             try
             {
                 uint cell;
@@ -942,22 +970,22 @@ namespace ACE.Server.Command.Handlers
                         break;
                     }
 
-                    if (!float.TryParse(parameters[i + 1].Trim(new Char[] { ' ', '[', ']' }), out var position))
-                        return;
+                    if (!float.TryParse(parameters[i + 1].Trim(new Char[] { ' ', '[', ']' }), out var value))
+                    {
+                        error = $"Could not parse numeric value at position {i + 1}.";
+                        return false;
+                    }
 
-                    positionData[i] = position;
+                    positionData[i] = value;
                 }
 
-                session.Player.Teleport(new Position(cell, positionData[0], positionData[1], positionData[2], positionData[4], positionData[5], positionData[6], positionData[3]));
+                position = new Position(cell, positionData[0], positionData[1], positionData[2], positionData[4], positionData[5], positionData[6], positionData[3], instance);
+                return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                ChatPacket.SendServerMessage(session, "Invalid arguments for @teleloc", ChatMessageType.Broadcast);
-                ChatPacket.SendServerMessage(session, "Hint: @teleloc follows the same number order as displayed from @loc output", ChatMessageType.Broadcast);
-                ChatPacket.SendServerMessage(session, "Usage: @teleloc cell [x y z] (qw qx qy qz)", ChatMessageType.Broadcast);
-                ChatPacket.SendServerMessage(session, "Example: @teleloc 0x7F0401AD [12.319900 -28.482000 0.005000] -0.338946 0.000000 0.000000 -0.940806", ChatMessageType.Broadcast);
-                ChatPacket.SendServerMessage(session, "Example: @teleloc 0x7F0401AD 12.319900 -28.482000 0.005000 -0.338946 0.000000 0.000000 -0.940806", ChatMessageType.Broadcast);
-                ChatPacket.SendServerMessage(session, "Example: @teleloc 7F0401AD 12.319900 -28.482000 0.005000", ChatMessageType.Broadcast);
+                error = ex.Message;
+                return false;
             }
         }
 
@@ -2817,17 +2845,25 @@ namespace ACE.Server.Command.Handlers
                 var items = new List<WorldObject>();
                 var playerLoc = new Position(player.Location);
 
+                // one batched off-player save after both loops instead of one queue entry per item - see
+                // Player.DeepSave. Forcing a full pack + equipment drop is the widest-N case of all of these.
+                var deferredSaves = Player.NewDeferredSaveList();
+
                 foreach (var item in player.Inventory)
                 {
-                    if (player.TryRemoveFromInventoryWithNetworking(item.Key, out var worldObject, Player.RemoveFromInventoryAction.DropItem))
+                    if (player.TryRemoveFromInventoryWithNetworking(item.Key, out var worldObject, Player.RemoveFromInventoryAction.DropItem, deferredSaves))
                         items.Add(worldObject);
                 }
 
                 foreach (var item in player.EquippedObjects)
                 {
-                    if (player.TryDequipObjectWithNetworking(item.Key.Full, out var worldObject, Player.DequipObjectAction.DropItem))
+                    if (player.TryDequipObjectWithNetworking(item.Key.Full, out var worldObject, Player.DequipObjectAction.DropItem, deferredSaves))
                         items.Add(worldObject);
                 }
+
+                // nothing between the loops and here mutates or destroys a dropped item; the landblock placement
+                // loop below runs after, exactly as it did when each item saved itself inline.
+                Player.FlushDeferredSaves(deferredSaves);
 
                 player.SavePlayerToDatabase();
 
@@ -3377,6 +3413,18 @@ namespace ACE.Server.Command.Handlers
             {
                 session.Network.EnqueueSend(new GameMessageSystemChat($"You cannot heal {wo.Name} because it is not a player.", ChatMessageType.Broadcast));
             }
+        }
+
+        // healself
+        [CommandHandler("healself", AccessLevel.Envoy, CommandHandlerFlag.RequiresWorld, 0,
+            "Fully restores your own health/stamina/mana, ignoring any selected target.")]
+        public static void HandleHealSelf(Session session, params string[] parameters)
+        {
+            // usage: @healself
+            // This command fully restores your own health, mana, and stamina, ignoring any selected target.
+            // @healself - Heals yourself, regardless of what is selected.
+
+            session.Player.SetMaxVitals();
         }
 
         // housekeep
@@ -4751,7 +4799,7 @@ namespace ACE.Server.Command.Handlers
             var newLoc = new Position(session.Player.Location);
             newLoc.Rotation = prevLoc.Rotation;     // keep previous rotation
 
-            var setPos = new Physics.Common.SetPosition(newLoc.PhysPosition(), Physics.Common.SetPositionFlags.Teleport | Physics.Common.SetPositionFlags.Slide);
+            var setPos = new Physics.Common.SetPosition(newLoc.PhysPosition(), Physics.Common.SetPositionFlags.Teleport | Physics.Common.SetPositionFlags.Slide, newLoc.Instance);
             var result = obj.PhysicsObj.SetPosition(setPos);
 
             if (result != Physics.Common.SetPositionError.OK)
@@ -4762,9 +4810,9 @@ namespace ACE.Server.Command.Handlers
             }
             session.Network.EnqueueSend(new GameMessageSystemChat($"Moving {obj.Name} ({obj.Guid}) to current location", ChatMessageType.Broadcast));
 
-            obj.Location = obj.PhysicsObj.Position.ACEPosition();
+            obj.Location = obj.PhysicsObj.Position.ACEPosition(obj.PhysicsObj.CurInstance);
 
-            if (prevLoc.Landblock != obj.Location.Landblock)
+            if (prevLoc.InstancedLandblock != obj.Location.InstancedLandblock)
             {
                 LandblockManager.RelocateObjectForPhysics(obj, true);
             }

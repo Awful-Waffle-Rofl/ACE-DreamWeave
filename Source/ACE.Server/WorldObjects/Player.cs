@@ -493,6 +493,15 @@ namespace ACE.Server.WorldObjects
         public bool IsLoggingOut;
 
         /// <summary>
+        /// Set when the first-login welcome popup was withheld because this character was routed
+        /// through the Loom: the popup tells them to go and speak to the Society Greeter, who is in
+        /// the training hall, so it is replayed when the DreamWeave sets them down there.
+        /// Session-scoped on purpose - if they log out inside the Loom they are resumed into it, and
+        /// the popup fires again on that login anyway (TotalLogins is still 1).
+        /// </summary>
+        public bool DeferredWelcomePopup;
+
+        /// <summary>
         /// Do the player log out work.<para />
         /// If you want to force a player to logout, use Session.LogOffPlayer().
         /// </summary>
@@ -567,6 +576,9 @@ namespace ACE.Server.WorldObjects
 
             if (CurrentActivePet != null)
                 CurrentActivePet.Destroy();
+
+            if (SecondaryActivePet != null)   // Summon 2x second slot
+                SecondaryActivePet.Destroy();
 
             // If we're in the dying animation process, we cannot logout until that animation completes..
             if (IsInDeathProcess)
@@ -854,7 +866,7 @@ namespace ACE.Server.WorldObjects
 
             foreach (var creature in PhysicsObj.ObjMaint.GetKnownObjectsValuesAsCreature())
             {
-                if (isDungeon && Location.Landblock != creature.Location.Landblock)
+                if (isDungeon && Location.InstancedLandblock != creature.Location.InstancedLandblock)
                     continue;
 
                 var distSquared = Location.SquaredDistanceTo(creature.Location);
@@ -868,15 +880,23 @@ namespace ACE.Server.WorldObjects
             StartJump = new ACE.Entity.Position(Location);
             //Console.WriteLine($"JumpPack: Velocity: {jump.Velocity}, Extent: {jump.Extent}");
 
-            var strength = Strength.Current;
-            var capacity = EncumbranceSystem.EncumbranceCapacity((int)strength, AugmentationIncreasedCarryingCapacity);
+            // Capacity comes from Player.GetEncumbranceCapacity, the single authority for a Player (see its
+            // summary). Numerically identical to the old inline EncumbranceSystem.EncumbranceCapacity call for
+            // every normal character; it additionally honours the mule capacity override.
+            var capacity = GetEncumbranceCapacity();
             var burden = EncumbranceSystem.GetBurden(capacity, EncumbranceVal ?? 0);
 
             // calculate stamina cost for this jump
             var extent = Math.Clamp(jump.Extent, 0.0f, 1.0f);
             var staminaCost = MovementSystem.JumpStaminaCost(extent, burden, PKTimerActive);
 
-            //Console.WriteLine($"Strength: {strength}, Capacity: {capacity}, Encumbrance: {EncumbranceVal ?? 0}, Burden: {burden}, StaminaCost: {staminaCost}");
+            // survival challenge (WaffleACE): a flat, punishing jump tax while actually inside an active survival run,
+            // so the arena cannot be trivialized by bunny-hopping the enemies. Gated on being in the bound run
+            // instance (not the bare flag) so a stale flag never taxes jumps outside the arena.
+            if (IsInSurvivalChallengeInstance)
+                staminaCost = 100;
+
+            //Console.WriteLine($"Strength: {Strength.Current}, Capacity: {capacity}, Encumbrance: {EncumbranceVal ?? 0}, Burden: {burden}, StaminaCost: {staminaCost}");
 
             // ensure player has enough stamina to jump
 
@@ -1015,9 +1035,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override float GetBurdenMod()
         {
-            var strength = Strength.Current;
-
-            var capacity = EncumbranceSystem.EncumbranceCapacity((int)strength, AugmentationIncreasedCarryingCapacity);
+            // Capacity comes from Player.GetEncumbranceCapacity, the single authority for a Player (see its
+            // summary). This is the site that matters most for the mule override: GetBurdenMod is what degrades
+            // Run, Jump, Melee Defense and Missile Defense when overburdened (Creature_Combat.GetBurdenMod), so
+            // a mule whose pickup gate used the override while this used the Strength formula would be waved
+            // through the gate and then crippled by the load it was just allowed to take.
+            var capacity = GetEncumbranceCapacity();
 
             var burden = EncumbranceSystem.GetBurden(capacity, EncumbranceVal ?? 0);
 
@@ -1137,7 +1160,7 @@ namespace ACE.Server.WorldObjects
                         if (colliding)
                         {
                             // try initial placement
-                            var result = PhysicsObj.SetPositionSimple(PhysicsObj.Position, true);
+                            var result = PhysicsObj.SetPositionSimple(PhysicsObj.Position, true, Location.Instance);
 
                             if (result == SetPositionError.OK)
                             {

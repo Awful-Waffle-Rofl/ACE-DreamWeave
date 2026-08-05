@@ -8,6 +8,7 @@ using ACE.Common;
 using ACE.DatLoader.Entity.AnimationHooks;
 using ACE.Entity.Enum;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
@@ -65,6 +66,12 @@ namespace ACE.Server.Entity
         public float AccuracyMod;
 
         public bool Evaded;
+
+        // class-ability avoidance outcomes (resolved before the evade roll). Blocked = Shield Block,
+        // Parried = Parry. Both zero the damage like an evade, but unlike an evade they proc their
+        // synergy (Thorns / Shield Check / Riposte) - handled at the roll site.
+        public bool Blocked;
+        public bool Parried;
 
         public BaseDamageMod BaseDamageMod;
         public float BaseDamage { get; set; }
@@ -129,7 +136,7 @@ namespace ACE.Server.Entity
 
         public bool GeneralFailure;
 
-        public bool HasDamage => !Evaded && !LifestoneProtection;
+        public bool HasDamage => !Evaded && !Blocked && !Parried && !LifestoneProtection;
 
         public bool CriticalDefended;
 
@@ -194,6 +201,22 @@ namespace ACE.Server.Entity
             // overpower
             if (attacker.Overpower != null)
                 Overpower = Creature.GetOverpower(attacker, defender);
+
+            // class-ability avoidance (Shield Block / Parry) - resolved BEFORE the evade roll so a blocked
+            // or parried hit can proc its synergy (Thorns / Shield Check / Riposte), whereas an evaded hit
+            // procs nothing. PvE only (playerAttacker == null), matching every other class ability's PvP
+            // exclusion; no-op unless the defender has learned one of those skills.
+            if (!Overpower && playerDefender != null && playerAttacker == null)
+            {
+                var avoidance = playerDefender.RollClassAbilityAvoidance(attacker, CombatType);
+                if (avoidance != ClassAbilityAvoidanceOutcome.None)
+                {
+                    Blocked = avoidance == ClassAbilityAvoidanceOutcome.Block;
+                    Parried = avoidance == ClassAbilityAvoidanceOutcome.Parry;
+                    playerDefender.OnClassAbilityAttackAvoided(attacker, avoidance, CombatType);
+                    return 0.0f;
+                }
+            }
 
             // evasion chance
             if (!Overpower)
@@ -342,7 +365,7 @@ namespace ACE.Server.Entity
             }
 
             // damage resistance rating
-            DamageResistanceRatingMod = DamageResistanceRatingBaseMod = defender.GetDamageResistRatingMod(CombatType);
+            DamageResistanceRatingMod = DamageResistanceRatingBaseMod = defender.GetDamageResistRatingMod(CombatType, attacker: Attacker);
 
             if (IsCritical)
             {

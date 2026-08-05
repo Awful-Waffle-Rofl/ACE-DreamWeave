@@ -265,6 +265,13 @@ namespace ACE.Server.WorldObjects
 
         public Pet CurrentActivePet { get; set; }
 
+        /// <summary>
+        /// A second concurrently-active combat pet, populated only when the Summon 2x class ability is
+        /// learned (see Player.CanSummonAdditionalCombatPet). Null for everyone else; the normal single-pet
+        /// paths are unaffected.
+        /// </summary>
+        public Pet SecondaryActivePet { get; set; }
+
         public void ApplyConsumable(MotionCommand useMotion, Action action, float animMod = 1.0f)
         {
             if (PropertyManager.GetBool("allow_fast_chug").Item && FastTick)

@@ -42,6 +42,15 @@ namespace ACE.Server.WorldObjects.Entity
         }
 
         /// <summary>
+        /// StartingValue as reported to the client, folding in the getter-only "Enhanced &lt;attribute&gt;"
+        /// class ability bonus so the client's attribute panel (which rebuilds the value from Ranks +
+        /// StartingValue, not from the server's Current) reflects it. The stored InitLevel is left
+        /// untouched, which is what keeps the bonus out of the redistributable pool.
+        /// </summary>
+        public uint NetworkStartingValue =>
+            StartingValue + (creature is Player player ? (uint)(player.GetEnhancedAttributeBonus(Attribute) + Math.Max(0, player.Enlightenment)) : 0);
+
+        /// <summary>
         /// Total Experience Spent on an attribute
         /// </summary>
         public uint ExperienceSpent
@@ -95,6 +104,21 @@ namespace ACE.Server.WorldObjects.Entity
             get
             {
                 uint total = Ranks + StartingValue;
+
+                // "Enhanced <attribute>" class ability - a flat base increase that is never written into
+                // the attribute record, so it is not redistributable by an attribute reset. Current
+                // derives from Base, so this also raises the effective attribute (and everything the
+                // attribute formulas derive from it: skills and vitals).
+                if (creature is Player enhancedPlayer)
+                {
+                    total += (uint)enhancedPlayer.GetEnhancedAttributeBonus(Attribute);
+
+                    // +1 per enlightenment - a permanent floor never written into the attribute record, so it
+                    // cannot be redistributed by an attribute reset (AttributeTransferDevice reads/writes
+                    // StartingValue only). Current derives from Base, so this also raises everything the
+                    // attribute formulas derive (skills and vitals).
+                    total += (uint)Math.Max(0, enhancedPlayer.Enlightenment);
+                }
 
                 // TODO: cap at 10x of these augs across the board elsewhere
                 // verify this with client formula

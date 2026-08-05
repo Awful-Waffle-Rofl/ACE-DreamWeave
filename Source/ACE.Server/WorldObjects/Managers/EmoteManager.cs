@@ -44,6 +44,13 @@ namespace ACE.Server.WorldObjects.Managers
 
         public bool Debug = false;
 
+        /// <summary>
+        /// The owner creature's health fraction (0-1) at the previous WoundedTaunt evaluation.
+        /// Used to detect HP-milestone bands that a single large hit (or a lethal blow) jumped
+        /// entirely over, so they can be replayed (fire-on-cross). Defaults to full health.
+        /// </summary>
+        private float lastWoundedHealth = 1.0f;
+
         public EmoteManager(WorldObject worldObject)
         {
             _worldObject = worldObject;
@@ -336,7 +343,16 @@ namespace ACE.Server.WorldObjects.Managers
 
                     if (player != null)
                     {
-                        Enlightenment.HandleEnlightenment(WorldObject, player);
+                        Enlightenment.HandleEnlightenmentRequest(player, false);
+                    }
+
+                    break;
+
+                case EmoteType.MuleConversion:
+
+                    if (player != null)
+                    {
+                        MuleConversion.HandleMuleRequest(player);
                     }
 
                     break;
@@ -345,6 +361,19 @@ namespace ACE.Server.WorldObjects.Managers
                 case EmoteType.EraseQuest:
 
                     questTarget = GetQuestTarget((EmoteType)emote.Type, targetCreature, creature);
+
+                    // Content may not erase the quest stamp system's own bookkeeping rows. EraseQuest takes a
+                    // raw name straight out of the emote, so without this an emote block could erase its
+                    // QuestStampSeen_ ledger row alongside the quest flag it is resetting, and re-arm the
+                    // stamp payout it exists to stop. Authoring doctrine already bans naming a flag with the
+                    // QuestStamp prefix; this makes erasing one impossible rather than merely discouraged.
+                    // Deliberately scoped to the content path: the admin single-quest erase and server code
+                    // keep full control, and an admin full wipe is a test-character reset.
+                    if (questTarget != null && QuestStamps.IsSystemRowName(emote.Message))
+                    {
+                        log.Warn($"{WorldObject?.Name} ({WorldObject?.Guid}) tried to erase quest stamp bookkeeping row {emote.Message} from an emote - refused. Rename the flag; the QuestStamp prefix is reserved.");
+                        break;
+                    }
 
                     if (questTarget != null)
                         questTarget.QuestManager.Erase(emote.Message);
@@ -538,6 +567,16 @@ namespace ACE.Server.WorldObjects.Managers
                     if (targetObject != null)
                     {
                         var stat = targetObject.GetProperty((PropertyInt64)emote.Stat);
+
+                        // WaffleACE: Luminance is spendable from the uncapped bank as well as the capped
+                        // available pool - SpendLuminance routes through TrySpendLuminanceIncludingBank. The
+                        // affordability precheck retail puts in front of every Luminance purchase is this
+                        // generic stat inquiry, so it has to count the same two pools or the check and the
+                        // spend disagree: a player whose Luminance sits in the bank gets told "You do not have
+                        // enough Luminance." and never reaches the spend. That is not a Nalicana quirk - there
+                        // are 290 of these checks across 24 weenies (every Seer and every Mastery object).
+                        if ((PropertyInt64)emote.Stat == PropertyInt64.AvailableLuminance && targetObject is Player lumPlayer)
+                            stat = lumPlayer.GetSpendableLuminance();
 
                         if (stat == null && HasValidTestNoQuality(emote.Message))
                             ExecuteEmoteSet(EmoteCategory.TestNoQuality, emote.Message, targetObject, true);
@@ -1235,7 +1274,7 @@ namespace ACE.Server.WorldObjects.Managers
                 case EmoteType.SetSanctuaryPosition:
 
                     if (player != null)
-                        player.SetPosition(PositionType.Sanctuary, new Position(emote.ObjCellId.Value, emote.OriginX.Value, emote.OriginY.Value, emote.OriginZ.Value, emote.AnglesX.Value, emote.AnglesY.Value, emote.AnglesZ.Value, emote.AnglesW.Value));
+                        player.SetPosition(PositionType.Sanctuary, new Position(emote.ObjCellId.Value, emote.OriginX.Value, emote.OriginY.Value, emote.OriginZ.Value, emote.AnglesX.Value, emote.AnglesY.Value, emote.AnglesZ.Value, emote.AnglesW.Value, 0));
                     break;
 
                 case EmoteType.Sound:
@@ -1246,7 +1285,8 @@ namespace ACE.Server.WorldObjects.Managers
                 case EmoteType.SpendLuminance:
 
                     if (player != null)
-                        player.SpendLuminance(emote.Amount64 ?? emote.HeroXP64 ?? 0);
+                        // WaffleACE: draw from the uncapped Luminance bank (legacy available first, then bank)
+                        player.TrySpendLuminanceIncludingBank(emote.Amount64 ?? emote.HeroXP64 ?? 0);
                     break;
 
                 case EmoteType.StampFellowQuest:
@@ -1349,7 +1389,7 @@ namespace ACE.Server.WorldObjects.Managers
                         {
                             if (emote.ObjCellId.Value > 0)
                             {
-                                var destination = new Position(emote.ObjCellId.Value, emote.OriginX.Value, emote.OriginY.Value, emote.OriginZ.Value, emote.AnglesX.Value, emote.AnglesY.Value, emote.AnglesZ.Value, emote.AnglesW.Value);
+                                var destination = new Position(emote.ObjCellId.Value, emote.OriginX.Value, emote.OriginY.Value, emote.OriginZ.Value, emote.AnglesX.Value, emote.AnglesY.Value, emote.AnglesZ.Value, emote.AnglesW.Value, 0);
 
                                 WorldObject.AdjustDungeon(destination);
                                 WorldManager.ThreadSafeTeleport(player, destination);
@@ -1539,8 +1579,10 @@ namespace ACE.Server.WorldObjects.Managers
 
             if (category == EmoteCategory.WoundedTaunt)
             {
+                // lastWoundedHealth is the health fraction *before* this hit - OnDamage updates it only
+                // after this selection runs - so it is the "from" side of the crossing test.
                 if (_worldObject is Creature creature)
-                    emoteSet = emoteSet.Where(e => creature.Health.Percent >= e.MinHealth && creature.Health.Percent <= e.MaxHealth);
+                    emoteSet = emoteSet.Where(e => ShouldFireInBand(e, lastWoundedHealth, creature.Health.Percent));
             }
 
             if (useRNG)
@@ -1982,7 +2024,117 @@ namespace ACE.Server.WorldObjects.Managers
 
         public void OnDamage(Creature attacker)
         {
+            // in-band wounded taunt selection - see ShouldFireInBand: a milestone band fires only on the
+            // hit that crosses into it, a plain "while wounded" taunt still fires every hit.
             ExecuteEmoteSet(EmoteCategory.WoundedTaunt, null, attacker);
+
+            // fire-on-cross recovery: WoundedTaunt selection is stateless - it only matches emotes whose
+            // [MinHealth, MaxHealth] band contains the *current* (post-damage) health. A single large hit
+            // can drop health straight past a narrow HP-milestone band (e.g. a 49%-51% "summon adds" or
+            // phase start/stop-event band) without ever landing inside it, so that band never fires and
+            // the encounter stalls or leaves a server-global event stuck. Replay any band the hit jumped
+            // entirely over. Only HP-banded emotes (MinHealth > 0) can qualify, so ordinary unbanded
+            // wounded taunts - and every non-milestone creature - are completely unaffected.
+            if (_worldObject is Creature creature && creature.Biota?.PropertiesEmote != null)
+            {
+                var current = creature.Health.Percent;
+
+                foreach (var emote in GetSkippedWoundedTaunts(creature.Biota.PropertiesEmote, lastWoundedHealth, current))
+                    ReplayWoundedTaunt(emote, attacker);
+
+                lastWoundedHealth = current;
+            }
+        }
+
+        /// <summary>
+        /// True when a WoundedTaunt band is an HP *milestone* - a proper sub-range of 0-1 - rather than a
+        /// plain "while wounded" taunt. A milestone means "at this point in the fight", so it should fire
+        /// once as health descends through it; a full-range [0,1] band means "whenever wounded" and is used
+        /// by always-on spawners (e.g. Coral Tower), so it must keep firing on every hit.
+        /// </summary>
+        public static bool IsMilestoneBand(PropertiesEmote emote)
+            => emote.MinHealth > 0.0f || emote.MaxHealth < 1.0f;
+
+        /// <summary>
+        /// Whether the normal in-band pass should fire <paramref name="emote"/> for a hit that moved health
+        /// from <paramref name="from"/> to <paramref name="to"/>.
+        ///
+        /// Selection used to be purely "is current health inside the band", which is stateless: while health
+        /// sat anywhere inside a wide band, *every* hit re-ran the band's entire action list. For a phase
+        /// band carrying Generate actions that meant re-spawning the adds on every swing (Grulsk the
+        /// Doorwright, 25-point-wide bands at probability 1, spawning two adds per hit taken).
+        ///
+        /// Retail content dodges this by authoring milestones as +/-1% windows that health rarely lands in
+        /// twice, but that only holds when hits are large relative to the creature's HP - a fresh character
+        /// chipping a ~135 HP boss for 4 damage sits inside even a narrow window for several swings. So the
+        /// milestone case is latched on the crossing instead: it fires only on the hit that brought health
+        /// down into the band from above.
+        ///
+        /// This deliberately does NOT replace <see cref="GetSkippedWoundedTaunts"/>. The two are disjoint by
+        /// construction - this one requires health to land inside the band, that one requires it to end up
+        /// below the band - and a hit large enough to jump a band still needs the replay path to fire it.
+        /// </summary>
+        public static bool ShouldFireInBand(PropertiesEmote emote, float from, float to)
+        {
+            // outside the band (also the null-band case: a lifted float? comparison is false, which is why
+            // an emote with a null MinHealth/MaxHealth can never fire - PreflightCommand warns about it)
+            if (!(to >= emote.MinHealth && to <= emote.MaxHealth))
+                return false;
+
+            // plain "while wounded" taunt - retail repeat behavior, unchanged
+            if (!IsMilestoneBand(emote))
+                return true;
+
+            // milestone - only the hit that crossed in from above
+            return from > emote.MaxHealth;
+        }
+
+        /// <summary>
+        /// WoundedTaunt bands that a health drop from <paramref name="from"/> to <paramref name="to"/>
+        /// jumped entirely over (health is now below the band, and was above it before the hit). These
+        /// are exactly the bands a plain in-band check at the current health would miss. A band the hit
+        /// *landed inside* is deliberately excluded here - it is still handled by the normal in-band
+        /// selection - so nothing is double-fired. Ordered highest-first so phased start/stop-event
+        /// chains replay in descending-health order.
+        /// </summary>
+        public static IEnumerable<PropertiesEmote> GetSkippedWoundedTaunts(ICollection<PropertiesEmote> emotes, float from, float to)
+        {
+            if (from <= to || emotes == null)
+                return Enumerable.Empty<PropertiesEmote>();
+
+            return emotes
+                .Where(e => e.Category == EmoteCategory.WoundedTaunt && to < e.MinHealth && from > e.MaxHealth)
+                .OrderByDescending(e => e.MaxHealth);
+        }
+
+        /// <summary>
+        /// WoundedTaunt bands whose upper threshold lies below <paramref name="from"/> - i.e. every
+        /// milestone at or under the last-seen health that has not yet fired. Used on death, where the
+        /// killing blow skipped OnDamage entirely (it is gated on the target being alive), so these
+        /// bands - most importantly StopEvent bands that release server-global event state - never ran.
+        /// Includes MinHealth == 0 bands (unlike the alive-path skip check) since none will be handled
+        /// by an in-band pass once the creature is dead. Ordered highest-first.
+        /// </summary>
+        public static IEnumerable<PropertiesEmote> GetPendingWoundedTaunts(ICollection<PropertiesEmote> emotes, float from)
+        {
+            if (emotes == null)
+                return Enumerable.Empty<PropertiesEmote>();
+
+            return emotes
+                .Where(e => e.Category == EmoteCategory.WoundedTaunt && e.MaxHealth < from)
+                .OrderByDescending(e => e.MaxHealth);
+        }
+
+        /// <summary>
+        /// Replays a single WoundedTaunt band that would otherwise have been skipped, honoring its
+        /// probability roll. Runs nested so a sequence of recovered bands is not dropped by IsBusy.
+        /// </summary>
+        private void ReplayWoundedTaunt(PropertiesEmote emote, WorldObject targetObject)
+        {
+            if (emote.Probability < 1.0f && ThreadSafeRandom.Next(0.0f, 1.0f) > emote.Probability)
+                return;
+
+            ExecuteEmoteSet(emote, targetObject, nested: true);
         }
 
         public void OnReceiveCritical(Creature attacker)
@@ -1997,12 +2149,26 @@ namespace ACE.Server.WorldObjects.Managers
 
         public void OnDeath(DamageHistoryInfo lastDamagerInfo)
         {
+            var lastDamager = lastDamagerInfo?.TryGetPetOwnerOrAttacker();
+
+            // fire-on-cross recovery for the killing blow. OnDamage is skipped on a lethal hit (it is
+            // gated on the target still being alive), so any WoundedTaunt HP-milestone band below the
+            // last-seen health never fired - most importantly StopEvent bands that must run to release a
+            // server-global event (otherwise a burst/one-shot kill can leave that event stuck on for
+            // everyone). Replay them here, highest-first. Only HP-banded emotes qualify, so this affects
+            // only the handful of milestone bosses and never an ordinary creature's death.
+            if (_worldObject is Creature creature && creature.Biota?.PropertiesEmote != null)
+            {
+                foreach (var emote in GetPendingWoundedTaunts(creature.Biota.PropertiesEmote, lastWoundedHealth))
+                    ReplayWoundedTaunt(emote, lastDamager);
+
+                lastWoundedHealth = 0.0f;
+            }
+
             if (GetEmoteSet(EmoteCategory.Death) == null)
                 return;
-            
-            IsBusy = false;
 
-            var lastDamager = lastDamagerInfo?.TryGetPetOwnerOrAttacker();
+            IsBusy = false;
 
             ExecuteEmoteSet(EmoteCategory.Death, null, lastDamager);
         }

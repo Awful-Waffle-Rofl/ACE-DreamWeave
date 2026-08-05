@@ -141,6 +141,11 @@ namespace ACE.Server.WorldObjects
 
         public void HandleSalvaging(uint tool, List<uint> salvageItems)
         {
+            // Mule (WaffleACE): the salvage panel has no training check anywhere on this path, so an
+            // untrained mule could otherwise still salvage. Guarded before any inventory is touched.
+            if (MuleBlocked(MuleAction.Salvage))
+                return;
+
             if (!ToolIsValidUst(tool))
                 return;
 

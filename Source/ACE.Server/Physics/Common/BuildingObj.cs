@@ -51,27 +51,27 @@ namespace ACE.Server.Physics.Common
             return transitionState;
         }
 
-        public void find_building_transit_cells(Position pos, int numSphere, List<Sphere> sphere, CellArray cellArray, SpherePath path)
+        public void find_building_transit_cells(Position pos, int numSphere, List<Sphere> sphere, CellArray cellArray, SpherePath path, uint instance)
         {
             foreach (var portal in Portals)
             {
-                var otherCell = portal.GetOtherCell(CurCell.ID);
+                var otherCell = portal.GetOtherCell(CurCell.ID, instance);
                 if (otherCell != null)
                     otherCell.check_building_transit(portal.OtherPortalId, pos, numSphere, sphere, cellArray, path);
             }
         }
 
-        public void find_building_transit_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray)
+        public void find_building_transit_cells(int numParts, List<PhysicsPart> parts, CellArray cellArray, uint instance)
         {
             foreach (var portal in Portals)
             {
-                var otherCell = portal.GetOtherCell(CurCell.ID);
+                var otherCell = portal.GetOtherCell(CurCell.ID, instance);
                 if (otherCell != null)
-                    otherCell.check_building_transit(portal.OtherPortalId, numParts, parts, cellArray);
+                    otherCell.check_building_transit(portal.OtherPortalId, numParts, parts, cellArray, instance);
             }
         }
 
-        public List<EnvCell> get_building_cells()
+        public List<EnvCell> get_building_cells(uint instance)
         {
             if (BuildingCells != null) return BuildingCells;
 
@@ -81,7 +81,7 @@ namespace ACE.Server.Physics.Common
             // aka cells touching the outdoor landblock
             foreach (var portal in Portals)
             {
-                var entrypoint = portal.GetOtherCell(LandblockID);
+                var entrypoint = portal.GetOtherCell(LandblockID, instance);
                 add_cells_recursive(entrypoint);
             }
             return BuildingCells;
@@ -127,9 +127,9 @@ namespace ACE.Server.Physics.Common
             return building;
         }
 
-        public float GetMinZ()
+        public float GetMinZ(uint instance)
         {
-            get_building_cells();
+            get_building_cells(instance);
 
             var minZ = float.MaxValue;
 

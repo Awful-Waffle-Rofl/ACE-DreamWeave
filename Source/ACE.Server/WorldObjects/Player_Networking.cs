@@ -34,6 +34,22 @@ namespace ACE.Server.WorldObjects
             Character.TotalLogins++;
             CharacterChangesDetected = true;
 
+            // Bank offline bonus time for however long this character was logged out (reads the prior
+            // session's LogoffTimestamp, which is not reset until this session's logout), and anchor the
+            // online drain clock. Must run before LogoffTimestamp is touched again this session.
+            AccrueOfflineBonus();
+
+            // Cache the alt character bonus catch-up target (highest enlightenment+level on this account) for
+            // the duration of this login. Only one character per account is online at a time, so the target is
+            // fixed until logout - only this character's own progression changes as it levels. See
+            // Player_AltCharacterBonus.
+            InitAltCharacterBonus();
+
+            // Backfill this character's quest stamp count if it predates the feature, and compute the
+            // account-wide total for the session. Same one-character-per-account assumption as above: the
+            // other characters' counts are frozen until this one logs out. See Player_QuestStamps.
+            InitQuestStamps();
+
             Sequences.SetSequence(SequenceType.ObjectInstance, new UShortSequence((ushort)Character.TotalLogins));
 
             if (BarberActive)
@@ -112,6 +128,15 @@ namespace ACE.Server.WorldObjects
             HandleAllegianceOnLogin();
             HandleHouseOnLogin();
 
+            // let the player know if they have offline bonus time banked from being logged out
+            if (IsOfflineExperienceBonusActive)
+            {
+                var actionChain = new ActionChain();
+                actionChain.AddDelaySeconds(3.0f);
+                actionChain.AddAction(this, () => ShowOfflineExperienceBonusStatus());
+                actionChain.EnqueueChain();
+            }
+
             // retail appeared to send the squelch list very early,
             // even before the CreatePlayer, but doing it here
             if (SquelchManager.HasSquelches)
@@ -121,6 +146,20 @@ namespace ACE.Server.WorldObjects
             AuditEquippedItems();
 
             HandleMissingXp();
+
+            // pay out any level-milestone class ability points not yet granted (retroactive for existing
+            // characters, immune to missed level-ups) - DESIGN.md sec 2a
+            GrantMilestoneClassAbilityPoints();
+
+            // pay out any enlightenment-milestone class ability points not yet granted (retroactive for
+            // characters enlightened before this lane existed) - DESIGN.md sec 2c
+            GrantEnlightenmentClassAbilityPoints();
+
+            // refund class ability points orphaned by a since-retired ability (e.g. Advanced Weaponry,
+            // Questionable Tactics) and clean up the dead quest registry row - runs regardless of
+            // class_abilities_enabled, unlike the two grants above
+            SweepRetiredClassAbilities();
+
             HandleSkillCreditRefund();
             HandleSkillTemplesReset();
             HandleSkillSpecCreditRefund();

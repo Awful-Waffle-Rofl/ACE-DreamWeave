@@ -33,6 +33,48 @@ namespace ACE.Server.Command
 
         public static CommandHandler GetDelegate(Action<Session, string[]> handler) => (CommandHandler)Delegate.CreateDelegate(typeof(CommandHandler), handler.Method);
 
+        /// <summary>
+        /// Commands whose parameters carry secrets (passwords) and must be redacted in the audit log.
+        /// </summary>
+        private static readonly HashSet<string> AuditRedactedCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "accountcreate",
+            "set-accountpassword",
+            "passwd",
+        };
+
+        /// <summary>
+        /// Writes a persistent, disk-backed audit record for every privileged (access &gt; Player) command
+        /// at the point it is dispatched, so the paper trail no longer depends on each handler remembering
+        /// to call <see cref="ACE.Server.Managers.PlayerManager.BroadcastToAuditChannel"/>. Player-level
+        /// commands are not logged here (they are not state-mutating admin actions). Secrets are redacted.
+        /// </summary>
+        public static void LogCommandAudit(Session session, CommandHandlerInfo commandInfo, string[] parameters, bool sudo)
+        {
+            if (commandInfo == null || commandInfo.Attribute.Access <= AccessLevel.Player)
+                return;
+
+            var command = commandInfo.Attribute.Command;
+
+            string paramText;
+            if (parameters == null || parameters.Length == 0)
+                paramText = "";
+            else if (AuditRedactedCommands.Contains(command))
+                paramText = $"{parameters[0]} [redacted]";
+            else
+                paramText = string.Join(" ", parameters);
+
+            string who;
+            if (session?.Player != null)
+                who = $"{session.Player.Name} (0x{session.Player.Guid.Full:X8}, account: {session.Account})";
+            else if (session != null)
+                who = $"account: {session.Account}";
+            else
+                who = "<console>";
+
+            log.Info($"[CMD_AUDIT] {who} [{commandInfo.Attribute.Access}]{(sudo ? " (sudo)" : "")} @{command} {paramText}".TrimEnd());
+        }
+
         public static bool TryAddCommand(MethodInfo handler, string command, AccessLevel access, CommandHandlerFlag flags = CommandHandlerFlag.None, string description = "", string usage = "", bool overrides = true)
         {
             var del = (CommandHandler)Delegate.CreateDelegate(typeof(CommandHandler), handler);
@@ -139,6 +181,14 @@ namespace ACE.Server.Command
                 Console.Write("ACE >> ");
 
                 string commandLine = Console.ReadLine();
+                // ReadLine returns null when stdin is closed (EOF) - e.g. a detached container or
+                // a piped command whose input ended. Treating that as whitespace + `continue`
+                // busy-loops a whole CPU core, so stop the prompt instead.
+                if (commandLine == null)
+                {
+                    log.Info("Console stdin closed (EOF); command prompt stopping. The server keeps running.");
+                    return;
+                }
                 if (string.IsNullOrWhiteSpace(commandLine))
                     continue;
 
@@ -159,6 +209,7 @@ namespace ACE.Server.Command
                     {
                         try
                         {
+                            LogCommandAudit(null, commandHandler, parameters, false);
                             if (commandHandler.Attribute.IncludeRaw)
                             {
                                 parameters = StuffRawIntoParameters(commandLine, command, parameters);

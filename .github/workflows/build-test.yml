@@ -1,0 +1,83 @@
+name: build and test
+
+on:
+  push:
+    branches:
+      - 'master'
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Load base schema into MySQL
+        # Database/Base/{Authentication,Shard}Base.sql are point-in-time dumps and are not always
+        # current (see Database/Updates/*/updates.txt), but they're enough for the Auth/Shard
+        # tables the gated tests touch.
+        run: |
+          mysql -h127.0.0.1 -uroot < Database/Base/AuthenticationBase.sql
+          mysql -h127.0.0.1 -uroot < Database/Base/ShardBase.sql
+      - name: Import the real world database
+        env:
+          WORLD_DB_RELEASE_TAG: v0.9.294
+          WORLD_DB_RELEASE_ASSET: ACE-World-Database-v0.9.294.sql.zip
+        # DatabaseManager.Initialize() (Source/ACE.Database/DatabaseManager.cs:47-53) hard-gates on
+        # a real "human" weenie existing in ace_world before it will even assign DatabaseManager.Shard
+        # - a schema-only ace_world (Database/Base/WorldBase.sql has zero INSERT statements) makes it
+        # set InitializationFailure and bail before Shard is ever assigned, which is what made
+        # StartupTests.WorldManager_Initialize NRE downstream in PlayerManager.Initialize(). Import
+        # the same world database release README.md tells a real contributor to install, pinned to a
+        # fixed tag so CI stays reproducible (never "latest"). This supersedes WorldBase.sql entirely
+        # for ace_world - it's a full dump, not an addition on top of it.
+        run: |
+          curl -fL -o "$WORLD_DB_RELEASE_ASSET" \
+            "https://github.com/ACEmulator/ACE-World-16PY-Patches/releases/download/${WORLD_DB_RELEASE_TAG}/${WORLD_DB_RELEASE_ASSET}"
+          unzip -o "$WORLD_DB_RELEASE_ASSET"
+          mysql -h127.0.0.1 -uroot -e "CREATE DATABASE IF NOT EXISTS ace_world"
+          mysql -h127.0.0.1 -uroot ace_world < "${WORLD_DB_RELEASE_ASSET%.zip}"
+
+          # The fork's own structural additions (realm tables etc.) are not in the upstream dump, so
+          # they must be replayed AFTER it or the import wipes them (it's a full DROP+CREATE dump).
+          # Shard's own pending update (Database/Updates/Shard/2026-07-10-00-Add-Biota-Position-
+          # Instance.sql) is deliberately EXCLUDED here - do not "fix" this by adding it back. Its own
+          # file header says not to pipe it through the mysql CLI: it wraps its ALTER TABLE in a
+          # stored procedure body, and the CLI splits on the `;` inside BEGIN/END without a DELIMITER
+          # change (confirmed: piping it this way threw "ERROR 1064 ... near '' at line 9"). It's
+          # meant to run only through the server's own boot patcher (Program_DbUpdates.PatchDatabase),
+          # which sends the whole batch as one MySqlCommand instead of splitting client-side. Nothing
+          # the MySQL-gated tests exercise needs that column.
+          for f in Database/Updates/World/*.sql; do [ -e "$f" ] && mysql -h127.0.0.1 -uroot ace_world < "$f"; done
+      - name: Build
+        run: dotnet build Source/ACE.sln -c Release -p:Platform=x64
+      # MySQL-gated tests (AccountTests, StartupTests, WeenieSearchTests) now run against the
+      # service container above and the imported world database release, via the
+      # Config.js.example fallback (root/no password/127.0.0.1:3306) that TestEnvironment copies
+      # in when no real Config.js exists. Tests that need client .dat files still skip themselves
+      # (Inconclusive) - that's a separate, unrelated dependency this job doesn't provide.
+      - name: Test ACE.Server.Tests
+        run: dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+      - name: Test ACE.Database.Tests
+        run: dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+      - name: Test ACE.DatLoader.Tests
+        run: dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+      # pure comparison logic for the benchmark harness - no MySQL, no dat files, nothing to skip
+      - name: Test ACE.Database.LoadTest.Tests
+        run: dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings

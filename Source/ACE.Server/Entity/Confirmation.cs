@@ -137,6 +137,47 @@ namespace ACE.Server.Entity
         }
     }
 
+    /// <summary>
+    /// "Are you sure?" for the Prismatic Drift Stone, whose application permanently closes the
+    /// target weapon's tinkering future.
+    ///
+    /// Replay safety comes from ConfirmationManager: HandleResponse TryRemoves this instance from
+    /// the per-player dictionary BEFORE calling ProcessConfirmation, and rejects any response whose
+    /// contextId does not match. So only this dialog, answered once, can run this code - a stale or
+    /// duplicated client response finds nothing to confirm. The work itself re-verifies from scratch.
+    /// </summary>
+    public class Confirmation_PrismaticDriftStone : Confirmation
+    {
+        public ObjectGuid SourceGuid;
+        public ObjectGuid TargetGuid;
+
+        public Confirmation_PrismaticDriftStone(ObjectGuid playerGuid, ObjectGuid sourceGuid, ObjectGuid targetGuid)
+            : base(playerGuid, ConfirmationType.CraftInteraction)
+        {
+            SourceGuid = sourceGuid;
+            TargetGuid = targetGuid;
+        }
+
+        public override void ProcessConfirmation(bool response, bool timeout = false)
+        {
+            var player = Player;
+            if (player == null) return;
+
+            if (!response)
+            {
+                player.SendWeenieError(WeenieError.YouChickenOut);
+                return;
+            }
+
+            var source = player.FindObject(SourceGuid.Full, Player.SearchLocations.LocationsICanMove);
+            var target = player.FindObject(TargetGuid.Full, Player.SearchLocations.LocationsICanMove);
+
+            if (source == null || target == null) return;
+
+            PrismaticDriftStone.UseObjectOnTarget(player, source, target, true);
+        }
+    }
+
     public class Confirmation_Fellowship : Confirmation
     {
         public ObjectGuid InviterGuid;

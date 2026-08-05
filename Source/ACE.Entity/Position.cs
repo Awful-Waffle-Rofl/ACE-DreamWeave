@@ -15,10 +15,32 @@ namespace ACE.Entity
             set => landblockId = value;
         }
 
-        public uint Landblock { get => landblockId.Raw >> 16; }
+        /// <summary>
+        /// The 16-bit landblock id (no cell, no instance). Only valid as a key for
+        /// client-side geometry (dat) and world-db content, which are shared by all
+        /// instances of a landblock. For server-side landblock identity use
+        /// <see cref="InstancedLandblock"/>.
+        /// </summary>
+        public uint LandblockShort { get => landblockId.Raw >> 16; }
+
+        /// <summary>
+        /// The 64-bit (instance, landblock) key identifying the specific server-side
+        /// copy of this landblock: (Instance &lt;&lt; 32) | (cell id with FFFF cell bits).
+        /// </summary>
+        public ulong InstancedLandblock { get => LongLandblockID; }
 
         // FIXME: this is returning landblock + cell
         public uint Cell { get => landblockId.Raw; }
+
+        /// <summary>
+        /// The landblock instance this position exists in, laid out as
+        /// [1 bit ephemeral][15 bits realmId][16 bits shortInstanceId].
+        /// Always 0 in Phase 1 of the instancing port (base world only).
+        /// </summary>
+        public uint Instance;
+
+        private ulong LongObjCellID => (ulong)Instance << 32 | Cell;
+        private ulong LongLandblockID => LongObjCellID | 0xFFFF;
 
         public uint CellX { get => landblockId.Raw >> 8 & 0xFF; }
         public uint CellY { get => landblockId.Raw & 0xFF; }
@@ -109,10 +131,10 @@ namespace ACE.Entity
             if (rotate180)
             {
                 var rotate = new Quaternion(0, 0, qz, qw) * Quaternion.CreateFromYawPitchRoll(0, 0, (float)Math.PI);
-                return new Position(LandblockId.Raw, PositionX + dx, PositionY + dy, PositionZ + bumpHeight, 0f, 0f, rotate.Z, rotate.W);
+                return new Position(LandblockId.Raw, PositionX + dx, PositionY + dy, PositionZ + bumpHeight, 0f, 0f, rotate.Z, rotate.W, Instance);
             }
             else
-                return new Position(LandblockId.Raw, PositionX + dx, PositionY + dy, PositionZ + bumpHeight, 0f, 0f, qz, qw);
+                return new Position(LandblockId.Raw, PositionX + dx, PositionY + dy, PositionZ + bumpHeight, 0f, 0f, qz, qw, Instance);
         }
 
         /// <summary>
@@ -213,13 +235,19 @@ namespace ACE.Entity
         public Position(Position pos)
         {
             LandblockId = new LandblockId(pos.LandblockId.Raw);
+            Instance = pos.Instance;
             Pos = pos.Pos;
             Rotation = pos.Rotation;
         }
 
-        public Position(uint blockCellID, float newPositionX, float newPositionY, float newPositionZ, float newRotationX, float newRotationY, float newRotationZ, float newRotationW, bool relativePos = false)
+        public Position(Position pos, uint instance)
+            : this(pos) { Instance = instance; }
+
+        public Position(uint blockCellID, float newPositionX, float newPositionY, float newPositionZ, float newRotationX, float newRotationY, float newRotationZ, float newRotationW, uint instance, bool relativePos = false)
         {
             LandblockId = new LandblockId(blockCellID);
+
+            Instance = instance;
 
             if (!relativePos)
             {
@@ -520,6 +548,54 @@ namespace ACE.Entity
         public bool Equals(Position p)
         {
             return p != null && Cell == p.Cell && Pos.Equals(p.Pos) && Rotation.Equals(p.Rotation);
+        }
+
+        /// <summary>
+        /// The realm this position's instance belongs to (0 = base world).
+        /// </summary>
+        public ushort RealmID
+        {
+            get
+            {
+                ParseInstanceID(Instance, out _, out var realmId, out _);
+                return realmId;
+            }
+        }
+
+        /// <summary>
+        /// True if this position is in an ephemeral (on-demand, temporary) instance.
+        /// </summary>
+        public bool IsEphemeralRealm
+        {
+            get
+            {
+                ParseInstanceID(Instance, out var isEphemeralRealm, out _, out _);
+                return isEphemeralRealm;
+            }
+        }
+
+        public static void ParseInstanceID(uint instanceId, out bool isEphemeralRealm, out ushort realmId, out ushort shortInstanceId)
+        {
+            shortInstanceId = (ushort)(instanceId & 0xFFFF);
+            ushort left = (ushort)(instanceId >> 16);
+            isEphemeralRealm = (left & 0x8000) == 0x8000;
+            realmId = (ushort)(left & 0x7FFF);
+        }
+
+        public static uint InstanceIDFromVars(ushort realmId, ushort shortInstanceId, bool isTemporaryRuleset)
+        {
+            if (realmId > 0x7FFF)
+                throw new ArgumentOutOfRangeException(nameof(realmId));
+            uint result = ((uint)realmId) << 16;
+            result |= (uint)shortInstanceId;
+            if (isTemporaryRuleset)
+                result |= 0x80000000;
+            return result;
+        }
+
+        public void SetToDefaultRealmInstance(ushort newRealmId)
+        {
+            Instance = InstanceIDFromVars(newRealmId, 0, false);
         }
     }
 }

@@ -32,9 +32,14 @@ namespace ACE.Server.Network.GameEvent.Events
                 var altCurrency = DatabaseManager.World.GetCachedWeenie(vendor.AlternateCurrency.Value);
                 var pluralName = altCurrency.GetPluralName();
 
-                // the total amount of alternate currency the player currently has
+                // the total amount of alternate currency the player currently has - inventory PLUS any
+                // banked balance backing this currency (banked promissory notes, and Class Ability Points,
+                // which are held only as a property, never as an inventory item). Without the banked amount
+                // the client shows "You have 0" and refuses to initiate the purchase, even though the server
+                // would accept it (Vendor.BuyItems_ValidateTransaction already counts the banked balance).
                 var altCurrencyInInventory = (uint)session.Player.GetNumInventoryItemsOfWCID(vendor.AlternateCurrency.Value);
-                Writer.Write(altCurrencyInInventory + altCurrencySpent);
+                var altCurrencyBanked = (uint)session.Player.GetBankedAlternateCurrency(vendor.AlternateCurrency.Value);
+                Writer.Write(altCurrencyInInventory + altCurrencyBanked + altCurrencySpent);
 
                 // the plural name of alt currency
                 Writer.WriteString16L(pluralName);

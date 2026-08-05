@@ -185,7 +185,7 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.MoveTo_Tick()");
 
-            PhysicsObj.update_object();
+            PhysicsObj.update_object(Location.Instance);
 
             if (IsMoving)
                 Enqueue_NextMoveTick();
@@ -282,6 +282,16 @@ namespace ACE.Server.WorldObjects
         public void TakeDamage_Falling(float amount)
         {
             if (IsDead || Invincible) return;
+
+            // Mule (WaffleACE): immune to fall damage, and this is load-bearing rather than a kindness.
+            // A mule buys its carrying capacity with a large Strength attribute, and Jump reads
+            // (Strength + Coordination) / 2, so a mule's jump is far higher than a normal character's while
+            // the safe-landing threshold in HandleFallingDamage is a hardcoded constant that does not scale
+            // with the skill. Without this, an ordinary hop lands hard enough to kill. Clamping the jump
+            // instead was rejected: the client predicts jump height from the attributes it is sent, so a
+            // server-side clamp cannot be made client-clean and would rubber-band every jump.
+            // Mules remain mortal in every other respect - they take normal combat damage and leave corpses.
+            if (IsMule) return;
 
             // handle lifestone protection?
             if (UnderLifestoneProtection)

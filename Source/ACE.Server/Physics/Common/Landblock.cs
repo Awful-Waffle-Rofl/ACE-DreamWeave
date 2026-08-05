@@ -33,6 +33,11 @@ namespace ACE.Server.Physics.Common
         public List<PhysicsObj> Scenery;
         public List<PhysicsObj> ServerObjects { get; set; }
 
+        /// <summary>
+        /// The landblock instance this physics landblock copy belongs to (0 = base world)
+        /// </summary>
+        public uint Instance;
+
         public static bool UseSceneFiles = true;
 
         public Landblock() : base()
@@ -40,9 +45,11 @@ namespace ACE.Server.Physics.Common
             Init();
         }
 
-        public Landblock(CellLandblock landblock)
+        public Landblock(CellLandblock landblock, uint instance)
             : base(landblock)
         {
+            Instance = instance;
+
             Init();
 
             ID = landblock.Id;
@@ -145,7 +152,7 @@ namespace ACE.Server.Physics.Common
             var cellY = (int)point.Y / 24;
 
             var blockCellID = (ID & 0xFFFF0000) | (uint)(cellX * 8 + cellY) + 1;
-            return (LandCell)LScape.get_landcell((uint)blockCellID);
+            return (LandCell)LScape.get_landcell((uint)blockCellID, Instance);
         }
 
         public void destroy_buildings()
@@ -685,7 +692,7 @@ namespace ACE.Server.Physics.Common
             var cellID = startCell;
             for (var i = 0; i < Info.NumCells; i++)
             {
-                var envCell = (EnvCell)LScape.get_landcell(cellID++);
+                var envCell = (EnvCell)LScape.get_landcell(cellID++, Instance);
                 if (envCell != null)
                     envcells.Add(envCell);
                 else

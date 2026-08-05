@@ -5,8 +5,11 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics;
@@ -125,6 +128,52 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // class ability point item - a gem whose function is granting class ability points
+            // (see ClassAbilityRegistry / Player_ClassAbilities). Data-driven: any Gem weenie with
+            // PropertyInt.ClassAbilityPointValue set becomes a point item, no per-item code.
+            var classAbilityPoints = GetProperty(PropertyInt.ClassAbilityPointValue) ?? 0;
+            if (classAbilityPoints > 0)
+            {
+                if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+                {
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("Class abilities are not currently enabled on this server.", ChatMessageType.Broadcast));
+                    return;
+                }
+
+                // defensive: only consume the item if the grant took (it can only be refused for a
+                // non-positive amount, which the > 0 guard above already excludes - there is no cap)
+                if (!player.GrantClassAbilityPoints(classAbilityPoints, Name))
+                    return;
+
+                if (UseSound > 0)
+                    player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
+
+                if ((GetProperty(PropertyBool.UnlimitedUse) ?? false) == false)
+                    player.TryConsumeFromInventoryWithNetworking(this, 1);
+
+                return;
+            }
+
+            // class ability token - a Gem that teaches one specific class ability rank/tier when used, mirroring
+            // /abilities learn: it runs the same learn path (so it spends the normal point cost) behind a
+            // confirmation, with full success/failure branches. Data-driven via ClassAbilityTokenId +
+            // ClassAbilityTokenTier; the token is consumed only on a successful learn (never on any failure).
+            var tokenSkillId = GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0;
+            if (tokenSkillId > 0)
+            {
+                UseClassAbilityToken(player, tokenSkillId, GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, false);
+                return;
+            }
+
+            // portal gem - a Gem with a Destination position teleports the player there instantly on use
+            // (no recall animation). Data-driven: realm-aware via PortalRealm, guarded against combat use
+            // and same-landblock cross-realm hops. See UsePortalGem.
+            if (Destination != null)
+            {
+                UsePortalGem(player);
+                return;
+            }
+
             // trying to use a dispel potion while pk timer is active
             // send error message and cancel - do not consume item
             if (SpellDID != null)
@@ -149,9 +198,12 @@ namespace ACE.Server.WorldObjects
             {
                 var spell = new Spell((uint)SpellDID);
 
-                // should be 'You cast', instead of 'Item cast'
-                // omitting the item caster here, so player is also used for enchantment registry caster,
-                // which could prevent some scenarios with spamming enchantments from multiple gem sources to protect against dispels
+                // Cast AS the player so the message reads 'You cast' rather than 'Item cast', but with this gem
+                // passed as the itemCaster. Note the resulting CasterObjectId is NOT a reliable "came from a gem"
+                // marker: WorldObject_Magic.cs:283-284 records an itemCaster that "is Gem" as the caster, but the
+                // TryCastItemEnchantment_WithRedirects branch below drops the itemCaster before creating the
+                // enchantment on the redirected item, so Impen/Bane/Aura entries land with the PLAYER as caster.
+                // StripRareGemBuffs therefore identifies gem buffs by SPELL CATEGORY, not by caster.
 
                 // TODO: figure this out better
                 if (spell.MetaSpellType == SpellType.PortalSummon)
@@ -176,6 +228,159 @@ namespace ACE.Server.WorldObjects
                 if (!HandleUseCreateItem(player))
                     return;
             }
+
+            if (UseSound > 0)
+                player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
+
+            if ((GetProperty(PropertyBool.UnlimitedUse) ?? false) == false)
+                player.TryConsumeFromInventoryWithNetworking(this, 1);
+        }
+
+        /// <summary>
+        /// Portal gem use: an instant teleport to the gem's Destination, resolved exactly the way a Portal
+        /// weenie resolves its own destination (see Portal.ResolvePortalDestination, which both call so the
+        /// realm routing can never drift). There is no recall animation and no delay - the gem is meant to be
+        /// a pocket portal, so the guards below are what keep it from being an escape button: it is refused in
+        /// combat (deliberately not auto-peacing the way HandleActionTeleToMarketPlace does) and while the PK
+        /// timer is running. The gem is never consumed here - portal gems are expected to set UnlimitedUse,
+        /// and this branch returns before the normal consumption path.
+        /// </summary>
+        private void UsePortalGem(Player player)
+        {
+            if (player.CombatMode != CombatMode.NonCombat)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You cannot use the {Name} while in combat.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (player.PKTimerActive)
+            {
+                player.Session.Network.EnqueueSend(new GameEventWeenieError(player.Session, WeenieError.YouHaveBeenInPKBattleTooRecently));
+                return;
+            }
+
+            var portalDest = new Position(Destination);
+            AdjustDungeon(portalDest);
+
+            portalDest = Portal.ResolvePortalDestination(this, player, portalDest);
+
+            // a cross-realm hop that stays inside one landblock renders as a blend of both realms' content,
+            // because the landblock is already loaded for the instance the player is standing in. The Town
+            // Network and the Drift hub share landblock 0x0007, so this is reachable in practice - refuse it
+            // rather than drop the player into a half-drawn world. See Content/realms/driftnetwork_entry.sql.
+            if (player.Location.LandblockShort == portalDest.LandblockShort && player.Location.Instance != portalDest.Instance)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"The {Name} fizzles. It cannot be used this close to its destination's reflection.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (UseSound > 0)
+                player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
+
+            WorldManager.ThreadSafeTeleport(player, portalDest, new ActionEventDelegate(() =>
+            {
+                player.SendWeenieError(WeenieError.ITeleported);
+
+            }), true);
+        }
+
+        /// <summary>
+        /// Class ability token use: teaches the token's specific class ability rank (ClassAbilityTokenTier), which
+        /// must be the player's current rank + 1, by running the same learn path /abilities learn uses - so it
+        /// spends the normal class ability point cost. Confirmed before spending; the token is consumed only on
+        /// a successful learn. Every failure branch (system disabled, misconfigured, wrong tier order, already
+        /// max, not enough points, token gone) leaves the token untouched in the pack.
+        /// </summary>
+        private void UseClassAbilityToken(Player player, int tokenSkillId, int tier, bool confirmed)
+        {
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat("Class abilities are not currently enabled on this server.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // The registry - not Enum.IsDefined - is the source of truth: the generated Enhanced-stat family
+            // uses synthetic ClassAbilityIds (0x1000+) that are registered but are not named enum members.
+            if (tokenSkillId <= 0 ||
+                !ClassAbilityRegistry.Abilities.TryGetValue((ClassAbilityId)tokenSkillId, out var skill))
+            {
+                player.SendTransientError($"The {Name} is misconfigured and cannot be used.");
+                return;
+            }
+
+            // Every class ability token is a PREPAID voucher: the class ability point cost is charged when the
+            // token is acquired (trainer vendor currency, or TryPurchaseClassAbilityVoucher), never here on use.
+            // There is deliberately no per-instance discriminator - a token that reached the pack by any route
+            // applies its rank for free, so no acquisition path can charge twice by forgetting to mark it.
+            var rank = player.GetClassAbilityRank(skill.Id);
+
+            // The point balance is irrelevant (already paid), so it must not fail the InsufficientPoints check -
+            // pass an unbounded balance so only the rank/tier/implemented rules apply.
+            var eval = ClassAbilityTokenCatalog.Evaluate(skill, rank, tier, int.MaxValue);
+
+            // failure branches - all leave the token in the pack
+            switch (eval.Outcome)
+            {
+                case ClassAbilityTokenOutcome.NotImplemented:
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{skill.DisplayName} cannot be learned yet.", ChatMessageType.Broadcast));
+                    return;
+                case ClassAbilityTokenOutcome.AlreadyMaxRank:
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You already have {skill.DisplayName} at its maximum rank ({rank}/{skill.MaxRank}).", ChatMessageType.Broadcast));
+                    return;
+                case ClassAbilityTokenOutcome.WrongTierOrder:
+                    var wrong = tier <= rank
+                        ? $"You already have {skill.DisplayName} rank {tier}."
+                        : $"This {Name} teaches {skill.DisplayName} rank {tier}, but you must learn rank {rank + 1} first.";
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat(wrong, ChatMessageType.Broadcast));
+                    return;
+                // No InsufficientPoints case: the balance passed to Evaluate above is int.MaxValue, so that
+                // outcome is unreachable here. Affordability is decided at purchase, not at use.
+            }
+
+            // Tier 2/3 unlock gate - checked here too (not just in LearnClassAbility) so a locked token
+            // reports why up front instead of after a pointless confirmation dialog. Leaves it in the pack.
+            if (rank == 0 && !player.MeetsClassAbilityTierUnlock(skill, out var tierError))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(tierError, ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (!confirmed)
+            {
+                var prompt = $"Use {Name} to learn {skill.DisplayName} rank {tier} of {skill.MaxRank}?\n\nThis token is already paid for and will be consumed.";
+                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Custom(player.Guid, () => UseClassAbilityToken(player, tokenSkillId, tier, true)), prompt))
+                    player.SendWeenieError(WeenieError.ConfirmationInProgress);
+                return;
+            }
+
+            // re-validate after the confirmation dialog - state may have changed while it was up
+            if (player.FindObject(Guid.Full, Player.SearchLocations.MyInventory) == null)
+            {
+                player.SendTransientError($"Cannot find the {Name}");
+                return;
+            }
+            rank = player.GetClassAbilityRank(skill.Id);
+            if (tier != rank + 1)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"You can no longer learn {skill.DisplayName} rank {tier}.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // Re-checks Implemented / max rank / rank order; on any failure it returns false with a message and
+            // no state change, so the token stays in the pack. The rank is applied for free - the points were
+            // charged when the token was acquired.
+            if (!player.ApplyClassAbilityRankPrepaid(skill, out var error))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(error, ChatMessageType.Broadcast));
+                return;
+            }
+
+            var newRank = player.GetClassAbilityRank(skill.Id);
+            player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                $"You use {Name} and learn {skill.DisplayName} rank {newRank}/{skill.MaxRank}.", ChatMessageType.Broadcast));
+
+            // The item level-up burst, so learning the rank reads as an upgrade.
+            player.PlayParticleEffect(PlayScript.LevelUp, player.Guid);
 
             if (UseSound > 0)
                 player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
@@ -251,6 +456,23 @@ namespace ACE.Server.WorldObjects
             if (Tailoring.IsTailoringKit(WeenieClassId))
             {
                 Tailoring.UseObjectOnTarget(player, this, target);
+                return;
+            }
+
+            // the Prismatic Drift Stone is a dynamic-outcome application (the rend it grants depends
+            // on the target weapon's damage type), which data recipes cannot express - so it gets a
+            // manager of its own, keyed off the gem's wcid, same as the tailoring kits above.
+            if (PrismaticDriftStone.IsPrismaticDriftStone(WeenieClassId))
+            {
+                PrismaticDriftStone.UseObjectOnTarget(player, this, target);
+                return;
+            }
+
+            // Attuned Drift Prism: permanently aligns an orb to one damage type. Self-contained
+            // wcid-set check (AttunedDriftPrism.PrismElements) so this dispatch stays one block.
+            if (AttunedDriftPrism.IsPrism(WeenieClassId))
+            {
+                AttunedDriftPrism.UseObjectOnTarget(player, this, target);
                 return;
             }
 

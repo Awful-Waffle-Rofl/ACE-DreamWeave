@@ -61,6 +61,57 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        // PROTOTYPE: multi-shot - dedicated properties (not shared with melee Cleaving), so count/range/damage
+        // can be tuned independently per weapon.
+
+        /// <summary>
+        /// Returns TRUE if this missile weapon fires additional arrows at nearby targets
+        /// </summary>
+        public bool IsMultiShot { get => GetProperty(PropertyBool.MultiShot) ?? false; }
+
+        /// <summary>
+        /// Returns the number of additional targets for multi-shot (not counting the primary target)
+        /// </summary>
+        public int MultiShotCount { get => IsMultiShot ? Math.Max(0, GetProperty(PropertyInt.MultiShotCount) ?? DefaultMultiShotCount) : 0; }
+
+        public const int DefaultMultiShotCount = 2;
+
+        // Multi-shot's max range is always the wielder's own current missile range (Creature_Missile.GetMaxMissileRange),
+        // not an independently tunable value - a split arrow shouldn't be able to reach farther than a normal shot.
+
+        public const float DefaultMultiShotSpreadAngle = 20.0f;   // half-angle the fan widens by per unit of distance
+        public const float MinMultiShotSpreadAngle = 1.0f;
+        public const float MaxMultiShotSpreadAngle = 90.0f;
+
+        /// <summary>
+        /// Returns the half-angle (in degrees) the multi-shot fan widens by per unit of distance from the shooter,
+        /// clamped to sane bounds. This is the one deliberately per-weapon-tunable knob for the fan's shape.
+        /// </summary>
+        public float MultiShotSpreadAngle
+        {
+            get
+            {
+                var angle = GetProperty(PropertyFloat.MultiShotSpreadAngle) ?? DefaultMultiShotSpreadAngle;
+                return (float)Math.Clamp(angle, MinMultiShotSpreadAngle, MaxMultiShotSpreadAngle);
+            }
+        }
+
+        public const float DefaultMultiShotDamageMultiplier = 1.0f;
+        public const float MinMultiShotDamageMultiplier = 0.1f;
+        public const float MaxMultiShotDamageMultiplier = 2.0f;
+
+        /// <summary>
+        /// Returns the damage multiplier applied to multi-shot's additional (non-primary) hits, clamped to sane bounds
+        /// </summary>
+        public float MultiShotDamageMultiplier
+        {
+            get
+            {
+                var mult = GetProperty(PropertyFloat.MultiShotDamageMultiplier) ?? DefaultMultiShotDamageMultiplier;
+                return (float)Math.Clamp(mult, MinMultiShotDamageMultiplier, MaxMultiShotDamageMultiplier);
+            }
+        }
+
         /// <summary>
         /// Returns the primary weapon equipped by a creature
         /// (melee, missile, or wand)
@@ -520,6 +571,11 @@ namespace ACE.Server.WorldObjects
                     return ImbuedEffectType.ElectricRending;
                 case DamageType.Nether:
                     return ImbuedEffectType.NetherRending;
+                case DamageType.Health:
+                    // FORK ADDITION - "Blood Rending", the life-magic counterpart of the elemental rends.
+                    // Reached for Harm/Drain (via GetDrainResistanceType) and for Hecatomb/Raven's Fury,
+                    // whose Spell.DamageType is Health (e_Type 128).
+                    return ImbuedEffectType.HealthRending;
                 default:
                     //log.DebugFormat("GetRendDamageType({0}) unexpected damage type", damageType);
                     return ImbuedEffectType.Undef;
@@ -966,6 +1022,11 @@ namespace ACE.Server.WorldObjects
             var rng = ThreadSafeRandom.Next(0.0f, 1.0f);
             if (rng >= chance)
                 return;
+
+            // class abilities that ride along with a successful item proc roll (e.g. Taunt on an
+            // aetheria surge) - fires regardless of whether the proc spell resists/fails below
+            if (attacker is Player procPlayer)
+                procPlayer.OnClassAbilityItemProc(this);
 
             var spell = new Spell(ProcSpell.Value);
 

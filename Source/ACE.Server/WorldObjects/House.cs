@@ -220,7 +220,7 @@ namespace ACE.Server.WorldObjects
             var house = this;
             if (CurrentLandblock != null && CurrentLandblock.HasDungeon && HouseType != HouseType.Apartment)
             {
-                var biota = DatabaseManager.Shard.BaseDatabase.GetBiotasByWcid(WeenieClassId).Where(bio => bio.BiotaPropertiesPosition.Count > 0).FirstOrDefault(b => b.BiotaPropertiesPosition.FirstOrDefault(p => p.PositionType == (ushort)PositionType.Location).ObjCellId >> 16 != Location.Landblock);
+                var biota = DatabaseManager.Shard.BaseDatabase.GetBiotasByWcid(WeenieClassId).Where(bio => bio.BiotaPropertiesPosition.Count > 0).FirstOrDefault(b => b.BiotaPropertiesPosition.FirstOrDefault(p => p.PositionType == (ushort)PositionType.Location).ObjCellId >> 16 != Location.LandblockShort);
                 if (biota != null)
                 {
                     house = WorldObjectFactory.CreateWorldObject(biota) as House;
@@ -509,7 +509,7 @@ namespace ACE.Server.WorldObjects
                 var landblock = (ushort)((RootGuid.Full >> 12) & 0xFFFF);
 
                 var landblockId = new LandblockId((uint)(landblock << 16 | 0xFFFF));
-                var isLoaded = LandblockManager.IsLoaded(landblockId);
+                var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
                 if (!isLoaded)
                 {
@@ -521,7 +521,7 @@ namespace ACE.Server.WorldObjects
                     return Load(RootGuid.Full);
                 }
                    
-                var loaded = LandblockManager.GetLandblock(landblockId, false);
+                var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
                 return loaded.GetObject(RootGuid) as House;
             }
         }
@@ -562,24 +562,24 @@ namespace ACE.Server.WorldObjects
             var landblock = (ushort)((houseGuid >> 12) & 0xFFFF);
 
             var landblockId = new LandblockId((uint)(landblock << 16 | 0xFFFF));
-            var isLoaded = LandblockManager.IsLoaded(landblockId);
+            var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
             if (!isLoaded)
                 return House.Load(houseGuid);
 
-            var loaded = LandblockManager.GetLandblock(landblockId, false);
+            var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
             return loaded.GetObject(new ObjectGuid(houseGuid)) as House;
         }
 
         public House GetDungeonHouse()
         {
             var landblockId = new LandblockId(DungeonLandblockID);
-            var isLoaded = LandblockManager.IsLoaded(landblockId);
+            var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
             if (!isLoaded)
                 return House.Load(DungeonHouseGuid, true);
 
-            var loaded = LandblockManager.GetLandblock(landblockId, false);
+            var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
             var wos = loaded.GetWorldObjectsForPhysicsHandling();
             return wos.FirstOrDefault(wo => wo.WeenieClassId == WeenieClassId) as House;
         }

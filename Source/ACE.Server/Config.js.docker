@@ -215,6 +215,12 @@
     // After updating to latest world database, automatically import further customizations
     // AutoUpdateWorldDatabase must be true for this option to be used
     // SQL files will be executed given the sort order of the full paths of the files
+    // Files whose contents are unchanged since they were last successfully applied to this exact
+    // world database are skipped, tracked via WorldCustomizationCache.json next to this config.
+    // That cache is automatically invalidated -- forcing a full reapply -- whenever the target database,
+    // or its Base/Patch version, differs from what was last recorded (e.g. a fresh/restored database, or
+    // a base world update was just applied this run). In a container without a persisted volume for this
+    // file, it will simply reset on every restart, which only costs a full reapply -- not correctness.
     "AutoApplyWorldCustomizations": true,
 
     // When AutoApplyWorldCustomizations is set to true, the auto apply process will search for

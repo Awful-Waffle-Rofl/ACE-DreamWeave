@@ -248,6 +248,48 @@ namespace ACE.Database
             return weenie;
         }
 
+        private volatile HashSet<uint> rareGemSpellIds;
+        private readonly object rareGemSpellIdsLock = new object();
+
+        /// <summary>
+        /// Survival challenge (WaffleACE): the set of spell ids cast by rare gems - every Gem-type weenie that
+        /// carries a RareId and a Spell DID. Computed once from the world DB and cached.
+        /// <para/>
+        /// This is the BROAD CANDIDATE set, not a gem-exclusive one. Roughly half the ids it returns are ordinary
+        /// player-castable spells (the level-8 Incantation line and the "Aura of Incantation" family), and
+        /// ace_world ships Scroll weenies teaching them, so a consumer must not treat a spell-id match as proof a
+        /// buff came from a gem. The gem-exclusive half is the Prodigal set, and what separates the two is the
+        /// spell's SpellCategory - which comes from the client dat, not from this database, so it cannot be
+        /// filtered here. ACE.Server narrows the set by category in ACE.Server.Entity.RareGemSpells; that is what
+        /// Player.StripRareGemBuffs consumes.
+        /// </summary>
+        public HashSet<uint> GetRareGemSpellIds()
+        {
+            if (rareGemSpellIds != null)
+                return rareGemSpellIds;
+
+            lock (rareGemSpellIdsLock)
+            {
+                if (rareGemSpellIds != null)
+                    return rareGemSpellIds;
+
+                using (var context = new WorldDbContext())
+                {
+                    var query = from spell in context.WeeniePropertiesDID.AsNoTracking()
+                                join w in context.Weenie on spell.ObjectId equals w.ClassId
+                                join rare in context.WeeniePropertiesInt on spell.ObjectId equals rare.ObjectId
+                                where w.Type == (int)WeenieType.Gem
+                                   && spell.Type == (ushort)PropertyDataId.Spell
+                                   && rare.Type == (ushort)PropertyInt.RareId
+                                select spell.Value;
+
+                    rareGemSpellIds = new HashSet<uint>(query.Distinct().ToList());
+                }
+
+                return rareGemSpellIds;
+            }
+        }
+
         private readonly ConcurrentDictionary<string, uint> creatureWeenieNamesLowerInvariantCache = new ConcurrentDictionary<string, uint>();
 
         public bool IsCreatureNameInWorldDatabase(string name)
@@ -569,6 +611,13 @@ namespace ACE.Database
         private readonly ConcurrentDictionary<ushort /* Landblock */, List<LandblockInstance>> cachedLandblockInstances = new ConcurrentDictionary<ushort, List<LandblockInstance>>();
 
         /// <summary>
+        /// Realms Phase 3: per-(realm, landblock) content. Keyed (realmId &lt;&lt; 16) | landblock.
+        /// A cached entry may be the realm's override rows, or the base list when the
+        /// realm has no override for that landblock.
+        /// </summary>
+        private readonly ConcurrentDictionary<uint /* (realmId << 16) | landblock */, List<LandblockInstance>> cachedRealmLandblockInstances = new ConcurrentDictionary<uint, List<LandblockInstance>>();
+
+        /// <summary>
         /// Returns the number of LandblockInstances currently cached.
         /// </summary>
         public int GetLandblockInstancesCacheCount()
@@ -582,6 +631,7 @@ namespace ACE.Database
         public void ClearCachedLandblockInstances()
         {
             cachedLandblockInstances.Clear();
+            cachedRealmLandblockInstances.Clear();
         }
 
         /// <summary>
@@ -589,6 +639,12 @@ namespace ACE.Database
         /// </summary>
         public bool ClearCachedInstancesByLandblock(ushort landblock)
         {
+            foreach (var key in cachedRealmLandblockInstances.Keys)
+            {
+                if ((ushort)(key & 0xFFFF) == landblock)
+                    cachedRealmLandblockInstances.TryRemove(key, out _);
+            }
+
             return cachedLandblockInstances.TryRemove(landblock, out _);
         }
 
@@ -615,6 +671,30 @@ namespace ACE.Database
         {
             using (var context = new WorldDbContext())
                 return GetCachedInstancesByLandblock(context, landblock);
+        }
+
+        /// <summary>
+        /// Realms Phase 3: content for a landblock as seen from a realm. If the realm
+        /// has override rows for this landblock they replace the base rows entirely;
+        /// otherwise the base content is returned.
+        /// </summary>
+        public List<LandblockInstance> GetCachedInstancesByLandblock(ushort landblock, ushort realmId)
+        {
+            if (realmId == 0)
+                return GetCachedInstancesByLandblock(landblock);
+
+            var key = ((uint)realmId << 16) | landblock;
+
+            if (cachedRealmLandblockInstances.TryGetValue(key, out var value))
+                return value;
+
+            var realmRows = GetRealmInstancesByLandblock(landblock, realmId);
+
+            var results = realmRows.Count > 0 ? realmRows : GetCachedInstancesByLandblock(landblock);
+
+            cachedRealmLandblockInstances.TryAdd(key, results);
+
+            return cachedRealmLandblockInstances[key];
         }
 
 
@@ -712,6 +792,16 @@ namespace ACE.Database
         public bool ClearCachedQuest(string questName)
         {
             return cachedQuest.TryRemove(questName, out _);
+        }
+
+        /// <summary>
+        /// Inserts or replaces a quest in the in-memory cache without touching the database.
+        /// Intended for tests and tools that need a deterministic world quest definition
+        /// (MaxSolves / MinDelta) with no live world database. Mirrors <see cref="ClearCachedQuest"/>.
+        /// </summary>
+        public void AddCachedQuest(Quest quest)
+        {
+            cachedQuest[quest.Name] = quest;
         }
 
         public Quest GetCachedQuest(string questName)

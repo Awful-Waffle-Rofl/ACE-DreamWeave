@@ -16,10 +16,10 @@ namespace ACE.Server.Physics.Common
 
         private static readonly object landblockMutex = new object();
         /// <summary>
-        /// This is not used if PhysicsEngine.Instance.Server is true
+        /// This is not used if PhysicsEngine.Instance.Server is true.
+        /// Keyed by the 64-bit (instance, landblock) pair.
         /// </summary>
-        public static ConcurrentDictionary<uint, Landblock> Landblocks = new ConcurrentDictionary<uint, Landblock>();
-        public static Dictionary<uint, Landblock> BlockDrawList = new Dictionary<uint, Landblock>();
+        public static ConcurrentDictionary<ulong, Landblock> Landblocks = new ConcurrentDictionary<ulong, Landblock>();
 
         public static uint LoadedCellID;
         public static uint ViewerCellID;
@@ -46,19 +46,24 @@ namespace ACE.Server.Physics.Common
 
         public static int LandblocksCount => Landblocks.Count;
 
+        private static ulong LandblockKey(uint landblockID, uint instance)
+        {
+            return ((ulong)instance << 32) | landblockID;
+        }
+
         /// <summary>
         /// Loads the backing store landblock structure<para />
         /// This function is thread safe
         /// </summary>
         /// <param name="blockCellID">Any landblock + cell ID within the landblock</param>
-        public static Landblock get_landblock(uint blockCellID)
+        public static Landblock get_landblock(uint blockCellID, uint instance)
         {
             var landblockID = blockCellID | 0xFFFF;
 
             if (PhysicsEngine.Instance.Server)
             {
                 var lbid = new LandblockId(landblockID);
-                var lbmLandblock = LandblockManager.GetLandblock(lbid, false, false);
+                var lbmLandblock = LandblockManager.GetLandblock(lbid, instance, false, false);
 
                 return lbmLandblock.PhysicsLandblock;
             }
@@ -81,41 +86,43 @@ namespace ACE.Server.Physics.Common
 
             return Landblocks[yDiff + xDiff * MidWidth];*/
 
+            var key = LandblockKey(landblockID, instance);
+
             // check if landblock is already cached
-            if (Landblocks.TryGetValue(landblockID, out var landblock))
+            if (Landblocks.TryGetValue(key, out var landblock))
                 return landblock;
 
             lock (landblockMutex)
             {
                 // check if landblock is already cached, this time under the lock.
-                if (Landblocks.TryGetValue(landblockID, out landblock))
+                if (Landblocks.TryGetValue(key, out landblock))
                     return landblock;
 
                 // if not, load into cache
-                landblock = new Landblock(DBObj.GetCellLandblock(landblockID));
-                if (Landblocks.TryAdd(landblockID, landblock))
+                landblock = new Landblock(DBObj.GetCellLandblock(landblockID), instance);
+                if (Landblocks.TryAdd(key, landblock))
                     landblock.PostInit();
                 else
-                    Landblocks.TryGetValue(landblockID, out landblock);
+                    Landblocks.TryGetValue(key, out landblock);
 
                 return landblock;
             }
         }
 
-        public static bool unload_landblock(uint landblockID)
+        public static bool unload_landblock(uint landblockID, uint instance)
         {
             if (PhysicsEngine.Instance.Server)
             {
                 // todo: Instead of ACE.Server.Entity.Landblock.Unload() calling this function, it should be calling PhysicsLandblock.Unload()
                 // todo: which would then call AdjustCell.AdjustCells.Remove()
 
-                AdjustCell.AdjustCells.TryRemove(landblockID >> 16, out _);
+                AdjustCell.TryRemove(landblockID >> 16, instance);
                 return true;
             }
 
-            var result = Landblocks.TryRemove(landblockID, out _);
+            var result = Landblocks.TryRemove(LandblockKey(landblockID, instance), out _);
             // todo: Like mentioned above, the following function should be moved to ACE.Server.Physics.Common.Landblock.Unload()
-            AdjustCell.AdjustCells.TryRemove(landblockID >> 16, out _);
+            AdjustCell.TryRemove(landblockID >> 16, instance);
             return result;
         }
 
@@ -123,11 +130,11 @@ namespace ACE.Server.Physics.Common
         /// Gets the landcell from a landblock. If the cell is an indoor cell and hasn't been loaded, it will be loaded.<para />
         /// This function is thread safe
         /// </summary>
-        public static ObjCell get_landcell(uint blockCellID)
+        public static ObjCell get_landcell(uint blockCellID, uint instance)
         {
             //Console.WriteLine($"get_landcell({blockCellID:X8}");
 
-            var landblock = get_landblock(blockCellID);
+            var landblock = get_landblock(blockCellID, instance);
             if (landblock == null)
                 return null;
 
@@ -154,6 +161,8 @@ namespace ACE.Server.Physics.Common
                         return cell;
 
                     cell = DBObj.GetEnvCell(blockCellID);
+                    cell.CurLandblock = landblock;
+
                     landblock.LandCells.TryAdd((int)cellID, cell);
                     var envCell = (EnvCell)cell;
                     envCell.PostInit();

@@ -281,6 +281,28 @@ namespace ACE.Server.Managers
             }
         }
 
+        /// <summary>
+        /// Returns a point-in-time copy of every character on an account (online and offline). Unlike
+        /// <see cref="GetAccountPlayers"/>, which hands back the live dictionary, this snapshots under the read
+        /// lock so callers can enumerate it safely from any thread (e.g. the off-thread XP grant path) without
+        /// racing a concurrent login/logout mutation. Empty list when the account has no known characters.
+        /// </summary>
+        public static List<IPlayer> GetAccountPlayersSnapshot(uint accountId)
+        {
+            playersLock.EnterReadLock();
+            try
+            {
+                if (playerAccounts.TryGetValue(accountId, out var accountPlayers))
+                    return accountPlayers.Values.ToList();
+
+                return new List<IPlayer>();
+            }
+            finally
+            {
+                playersLock.ExitReadLock();
+            }
+        }
+
         public static int GetOfflineCount()
         {
             playersLock.EnterReadLock();
@@ -650,8 +672,10 @@ namespace ACE.Server.Managers
             else
                 BroadcastToChannelFromConsole(Channel.Audit, message);
 
-            //if (PropertyManager.GetBool("log_audit", true).Item)
-                //log.Info($"[AUDIT] {(issuer != null ? $"{issuer.Name} says on the Audit channel: " : "")}{message}");
+            // Persist a disk-backed record so the audit trail survives beyond the ephemeral in-game
+            // Audit channel (which is only seen by online staff who happen to be listening).
+            if (PropertyManager.GetBool("log_audit", true).Item)
+                log.Info($"[AUDIT] {(issuer != null ? $"{issuer.Name}: " : "")}{message}");
 
             //LogBroadcastChat(Channel.Audit, issuer, message);
         }

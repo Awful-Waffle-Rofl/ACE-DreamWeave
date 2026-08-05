@@ -1,6 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
+# Shell scripts must stay LF everywhere (CRLF breaks bash, including Git Bash on Windows)
+*.sh     text eol=lf
+
+# Workflow scripts are inlined into harness permission dialogs; CRLF reads as hidden control characters and blocks invocation
+.claude/workflows/*.js text eol=lf
+
 # Custom for Visual Studio
 *.cs     diff=csharp
 *.sln    merge=union

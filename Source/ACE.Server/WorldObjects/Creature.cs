@@ -24,6 +24,14 @@ namespace ACE.Server.WorldObjects
 
         public bool IsExhausted { get => Stamina.Current == 0; }
 
+        /// <summary>
+        /// Wave challenge (WaffleACE): the player whose wave-gauntlet run spawned this creature. Set by
+        /// Player_WaveChallenge.SpawnWave on every roster creature that makes it into the world, and read by
+        /// Creature.Die() to report the death back to the run. Purely in-memory and never persisted - wave
+        /// creatures live and die inside one ephemeral instance (mirrors Pet.P_PetOwner).
+        /// </summary>
+        public Player P_WaveOwner;
+
         protected QuestManager _questManager;
 
         public QuestManager QuestManager
@@ -147,8 +155,6 @@ namespace ACE.Server.WorldObjects
 
         public void GenerateNewFace()
         {
-            var cg = DatManager.PortalDat.CharGen;
-
             if (!Heritage.HasValue)
             {
                 if (!string.IsNullOrEmpty(HeritageGroupName) && Enum.TryParse(HeritageGroupName.Replace("'", ""), true, out HeritageGroup heritage))
@@ -169,6 +175,10 @@ namespace ACE.Server.WorldObjects
 #endif
                 return;
             }
+
+            // deferred until after the early-out above, so faceless creatures (and unit tests)
+            // can be constructed without the portal dat loaded
+            var cg = DatManager.PortalDat.CharGen;
 
             if (!cg.HeritageGroups.TryGetValue((uint)Heritage, out var heritageGroup) || !heritageGroup.Genders.TryGetValue((int)Gender, out var sex))
             {
@@ -333,6 +343,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void ActOnUse(WorldObject worldObject)
         {
+            // Drift Network class ability trainer / exchanger NPCs run their CAP purchase / refund interaction
+            // here (flagged by weenie data - see ClassAbilities.ClassAbilityTrainer). Their greeting emote has
+            // already fired in base.OnActivate -> EmoteManager.OnUse(). Every other NPC is emote-only.
+            if (worldObject is Player player && ClassAbilities.ClassAbilityTrainer.TryHandleUse(this, player))
+                return;
+
             // handled in base.OnActivate -> EmoteManager.OnUse()
         }
 

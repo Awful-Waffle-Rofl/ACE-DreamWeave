@@ -219,7 +219,7 @@ namespace ACE.Server.WorldObjects
             if (Timers.RunningTime < NextMoveTime)
                 return false;
 
-            PhysicsObj.update_object();
+            PhysicsObj.update_object(Location.Instance);
             UpdatePosition_SyncLocation();
 
             return !PhysicsObj.IsAnimating;
@@ -236,7 +236,7 @@ namespace ACE.Server.WorldObjects
             if (Timers.RunningTime < nextAttackTime || !IsAttackRange())
                 return false;
 
-            PhysicsObj.update_object();
+            PhysicsObj.update_object(Location.Instance);
             UpdatePosition_SyncLocation();
 
             return !PhysicsObj.IsAnimating;
@@ -418,6 +418,15 @@ namespace ACE.Server.WorldObjects
         }
 
         private static readonly ConcurrentDictionary<uint, BodyPartTable> BPTableCache = new ConcurrentDictionary<uint, BodyPartTable>();
+
+        /// <summary>
+        /// Pre-seeds the body part table for a wcid, bypassing the world database lookup in
+        /// GetBodyParts. Exposed to the test assembly via InternalsVisibleTo.
+        /// </summary>
+        internal static void SetBodyPartTable(uint wcid, BodyPartTable bpTable)
+        {
+            BPTableCache[wcid] = bpTable;
+        }
 
         public static BodyPartTable GetBodyParts(uint wcid)
         {

@@ -2,6 +2,14 @@ namespace ACE.Server.Physics.Common
 {
     public class EncumbranceSystem
     {
+        /// <summary>
+        /// The retail carrying-capacity formula. NOTE: this currently has no callers. Every site that used it
+        /// was a player path, and all of them now route through Player.GetEncumbranceCapacity, which is the
+        /// single authority for a Player's capacity (a mule overrides it outright, so a second implementation
+        /// would silently disagree with the pickup gate). Kept because it is the reference formula and the
+        /// natural home for a future non-Player creature that needs one. GetBurden / GetBurdenMod below are
+        /// still very much in use.
+        /// </summary>
         public static int EncumbranceCapacity(int strength, int numAugs)
         {
             if (strength <= 0) return 0;

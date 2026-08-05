@@ -125,6 +125,15 @@ namespace ACE.Adapter.GDLE.Models
         [JsonPropertyName("generatorTable")]
         public List<GeneratorTable> GeneratorTable { get; set; }
 
+        [JsonPropertyName("animParts")]
+        public List<AnimPartListing> AnimParts { get; set; }
+
+        [JsonPropertyName("palettes")]
+        public List<PaletteListing> Palettes { get; set; }
+
+        [JsonPropertyName("textureMaps")]
+        public List<TextureMapListing> TextureMaps { get; set; }
+
         [JsonIgnore]
         public string Name => StringStats?.FirstOrDefault((StringStat p) => p.Key == 1)?.Value ?? WeenieId.ToString();
 

@@ -16,12 +16,13 @@ using ACE.Server.Entity.Actions;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Managers;
+using ACE.Server.Realms;
 
 namespace ACE.Server.WorldObjects
 {
     partial class Player
     {
-        private static readonly Position MarketplaceDrop = DatabaseManager.World.GetCachedWeenie("portalmarketplace")?.GetPosition(PositionType.Destination) ?? new Position(0x016C01BC, 49.206f, -31.935f, 0.005f, 0, 0, -0.707107f, 0.707107f);
+        private static readonly Position MarketplaceDrop = DatabaseManager.World.GetCachedWeenie("portalmarketplace")?.GetPosition(PositionType.Destination) ?? new Position(0x016C01BC, 49.206f, -31.935f, 0.005f, 0, 0, -0.707107f, 0.707107f, 0);
 
         /// <summary>
         /// Teleports the player to position
@@ -261,6 +262,98 @@ namespace ACE.Server.WorldObjects
             mpChain.EnqueueChain();
         }
 
+        /// <summary>
+        /// The Drift Network arrival point: inside the main room (the crossing, landblock 0x0007) but
+        /// toward its SOUTH end, facing south down the garrisoned hallway.
+        /// NOT the dead centre (70,-70) - there is a fountain there and arrivals landed inside it.
+        /// (70,-85) is open floor in cell 0x00070145, ~15m clear of the fountain and ~5m short of where
+        /// the south wing begins, so the player arrives in the hall looking down the corridor.
+        /// The instance is left at 0 - it is re-bound to realm 1's default instance at teleport time,
+        /// because the realm registry is not populated when this static initialiser runs.
+        /// </summary>
+        private static readonly Position DriftNetworkDrop = new Position(0x00070145, 70f, -85f, 0.005f, 0, 0, 1f, 0, 0);
+
+        /// <summary>Realm 1, "Weave Content 1" - the realm the Drift Network's content lives in.</summary>
+        private const ushort DriftNetworkRealmId = 1;
+
+        /// <summary>
+        /// "/dn" - recall to the Drift Network, modelled on HandleActionTeleToMarketPlace: same guards,
+        /// same MarketplaceRecall animation and 14s cast, same move-too-far abort.
+        /// </summary>
+        public void HandleActionTeleToDriftNetwork()
+        {
+            if (IsOlthoiPlayer)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.OlthoiCanOnlyRecallToLifestone));
+                return;
+            }
+
+            if (PKTimerActive)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YouHaveBeenInPKBattleTooRecently));
+                return;
+            }
+
+            if (RecallsDisabled)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.ExitTrainingAcademyToUseCommand));
+                return;
+            }
+
+            if (TooBusyToRecall)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YoureTooBusy));
+                return;
+            }
+
+            var realm = RealmManager.GetRealm(DriftNetworkRealmId);
+            if (realm == null)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat("The Drift Network is not available on this world.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // Guard against the instance-blind visibility bug: teleporting between two instances of the
+            // SAME landblock leaves the client showing a blend of both realms (Physics/Common/ObjectMaint.cs
+            // has no concept of Instance). Recalling from anywhere else is an ordinary cross-landblock
+            // teleport and is fine. Same reason the entry portal lives in the Marketplace, not the hub.
+            // NB the guard is on the LANDBLOCK, which is shared by the retail Town Network (realm 0) and
+            // the Drift Network (realm 1) - so this fires in either hall and the wording must not assume
+            // the player is already in the Meridian's.
+            if (Location.LandblockId.Landblock == (DriftNetworkDrop.LandblockId.Landblock))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat("You must leave the network you are standing in before you can call for a way into another.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            EnqueueBroadcast(new GameMessageSystemChat($"{Name} is recalling to the Drift Network.", ChatMessageType.Recall), LocalBroadcastRange, ChatMessageType.Recall);
+
+            SendMotionAsCommands(MotionCommand.MarketplaceRecall, MotionStance.NonCombat);
+
+            var startPos = new Position(Location);
+
+            var dnChain = new ActionChain();
+            dnChain.AddDelaySeconds(14);
+
+            IsBusy = true;
+            dnChain.AddAction(this, () =>
+            {
+                IsBusy = false;
+                var endPos = new Position(Location);
+                if (startPos.SquaredDistanceTo(endPos) > RecallMoveThresholdSq)
+                {
+                    Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YouHaveMovedTooFar));
+                    return;
+                }
+
+                // bind the drop point to realm 1's default instance - same mechanism the realm portal
+                // uses via PropertyInt.PortalRealm, and what @telerealm does by hand
+                Teleport(new Position(DriftNetworkDrop, realm.DefaultInstanceID));
+            });
+
+            dnChain.EnqueueChain();
+        }
+
         private static readonly Motion motionAllegianceHometownRecall = new Motion(MotionStance.NonCombat, MotionCommand.AllegianceHometownRecall);
 
         public void HandleActionRecallAllegianceHometown()
@@ -470,11 +563,11 @@ namespace ACE.Server.WorldObjects
 
         private static List<Position> pkArenaLocs = new List<Position>()
         {
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew1")?.GetPosition(PositionType.Destination) ?? new Position(0x00660117, 30, -50, 0.005f, 0, 0,  0.000000f,  1.000000f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew2")?.GetPosition(PositionType.Destination) ?? new Position(0x00660106, 10,   0, 0.005f, 0, 0, -0.947071f,  0.321023f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew3")?.GetPosition(PositionType.Destination) ?? new Position(0x00660103, 30, -30, 0.005f, 0, 0, -0.699713f,  0.714424f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew4")?.GetPosition(PositionType.Destination) ?? new Position(0x0066011E, 50,   0, 0.005f, 0, 0, -0.961021f, -0.276474f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew5")?.GetPosition(PositionType.Destination) ?? new Position(0x00660127, 60, -30, 0.005f, 0, 0,  0.681639f,  0.731689f)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew1")?.GetPosition(PositionType.Destination) ?? new Position(0x00660117, 30, -50, 0.005f, 0, 0,  0.000000f,  1.000000f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew2")?.GetPosition(PositionType.Destination) ?? new Position(0x00660106, 10,   0, 0.005f, 0, 0, -0.947071f,  0.321023f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew3")?.GetPosition(PositionType.Destination) ?? new Position(0x00660103, 30, -30, 0.005f, 0, 0, -0.699713f,  0.714424f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew4")?.GetPosition(PositionType.Destination) ?? new Position(0x0066011E, 50,   0, 0.005f, 0, 0, -0.961021f, -0.276474f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpkarenanew5")?.GetPosition(PositionType.Destination) ?? new Position(0x00660127, 60, -30, 0.005f, 0, 0,  0.681639f,  0.731689f, 0)),
         };
 
         public void HandleActionTeleToPkArena()
@@ -548,11 +641,11 @@ namespace ACE.Server.WorldObjects
 
         private static List<Position> pklArenaLocs = new List<Position>()
         {
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew1")?.GetPosition(PositionType.Destination) ?? new Position(0x00670117, 30, -50, 0.005f, 0, 0,  0.000000f,  1.000000f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew2")?.GetPosition(PositionType.Destination) ?? new Position(0x00670106, 10,   0, 0.005f, 0, 0, -0.947071f,  0.321023f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew3")?.GetPosition(PositionType.Destination) ?? new Position(0x00670103, 30, -30, 0.005f, 0, 0, -0.699713f,  0.714424f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew4")?.GetPosition(PositionType.Destination) ?? new Position(0x0067011E, 50,   0, 0.005f, 0, 0, -0.961021f, -0.276474f)),
-            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew5")?.GetPosition(PositionType.Destination) ?? new Position(0x00670127, 60, -30, 0.005f, 0, 0,  0.681639f,  0.731689f)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew1")?.GetPosition(PositionType.Destination) ?? new Position(0x00670117, 30, -50, 0.005f, 0, 0,  0.000000f,  1.000000f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew2")?.GetPosition(PositionType.Destination) ?? new Position(0x00670106, 10,   0, 0.005f, 0, 0, -0.947071f,  0.321023f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew3")?.GetPosition(PositionType.Destination) ?? new Position(0x00670103, 30, -30, 0.005f, 0, 0, -0.699713f,  0.714424f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew4")?.GetPosition(PositionType.Destination) ?? new Position(0x0067011E, 50,   0, 0.005f, 0, 0, -0.961021f, -0.276474f, 0)),
+            new Position(DatabaseManager.World.GetCachedWeenie("portalpklarenanew5")?.GetPosition(PositionType.Destination) ?? new Position(0x00670127, 60, -30, 0.005f, 0, 0,  0.681639f,  0.731689f, 0)),
         };
 
         public void HandleActionTeleToPklArena()
@@ -653,7 +746,10 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void Teleport(Position _newPosition, bool fromPortal = false)
         {
-            var newPosition = new Position(_newPosition);
+            // single choke point for instance safety: every teleport destination must
+            // land in a registered realm, and ephemeral instances must be live and
+            // accept this player - otherwise reroute to the home realm's default
+            var newPosition = new Position(_newPosition.ValidateInstanceDestination(this));
             //newPosition.PositionZ += 0.005f;
             newPosition.PositionZ += 0.005f * (ObjScale ?? 1.0f);
 
@@ -704,7 +800,42 @@ namespace ACE.Server.WorldObjects
 
             HandlePreTeleportVisibility(newPosition);
 
-            UpdatePlayerPosition(new Position(newPosition), true);
+            // capture the origin landblock instance BEFORE UpdatePlayerPosition relocates us:
+            // for command teleports (InUpdate == false) that call relocates CurrentLandblock to
+            // the destination, so it can no longer tell us where we came from
+            var originInstancedLandblock = Location.InstancedLandblock;
+
+            // Tell the client to delete the origin landblock's objects on any teleport that leaves it,
+            // and do it BEFORE the relocate below. Required because a landblock's per-realm instance
+            // copies share object guids and client cell ids: without an explicit delete, the origin
+            // instance's objects re-render as un-interactable ghosts when a different instance of the
+            // same landblock id is later entered.
+            //
+            // This MUST run before UpdatePlayerPosition. That call performs the arrival visibility pass
+            // (update_object_server -> set_current_pos -> change_cell_server -> enter_cell_server ->
+            // handle_visible_cells -> enqueue_objs) which adds the DESTINATION landblock's objects to
+            // ObjMaint and enqueues their creates. Flushing AFTER it (the previous ordering) iterated
+            // those just-added destination objects, removed them from ObjMaint, and sent DeleteObject
+            // for them - so a player who stood still after a cross-instance teleport (e.g. returning
+            // from an ephemeral arena to the Marketplace) saw an empty destination until a cell change
+            // re-ran the visibility pass. Flushing FIRST operates on the still-current ORIGIN known
+            // objects (Location is still the origin here), leaving the arrival pass as the single
+            // authority for the destination - the same way an ordinary, non-instance-changing teleport
+            // already behaves. Uses newPosition (the validated destination) for the destination side,
+            // since Location is not relocated until UpdatePlayerPosition runs.
+            if (TeleportRequiresClientObjectFlush(originInstancedLandblock, newPosition.InstancedLandblock))
+                FlushKnownObjectsForInstanceChange();
+
+            var landblockUpdate = UpdatePlayerPosition(new Position(newPosition), true);
+
+            // cross-instance teleports must transfer landblock membership immediately:
+            // the usual deferred transfer (a client position ack arriving while
+            // Teleporting is still set) can race with OnTeleportComplete, and the
+            // client's ack can never signal an instance change on its own.
+            // (Command teleports already relocated inside UpdatePlayerPosition, so
+            // CurrentLandblock == destination here and this is a no-op for them.)
+            if (landblockUpdate && CurrentLandblock != null && CurrentLandblock.Instance != Location.Instance)
+                LandblockManager.RelocateObjectForPhysics(this, true);
         }
 
         public void DoPreTeleportHide()
@@ -758,7 +889,15 @@ namespace ACE.Server.WorldObjects
             IgnoreCollisions = false;
             Hidden = false;
             Teleporting = false;
-            
+
+            // survival challenge (WaffleACE): reconcile the run flag if a teleport moved us out of the arena
+            // instance by any path other than death / exit portal / login-clear (recalls, /hometown, admin tp)
+            CheckSurvivalChallengeInstanceExit();
+
+            // wave challenge (WaffleACE): same reconciliation for the wave gauntlet - any teleport out of the
+            // arena instance other than death / exit portal / login-clear abandons the run
+            CheckWaveChallengeInstanceExit();
+
             CheckMonsters();
             CheckHouse();
 

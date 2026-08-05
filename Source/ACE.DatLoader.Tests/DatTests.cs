@@ -12,21 +12,45 @@ namespace ACE.DatLoader.Tests
     [TestClass]
     public class DatTests
     {
-        private static string DAT_PATH = @"C:\Turbine\Asheron's Call\";
+        // the expected file counts match the end-of-retail client dats
+        private static string DAT_PATH = Environment.GetEnvironmentVariable("ACE_DAT_PATH") ?? @"C:\Turbine\Asheron's Call\";
 
-        private static string cellDatLocation = DAT_PATH + "client_cell_1.dat";
+        private static string cellDatLocation = Path.Combine(DAT_PATH, "client_cell_1.dat");
         private static int expectedCellDatFileCount = 805003;
 
-        private static string portalDatLocation = DAT_PATH + "client_portal.dat";
+        private static string portalDatLocation = Path.Combine(DAT_PATH, "client_portal.dat");
         private static int expectedPortalDatFileCount = 79694;
 
-        private static string localEnglishDatLocation = DAT_PATH + "client_local_English.dat";
+        private static string localEnglishDatLocation = Path.Combine(DAT_PATH, "client_local_English.dat");
         private static int expectedLocalEnglishDatFileCount = 118;
 
+        /// <summary>
+        /// Skips the calling test when the client .dat file isn't present or can't be opened,
+        /// instead of failing on machines without a client install — or while the game client
+        /// is running, which holds the .dat files with write access and blocks all readers.
+        /// </summary>
+        private static void RequireDatFile(string location)
+        {
+            if (!File.Exists(location))
+                Assert.Inconclusive($"Skipped: {location} not found. Set the ACE_DAT_PATH environment variable to a directory containing the client .dat files.");
+
+            try
+            {
+                using (new FileStream(location, FileMode.Open, FileAccess.Read))
+                { }
+            }
+            catch (IOException ex)
+            {
+                Assert.Inconclusive($"Skipped: {location} could not be opened for reading ({ex.Message}). Close any running client that holds the .dat files.");
+            }
+        }
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void LoadCellDat_NoExceptions()
         {
+            RequireDatFile(cellDatLocation);
+
             DatDatabase dat = new DatDatabase(cellDatLocation);
             int count = dat.AllFiles.Count;
             //Assert.AreEqual(ExpectedCellDatFileCount, count);
@@ -34,8 +58,11 @@ namespace ACE.DatLoader.Tests
         }
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void LoadPortalDat_NoExceptions()
         {
+            RequireDatFile(portalDatLocation);
+
             // Init our text encoding options. This will allow us to use more than standard ANSI text, which the client also supports.
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
@@ -46,8 +73,11 @@ namespace ACE.DatLoader.Tests
         }
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void LoadLocalEnglishDat_NoExceptions()
         {
+            RequireDatFile(localEnglishDatLocation);
+
             // Init our text encoding options. This will allow us to use more than standard ANSI text, which the client also supports.
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
@@ -59,8 +89,11 @@ namespace ACE.DatLoader.Tests
 
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void UnpackCellDatFiles_NoExceptions()
         {
+            RequireDatFile(cellDatLocation);
+
             var assembly = typeof(DatDatabase).GetTypeInfo().Assembly;
             var types = assembly.GetTypes().Where(t => t.GetCustomAttributes(typeof(DatFileTypeAttribute), false).Length > 0).ToList();
 
@@ -116,8 +149,11 @@ namespace ACE.DatLoader.Tests
         }
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void UnpackPortalDatFiles_NoExceptions()
         {
+            RequireDatFile(portalDatLocation);
+
             // We need to init the DatManager to load PortalDat.MasterProperty for the BaseProperty references for DbProperties
             // And we need the code page for some of the PortalDat autoload types
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
@@ -178,8 +214,11 @@ namespace ACE.DatLoader.Tests
         }
 
         [TestMethod]
+        [TestCategory("RequiresDatFiles")]
         public void UnpackLocalEnglishDatFiles_NoExceptions()
         {
+            RequireDatFile(localEnglishDatLocation);
+
             // We need to init the DatManager to load PortalDat.MasterProperty for the BaseProperty references for UiLayout/LayoutDesc
             // And we need the code page for some of the PortalDat autoload types
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);

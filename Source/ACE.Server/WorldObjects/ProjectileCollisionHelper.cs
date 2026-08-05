@@ -70,7 +70,8 @@ namespace ACE.Server.WorldObjects
                             if (sourceCreature.GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
                                 sourceCreature.FightDirty(targetPlayer, damageEvent.Weapon);
                         }
-                        else
+                        else if (!damageEvent.Blocked && !damageEvent.Parried)
+                            // a class-ability block/parry is not an evade (own message, no Defense proficiency)
                             targetPlayer.OnEvade(sourceCreature, CombatType.Missile);
                     }
                     else
@@ -142,13 +143,16 @@ namespace ACE.Server.WorldObjects
             worldObject.CurrentLandblock?.RemoveWorldObject(worldObject.Guid, showError: !worldObject.PhysicsObj.entering_world);
             worldObject.PhysicsObj.set_active(false);
 
-            if (worldObject.ProjectileSource is Player player)
+            if (!worldObject.IsCosmeticProjectile)
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat("Your missile attack hit the environment.", ChatMessageType.Broadcast));
-            }
-            else if (worldObject.ProjectileSource is Creature creature)
-            {
-                creature.MonsterProjectile_OnCollideEnvironment();
+                if (worldObject.ProjectileSource is Player player)
+                {
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("Your missile attack hit the environment.", ChatMessageType.Broadcast));
+                }
+                else if (worldObject.ProjectileSource is Creature creature)
+                {
+                    creature.MonsterProjectile_OnCollideEnvironment();
+                }
             }
 
             worldObject.HitMsg = true;

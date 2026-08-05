@@ -32,6 +32,10 @@ namespace ACE.Server.WorldObjects
             //Console.WriteLine($"\n{Name}.HandleActionBuyHouse()");
             log.Info($"[HOUSE] {Name}.HandleActionBuyHouse()");
 
+            // Mule (WaffleACE): a mule cannot own a dwelling.
+            if (MuleBlocked(MuleAction.BuyHouse))
+                return;
+
             // verify player doesn't already own a house
             var houseInstance = GetHouseInstance();
 
@@ -160,7 +164,7 @@ namespace ACE.Server.WorldObjects
             var location = slumLord.Location.GetMapCoordStr();
             if (location == null)
             {
-                if (!HouseManager.ApartmentBlocks.TryGetValue(slumLord.Location.Landblock, out location))
+                if (!HouseManager.ApartmentBlocks.TryGetValue(slumLord.Location.LandblockShort, out location))
                     log.ErrorFormat("{0}.GiveDeed() - couldn't find location {1}", Name, slumLord.Location.ToLOCString());
             }
 
@@ -961,12 +965,12 @@ namespace ACE.Server.WorldObjects
             var landblock = (ushort)((houseGuid >> 12) & 0xFFFF);
 
             var landblockId = new LandblockId((uint)(landblock << 16 | 0xFFFF));
-            var isLoaded = LandblockManager.IsLoaded(landblockId);
+            var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
             if (!isLoaded)
                 return House = House.Load(houseGuid);
 
-            var loaded = LandblockManager.GetLandblock(landblockId, false);
+            var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
             return House = loaded.GetObject(new ObjectGuid(houseGuid)) as House;
         }
 
@@ -1790,11 +1794,11 @@ namespace ACE.Server.WorldObjects
             var landblock = (ushort)((houseGuid >> 12) & 0xFFFF);
 
             var landblockId = new LandblockId((uint)(landblock << 16 | 0xFFFF));
-            var isLoaded = LandblockManager.IsLoaded(landblockId);
+            var isLoaded = LandblockManager.IsLoaded(landblockId, 0);
 
             if (isLoaded)
             {
-                var loaded = LandblockManager.GetLandblock(landblockId, false);
+                var loaded = LandblockManager.GetLandblock(landblockId, 0, false);
                 return loaded.GetObject(new ObjectGuid(houseGuid)) as House;
             }
 

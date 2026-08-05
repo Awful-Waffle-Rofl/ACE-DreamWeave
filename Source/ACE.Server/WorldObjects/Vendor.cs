@@ -10,6 +10,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
@@ -531,21 +532,44 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // Drift Network trainer vendors: reject a class-ability token the player can't currently learn
+            // (wrong rank order, a locked tier, already holding a voucher, or buying more than one) BEFORE
+            // charging any class ability points. Ordinary vendors stock no such items and pass straight through.
+            if (!ClassAbilityTokensBuyable(purchaseItems, player))
+            {
+                CleanupCreatedItems(defaultItems);
+                return false;
+            }
+
             // calculate price
-            uint totalPrice = 0;
+            // Accumulate in a ulong so a large purchase set can't roll a uint total over into a
+            // small number (which would let the player be charged far less than the true cost).
+            ulong totalPriceAccum = 0;
 
             foreach (var item in purchaseItems)
             {
                 var cost = GetSellCost(item);
 
-                // detect rollover?
-                totalPrice += cost;
+                totalPriceAccum += cost;
             }
 
+            // No legitimate purchase can exceed uint range, and the player can never hold that much
+            // currency, so treat an overflowing total as simply unaffordable.
+            if (totalPriceAccum > uint.MaxValue)
+            {
+                CleanupCreatedItems(defaultItems);
+                return false;
+            }
+
+            uint totalPrice = (uint)totalPriceAccum;
+
             // verify player has enough currency
+            // Banking shop hook (always on): banked pyreals back a coin purchase, and banked promissory
+            // notes back their alternate-currency vendor (Absalom Sarraf). Currencies we don't bank
+            // contribute 0, so those vendors stay inventory-only.
             if (AlternateCurrency == null)
             {
-                if (player.CoinValue < totalPrice)
+                if ((player.CoinValue ?? 0) + player.BankedPyreals < totalPrice)
                 {
                     CleanupCreatedItems(defaultItems);
                     return false;
@@ -555,7 +579,7 @@ namespace ACE.Server.WorldObjects
             {
                 var playerAltCurrency = player.GetNumInventoryItemsOfWCID(AlternateCurrency.Value);
 
-                if (playerAltCurrency < totalPrice)
+                if (playerAltCurrency + player.GetBankedAlternateCurrency(AlternateCurrency.Value) < totalPrice)
                 {
                     CleanupCreatedItems(defaultItems);
                     return false;
@@ -566,6 +590,49 @@ namespace ACE.Server.WorldObjects
 
             // send transaction to player for further processing
             player.FinalizeBuyTransaction(this, defaultItems, uniqueItems, totalPrice);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Buy-eligibility gate for Drift Network class-ability trainer vendors. A trainer stocks every rank of
+        /// its class's tokens; this rejects the whole transaction if the player cannot currently learn one of
+        /// the tokens being bought - wrong rank order, a locked tier, already holding a voucher (all via the
+        /// shared <see cref="Player.CanBuyClassAbilityToken"/>), or a quantity above one (a bound
+        /// one-per-skill voucher is never bought in bulk). Non-token purchases pass through untouched, so an
+        /// ordinary vendor is unaffected. On rejection sends a transient error and returns FALSE.
+        /// </summary>
+        private static bool ClassAbilityTokensBuyable(List<WorldObject> purchaseItems, Player player)
+        {
+            foreach (var item in purchaseItems)
+            {
+                var tokenSkillId = item.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0;
+                if (tokenSkillId <= 0)
+                    continue;   // not a class-ability token - ordinary merchandise
+
+                if ((item.StackSize ?? 1) > 1)
+                {
+                    player.SendTransientError("You can only buy one class ability training token at a time.");
+                    return false;
+                }
+
+                // Registry, not Enum.IsDefined: generated Enhanced-stat tokens use synthetic (0x1000+) ids that
+                // are registered but not named enum members.
+                if (tokenSkillId <= 0 ||
+                    !ClassAbilityRegistry.Abilities.TryGetValue((ClassAbilityId)tokenSkillId, out var def))
+                {
+                    player.SendTransientError($"The {item.Name} is misconfigured and cannot be sold.");
+                    return false;
+                }
+
+                var tier = item.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0;
+
+                if (!player.CanBuyClassAbilityToken(def, tier, out var error))
+                {
+                    player.SendTransientError(error);
+                    return false;
+                }
+            }
 
             return true;
         }

@@ -364,7 +364,7 @@ namespace ACE.Server.WorldObjects
             {
                 if (!IsDead && PhysicsObj?.MovementManager?.MoveToManager != null && PhysicsObj.IsMovingTo())
                 {
-                    PhysicsObj.update_object();
+                    PhysicsObj.update_object(Location.Instance);
                     UpdatePosition_SyncLocation();
                     SendUpdatePosition();
 
@@ -423,7 +423,7 @@ namespace ACE.Server.WorldObjects
 
             newPosition.PositionZ += 0.005f * (ObjScale ?? 1.0f);
 
-            if (Location.Landblock != newPosition.Landblock)
+            if (Location.InstancedLandblock != newPosition.InstancedLandblock)
             {
                 log.Error($"{Name} tried to teleport from {Location} to a different landblock {newPosition}");
                 return;
@@ -435,7 +435,7 @@ namespace ACE.Server.WorldObjects
             //HandlePreTeleportVisibility(newPosition);
 
             // do the physics teleport
-            var setPosition = new Physics.Common.SetPosition();
+            var setPosition = new Physics.Common.SetPosition(Location.Instance);
             setPosition.Pos = new Physics.Common.Position(newPosition);
             setPosition.Flags = Physics.Common.SetPositionFlags.SendPositionEvent | Physics.Common.SetPositionFlags.Slide | Physics.Common.SetPositionFlags.Placement | Physics.Common.SetPositionFlags.Teleport;
 

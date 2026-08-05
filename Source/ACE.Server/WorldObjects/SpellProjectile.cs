@@ -8,6 +8,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Factories;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -36,6 +37,69 @@ namespace ACE.Server.WorldObjects
         /// make sure there is no attempt to re-proc again when the spell projectile hits
         /// </summary>
         public bool FromProc { get; set; }
+
+        /// <summary>
+        /// Class ability "Spell AOE": TRUE when this projectile is a secondary copy radiated from a
+        /// struck target to a neighbor. Such children never re-trigger the blast (no cascade) and
+        /// never fire item procs (they also carry FromProc).
+        /// </summary>
+        public bool IsClassAbilityAoeChild { get; set; }
+
+        /// <summary>
+        /// TRUE when this projectile was itself spawned by a class ability (a Spell AOE radiated copy or
+        /// an Echo Cast recast). The general no-cascade guard: the projectile-spawning spell-hit skills
+        /// (Spell AOE, Echo Cast) skip a projectile carrying this flag so a spawned copy never spawns
+        /// further copies. Non-spawning effects (Elemental Rend) deliberately ignore it, so AOE copies
+        /// and echoes can still apply their debuff.
+        /// </summary>
+        public bool IsClassAbilitySpawned { get; set; }
+
+        /// <summary>
+        /// How many class-ability CHAIN HOPS this projectile is removed from the cast that started it.
+        /// 0 for anything cast normally (including a first-generation Spellsword proc); 1 for a Cascade
+        /// child of that proc; and so on. SPELLSWORD-DESIGN.md sec 5f / Q13.
+        ///
+        /// THIS IS NOT A SECOND SPELLING OF <see cref="IsClassAbilitySpawned"/>, and the two are deliberately
+        /// independent. The boolean means "NEVER chain again" - it is a one-way door, used by Spell AOE and
+        /// Echo Cast, which have no notion of depth and want none. The counter means "chain at most N more
+        /// times", which is a different guarantee and the only one Cascade can be built on.
+        ///
+        /// Cascade needed the counter because ruling Q10 leaves proc projectiles UNflagged on the boolean, so
+        /// that Echo Cast and Elemental Rend still fire off them ("I want this class to be a firework"). A
+        /// cascade child is therefore itself a landed proc, and reusing the boolean to stop it chaining would
+        /// have made the child behave visibly differently from the proc that spawned it - no echo, no rend -
+        /// which is exactly what Q13 rejected. The counter stops the chain without changing what the child IS.
+        ///
+        /// A projectile may legitimately carry both: an Echo Cast recast of a cascade child would be flagged
+        /// (echoes never chain) while still reporting the generation it was echoed from. Nothing resets this
+        /// to 0 except creating a fresh projectile through the normal cast path.
+        /// </summary>
+        public int ClassAbilityGeneration { get; set; }
+
+        /// <summary>
+        /// TRUE when this projectile was launched by a CLASS ABILITY's proc - a Spellsword weapon proc, or a
+        /// Cascade child of one - rather than by an ordinary cast, an item's cast-on-strike, or a cloak proc.
+        ///
+        /// WHY NOT JUST USE <see cref="FromProc"/>. FromProc answers "was this cast triggered by something
+        /// procing", which is true of item cast-on-strike spells, cloak procs and Echo Cast recasts as well.
+        /// Cascade needs the narrower question - "is this one of MY class's procs" - because its dispatch
+        /// site fires for every landed war-spell hit, so without a narrow signal it would chain off ordinary
+        /// war casts and off any proc weapon the player happens to swing.
+        ///
+        /// Stamped once, in WorldObject_Magic.LaunchSpellProjectiles, from the player-side latch
+        /// Player.ClassAbilityProcCastActive - which is armed only for the duration of one synchronous proc
+        /// cast (Player.CastClassAbilityProc), so there is no in-flight drift to reason about: the value is
+        /// decided while the projectile is being constructed. Defaults to false, so every existing caster and
+        /// every future one that does not opt in is unaffected.
+        /// </summary>
+        public bool IsClassAbilityProc { get; set; }
+
+        /// <summary>
+        /// Class ability "Spell AOE": damage scale applied to this projectile's landed hit. 1.0 for a
+        /// normal cast; a fraction (server tunable, default 0.5) for a radiated secondary blast so the
+        /// AOE hits softer than the primary.
+        /// </summary>
+        public float ClassAbilityAoeDamageMultiplier { get; set; } = 1.0f;
 
         public int DebugVelocity;
 
@@ -317,7 +381,23 @@ namespace ACE.Server.WorldObjects
                 }
                 else
                 {
-                    DamageTarget(creatureTarget, damage.Value, critical, critDefended, overpower);
+                    // Spell AOE secondary blasts land at a reduced fraction (1.0 = no scaling for a normal cast)
+                    DamageTarget(creatureTarget, damage.Value * ClassAbilityAoeDamageMultiplier, critical, critDefended, overpower);
+
+                    // Class ability hook: a player's landed war-spell hit can radiate (Spell AOE), recast
+                    // (Echo Cast), or apply Vulnerability (Elemental Rend). Each handler owns its own
+                    // Arc-only / no-cascade rules; the site dispatches every landed war-spell hit,
+                    // including class-ability-spawned copies (Rend may proc on those; Spell AOE and Echo
+                    // Cast self-exclude via IsClassAbilitySpawned to avoid cascade).
+                    if (player != null && Spell.School == MagicSchool.WarMagic)
+                        player.ApplySpellHitClassAbilities(creatureTarget, this);
+
+                    // Tier B weapon mods carried by the equipped WAND: the three leeches, taking their
+                    // fraction of the damage this hit is applying. Deliberately not school-gated, unlike the
+                    // class-ability dispatch above - a leech has no school in it. Gated on
+                    // weapon_mods_enabled inside. See Player_WeaponMods.cs.
+                    if (player != null)
+                        player.ApplyWeaponModSpellHit(creatureTarget, damage.Value * ClassAbilityAoeDamageMultiplier);
                 }
 
                 // if this SpellProjectile has a TargetEffect, play it on successful hit
@@ -486,10 +566,41 @@ namespace ACE.Server.WorldObjects
                 resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod));
 
                 finalDamage = (lifeMagicDamage + critDamageBonus) * elementalDamageMod * slayerMod * resistanceMod * absorbMod;
+
+                // class abilities: the Blood Mage life-strike package on the two life projectiles -
+                // Martyr's Hecatomb and Curse of Raven Fury. Blood Price (already paid at cast time), the
+                // Sanguine Reserve charge ramp or its Exsanguinate burst, and the burst's resistance-ignore.
+                // PvE only, the same condition the war/void branch below uses.
+                //
+                // THE BURST IS NOT DECIDED HERE, AND MUST NOT BE. User ruling, live test 2026-08-03:
+                // "Exsanguinate should be specifically for Hecatomb or Raven Fury", then "whole ring on
+                // raven fury + exsanguinate" - so all EIGHT projectiles of a Raven Fury cast carry the
+                // burst, not one of them. That supersedes BLOOD-MAGE-DESIGN sec 3's "Harm or Hecatomb" row.
+                //
+                // The pool is emptied by whoever consumes it, so a per-projectile read here would give the
+                // burst to whichever of the eight collided first and an empty pool to the other seven -
+                // arbitrary, and different every cast. The decision is therefore made ONCE PER CAST, in
+                // Player.ApplyLifeProjectileBloodCharge at the cast site, and every projectile of that cast
+                // reads the stamped answer. Do not "simplify" this back into a pool read at this site.
+                //
+                // grantCharge is still per-projectile and still limited to the AIMED bolt (only i == 0 gets
+                // a ProjectileTarget - see the launch loop in WorldObject_Magic), so one cast is one charge
+                // rather than eight against a 3-5 stack cap. Unlike the burst it belongs at this site: it is
+                // earned by a LANDED hit, and a cast that connects with nothing should build nothing.
+                //
+                // Hecatomb is a single aimed projectile and behaves as it always did.
+                if (sourceCreature is Player lifeClassAbilityCaster && targetPlayer == null)
+                {
+                    finalDamage *= lifeClassAbilityCaster.ApplyLifeProjectileClassAbilityDamage(target,
+                        grantCharge: ProjectileTarget != null);
+                }
             }
             // war/void magic projectiles
             else
             {
+                var spellMinDamage = Spell.MinDamage;
+                var spellMaxDamage = Spell.MaxDamage;
+
                 if (criticalHit)
                 {
                     // Original:
@@ -509,9 +620,9 @@ namespace ACE.Server.WorldObjects
                     // No more crits that do less damage than non-crits!
 
                     if (isPVP) // PvP: 50% of the MIN damage added to normal damage roll
-                        critDamageBonus = Spell.MinDamage * 0.5f;
+                        critDamageBonus = spellMinDamage * 0.5f;
                     else   // PvE: 50% of the MAX damage added to normal damage roll
-                        critDamageBonus = Spell.MaxDamage * 0.5f;
+                        critDamageBonus = spellMaxDamage * 0.5f;
 
                     // verify: CriticalMultiplier only applied to the additional crit damage,
                     // whereas CD/CDR applied to the total damage (base damage + additional crit damage)
@@ -531,10 +642,10 @@ namespace ACE.Server.WorldObjects
                     {
                         var percentageBonus = (magicSkill - Spell.Power) / 1000.0f;
 
-                        skillBonus = Spell.MinDamage * percentageBonus;
+                        skillBonus = spellMinDamage * percentageBonus;
                     }
                 }
-                baseDamage = ThreadSafeRandom.Next(Spell.MinDamage, Spell.MaxDamage);
+                baseDamage = ThreadSafeRandom.Next(spellMinDamage, spellMaxDamage);
 
                 weaponResistanceMod = GetWeaponResistanceModifier(weapon, sourceCreature, attackSkill, Spell.DamageType);
 
@@ -555,6 +666,17 @@ namespace ACE.Server.WorldObjects
                 finalDamage = baseDamage + critDamageBonus + skillBonus;
 
                 finalDamage *= elementalDamageMod * slayerMod * resistanceMod * absorbMod;
+
+                // class abilities: flat void/war spell-damage multipliers (PvE only). Applies to radiated
+                // Spell AOE children and Echo recasts too, since those route through here as well.
+                if (sourceCreature is Player classAbilityCaster && target is not Player)
+                    finalDamage *= classAbilityCaster.GetClassAbilitySpellDamageMod(Spell);
+
+                // Tier B weapon mods: Ambush's spell half, read off the equipped WAND. Same PvE-only
+                // condition, and the same reason this site rather than the hit site - it is the only place a
+                // spell's damage can still be scaled. Returns 1.0 unless the target is at full health.
+                if (sourceCreature is Player weaponModCaster && target is not Player)
+                    finalDamage *= weaponModCaster.GetWeaponModSpellDamageMod(target);
             }
 
             // show debug info
@@ -738,7 +860,7 @@ namespace ACE.Server.WorldObjects
                 var damageRating = sourceCreature?.GetDamageRating() ?? 0;
                 damageRatingMod = Creature.AdditiveCombine(Creature.GetPositiveRatingMod(damageRating), heritageMod, sneakAttackMod);
 
-                damageResistRatingMod = target.GetDamageResistRatingMod(CombatType.Magic);
+                damageResistRatingMod = target.GetDamageResistRatingMod(CombatType.Magic, attacker: ProjectileSource);
 
                 if (critical)
                 {
@@ -759,6 +881,13 @@ namespace ACE.Server.WorldObjects
                 }
 
                 damage *= damageRatingMod * damageResistRatingMod;
+
+                // class ability: Soul Tether reduces damage to its owner's combat pet. Spell damage is
+                // applied straight to the vital here rather than through Creature.TakeDamage, so the pet's
+                // melee/missile site (CombatPet.TakeDamage) does not cover this path and the mod is read
+                // again - live, so a rank learned mid-fight applies immediately.
+                if (target is CombatPet soulTetherPet)
+                    damage *= soulTetherPet.P_PetOwner?.GetSoulTetherDamageReductionMod() ?? 1.0f;
 
                 percent = damage / target.Health.MaxValue;
 
@@ -890,6 +1019,77 @@ namespace ACE.Server.WorldObjects
                 PhysicsObj.ProjectileTarget = target.PhysicsObj;
 
             PhysicsObj.set_active(true);
+        }
+
+        /// <summary>
+        /// Fixed launch speed (m/s) for a Spell AOE secondary projectile - it only travels the short
+        /// hop from the struck target to an adjacent neighbor, so a per-spell velocity lookup isn't worth it.
+        /// </summary>
+        private const float ClassAbilityAoeChildSpeed = 15.0f;
+
+        /// <summary>
+        /// Class ability "Spell AOE": launches one secondary copy of this spell from the struck target
+        /// (<paramref name="primaryTarget"/>) at a neighboring creature, so it reads visually as the
+        /// same spell radiating outward from the target. The child is attributed to the original
+        /// <paramref name="caster"/> and runs the normal collision/damage path against its own target -
+        /// an independent full-damage hit with its own resistance and crit rolls. It is flagged so it
+        /// neither re-triggers the blast nor fires item procs. The caller owns target selection (range,
+        /// filters); this method owns only the projectile mechanics.
+        /// </summary>
+        public void SpawnClassAbilityAoeChild(Player caster, Creature primaryTarget, Creature neighbor, float damageMult)
+        {
+            if (caster == null || primaryTarget?.PhysicsObj == null || neighbor?.PhysicsObj == null || Spell == null)
+                return;
+
+            var spellType = GetProjectileSpellType(Spell.Id);
+
+            var sp = WorldObjectFactory.CreateNewWorldObject(Spell.Wcid) as SpellProjectile;
+            if (sp == null)
+                return;
+
+            sp.Setup(Spell, spellType);
+
+            sp.IsClassAbilityAoeChild = true;   // never cascade into further blasts
+            sp.IsClassAbilitySpawned = true;    // general no-cascade guard (shared with Echo Cast)
+            sp.FromProc = true;               // never re-fire item procs
+            sp.ClassAbilityAoeDamageMultiplier = damageMult;   // secondary blasts land softer
+
+            sp.ProjectileSource = caster;
+            sp.ProjectileTarget = neighbor;
+            sp.ProjectileLauncher = ProjectileLauncher;
+            sp.ProjectileAmmo = ProjectileAmmo;
+            sp.IsWeaponSpell = IsWeaponSpell;
+
+            // spawn at the struck target's upper body
+            var origin = new Position(primaryTarget.Location);
+            var originPos = origin.Pos;
+            originPos.Z += primaryTarget.Height * 0.75f;
+            origin.Pos = originPos;
+            sp.Location = origin;
+
+            // aim from the struck target toward the neighbor, accounting for the height difference
+            var offset = primaryTarget.PhysicsObj.Position.GetOffset(neighbor.PhysicsObj.Position);
+            offset.Z = (neighbor.Height / 2.0f) - (primaryTarget.Height * 0.75f);
+
+            var dir = Vector3.Normalize(offset);
+            sp.PhysicsObj.Velocity = dir * ClassAbilityAoeChildSpeed;
+
+            sp.PhysicsObj.Position.Frame.set_vector_heading(dir);
+            sp.Location.Rotation = sp.PhysicsObj.Position.Frame.Orientation;
+
+            sp.SetProjectilePhysicsState(neighbor, false);
+            sp.SpawnPos = new Position(sp.Location);
+
+            if (!LandblockManager.AddObject(sp))
+            {
+                sp.Destroy();
+                return;
+            }
+
+            if (sp.WorldEntryCollision)
+                return;
+
+            sp.EnqueueBroadcast(new GameMessageScript(sp.Guid, PlayScript.Launch, sp.GetProjectileScriptIntensity(spellType)));
         }
 
         public static void ShowInfo(Creature observed, Spell spell, CreatureSkill skill, float criticalChance, bool criticalHit, bool critDefended, bool overpower, float weaponCritDamageMod,

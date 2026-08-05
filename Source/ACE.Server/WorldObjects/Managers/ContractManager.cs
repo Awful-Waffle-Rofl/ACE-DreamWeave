@@ -9,6 +9,7 @@ using ACE.Database.Models.Shard;
 using ACE.DatLoader;
 using ACE.DatLoader.Entity;
 using ACE.Entity.Enum;
+using ACE.Server.Entity;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Structure;
@@ -118,6 +119,11 @@ namespace ACE.Server.WorldObjects.Managers
         /// </summary>
         public bool Add(uint contractId)
         {
+            // Mule (WaffleACE): a mule cannot take on contracts. Guarded on the uint overload because the
+            // int overload delegates straight to it.
+            if (Player != null && Player.MuleBlocked(MuleAction.AcceptContract))
+                return false;
+
             var datContract = GetContractFromDat(contractId);
 
             if (datContract == null)

@@ -59,7 +59,12 @@ namespace ACE.Server.WorldObjects
             SuppressGenerateEffect = true;
         }
 
-        public virtual bool? Init(Player player, PetDevice petDevice)
+        /// <param name="spawnStagger">
+        /// TRUE for the second pet of a Summon 2x activation: pushes the spawn point further out in front of
+        /// the owner so the pair does not land on the same spot. Pets are Ethereal, so they never actually
+        /// collide - this exists only so the player can see that two of them arrived.
+        /// </param>
+        public virtual bool? Init(Player player, PetDevice petDevice, bool spawnStagger = false)
         {
             var result = HandleCurrentActivePet(player);
 
@@ -71,6 +76,9 @@ namespace ACE.Server.WorldObjects
             var petRadius = GetPetRadius();
 
             var spawnDist = playerRadius + petRadius + MinDistance;
+
+            if (spawnStagger)
+                spawnDist += petRadius * 2.0f;
 
             if (IsPassivePet)
             {
@@ -101,7 +109,16 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
-            player.CurrentActivePet = this;
+            // assign into the free pet slot - the primary normally, or the Summon 2x secondary slot when a
+            // combat pet already occupies the primary (the gate above only permits this with Summon 2x)
+            if (player.CurrentActivePet == null)
+                player.CurrentActivePet = this;
+            else
+                player.SecondaryActivePet = this;
+
+            // class ability: a live combat pet disarms Soul Tether's "pet died" resummon-cooldown skip
+            if (this is CombatPet)
+                player.OnCombatPetSummoned();
 
             petDevice.Pet = Guid.Full;
             PetDevice = petDevice.Guid.Full;
@@ -129,6 +146,10 @@ namespace ACE.Server.WorldObjects
 
             if (player.CurrentActivePet is CombatPet)
             {
+                // class ability: Summon 2x permits a second concurrent combat pet
+                if (this is CombatPet && player.CanSummonAdditionalCombatPet())
+                    return true;
+
                 // possibly add the ability to stow combat pets with passive pet devices here?
                 player.SendTransientError($"{player.CurrentActivePet.Name} is already active");
                 return false;
@@ -159,6 +180,10 @@ namespace ACE.Server.WorldObjects
                 // using a combat pet device
                 if (player.CurrentActivePet is CombatPet)
                 {
+                    // class ability: Summon 2x permits a second concurrent combat pet
+                    if (this is CombatPet && player.CanSummonAdditionalCombatPet())
+                        return true;
+
                     player.SendTransientError($"{player.CurrentActivePet.Name} is already active");
                 }
                 else
@@ -183,7 +208,7 @@ namespace ACE.Server.WorldObjects
 
             if (IsMoving)
             {
-                PhysicsObj.update_object();
+                PhysicsObj.update_object(Location.Instance);
 
                 UpdatePosition_SyncLocation();
 

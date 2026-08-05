@@ -297,8 +297,9 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
-            // Check for a cooldown
-            if (!player.EnchantmentManager.CheckCooldown(CooldownId))
+            // Check for a cooldown. Soul Tether waives it for a summoning device whose combat pet was just
+            // slain; CanSkipCombatPetSummonCooldown is false for every other item and every other player.
+            if (!player.EnchantmentManager.CheckCooldown(CooldownId) && !player.CanSkipCombatPetSummonCooldown(this))
             {
                 // TODO: werror/string not found, find exact message
 

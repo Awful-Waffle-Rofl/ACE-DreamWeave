@@ -17,6 +17,9 @@ namespace ACE.Server.Network.GameAction.Actions
 
             var position = new Position(message.Payload);
 
+            // client positions carry no instance - they are always within the player's current one
+            position.Instance = session.Player.Location.Instance;
+
             var instanceTimestamp = message.Payload.ReadUInt16();
             var serverControlTimestamp = message.Payload.ReadUInt16();
             var teleportTimestamp = message.Payload.ReadUInt16();

@@ -5,6 +5,12 @@ namespace ACE.Entity.Models
     public class PropertiesPosition
     {
         public uint ObjCellId { get; set; }
+
+        /// <summary>
+        /// The landblock instance this position belongs to. Null means instance 0 (the base world).
+        /// </summary>
+        public uint? Instance { get; set; }
+
         public float PositionX { get; set; }
         public float PositionY { get; set; }
         public float PositionZ { get; set; }
@@ -18,6 +24,7 @@ namespace ACE.Entity.Models
             var result = new PropertiesPosition
             {
                 ObjCellId = ObjCellId,
+                Instance = Instance,
                 PositionX = PositionX,
                 PositionY = PositionY,
                 PositionZ = PositionZ,

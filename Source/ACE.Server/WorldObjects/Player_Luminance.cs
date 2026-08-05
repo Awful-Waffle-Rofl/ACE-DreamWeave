@@ -2,7 +2,9 @@ using System;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Managers.Analytics;
 using ACE.Server.Network.GameMessages.Messages;
 
 namespace ACE.Server.WorldObjects
@@ -26,7 +28,24 @@ namespace ACE.Server.WorldObjects
             // should this be passed upstream to fellowship?
             var enchantment = GetXPAndLuminanceModifier(xpType);
 
-            var m_amount = (long)Math.Round(amount * enchantment * modifier);
+            var product = amount * enchantment * modifier;
+
+            // Match EarnXP: guard against overflow / non-finite results before the cast to long.
+            if (!double.IsFinite(product) || Math.Abs(product) >= long.MaxValue)
+            {
+                log.Warn($"{Name}.EarnLuminance({amount}, {shareType}) - out of range; modifier: {modifier}, enchantment: {enchantment}, product: {product}");
+                return;
+            }
+
+            var m_amount = (long)Math.Round(product);
+
+            // Never pass a negative into GrantLuminance: SplitLuminance casts to (ulong), which would
+            // turn a negative into an enormous positive luminance grant. (EarnXP already guards this.)
+            if (m_amount < 0)
+            {
+                log.Warn($"{Name}.EarnLuminance({amount}, {shareType}) - negative m_amount: {m_amount}");
+                return;
+            }
 
             GrantLuminance(m_amount, xpType, shareType);
         }
@@ -36,6 +55,23 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void GrantLuminance(long amount, XpType xpType, ShareType shareType = ShareType.All)
         {
+            GrantLuminance(amount, xpType, shareType, false);
+        }
+
+        /// <summary>
+        /// Directly grants luminance to the player, without any additional luminance modifiers
+        /// </summary>
+        /// <param name="combatShare">
+        /// TRUE when this grant is a fellowship member's share of a fellow's *kill* (set by Fellowship.SplitLuminance).
+        /// Together with xpType == Kill this identifies combat-sourced Luminance eligible for the receiving
+        /// player's offline bonus, distinguishing it from a fellowship share of quest Luminance.
+        /// </param>
+        public void GrantLuminance(long amount, XpType xpType, ShareType shareType, bool combatShare)
+        {
+            // Mule (WaffleACE): a mule earns no luminance, ever.
+            if (MuleBlocked(MuleAction.GainLuminance))
+                return;
+
             if (IsOlthoiPlayer)
                 return;
 
@@ -46,33 +82,48 @@ namespace ACE.Server.WorldObjects
                 Fellowship.SplitLuminance((ulong)amount, xpType, shareType, this);
             }
             else
-                AddLuminance(amount, xpType);
+            {
+                // Boost this player's own combat Luminance with their offline bonus. As in GrantXP, this runs
+                // after the fellowship split, so it scales only what THIS player receives - their own kill
+                // (XpType.Kill) or their share of a fellow's kill (combatShare) - never a fellow's take or
+                // quest Luminance (which is excluded because combatShare is false).
+                var addAmount = amount;
+                if (xpType == XpType.Kill || combatShare)
+                    addAmount = ApplyOfflineExperienceBonus(amount);
+
+                AddLuminance(addAmount, xpType);
+            }
         }
 
         private void AddLuminance(long amount, XpType xpType)
         {
-            var available = AvailableLuminance ?? 0;
-            var maximum = MaximumLuminance ?? 0;
-
-            if (available == maximum)
+            if (amount <= 0)
                 return;
 
-            // this is similar to Player_Xp.UpdateXpAndLevel()
+            // Monitoring: aggregate, server-wide Luminance firehose (see ServerMetrics / DESIGN.md §4.1).
+            ServerMetrics.LumGranted.Add(amount);
 
-            var remaining = maximum - available;
+            // Analytics: per-character luminance rate (Tier-1). Lock-free Interlocked.Add, flushed off-thread.
+            AnalyticsManager.RecordLuminance(this, amount);
 
-            var addAmount = Math.Min(amount, remaining);
-
-            AvailableLuminance = available + addAmount;
+            // WaffleACE: all earned Luminance goes straight to the persistent, uncapped bank
+            // (see Player_Bank.cs) instead of the retail available/maximum pool. There is no
+            // luminance-flag requirement and no MaximumLuminance cap: any player earns Luminance
+            // from the first kill, and it accumulates without limit. The retail AvailableLuminance
+            // UI bar is intentionally left untouched (not driven), so we do NOT call UpdateLuminance().
+            ModifyBankBalance(PropertyInt64.BankedLuminance, amount);
+            RushNextPlayerSave(60);
 
             if (xpType == XpType.Quest)
                 Session.Network.EnqueueSend(new GameMessageSystemChat($"You've earned {amount:N0} Luminance.", ChatMessageType.Broadcast));
-
-            UpdateLuminance();
         }
 
         /// <summary>
-        /// Spends the amount of luminance specified, deducting it from available luminance
+        /// Spends the amount of luminance specified, deducting it from available (earned) luminance only.
+        /// Earned Luminance now banks straight into the uncapped bank, so available Luminance is normally 0
+        /// and this only drains any legacy pre-migration balance; it is the low-level primitive that
+        /// <see cref="TrySpendLuminanceIncludingBank"/> uses for the available-first portion of a spend.
+        /// Gameplay spends should call <see cref="TrySpendLuminanceIncludingBank"/>, not this directly.
         /// </summary>
         public bool SpendLuminance(long amount)
         {

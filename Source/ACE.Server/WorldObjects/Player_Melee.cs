@@ -52,6 +52,14 @@ namespace ACE.Server.WorldObjects
         {
             //log.Info($"-");
 
+            // Mule (WaffleACE): a mule never fights. OnAttackDone releases the client's attack sequence,
+            // matching the other refusal branches below.
+            if (MuleBlocked(MuleAction.MeleeAttack))
+            {
+                OnAttackDone();
+                return;
+            }
+
             if (CombatMode != CombatMode.Melee)
             {
                 log.Warn($"{Name}.HandleActionTargetedMeleeAttack({targetGuid:X8}, {attackHeight}, {powerLevel}) - CombatMode mismatch {CombatMode}, LastCombatMode {LastCombatMode}");
@@ -299,6 +307,11 @@ namespace ACE.Server.WorldObjects
             // stamina usage
             // TODO: ensure enough stamina for attack
             var staminaCost = GetAttackStamina(GetPowerRange());
+
+            // class ability: Whirlwind adds a stamina surcharge and, when affordable, enables the
+            // 360°/+1-target cleave for this swing (else this is a no-op and the swing cleaves normally)
+            staminaCost = ApplyWhirlwindStamina(weapon, staminaCost);
+
             UpdateVitalDelta(Stamina, -staminaCost);
 
             if (numStrikes != attackFrames.Count)
@@ -339,14 +352,18 @@ namespace ACE.Server.WorldObjects
                         targetProc = true;
                     }
 
-                    if (weapon != null && weapon.IsCleaving)
+                    // class ability: Whirlwind grants a cleave even on a non-cleaving weapon
+                    if (weapon != null && (weapon.IsCleaving || WhirlwindSwingActive))
                     {
                         var cleave = GetCleaveTarget(creature, weapon);
 
-                        foreach (var cleaveHit in cleave)
+                        if (cleave != null)
                         {
-                            // target procs don't happen for cleaving
-                            DamageTarget(cleaveHit, weapon);
+                            foreach (var cleaveHit in cleave)
+                            {
+                                // target procs don't happen for cleaving
+                                DamageTarget(cleaveHit, weapon);
+                            }
                         }
                     }
                 });

@@ -255,7 +255,7 @@ namespace ACE.Server.WorldObjects
         public void UpdatePosition(bool netsend = true)
         {
             //stopwatch.Restart();
-            PhysicsObj.update_object();
+            PhysicsObj.update_object(Location.Instance);
             //ServerPerformanceMonitor.AddToCumulativeEvent(ServerPerformanceMonitor.CumulativeEventHistoryType.Monster_Navigation_UpdatePosition_PUO, stopwatch.Elapsed.TotalSeconds);
             UpdatePosition_SyncLocation();
 
@@ -350,9 +350,11 @@ namespace ACE.Server.WorldObjects
             // assuming burden only applies to players...
             if (this is Player player)
             {
-                var strength = Strength.Current;
-
-                var capacity = EncumbranceSystem.EncumbranceCapacity((int)strength, player.AugmentationIncreasedCarryingCapacity);
+                // Capacity comes from Player.GetEncumbranceCapacity, the single authority for a Player (see its
+                // summary). Numerically identical to the old inline call for every normal character; it
+                // additionally honours the mule capacity override, so a loaded mule's run rate is not throttled
+                // by a capacity the pickup gate never used.
+                var capacity = player.GetEncumbranceCapacity();
                 burden = EncumbranceSystem.GetBurden(capacity, EncumbranceVal ?? 0);
 
                 // TODO: find this exact formula in client
@@ -525,7 +527,7 @@ namespace ACE.Server.WorldObjects
             if (DebugMove)
                 Console.WriteLine($"{Name} ({Guid}) - ForceHome({homePos.ToLOCString()})");
 
-            var setPos = new SetPosition();
+            var setPos = new SetPosition(Location.Instance);
             setPos.Pos = new Physics.Common.Position(homePos);
             setPos.Flags = SetPositionFlags.Teleport;
 
