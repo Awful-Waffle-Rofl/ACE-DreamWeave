@@ -46,6 +46,19 @@ namespace ACE.Server.WorldObjects
 
         public bool LastContact = true;
 
+        /// <summary>
+        /// The ObjectTeleport sequence this player's OWN client last accepted: written by GameMessagePlayerTeleport
+        /// and by an admin-move position packet, both of which the client is meant to act on as a teleport.
+        /// NULL until one of those happens, meaning "use the live sequence".
+        ///
+        /// Why it exists: PositionPack can advance ObjectTeleport for OBSERVERS only (see
+        /// PositionPack observerTeleport and Player_Tick.UpdateObjectPhysics). The live sequence then runs ahead
+        /// of what this client has seen, and every position packet built for THIS client must keep carrying the
+        /// value it has already accepted - a newer teleport sequence on the client's own object is a full portal
+        /// transition (character stopped, portal view), tested live 2026-08-17.
+        /// </summary>
+        public byte[] SelfTeleportSequence;
+
         public bool IsJumping
         {
             get

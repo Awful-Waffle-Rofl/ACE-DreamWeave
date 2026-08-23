@@ -644,7 +644,7 @@ namespace ACE.Server.WorldObjects
             ActionChain pickupChain = new ActionChain();
 
             // start picking up item animation
-            EnqueueBroadcast(new GameMessageUpdatePosition(this));
+            SendUpdatePosition();
 
             var motion = new Motion(CurrentMotionState.Stance, MotionPickup);
 
@@ -706,7 +706,7 @@ namespace ACE.Server.WorldObjects
                 return new ActionChain();
 
             // start picking up item animation
-            EnqueueBroadcast(new GameMessageUpdatePosition(this));
+            SendUpdatePosition();
 
             var motion = new Motion(CurrentMotionState.Stance, pickupMotion);
 
