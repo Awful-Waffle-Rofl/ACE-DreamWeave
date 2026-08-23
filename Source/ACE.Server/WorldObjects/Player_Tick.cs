@@ -353,7 +353,7 @@ namespace ACE.Server.WorldObjects
                 if (!PhysicsObj.IsMovingOrAnimating)
                 {
                     SyncLocation();
-                    EnqueueBroadcast(new GameMessageUpdatePosition(this));
+                    SendUpdatePosition();
                 }
             }
 
@@ -401,6 +401,27 @@ namespace ACE.Server.WorldObjects
         /// If you wish for players to glitch around less during powerslides, lower this value
         /// </summary>
         public static TimeSpan MoveToState_UpdatePosition_Threshold = TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        /// How long after a jump a grounded position still goes to observers with a fresh teleport sequence.
+        /// Covers the landing itself, the next hop of a jump-run, and the first at-rest refresh after the run
+        /// (positions refresh at ~1 Hz, the landing slide lasts ~1 s, so 1.5 s left a 1.3 m standing offset;
+        /// measured 2026-08-17).
+        /// </summary>
+        public static TimeSpan TouchdownTeleportWindow = TimeSpan.FromSeconds(3);
+
+        /// <summary>
+        /// TRUE when the position about to be broadcast should reach observers as a teleport rather than as an
+        /// interpolation node: the client reports itself on the ground, it jumped within TouchdownTeleportWindow,
+        /// and the player_touchdown_teleport toggle is on. See PositionPack for why observers need this and
+        /// SelfTeleportSequence for why the moving player must never receive it.
+        /// </summary>
+        private bool IsTouchdownTeleport()
+        {
+            return LastContact
+                && DateTime.UtcNow - LastJumpTime < TouchdownTeleportWindow
+                && PropertyManager.GetBool("player_touchdown_teleport").Item;
+        }
 
         /// <summary>
         /// Used by physics engine to actually update a player position
@@ -511,9 +532,22 @@ namespace ACE.Server.WorldObjects
                     RecordCast.Log($"CurPos: {Location.ToLOCString()}");
 
                 if (RequestedLocationBroadcast || DateTime.UtcNow - LastUpdatePosition >= MoveToState_UpdatePosition_Threshold)
-                    SendUpdatePosition();
+                {
+                    if (IsTouchdownTeleport())
+                    {
+                        // the moving player gets a normal packet (its own teleport view frozen, see
+                        // SelfTeleportSequence); observers get one whose ObjectTeleport sequence is newer, so
+                        // their client places the copy on this landing point now instead of queueing it as an
+                        // interpolation node it may only reach seconds later, via every stale node before it
+                        Session.Network.EnqueueSend(new GameMessageUpdatePosition(this, false, PositionAudience.Self));
+                        EnqueueBroadcast(false, new GameMessageUpdatePosition(this, false, PositionAudience.ObserversTeleport));
+                        LastUpdatePosition = DateTime.UtcNow;
+                    }
+                    else
+                        SendUpdatePosition();
+                }
                 else
-                    Session.Network.EnqueueSend(new GameMessageUpdatePosition(this));
+                    Session.Network.EnqueueSend(new GameMessageUpdatePosition(this, false, PositionAudience.Self));
 
                 if (!InUpdate)
                     LandblockManager.RelocateObjectForPhysics(this, true);

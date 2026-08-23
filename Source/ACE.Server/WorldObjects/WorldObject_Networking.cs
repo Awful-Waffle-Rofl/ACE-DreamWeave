@@ -431,7 +431,15 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.SendUpdatePosition({Location.ToLOCString()})");
 
-            EnqueueBroadcast(new GameMessageUpdatePosition(this, adminMove));
+            if (this is Player player && !adminMove)
+            {
+                // a Player's position goes out once per audience: its own client must keep seeing the teleport
+                // sequence it last accepted, observers must keep seeing the live one (see PositionPack)
+                player.Session.Network.EnqueueSend(new GameMessageUpdatePosition(this, false, PositionAudience.Self));
+                EnqueueBroadcast(false, new GameMessageUpdatePosition(this, false, PositionAudience.Observers));
+            }
+            else
+                EnqueueBroadcast(new GameMessageUpdatePosition(this, adminMove));
 
             LastUpdatePosition = DateTime.UtcNow;
         }
