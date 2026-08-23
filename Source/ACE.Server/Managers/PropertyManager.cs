@@ -597,6 +597,7 @@ namespace ACE.Server.Managers
                 ("smite_uses_takedamage", new Property<bool>(false, "if enabled, smite applies damage via TakeDamage")),
                 ("spellcast_recoil_queue", new Property<bool>(false, "if true, players can queue the next spell to cast during recoil animation")),
                 ("spell_projectile_ethereal", new Property<bool>(false, "broadcasts all spell projectiles as ethereal to clients only, and manually send stop velocity on collision. can fix various issues with client missing target id.")),
+                ("spell_projectile_ethereal_360", new Property<bool>(true, "(non-retail function) broadcasts spell projectiles from 360-degree spread spells (ring spells) as ethereal to clients only. server-side collision and damage are unaffected. fixes the third-person camera being pulled in every time a ring is cast, because one projectile always travels straight through the camera and the client's viewer transition treats a non-ethereal projectile as an obstruction")),
                 ("suicide_instant_death", new Property<bool>(false, "if enabled, @die command kills player instantly. defaults to disabled, as in retail")),
                 ("taboo_table", new Property<bool>(true, "if enabled, taboo table restricts player names during character creation")),
                 ("tailoring_intermediate_uieffects", new Property<bool>(false, "If true, tailoring intermediate icons retain the magical/elemental highlight of the original item")),

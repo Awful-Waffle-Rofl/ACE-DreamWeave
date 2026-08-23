@@ -298,8 +298,21 @@ namespace ACE.Server.WorldObjects
                 physicsState &= ~PhysicsState.Cloaked;
             }
 
-            if (this is SpellProjectile && PropertyManager.GetBool("spell_projectile_ethereal").Item)
-                physicsState |= PhysicsState.Ethereal;
+            if (this is SpellProjectile spellProjectile)
+            {
+                // ethereal is applied to the serialized copy only - the server's own PhysicsObj.State stays
+                // non-ethereal, so server-side collision, wall blocking and damage are unchanged.
+
+                // a ring spreads its projectiles around the caster, so one of them always travels on a vector
+                // straight through the third-person camera. The client's viewer transition
+                // (ObjectInfoState.IsViewer) exempts creatures from obstructing the camera but not missiles,
+                // so a non-ethereal ring projectile pulls the camera in on every cast. Ethereal objects never
+                // obstruct anything, viewer included. SpellType is assigned in Setup(), before world entry.
+                var etherealRing = spellProjectile.SpellType == ProjectileSpellType.Ring && PropertyManager.GetBool("spell_projectile_ethereal_360").Item;
+
+                if (etherealRing || PropertyManager.GetBool("spell_projectile_ethereal").Item)
+                    physicsState |= PhysicsState.Ethereal;
+            }
 
             writer.Write((uint)physicsState);
 
