@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime;
 using System.Runtime.InteropServices;
@@ -13,10 +14,12 @@ using ACE.Common;
 using ACE.Common.Extensions;
 using ACE.Database;
 using ACE.DatLoader;
+using ACE.Database.Models.Auth;
 using ACE.Server.Command;
 using ACE.Server.Managers;
 using ACE.Server.Mods;
 using ACE.Server.Network.Managers;
+using ACE.Server.WorldEvents;
 
 namespace ACE.Server
 {
@@ -278,6 +281,21 @@ namespace ACE.Server
                 Environment.Exit(0);
             }
 
+            // The vault collapse test destroys an item and replaces it with a ledger row, so it must
+            // refuse to run at all if someone has added a collection to Biota that it does not
+            // compare. Checking that here means the failure stops the boot; left to first use it
+            // would instead throw out of the first player deposit after a deploy.
+            try
+            {
+                Entity.AccountVault.VaultCollapse.AssertBiotaCoverage();
+            }
+            catch (Exception ex)
+            {
+                log.Fatal($"VaultCollapse coverage check failed. ACEmulator will now abort startup. {ex.Message}");
+                ServerManager.StartupAbort();
+                Environment.Exit(0);
+            }
+
             log.Info("Initializing ServerManager...");
             ServerManager.Initialize();
 
@@ -315,6 +333,24 @@ namespace ACE.Server
             log.Info("Initializing GuidManager...");
             GuidManager.Initialize();
 
+            // Must run BEFORE anything can activate a landblock, which is why it sits here rather than
+            // beside the other managers below. It reads account_vault once and seeds the filter that
+            // keeps vault container biotas out of the world (Docs/MuleVendor/DESIGN.md 7.2, risk R1);
+            // a landblock that activated ahead of it would spawn every account's vault as a lootable
+            // backpack. It never throws and never aborts startup - see AccountVaultManager.Initialize
+            // for what a failed read does instead.
+            log.Info("Initializing AccountVaultManager...");
+            AccountVaultManager.Initialize();
+
+            // Barrel retention (Docs/Market/GIVEAWAY-BULK-BARREL-DESIGN.md 6.3). Started here rather
+            // than beside the market, even though the barrel's only player-facing door is the market
+            // API today: the barrel belongs to the vault, /vaultrestore reaches it with the market
+            // switched off, and an item whose retention window has expired must be destroyed either
+            // way. It logs the window in days at startup so an operator can see the setting without
+            // querying the shard.
+            log.Info("Starting the account vault barrel retention sweep...");
+            AccountVaultBarrelReaper.Start();
+
             if (ConfigManager.Config.Server.ServerPerformanceMonitorAutoStart)
             {
                 log.Info("Server Performance Monitor auto starting...");
@@ -333,6 +369,8 @@ namespace ACE.Server
                 DatabaseManager.World.CacheAllHousePortals();
                 log.Info("Precaching Points Of Interest...");
                 DatabaseManager.World.CacheAllPointsOfInterest();
+                log.Info("Precaching Realm Landblock Rules...");
+                DatabaseManager.World.CacheAllRealmLandblockRules();
                 log.Info("Precaching Spells...");
                 DatabaseManager.World.CacheAllSpells();
                 log.Info("Precaching Treasures - Death...");
@@ -354,6 +392,12 @@ namespace ACE.Server
             log.Info("Initializing RealmManager...");
             RealmManager.Initialize();
 
+            log.Info("Initializing SpeedSeasonManager...");
+            SpeedSeasonManager.Initialize();
+
+            log.Info("Initializing SpeedBoardManager...");
+            SpeedBoardManager.Initialize();
+
             log.Info("Initializing PlayerManager...");
             PlayerManager.Initialize();
 
@@ -369,6 +413,20 @@ namespace ACE.Server
             log.Info("Initializing WorldManager...");
             WorldManager.Initialize();
 
+            // Started here on purpose: after WorldManager.Initialize so there is a world thread to watch,
+            // and before ServerMetrics.Initialize so the ace.world.* gauges have a published state to read
+            // from their very first scrape. The watchdog must also be running DURING
+            // LandblockManager.PreloadConfigLandblocks, which is where the world thread spends its first
+            // minutes and where it can also die - the "starting" heartbeat is what tells an external
+            // healthcheck the difference between a slow start and a hung process.
+            if (ConfigManager.Config.Server.WorldWatchdogEnabled)
+            {
+                log.Info("Initializing WorldWatchdog...");
+                WorldWatchdog.Initialize();
+            }
+            else
+                log.Warn("WorldWatchdog is DISABLED by configuration (WorldWatchdogEnabled=false). A dead or hung world thread will not be detected, reported by ace.world.status, or written to the heartbeat file.");
+
             log.Info("Initializing ServerMetrics...");
             ServerMetrics.Initialize();
 
@@ -377,6 +435,12 @@ namespace ACE.Server
 
             log.Info("Initializing EventManager...");
             EventManager.Initialize();
+
+            log.Info("Initializing WorldEventManager...");
+            WorldEventManager.Initialize();
+
+            log.Info("Initializing ThreadDungeonManager...");
+            ACE.Server.ThreadDungeons.ThreadDungeonManager.Initialize();
 
             // Free up memory before the server goes online. This can free up 6 GB+ on larger servers.
             log.Info("Forcing .net garbage collection...");
@@ -398,10 +462,80 @@ namespace ACE.Server
             ModManager.RegisterCommands();
             ModManager.ListMods();
 
+            // The Market (Docs/Market/DESIGN.md 4.1). Last, deliberately: it needs DatabaseManager,
+            // PropertyManager, PlayerManager and AccountVaultManager already up. Config-gated and OFF
+            // by default; with Market.Enabled false nothing below runs and no listener is bound.
+            if (ConfigManager.Config.Market != null && ConfigManager.Config.Market.Enabled)
+            {
+                log.Info("Initializing MarketManager...");
+                ACE.Server.Managers.Market.MarketManager.Initialize();
+
+                // Boot recovery BEFORE the API opens, so no new purchase can interleave with the
+                // examination of the interrupted ones (DESIGN 5.4, "Restart mid-purchase").
+                ACE.Server.Managers.Market.MarketManager.RecoverPendingTransactions(
+                    ConfigManager.Config.Market.RequestTimeoutMs);
+
+                // Orders recover, reconcile and expire BEFORE the API opens, for the same reason as the
+                // line above. Reconciliation runs AFTER the two recovery passes on purpose: it reads
+                // Completed fill rows, and RecoverPendingTransactions is what settles the interrupted
+                // ones first (WANTED-DESIGN 6.5).
+                ACE.Server.Managers.Market.MarketManager.RecoverPendingOrders(ConfigManager.Config.Market.RequestTimeoutMs);
+                ACE.Server.Managers.Market.MarketManager.ReconcileFilledOrders();
+                ACE.Server.Managers.Market.MarketManager.ExpireOrders(DateTime.UtcNow);
+                MarketBuyOrderExpiry.Start();
+                MarketAdvertiserJob.Start();
+
+                log.Info("Starting MarketApiHost...");
+                ACE.Server.Managers.Market.MarketApiHost.Start(BuildMarketApiOptions());
+            }
+
             if (!PropertyManager.GetBool("world_closed", false).Item)
             {
                 WorldManager.Open(null);
             }
+        }
+
+        /// <summary>
+        /// Config.js plus the two environment overrides deployment needs. ConfigManager has no
+        /// environment layer of its own, and Config.js is gitignored and hand-managed per host, so
+        /// without ACE_MARKET_SHARED_KEY the secret would have to be edited in on every deploy.
+        /// </summary>
+        private static ACE.Server.Managers.Market.MarketApiOptions BuildMarketApiOptions()
+        {
+            var config = ConfigManager.Config.Market;
+
+            var key = Environment.GetEnvironmentVariable("ACE_MARKET_SHARED_KEY");
+            var url = Environment.GetEnvironmentVariable("ACE_MARKET_LISTEN_URL");
+
+            return new ACE.Server.Managers.Market.MarketApiOptions
+            {
+                ListenUrl = string.IsNullOrWhiteSpace(url) ? config.ListenUrl : url,
+                SharedKey = string.IsNullOrWhiteSpace(key) ? config.SharedKey : key,
+                MaxInFlight = config.MaxInFlight,
+                WriteRatePerMinute = config.WriteRatePerMinute,
+                RequestTimeoutMs = config.RequestTimeoutMs,
+                LoginRatePerMinutePerAccount = config.LoginRatePerMinutePerAccount,
+                LoginRatePerMinutePerIp = config.LoginRatePerMinutePerIp,
+                TrustedForwardedForSource = config.TrustedForwardedForSource,
+                SessionLifetimeMinutes = config.SessionLifetimeMinutes,
+                Wallet = new ACE.Server.Managers.Market.BankMarketWallet(),
+
+                // Delegates rather than direct calls, so MarketApiHost needs neither DatabaseManager
+                // nor a live Player and stays testable.
+                AuthenticateAccount = (name, password) =>
+                {
+                    var account = DatabaseManager.Authentication.GetAccountByName(name);
+
+                    // An unknown account and a wrong password must be indistinguishable, or the
+                    // endpoint enumerates accounts.
+                    return account != null && account.PasswordMatches(password) ? account.AccountId : 0u;
+                },
+
+                ListCharacters = accountId => PlayerManager.GetAccountPlayersSnapshot(accountId)
+                    .Where(p => !p.IsDeleted && !p.IsPendingDeletion)
+                    .Select(p => (p.Guid.Full, p.Name))
+                    .ToList(),
+            };
         }
 
         private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
@@ -436,7 +570,10 @@ namespace ACE.Server
         }
 
         // Guards the container graceful shutdown so the signal handler and OnProcessExit, which
-        // both funnel into it, run it exactly once.
+        // both funnel into it, only start the warned countdown once. A signal arriving after the
+        // countdown has already started is handled separately inside InitiateContainerShutdown -
+        // it either forces an immediate shutdown (countdown still pending) or is ignored (final
+        // shutdown already in progress) - see there for details.
         private static int containerShutdownStarted;
 
         private static void HandleContainerSignal(PosixSignalContext context)
@@ -449,17 +586,116 @@ namespace ACE.Server
         private static void InitiateContainerShutdown(string reason)
         {
             if (Interlocked.CompareExchange(ref containerShutdownStarted, 1, 0) != 0)
+            {
+                // A repeat signal while a countdown is already running. Once the countdown expires,
+                // ServerManager.ShutdownInProgress flips true and the final shutdown (log off players,
+                // unload landblocks, drain the shard DB queue, Environment.Exit) is already underway -
+                // in that case treat the repeat signal as a no-op instead of re-entering DoShutdownNow.
+                // Otherwise the operator is asking for force-now on a double signal, so skip the warned
+                // countdown and shut down immediately.
+                if (ServerManager.ShutdownInProgress)
+                {
+                    log.Warn($"{reason} - shutdown already in progress, ignoring repeat signal.");
+                    return;
+                }
+
+                log.Warn($"{reason} - repeat signal received during warned countdown, forcing immediate shutdown...");
+                ServerManager.DoShutdownNow();
+                return;
+            }
+
+            // Triage BEFORE reading the online count, because with a dead world that count is a lie.
+            // PlayerManager's online roster is only cleaned up by the world thread, so on 2026-09-01 the
+            // SIGTERM handler read 34 sessions that had stopped existing hours earlier, took the warned
+            // path on their behalf, and started a 300s countdown that then ran on the dead world thread.
+            // The stop had to be force-killed. If the world is not running there is nobody to warn and
+            // nothing that can service a countdown, so go straight to the world-independent fast path.
+            //
+            // Classify() and NOT WorldWatchdog.CurrentState: CurrentState is only ever moved by the
+            // watchdog's poll thread, so reading it here would make this fix a subscriber to an optional
+            // subsystem - setting WorldWatchdogEnabled to false would leave it frozen at Starting and
+            // silently restore the exact pre-fix behaviour on the one path that must never regress.
+            // Classify computes the same verdict on this thread from the world thread's own statics,
+            // which are maintained unconditionally.
+            var worldState = WorldWatchdog.Classify(out var staleSeconds);
+
+            if (worldState == WorldWatchdog.WorldState.Dead || worldState == WorldWatchdog.WorldState.Stalled)
+            {
+                // The watchdog's published view is only worth quoting when it is actually running; when
+                // it is not, say so, because otherwise a reader of this line has no way to tell whether
+                // the absence of the usual watchdog FATAL line above means anything.
+                var watchdogView = WorldWatchdog.WatchdogRunning
+                    ? $"watchdog last published {WorldWatchdog.CurrentState.ToString().ToLowerInvariant()}"
+                    : "watchdog not running, classified directly from the world thread's own state";
+
+                log.Warn($"{reason} - world is {worldState.ToString().ToUpperInvariant()} (last world tick {(staleSeconds < 0 ? "never" : $"{staleSeconds}s ago")}; {watchdogView}). " +
+                         $"Skipping the player warning countdown because the world is not running - any online count is stale - and shutting down via the fast path.");
+
+                // Exit code 0: this is a requested, orderly stop that we are simply completing without
+                // the world's help. The watchdog's own self-exit is the one that reports a fault (70).
+                ServerManager.DoFastShutdown(reason, 0);
+                return;
+            }
+
+            var onlineCount = PlayerManager.GetOnlineCount();
+            var warningSeconds = ConfigManager.Config.Server.ContainerShutdownWarningSeconds;
+
+            if (onlineCount == 0)
+            {
+                log.Warn($"{reason} - no players online, shutting down immediately...");
+                ServerManager.DoShutdownNow();
+                return;
+            }
+
+            if (warningSeconds == 0)
+            {
+                log.Warn($"{reason} - {onlineCount} player{(onlineCount > 1 ? "s" : "")} online, but ContainerShutdownWarningSeconds is 0 (warning disabled), shutting down immediately...");
+                ServerManager.DoShutdownNow();
+                return;
+            }
+
+            log.Warn($"{reason} - {onlineCount} player{(onlineCount > 1 ? "s" : "")} online, warning them for {warningSeconds}s before graceful shutdown...");
+
+            // Reuses the existing countdown thread, which broadcasts ATTENTION/WARNING/"Please log out!"
+            // notices at retail cadence via NotifyPlayersOfPendingShutdown and ends by calling
+            // Environment.Exit (which re-enters OnProcessExit below).
+            ServerManager.SetShutdownInterval(warningSeconds);
+            ServerManager.BeginShutdown();
+        }
+
+        /// <summary>
+        /// Entry point for WorldWatchdog's self-exit. Takes the same containerShutdownStarted latch a
+        /// SIGTERM would, so a stop signal arriving at the same moment cannot start a second shutdown
+        /// alongside this one, and returns quietly if that latch is already taken - if an operator's
+        /// stop is already running, let it run.
+        ///
+        /// Exit code 70 (EX_SOFTWARE) marks this as a fault-driven exit rather than a requested stop,
+        /// so it is distinguishable in container restart logs from the code 0 taken by
+        /// InitiateContainerShutdown's dead-world triage.
+        /// </summary>
+        internal static void InitiateWatchdogShutdown(string reason)
+        {
+            if (Interlocked.CompareExchange(ref containerShutdownStarted, 1, 0) != 0)
                 return;
 
-            log.Warn($"{reason} - initiating graceful shutdown (saving world state before exit)...");
-
-            // Runs the full shutdown synchronously (log off players, unload landblocks, drain the
-            // shard DB queue) and then Environment.Exit, which re-enters OnProcessExit below.
-            ServerManager.DoShutdownNow();
+            ServerManager.DoFastShutdown(reason, 70);
         }
 
         private static void OnProcessExit(object sender, EventArgs e)
         {
+            // First, and outside both branches: Shutdown clears AccountVaultStore.PreWithdrawHook,
+            // so a stopping market never intercepts a withdraw during the drain below. Both are
+            // no-ops when the module never started.
+            ACE.Server.Managers.Market.MarketApiHost.Stop();
+            MarketBuyOrderExpiry.Stop();
+            MarketAdvertiserJob.Stop();
+            ACE.Server.Managers.Market.MarketManager.Shutdown();
+
+            // Also a no-op when it never started. Stopped before the database goes down below, so a
+            // pass in flight is not cut off mid-write; a pass that does not finish simply leaves its
+            // rows for the next process, because nothing is stamped until its item is destroyed.
+            AccountVaultBarrelReaper.Stop();
+
             if (!IsRunningInContainer)
             {
                 if (!ServerManager.ShutdownInitiated)

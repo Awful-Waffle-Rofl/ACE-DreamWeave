@@ -38,7 +38,11 @@ namespace ACE.Server.EquipmentMods
         FrenziedPace     = 15,
         LingeringFury    = 16,
         SavageBlows      = 17,
-        BloodFury        = 18,
+        // 18 was Blood Fury until 2026-08-17. The class ability it amplified was retired in the same change
+        // and the mod was REPURPOSED IN PLACE rather than retired with it: the id and its PropertyFloat (8117)
+        // are unchanged, so every already-rolled item keeps a live mod and simply re-labels as Break Armor.
+        // Both the old and new roles are bounded at MaxMagnitude 0.03, so no live item gained or lost budget.
+        BreakArmor       = 18,
         Executioner      = 19,
         Bloodlust        = 20,
 

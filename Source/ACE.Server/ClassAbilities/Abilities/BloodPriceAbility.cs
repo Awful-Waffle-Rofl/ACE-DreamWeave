@@ -44,7 +44,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "your current health by rank and deals +8/16/24% damage. Below 20% health the cast " +
                           "lands normally, with no bonus and no health cost. Against monsters only.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

@@ -65,6 +65,13 @@ namespace ACE.Server.WorldObjects
                 ApplyVisualEffects(PlayScript.EnchantDownBlue);
             }
 
+            if (surefootedStacks > 0 && SurefootedExpired(now))
+            {
+                surefootedStacks = 0;
+                SendClassAbilityBuffMessage("You are no longer surefooted.");
+                ApplyVisualEffects(PlayScript.EnchantDownBlue);
+            }
+
             // Sanguine Ward EXPIRES UNUSED - whatever absorb is left when the window lapses is simply
             // dropped. It is never refunded, converted to health, or carried into the next cast.
             if (sanguineWard.Amount > 0 && SanguineWardMath.IsExpired(sanguineWard, now))
@@ -134,11 +141,46 @@ namespace ACE.Server.WorldObjects
                 // announce once, on the hit that tops it off
                 if (frenzyStacks == cap)
                 {
-                    var pct = (int)Math.Round(cap * PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item * 100);
+                    // quotes the SAME per-stack rate the animation site applies - Recklessness rider and
+                    // Frenzied Pace gear included - so the announced percentage cannot drift from what the
+                    // player actually gets. Announcing the bare tunable understated a 6.1%/stack player's
+                    // peak as 15% instead of 18.3%.
+                    var terms = GetFrenzyPerStackTerms();
+                    var pct = (int)Math.Round(cap * (terms.Skill + terms.Affinity + terms.Gear) * 100);
                     SendClassAbilityBuffMessage($"Your frenzy reaches its peak! (+{pct}% attack speed)");
                     ApplyVisualEffects(PlayScript.EnchantUpRed);
                 }
             }
+        }
+
+        /// <summary>
+        /// THE SINGLE SOURCE for Frenzy's per-stack attack-speed rate, broken into the three terms the
+        /// /abilities readout renders as [skill/affinity/gear]. Returned decomposed rather than summed
+        /// because the readout needs the parts and every other caller needs only the total - one method
+        /// serving both is what keeps them in step.
+        ///
+        /// THREE CALLERS, AND THAT IS THE POINT: GetFrenzyAttackSpeedMod (what the animation actually
+        /// gets), OnFrenzyLandedHit's peak announcement (what the player is told), and
+        /// FrenzyAbility.GetReadout (what /abilities prints). The announcement used to restate just the
+        /// bare tunable and so under-reported the peak for any player with Recklessness trained or
+        /// Frenzied Pace equipped - a rank-1 player at 6.1%/stack was told +15% while receiving +18.3%.
+        /// A restatement anywhere here is a bug waiting to happen; call this instead.
+        ///
+        /// Recklessness rider and the Frenzied Pace equipment mod (MACHINERY) are both ADDITIVE on the
+        /// per-stack axis, so gear is worth nothing without stacks to multiply and scales with how deep
+        /// into a frenzy the player is. Untrained Recklessness reproduces the pre-rider rate exactly
+        /// (GetClassAbilityScaling returns 0).
+        /// </summary>
+        public (double Skill, double Affinity, double Gear) GetFrenzyPerStackTerms()
+        {
+            var reckless = GetClassAbilityScaling(Skill.Recklessness,
+                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_trained").Item,
+                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_spec").Item) * 0.01;
+
+            return (
+                PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item,
+                reckless,
+                GetEquippedModValue(EquipmentModId.FrenziedPace));
         }
 
         /// <summary>
@@ -168,22 +210,12 @@ namespace ACE.Server.WorldObjects
 
             var stacks = Math.Min(frenzyStacks, FrenzyAbility.StackCap(rank));
 
-            // Frenzied Pace equipment mod (MACHINERY): adds to the PER-STACK rate, so it is worth nothing
-            // without Frenzy stacks to multiply and scales with how deep into a frenzy the player is. Read
-            // here rather than at the animation site, so it composes inside the shared ceiling clamp in
-            // ApplyClassAbilityAttackSpeed like every other attack-speed term.
-            //
-            // Recklessness rider: additive on the same per-stack axis as the equipment mod. Untrained
-            // Recklessness reproduces the pre-rider per-stack rate exactly (GetClassAbilityScaling returns 0).
-            var reckless = GetClassAbilityScaling(Skill.Recklessness,
-                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_trained").Item,
-                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_spec").Item) * 0.01;
+            // The Frenzied Pace gear term is read here rather than at the animation site, so it composes
+            // inside the shared ceiling clamp in ApplyClassAbilityAttackSpeed like every other
+            // attack-speed term. See GetFrenzyPerStackTerms for the three terms and why they are shared.
+            var terms = GetFrenzyPerStackTerms();
 
-            var perStack = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item
-                + reckless
-                + GetEquippedModValue(EquipmentModId.FrenziedPace);
-
-            return FrenzyAbility.AttackSpeedMultiplier(stacks, perStack);
+            return FrenzyAbility.AttackSpeedMultiplier(stacks, terms.Skill + terms.Affinity + terms.Gear);
         }
 
         /// <summary>
@@ -223,9 +255,20 @@ namespace ACE.Server.WorldObjects
         /// private static no config can raise - so the clamp below is the only thing bounding the axis, and
         /// every term that rides it has to land inside that clamp. See Player_WeaponMods.cs.
         /// </summary>
-        public float ApplyClassAbilityAttackSpeed(float baseAnimSpeed)
+        public float ApplyClassAbilityAttackSpeed(float baseAnimSpeed) => ApplyClassAbilityAttackSpeed(baseAnimSpeed, false);
+
+        /// <summary>
+        /// <see cref="ApplyClassAbilityAttackSpeed(float)"/>, optionally including the CONDITIONAL weapon-mod
+        /// attack-speed terms - currently just Panic Reload, whose condition is where the player is standing.
+        ///
+        /// THE SPLIT EXISTS FOR THE READOUTS, not for the arithmetic. Creature.GetAnimSpeed - the one combat
+        /// caller - passes true. AttackSpeedAbility.GetReadout and FrenzyAbility.GetReadout call the
+        /// parameterless overload above (to decide whether the ceiling is actually clipping), so nothing a
+        /// player is printed changes with their position. See Player_WeaponMods.GetWeaponModAttackSpeedMod.
+        /// </summary>
+        public float ApplyClassAbilityAttackSpeed(float baseAnimSpeed, bool includeConditional)
         {
-            var mod = GetFrenzyAttackSpeedMod() * GetAttackSpeedSkillMod() * GetWeaponModAttackSpeedMod();
+            var mod = GetFrenzyAttackSpeedMod() * GetAttackSpeedSkillMod() * GetWeaponModAttackSpeedMod(includeConditional);
             if (mod <= 1.0f)
                 return baseAnimSpeed;
 
@@ -277,7 +320,9 @@ namespace ACE.Server.WorldObjects
                 // announce once, on the cast that tops it off
                 if (netherRushStacks == NetherRushAbility.MaxStacks)
                 {
-                    var pct = (int)Math.Round(NetherRushAbility.MaxStacks * rank * perRank * 100);
+                    // quotes the SAME perStack expression CastSpeedMultiplier applies above, Arcane Lore
+                    // rider included, so the announced percentage cannot drift from what the next cast gets
+                    var pct = (int)Math.Round(NetherRushAbility.MaxStacks * (rank * perRank + arcaneLore) * 100);
                     SendClassAbilityBuffMessage($"Your nether rush surges to its peak! (+{pct}% cast speed)");
                     ApplyVisualEffects(PlayScript.EnchantUpPurple);
                 }
@@ -598,30 +643,124 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Refunds the Mana Barrier share of a hit that has ALREADY been deducted from Health: drains Mana
-        /// and restores the same amount of Health. Called from the incoming-damage hook, which runs before
-        /// TakeDamage's death check, so this can avert a killing blow (intended). Pays partially when Mana
-        /// is short, and does nothing when Mana is empty.
+        /// Runs an incoming hit through Mana Barrier and returns what is LEFT of it to apply to Health.
+        /// Returns <paramref name="incomingDamage"/> unchanged whenever the barrier does not apply, which
+        /// is every hit on every player who has not learned it.
+        ///
+        /// A REDUCTION BEFORE THE HEALTH WRITE, NEVER A REFUND AFTER IT. This method spends Mana and hands
+        /// back a smaller damage figure; it never calls UpdateVitalDelta(Health, +x). Until 2026-09-08 it
+        /// was the reverse, and that was a live bug: every health write clamps at zero, so an overkill hit
+        /// handed the refund the victim's CURRENT HEALTH rather than the damage thrown, and the barrier
+        /// refunded a share of the smaller number on top of a health bar already sitting at zero. A player
+        /// with 477 Health survived a 942-damage critical. With any Mana in the tank, no single hit of any
+        /// size could kill a barrier carrier. See ManaBarrierAbility.AbsorbDamage for the arithmetic and
+        /// why taking no health input is the fix.
+        ///
+        /// EVERY CALLER OWNS THE SAME CONTRACT, and it is now identical to Sanguine Ward's: call this
+        /// before the health write and after any cloak proc and ward absorb, assign the result back over
+        /// the damage figure, recompute any `percent` kept from it, and let everything downstream - the
+        /// reported number, the death check, further procs - see the reduced value. The victim-facing
+        /// damage line therefore reports the POST-barrier number, which is intended: the "absorbs N points"
+        /// line plus the damage line now add up to the hit that was thrown.
+        ///
+        /// CALLED FROM FOUR SITES with this signature, one per way a player can lose health to an
+        /// identifiable attacker: Player.TakeDamage (melee, missile, hotspots), SpellProjectile.DamageTarget
+        /// (war, void and life bolts), WorldObject_Magic.HandleCastSpell_Boost (Harm) and
+        /// HandleCastSpell_Transfer (Drain Health). DoT ticks carry no attacker and use
+        /// <see cref="AbsorbWithManaBarrierDot"/> instead. Only the first was wired until 2026-09-03, which
+        /// made the barrier physical-only - do not "simplify" the other three away.
+        ///
+        /// THE GATES ARE THE OLD HOOK'S GATES, reproduced exactly so the barrier behaves identically
+        /// whatever the damage type: nothing to absorb from a zero-damage hit, the class ability system must
+        /// be enabled, the ability must actually be LEARNED (rank 1 or better - so a rank-0 player carrying
+        /// nothing but the Mana Barrier equipment mod gets no barrier on any path, a known gap kept
+        /// deliberately consistent rather than fixed here), and the source must be a live non-player
+        /// creature other than the victim, which excludes PvP and self-damage. This is where the barrier
+        /// DIVERGES from Sanguine Ward, which is called unconditionally; do not unify the two gates.
         /// </summary>
-        public void ApplyManaBarrierDivert(Creature attacker, uint damageTaken)
+        public uint AbsorbWithManaBarrier(WorldObject source, uint incomingDamage)
+        {
+            if (incomingDamage == 0)
+                return incomingDamage;
+
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+                return incomingDamage;
+
+            if (!TryGetClassAbility(ClassAbilityId.ManaBarrier, out _))
+                return incomingDamage;
+
+            // same attacker filter as ApplyIncomingDamageClassAbilities: monsters only, never PvP or self
+            if (source is not Creature attacker || attacker is Player || attacker == this || attacker.IsDead)
+                return incomingDamage;
+
+            return AbsorbWithManaBarrierCore(attacker, incomingDamage);
+        }
+
+        /// <summary>
+        /// Mana Barrier for damage-over-time ticks, same reduction-before-the-write contract as
+        /// <see cref="AbsorbWithManaBarrier"/>.
+        ///
+        /// CALLED FROM EnchantmentManager.ApplyDamageTick, NOT FROM Player.TakeDamageOverTime, and the
+        /// difference is load-bearing. ApplyDamageTick accumulates every DoT enchantment into one tick total
+        /// and used to cap that total to the victim's current Health before passing it down, which defeated
+        /// an absorb placed inside TakeDamageOverTime exactly as thoroughly as the old post-write refund
+        /// did - an absorb applied to a figure already capped at current health leaves the victim strictly
+        /// alive whatever the tick was worth. This must run against the RAW accumulated total, above that
+        /// cap. Sanguine Ward is called from the same place, immediately before this, for the same reason.
+        ///
+        /// DELIBERATE, DOCUMENTED DIVERGENCE from the other paths: no source filter, because the PvP and
+        /// self-damage exclusions cannot be enforced here at all. TakeDamageOverTime's signature is
+        /// (float, DamageType) - the tick carries no source whatsoever, so there is nothing to test
+        /// against. A DoT stacked on a player by another player is therefore absorbed, where that same
+        /// player's direct spell would not be. Closing that would mean threading an attacker through the
+        /// whole DoT stack, which is well outside a barrier fix; the alternative (skipping DoTs entirely)
+        /// is what the 2026-09-03 player-visible bug was.
+        ///
+        /// Still Mana Barrier only: Thorns and the Thorns equipment mod stay off DoT ticks exactly as
+        /// before, which is also the only thing they could do - there is no attacker here to reflect at.
+        /// </summary>
+        public uint AbsorbWithManaBarrierDot(uint incomingDamage)
+        {
+            if (incomingDamage == 0)
+                return incomingDamage;
+
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+                return incomingDamage;
+
+            if (!TryGetClassAbility(ClassAbilityId.ManaBarrier, out _))
+                return incomingDamage;
+
+            // null attacker: the tick has no source, so the "absorbs N points" line cannot be squelch-gated
+            // on one. AbsorbWithManaBarrierCore tolerates a null attacker by design.
+            return AbsorbWithManaBarrierCore(null, incomingDamage);
+        }
+
+        /// <summary>
+        /// The shared body of the two entry points above, past their gates: resolves the diverted share
+        /// against the Mana on hand, spends the Mana, announces the absorb, and returns the reduced damage.
+        /// Pays partially when Mana is short, and returns the hit untouched when Mana is empty or the share
+        /// is zero. Spends Mana ONLY - the Health vital is the caller's to write.
+        /// </summary>
+        private uint AbsorbWithManaBarrierCore(Creature attacker, uint incomingDamage)
         {
             var share = GetManaBarrierDivertShare();
             if (share <= 0.0)
-                return;
+                return incomingDamage;
 
-            var divert = ManaBarrierAbility.Resolve(damageTaken, share, Mana.Current,
+            var absorbed = ManaBarrierAbility.AbsorbDamage(incomingDamage, share, Mana.Current,
                 PropertyManager.GetDouble("class_ability_manabarrier_mana_per_health").Item);
 
-            if (divert.HealthRestored == 0 || divert.ManaSpent == 0)
-                return;
+            if (absorbed.DamageAbsorbed == 0 || absorbed.ManaSpent == 0)
+                return incomingDamage;
 
-            UpdateVitalDelta(Mana, -(int)divert.ManaSpent);
-            UpdateVitalDelta(Health, (int)divert.HealthRestored);
+            UpdateVitalDelta(Mana, -(int)absorbed.ManaSpent);
 
-            // per-hit combat line, squelch-gated on the attacker - the same shape Thorns uses
+            // per-hit combat line, squelch-gated on the attacker - the same shape Sanguine Ward uses
             if (Session != null && (attacker == null || !SquelchManager.Squelches.Contains(attacker, ChatMessageType.CombatSelf)))
                 Session.Network.EnqueueSend(new GameMessageSystemChat(
-                    $"Your mana barrier absorbs {divert.HealthRestored:N0} points of damage.", ChatMessageType.CombatSelf));
+                    $"Your mana barrier absorbs {absorbed.DamageAbsorbed:N0} points of damage.", ChatMessageType.CombatSelf));
+
+            return absorbed.DamageAfter;
         }
 
         // ---- Whirlwind: per-swing 360°/+1-target cleave, paid for with a stamina surcharge ------
@@ -682,6 +821,12 @@ namespace ACE.Server.WorldObjects
         /// unresisted damage every class_ability_acidproc_dot_interval seconds for
         /// class_ability_acidproc_dot_ticks ticks. A re-proc refreshes the duration and tick amount instead
         /// of stacking (one running loop per target). Called from AcidProcAbility on a landed weapon hit.
+        ///
+        /// DEALS ONE TICK IMMEDIATELY (2026-08-17 Berserker/Rogue balance pass reading of "the increased
+        /// poison damage applies to the initial DoT"): a proc no longer waits out a full
+        /// class_ability_acidproc_dot_interval before the (possibly Acid-Proc-buffed) damage shows. This
+        /// immediate hit counts as the first of the tick budget - <see cref="ApplyOneAcidTick"/> is the same
+        /// TakeDamage + message code the scheduled loop uses, so the two paths cannot drift apart.
         /// </summary>
         public void ApplyAcidProcDot(Creature target, uint tickAmount)
         {
@@ -699,11 +844,32 @@ namespace ACE.Server.WorldObjects
             dot.TickAmount = tickAmount;                                                          // refresh amount
             dot.RemainingTicks = (int)PropertyManager.GetLong("class_ability_acidproc_dot_ticks").Item;   // refresh duration
 
-            if (!dot.LoopActive)
+            ApplyOneAcidTick(target, dot);   // immediate first tick, counted against RemainingTicks above
+
+            if (dot.RemainingTicks > 0 && !dot.LoopActive)
             {
                 dot.LoopActive = true;
                 ScheduleAcidProcTick(target, guid);
             }
+        }
+
+        /// <summary>
+        /// Deals one Acid Proc tick's damage + combat line and decrements the dot's remaining-tick budget.
+        /// Shared by the immediate proc-time tick (ApplyAcidProcDot) and the periodic scheduled loop below,
+        /// so the two never restate the same TakeDamage/message shape differently.
+        /// </summary>
+        private void ApplyOneAcidTick(Creature target, AcidProcDot dot)
+        {
+            if (target == null || target.IsDead)
+                return;
+
+            target.TakeDamage(this, DamageType.Base, dot.TickAmount);
+
+            if (Session != null && !SquelchManager.Squelches.Contains(target, ChatMessageType.CombatSelf))
+                Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    $"Your acid deals {dot.TickAmount:N0} points of periodic damage to {target.Name}!", ChatMessageType.CombatSelf));
+
+            dot.RemainingTicks--;
         }
 
         private void ScheduleAcidProcTick(Creature target, uint guid)
@@ -721,13 +887,7 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
-                target.TakeDamage(this, DamageType.Base, dot.TickAmount);
-
-                if (Session != null && !SquelchManager.Squelches.Contains(target, ChatMessageType.CombatSelf))
-                    Session.Network.EnqueueSend(new GameMessageSystemChat(
-                        $"Your acid deals {dot.TickAmount:N0} points of periodic damage to {target.Name}!", ChatMessageType.CombatSelf));
-
-                dot.RemainingTicks--;
+                ApplyOneAcidTick(target, dot);
 
                 if (dot.RemainingTicks > 0)
                     ScheduleAcidProcTick(target, guid);
@@ -1460,6 +1620,34 @@ namespace ACE.Server.WorldObjects
         /// ABSORB, NOT HEAL: this only ever reduces the hit. It never calls UpdateVitalDelta and can never
         /// return health to the player, so a caster who spent 40% of their pool on Hecatomb is still at
         /// 60% with a ward up, not back at full - burst thresholds and death risk are unchanged.
+        ///
+        /// CALLED FROM FIVE SITES, one per way a player can lose health, because there is no single
+        /// choke point: Player.TakeDamage (melee, missile, hotspots), SpellProjectile.DamageTarget (war,
+        /// void and life bolts), WorldObject_Magic.HandleCastSpell_Boost (Harm),
+        /// WorldObject_Magic.HandleCastSpell_Transfer (Drain Health) and EnchantmentManager.ApplyDamageTick
+        /// (DoT ticks). It was wired only into the first of those until 2026-09-03, which made the ward
+        /// physical-only - the same gap Mana Barrier had, found in the same sweep.
+        ///
+        /// THE DoT CALL MOVED UP on 2026-09-08, from Player.TakeDamageOverTime to the ApplyDamageTick
+        /// accumulation point that calls it. ApplyDamageTick used to cap the accumulated tick total to the
+        /// victim's current Health before passing it down, so a ward inside TakeDamageOverTime was always
+        /// handed a figure it could only ever reduce to something strictly above zero - a warded player
+        /// could not be killed by a DoT of any size. Do not move it back down.
+        ///
+        /// EVERY CALLER OWNS THE SAME CONTRACT, and it is the reverse of Mana Barrier's. The return value
+        /// REPLACES the damage the caller was about to apply, so the caller must (a) call this before its
+        /// health write, after any cloak damage proc it has, (b) assign the result back and recompute any
+        /// `percent` it keeps, and (c) let everything downstream - reported number, death check, further
+        /// procs - see the reduced value. Mana Barrier, by contrast, is a refund applied AFTER the health
+        /// write and deliberately leaves every reported number at its pre-barrier value. Both conventions
+        /// are correct: the ward stopped the damage, the barrier paid for damage that already landed.
+        ///
+        /// CALL IT UNCONDITIONALLY. There is no attacker filter and no class_abilities_enabled gate at any
+        /// site, which is what the original Player.TakeDamage site does and is therefore what "identical
+        /// behaviour whatever the damage type" means here: the ward already absorbs PvP hits and
+        /// self-damage, and a caller that adds guards would make the ward weaker on its path than on the
+        /// melee one. The early-out above keeps an unwarded player free on every hot path, and
+        /// <paramref name="source"/> is used only for the squelch check and tolerates null.
         /// </summary>
         public uint AbsorbWithSanguineWard(WorldObject source, uint incomingDamage)
         {
@@ -1573,7 +1761,9 @@ namespace ACE.Server.WorldObjects
             if (resonanceStacks != cap)
                 return;
 
-            var pct = (int)Math.Round(cap * ResonancePerStack(rank) * 100);
+            // quotes the SAME per-stack rate GetResonanceMagicDamageMod applies, Harmonics gear included,
+            // so the announced percentage cannot drift from what the next landed hit gets
+            var pct = (int)Math.Round(cap * (ResonancePerStack(rank) + Math.Max(0.0, GetEquippedModValue(EquipmentModId.Harmonics))) * 100);
             SendClassAbilityBuffMessage($"Your resonance reaches its peak! (+{pct}% magic damage)");
             ApplyVisualEffects(PlayScript.EnchantUpBlue);
         }
@@ -1785,6 +1975,118 @@ namespace ACE.Server.WorldObjects
             {
                 ClassAbilityProcCastActive = false;
             }
+        }
+
+        // ---- Surefooted (Rogue T2): evading melee builds parry chance ------------------------------
+        //
+        // Transient, never persisted, same as the Frenzy / Resonance / Spellsurge pools above: the buff is
+        // short-lived and naturally resets when the Player object is rebuilt on login. All access is on the
+        // player's landblock thread (the incoming-attack path), so no locking is needed.
+        //
+        // THE POOL IS KNOCKED FLAT BY A LANDED MELEE HIT, which is what distinguishes it from every other
+        // stack pool in this file - the others only lapse on an idle timer. Player.TakeDamage(DamageEvent)
+        // owns that reset, because it is the only player-damage entry point that still carries the
+        // CombatType needed to tell a melee hit from a spell or an arrow.
+
+        private int surefootedStacks;
+        private double surefootedLastEvadeTime;
+
+        private static double SurefootedExpireSeconds() =>
+            PropertyManager.GetDouble("class_ability_surefooted_expire_seconds").Item;
+
+        private bool SurefootedExpired(double now) =>
+            SurefootedAbility.StacksExpired(now, surefootedLastEvadeTime, SurefootedExpireSeconds());
+
+        /// <summary>
+        /// The player's current Surefooted stacks, lazily expiring the pool first so a caller on a hot path
+        /// never sees a stale count. Returns 0 for a player who never had any.
+        /// </summary>
+        public int GetSurefootedStacks()
+        {
+            if (surefootedStacks > 0 && SurefootedExpired(Time.GetUnixTime()))
+                surefootedStacks = 0;
+
+            return surefootedStacks;
+        }
+
+        /// <summary>
+        /// THE SINGLE SOURCE for Surefooted's contribution to parry chance, as a fraction. Read by
+        /// Player.RollClassAbilityAvoidance (what combat actually applies), by the peak announcement in
+        /// <see cref="OnSurefootedEvade"/> (what the player is told), and by ParryAbility.GetReadout (which
+        /// must feed it into the pooled cap or the parry line under-reports the pool). Returns 0 when the
+        /// ability is unowned or the pool is empty, so every caller can add it unconditionally.
+        ///
+        /// Clamps to the stack cap here rather than trusting the pool, matching GetFrenzyAttackSpeedMod:
+        /// the cap is a tunable and can be lowered under a player who is already holding more than the new
+        /// value.
+        /// </summary>
+        public double GetSurefootedParryBonus()
+        {
+            if (!TryGetClassAbility(ClassAbilityId.Surefooted, out var rank))
+                return 0.0;
+
+            var stacks = GetSurefootedStacks();
+
+            if (stacks <= 0)
+                return 0.0;
+
+            return SurefootedAbility.ParryBonus(rank,
+                Math.Min(stacks, Math.Max(0, SurefootedAbility.StackCap())),
+                PropertyManager.GetDouble("class_ability_surefooted_percent_per_rank_per_stack").Item);
+        }
+
+        /// <summary>
+        /// Called from Player.OnEvade when this player evades a MELEE attack from a non-player creature.
+        /// Resets the pool if the idle window had already lapsed, then adds one stack up to the cap and
+        /// refreshes the timer.
+        ///
+        /// ANNOUNCED AT THE PEAK ONLY, matching Frenzy and Resonance, and the announcement QUOTES
+        /// <see cref="GetSurefootedParryBonus"/> - the same getter combat reads - rather than restating the
+        /// tunable. There is no affinity rider or equipment mod on this entry today, so the two agree
+        /// trivially; quoting the getter is what keeps that true if one is ever added.
+        /// </summary>
+        public void OnSurefootedEvade(int rank)
+        {
+            var cap = SurefootedAbility.StackCap();
+
+            if (cap <= 0)
+                return;
+
+            var now = Time.GetUnixTime();
+
+            if (SurefootedExpired(now))
+                surefootedStacks = 0;
+
+            surefootedLastEvadeTime = now;
+
+            if (surefootedStacks >= cap)
+                return;
+
+            surefootedStacks++;
+
+            if (surefootedStacks != cap)
+                return;
+
+            var pct = (int)Math.Round(GetSurefootedParryBonus() * 100);
+            SendClassAbilityBuffMessage($"Your footwork is perfect! (+{pct}% parry)");
+            ApplyVisualEffects(PlayScript.EnchantUpBlue);
+        }
+
+        /// <summary>
+        /// Drops every Surefooted stack at once and tells the player why. Silent no-op on an empty pool, so
+        /// the damage path can call it unconditionally without spamming a player who has none.
+        /// </summary>
+        public void ClearSurefootedStacks(string reason)
+        {
+            if (surefootedStacks <= 0)
+                return;
+
+            surefootedStacks = 0;
+
+            if (!string.IsNullOrEmpty(reason))
+                SendClassAbilityBuffMessage(reason);
+
+            ApplyVisualEffects(PlayScript.EnchantDownBlue);
         }
     }
 }

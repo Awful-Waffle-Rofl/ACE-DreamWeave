@@ -38,8 +38,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "element's Vulnerability on the target at the spell's level. Higher Life Magic " +
                           "increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
+            AffinitySkill = Skill.LifeMagic,
         };
 
         // Per-element Life-Magic Vulnerability progressions (the "...Other" line). The SpellId enum values
@@ -222,7 +223,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = effective,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,

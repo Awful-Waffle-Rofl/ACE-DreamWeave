@@ -67,7 +67,7 @@ namespace ACE.Server.Tests
         {
             var divert = ManaBarrierAbility.Resolve(200, 0.25, currentMana: 1000, manaPerHealth: 1.0);
 
-            Assert.AreEqual(50u, divert.HealthRestored);
+            Assert.AreEqual(50u, divert.DamageAbsorbed);
             Assert.AreEqual(50u, divert.ManaSpent);
         }
 
@@ -77,7 +77,7 @@ namespace ACE.Server.Tests
             // wants 50 health (50 mana) but only 20 mana is left
             var divert = ManaBarrierAbility.Resolve(200, 0.25, currentMana: 20, manaPerHealth: 1.0);
 
-            Assert.AreEqual(20u, divert.HealthRestored);
+            Assert.AreEqual(20u, divert.DamageAbsorbed);
             Assert.AreEqual(20u, divert.ManaSpent);
             Assert.IsTrue(divert.ManaSpent <= 20u, "must never spend more mana than the player has");
         }
@@ -88,7 +88,7 @@ namespace ACE.Server.Tests
             // at 2 mana per health, 40 mana buys 20 health
             var divert = ManaBarrierAbility.Resolve(200, 0.25, currentMana: 40, manaPerHealth: 2.0);
 
-            Assert.AreEqual(20u, divert.HealthRestored);
+            Assert.AreEqual(20u, divert.DamageAbsorbed);
             Assert.AreEqual(40u, divert.ManaSpent);
             Assert.IsTrue(divert.ManaSpent <= 40u);
         }
@@ -96,27 +96,39 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void ManaBarrier_Resolve_IsInertWithoutShareDamageOrMana()
         {
-            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(0, 0.25, 1000, 1.0).HealthRestored);
-            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(200, 0.0, 1000, 1.0).HealthRestored);
-            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(200, 0.25, 0, 1.0).HealthRestored);
+            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(0, 0.25, 1000, 1.0).DamageAbsorbed);
+            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(200, 0.0, 1000, 1.0).DamageAbsorbed);
+            Assert.AreEqual(0u, ManaBarrierAbility.Resolve(200, 0.25, 0, 1.0).DamageAbsorbed);
 
             // a share too small to buy a whole point of health spends nothing
             Assert.AreEqual(0u, ManaBarrierAbility.Resolve(1, 0.10, 1000, 1.0).ManaSpent);
         }
 
         [TestMethod]
-        public void ManaBarrier_IsAnIncomingDamageAbilityAtTier2()
+        public void ManaBarrier_IsAPassiveAtTier2()
         {
             var handler = ClassAbilityRegistry.GetHandler(ClassAbilityId.ManaBarrier);
 
-            Assert.IsInstanceOfType(handler, typeof(IIncomingDamageAbility));
-            Assert.IsTrue(ClassAbilityRegistry.IncomingDamageAbilities.Contains((IIncomingDamageAbility)handler));
+            // The barrier is a REDUCTION applied before each site's health write, read directly off the
+            // player by Player.AbsorbWithManaBarrier - so it hooks nothing and carries IPassiveStatAbility,
+            // the same shape as Sanguine Ward. It rode IIncomingDamageAbility until 2026-09-08, and that
+            // was the overkill bug: the dispatch runs AFTER the health write, which clamps at zero, so an
+            // overkill hit handed the barrier the victim's remaining health instead of the damage thrown.
+            // Re-registering it on that hook would reintroduce the defect.
+            Assert.IsInstanceOfType(handler, typeof(IPassiveStatAbility));
+            Assert.IsFalse(handler is IIncomingDamageAbility, "a pre-write reduction must not ride the post-write hook");
+            Assert.IsFalse(ClassAbilityRegistry.IncomingDamageAbilities.Contains(handler as IIncomingDamageAbility));
+            Assert.IsFalse(handler is IOutgoingDamageAbility);
+            Assert.IsFalse(handler is IMissileVolleyAbility);
+            Assert.IsFalse(handler is IItemProcAbility);
+            Assert.IsFalse(handler is ISpellHitAbility);
+            Assert.IsFalse(handler is ICreatureDeathAbility);
 
             var def = handler.Definition;
             Assert.AreEqual(ClassAbilityClass.Archmage, def.AbilityClass);
             Assert.AreEqual(2, def.Tier);
             Assert.AreEqual(3, def.MaxRank);
-            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, def.CostPerRank);
+            CollectionAssert.AreEqual(new[] { 1, 2, 3 }, def.CostPerRank);
             Assert.IsTrue(def.Implemented);
             StringAssert.Contains(def.Description, "Magic Defense", "the description must name the affinity skill");
         }
@@ -183,7 +195,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(ClassAbilityClass.VoidSummon, def.AbilityClass);
             Assert.AreEqual(2, def.Tier);
             Assert.AreEqual(3, def.MaxRank);
-            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, def.CostPerRank);
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.IsTrue(def.Implemented);
         }
 
@@ -257,7 +269,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(ClassAbilityClass.VoidSummon, def.AbilityClass);
             Assert.AreEqual(2, def.Tier);
             Assert.AreEqual(3, def.MaxRank);
-            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, def.CostPerRank);
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
             Assert.IsTrue(def.Implemented);
             StringAssert.Contains(def.Description, "Loyalty", "the description must name the affinity skill");
         }

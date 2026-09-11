@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using ACE.Common;
 using ACE.Database;
 using ACE.Database.Models.World;
 using ACE.Entity;
@@ -19,7 +20,21 @@ namespace ACE.Server.WorldObjects
 {
     partial class Creature
     {
-        public TreasureDeath DeathTreasure { get => DeathTreasureType.HasValue ? DatabaseManager.World.GetCachedDeathTreasure(DeathTreasureType.Value) : null; }
+        /// <summary>
+        /// Threads (WaffleACE): DeathTreasureOverride, when set, replaces the weenie's DeathTreasureType
+        /// for this one creature (PLAN 7.2). It is an in-memory TreasureDeath the spawner built for the run, so it
+        /// is checked first and short-circuits the world-database lookup entirely.
+        /// </summary>
+        public TreasureDeath DeathTreasure
+        {
+            get
+            {
+                if (DeathTreasureOverride != null)
+                    return DeathTreasureOverride;
+
+                return DeathTreasureType.HasValue ? DatabaseManager.World.GetCachedDeathTreasure(DeathTreasureType.Value) : null;
+            }
+        }
 
         private bool onDeathEntered = false;
 
@@ -50,6 +65,21 @@ namespace ACE.Server.WorldObjects
                 // once-per-death guarantee from onDeathEntered above, and the Player-side method owns the
                 // shared preconditions (gate, PvP/pet/self exclusion). See Player_WeaponMods.cs.
                 killingPlayer.ApplyWeaponModCreatureDeath(this);
+
+                // Kill-fill vessels: a vessel in the killer's pack gains a charge. Same once-per-death
+                // guarantee from onDeathEntered above, and the Player-side method owns the shared
+                // preconditions. THE KILLING BLOW IS THE POINT: killingPlayer comes from
+                // DamageHistory.LastDamager, not TopDamager and not the damage list, so a fellow who did
+                // more damage gets nothing. That exclusion is the mechanic. See Player_KillFillVessel.cs.
+                killingPlayer.ApplyKillFillVesselCreatureDeath(this);
+
+                // Mule form tokens: an attuned token in the killer's pack records one kill toward a
+                // mule appearance. Same once-per-death guarantee from onDeathEntered above, the same
+                // killing-blow-only rule as the vessel line just above (killingPlayer is
+                // DamageHistory.LastDamager, never TopDamager), and the Player-side method owns the
+                // shared preconditions. Matches on WeenieClassId, not CreatureType. See
+                // Player_MuleFormToken.cs.
+                killingPlayer.ApplyMuleFormTokenCreatureDeath(this);
             }
 
             //QuestManager.OnDeath(lastDamager?.TryGetAttacker());
@@ -115,6 +145,74 @@ namespace ACE.Server.WorldObjects
             // exactly-once dieEntered guard so a wave creature can never be counted twice.
             if (GetProperty(PropertyBool.WaveChallengeCreature) == true)
                 P_WaveOwner?.OnWaveCreatureDied(this);
+
+            // world events (WaffleACE): a creature a running world event spawned reports its death to that
+            // run, which is what advances the objective, the alive count and the MVP ledger. Sits after the
+            // exactly-once dieEntered guard for the same reason the wave hook does, and requires BOTH the
+            // in-memory back-reference and the persisted stamp so a creature from a finished run is inert.
+            if (P_WorldEvent != null && GetProperty(PropertyInt.WorldEventId) != null)
+                ACE.Server.WorldEvents.WorldEventManager.OnEventCreatureDied(this, lastDamager, topDamager);
+
+            // Threads (WaffleACE): a run-owned creature reports its death to the run, which is what
+            // advances the clear. Same post-dieEntered slot and the same two-key check as the world-event hook:
+            // the in-memory back-reference AND the persisted stamp, so a creature from a dead run is inert.
+            if (P_DungeonRun != null && GetProperty(PropertyInt.ThreadDungeonRunId) != null)
+                ACE.Server.ThreadDungeons.ThreadDungeonManager.OnRunCreatureDied(this);
+
+            // speed challenge (WaffleACE): a boss flagged PropertyBool.SpeedChallengeBoss reports its death to
+            // the runner, which is one of the two ways a timed Proving Grounds run finishes
+            // (Docs/ProvingGroundsSpeed/DESIGN.md section 3.4). Sits in the same post-dieEntered cluster as the
+            // two hooks above, for the same reason: dieEntered is what makes a death report exactly once.
+            //
+            // The one real divergence from the wave hook is how the player is found. Wave reads P_WaveOwner, an
+            // in-memory back-reference stamped when the RUN spawned the creature (Player_WaveChallenge.cs:339).
+            // A speed-dungeon boss is pre-placed content inside the ephemeral instance - nothing ever spawns it
+            // on behalf of a run - so no back-reference exists to read and the runner must come from the damage
+            // history instead. Top damager first, last damager as the fallback, resolved through
+            // TryGetPetOwnerOrAttacker (not TryGetAttacker) so a kill landed by the runner's combat pet still
+            // credits the runner - the same resolution WorldEventParticipation.ResolvePlayer uses
+            // (WorldEventParticipation.cs:258-261), and it degrades to TryGetAttacker whenever no pet is involved.
+            //
+            // Resolving the WRONG player is not a scoring hazard: TryFinishSpeedChallenge re-validates through
+            // IsSpeedRunValid (Player_SpeedChallenge.cs:86-92), which requires that player to have a run armed
+            // AND to be standing in the exact ephemeral instance their own run is bound to, and it then gates
+            // this creature's wcid against the season's declared ObjectiveWcid. A player who is not on a run in
+            // this instance simply no-ops.
+            if (GetProperty(PropertyBool.SpeedChallengeBoss) == true)
+            {
+                var speedRunner = topDamager?.TryGetPetOwnerOrAttacker() as Player
+                    ?? lastDamager?.TryGetPetOwnerOrAttacker() as Player;
+
+                if (speedRunner != null)
+                    speedRunner.OnSpeedChallengeBossDied(this);
+                else
+                    log.Warn($"[SPEED] {Name} (0x{Guid}, wcid {WeenieClassId}) is flagged SpeedChallengeBoss but died with no resolvable player attacker - no run can be finished. Damage history holds no live player (killed by the environment, a non-player creature, or the killer logged out).");
+            }
+
+            // objective locks (WaffleACE): a creature carrying PropertyString.ObjectiveLockKey is a
+            // CONTRIBUTOR to a count-based puzzle gate - this is the "the door opens when every creature in
+            // the room is dead" case (see WorldObject_Objective.cs). Sits in the same post-dieEntered
+            // cluster as the three hooks above, for the same reason they do: dieEntered is what makes a
+            // death report exactly once, and here that matters for the wrong-answer path in particular -
+            // ObjectiveLock absorbs a duplicate CONTRIBUTION (the same token key just replaces itself), but
+            // a duplicate call on a creature flagged ObjectiveLockResets would wipe the room's progress a
+            // second time.
+            //
+            // CurrentLandblock is NOT checked here and is not assumed to be non-null: nothing in Die()
+            // reads it, so nothing in this path establishes it. ContributeToObjectiveLock does the
+            // null-check and logs, which keeps that judgement in one place shared with the activation call
+            // site.
+            if (ObjectiveLockKey != null)
+            {
+                // Resolved only to address the progress message; the contribution itself needs no player.
+                // Same resolution the speed hook above uses - top damager first, last damager as the
+                // fallback, through TryGetPetOwnerOrAttacker so a kill landed by a combat pet still talks
+                // to the pet's owner. A null result simply means nobody is told.
+                var objectiveKiller = topDamager?.TryGetPetOwnerOrAttacker() as Player
+                    ?? lastDamager?.TryGetPetOwnerOrAttacker() as Player;
+
+                ContributeToObjectiveLock(objectiveKiller);
+            }
 
             UpdateVital(Health, 0);
 
@@ -737,6 +835,38 @@ namespace ACE.Server.WorldObjects
                         else
                             droppedItems.Add(wo);
                     }
+                }
+            }
+
+            // Threads (WaffleACE): salvage affinity. A gem carrying one of the affinity modifiers
+            // gives every creature in its run a per-KILL chance to leave one extra ordinary item made of that
+            // material, which the player salvages themselves. Per kill rather than per rolled item, so the
+            // magnitude the gem advertises is the observed rate and stays orthogonal to lootQuantityMult.
+            //
+            // Guarded on the SAME two keys as the run's death hook (Creature_Death.cs:158): the in-memory
+            // back-reference AND the persisted stamp, so a creature left over from a dead run is inert.
+            //
+            // ThreadSafeRandom, never the gem's seeded Random - the population plan must stay bit-identical
+            // to a gem with no affinity modifier, and there is a determinism test that says so.
+            if (P_DungeonRun != null && GetProperty(PropertyInt.ThreadDungeonRunId) != null && P_DungeonSalvageAffinities != null)
+            {
+                // A run creature always leaves a corpse (ThreadDungeonSpawner clears NoCorpse), but the
+                // dropped-items branch is handled anyway rather than assumed away.
+                foreach (var affinity in P_DungeonSalvageAffinities)
+                {
+                    if (ThreadSafeRandom.Next(0.0f, 1.0f) > affinity.Chance)
+                        continue;
+
+                    var wo = ACE.Server.ThreadDungeons.DungeonSalvageAffinity.TryCreate(
+                        affinity.BaseWcid, affinity.MaterialId, DeathTreasure?.Tier ?? 1);
+
+                    if (wo == null)
+                        continue;
+
+                    if (corpse != null)
+                        corpse.TryAddToInventory(wo);
+                    else
+                        droppedItems.Add(wo);
                 }
             }
 

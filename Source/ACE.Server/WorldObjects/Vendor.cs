@@ -12,6 +12,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
+using ACE.Server.Entity.AccountVault;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Network.GameEvent.Events;
@@ -25,6 +26,13 @@ namespace ACE.Server.WorldObjects
     /// Player.HandleActionBuyItem -> Vendor.BuyItems_ValidateTransaction -> Player.FinalizeBuyTransaction -> Vendor.BuyItems_FinalTransaction
     ///     
     /// </summary>
+    /// <remarks>
+    /// Several members below are virtual solely so PersonalVendor (the Mule Vendor's private-store
+    /// window) can replace retail behavior that is actively wrong for a store rather than merely
+    /// unsuitable: ProcessItemsForPurchase destroys anything stackable and deletes the biotas it keeps,
+    /// RotUniques discards player-sold stock after 300 s, and both cost functions floor at 1. See
+    /// Docs/MuleVendor/DESIGN.md section 9.1. No behavior here changed when they were virtualized.
+    /// </remarks>
     public class Vendor : Creature
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
@@ -124,7 +132,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Populates this vendor's DefaultItemsForSale
         /// </summary>
-        private void LoadInventory()
+        protected virtual void LoadInventory()
         {
             if (inventoryloaded) return;
 
@@ -172,7 +180,12 @@ namespace ACE.Server.WorldObjects
             DefaultItemsForSale.Add(wo.Guid, wo);
         }
 
-        public void AddDefaultItem(WorldObject item)
+        /// <summary>
+        /// Virtual so PersonalVendor can add a redundant guard here: refuse (and log loudly) if the
+        /// item being added is one of its own store's biotas. See Docs/MuleVendor/DESIGN.md section 5
+        /// and PersonalVendor.cs. Retail behavior is unchanged - the base implementation below.
+        /// </summary>
+        public virtual void AddDefaultItem(WorldObject item)
         {
             var existing = GetDefaultItemsByWcid(item.WeenieClassId);
 
@@ -199,7 +212,7 @@ namespace ACE.Server.WorldObjects
         /// Helper function to replace the previous 'AllItemsForSale' combiner
         /// While AllItemsForSale was a useful concept, it was only used in 2 places, and was inefficient
         /// </summary>
-        public void forEachItem(Action<WorldObject> action)
+        public virtual void forEachItem(Action<WorldObject> action)
         {
             foreach (var kvp in DefaultItemsForSale)
                 action(kvp.Value);
@@ -207,6 +220,15 @@ namespace ACE.Server.WorldObjects
             foreach (var kvp in UniqueItemsForSale)
                 action(kvp.Value);
         }
+
+        /// <summary>
+        /// Virtual so a subclass whose <see cref="forEachItem"/> enumerates something other than just
+        /// these two dictionaries (PersonalVendor also enumerates a private storeItems dictionary -
+        /// see Docs/MuleVendor/DESIGN.md section 5) cannot drift from what GameEventApproachVendor
+        /// actually serializes. GameEventApproachVendor.cs computes numItems from this property rather
+        /// than re-deriving its own count, specifically so the two can never disagree.
+        /// </summary>
+        public virtual int ItemsForSaleCount => DefaultItemsForSale.Count + UniqueItemsForSale.Count;
 
         public List<WorldObject> GetDefaultItemsByWcid(uint wcid)
         {
@@ -216,7 +238,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Searches the vendor's inventory for an item
         /// </summary>
-        public bool TryGetItemForSale(ObjectGuid itemGuid, out WorldObject itemForSale)
+        public virtual bool TryGetItemForSale(ObjectGuid itemGuid, out WorldObject itemForSale)
         {
             return DefaultItemsForSale.TryGetValue(itemGuid, out itemForSale) || UniqueItemsForSale.TryGetValue(itemGuid, out itemForSale);
         }
@@ -266,7 +288,7 @@ namespace ACE.Server.WorldObjects
             lastPlayerInfo = new WorldObjectInfo(player);
         }
 
-        private void PrepareResetToHome()
+        protected virtual void PrepareResetToHome()
         {
             // Reset to Home position
             var resetInterval = ResetInterval ?? 300;
@@ -282,7 +304,7 @@ namespace ACE.Server.WorldObjects
         /// Sends the latest vendor inventory list to player, rotates vendor towards player, and performs the appropriate emote.
         /// </summary>
         /// <param name="action">The action performed by the player</param>
-        public void ApproachVendor(Player player, VendorType action = VendorType.Undef, uint altCurrencySpent = 0)
+        public virtual void ApproachVendor(Player player, VendorType action = VendorType.Undef, uint altCurrencySpent = 0)
         {
             RotUniques();
 
@@ -429,7 +451,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Handles validation for player buying items from vendor
         /// </summary>
-        public bool BuyItems_ValidateTransaction(List<ItemProfile> itemProfiles, Player player)
+        public virtual bool BuyItems_ValidateTransaction(List<ItemProfile> itemProfiles, Player player)
         {
             // one difference between buy and sell currently
             // is that if *any* items in the buy transactions are detected as invalid,
@@ -598,17 +620,36 @@ namespace ACE.Server.WorldObjects
         /// Buy-eligibility gate for Drift Network class-ability trainer vendors. A trainer stocks every rank of
         /// its class's tokens; this rejects the whole transaction if the player cannot currently learn one of
         /// the tokens being bought - wrong rank order, a locked tier, already holding a voucher (all via the
-        /// shared <see cref="Player.CanBuyClassAbilityToken"/>), or a quantity above one (a bound
-        /// one-per-skill voucher is never bought in bulk). Non-token purchases pass through untouched, so an
-        /// ordinary vendor is unaffected. On rejection sends a transient error and returns FALSE.
+        /// shared <see cref="Player.CanBuyClassAbilityToken"/>), or more than one copy of the same token in
+        /// the one transaction (a bound one-per-skill voucher is never bought in bulk). Non-token purchases
+        /// pass through untouched, so an ordinary vendor is unaffected. On rejection sends a transient error
+        /// and returns FALSE.
         /// </summary>
         private static bool ClassAbilityTokensBuyable(List<WorldObject> purchaseItems, Player player)
         {
+            var seenTokenSkills = new HashSet<int>();
+
             foreach (var item in purchaseItems)
             {
                 var tokenSkillId = item.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0;
                 if (tokenSkillId <= 0)
                     continue;   // not a class-ability token - ordinary merchandise
+
+                // ONE voucher per skill per TRANSACTION, not merely per pack. Both of the other guards miss
+                // a multi-copy buy:
+                //  - CanBuyClassAbilityToken's hold test reads GetAllPossessions(), which cannot see the
+                //    other items in this same purchase, because none of them are in the pack yet;
+                //  - the StackSize test below never fires either, because a quantity above one on a
+                //    MaxStackSize-1 token does not arrive as one stack of N. ItemProfileToWorldObjects
+                //    takes the STACKABLE branch for it (MaxStackSize 1 is still > 0) and emits N separate
+                //    one-item stacks, each of which then passes every per-item check on its own.
+                // Without this, buying N copies charged N x cost and handed over N tokens of which only the
+                // first was usable - the rest report a rank the player already has and sit dead in the pack.
+                if (!seenTokenSkills.Add(tokenSkillId))
+                {
+                    player.SendTransientError("You can only buy one class ability training token at a time.");
+                    return false;
+                }
 
                 if ((item.StackSize ?? 1) > 1)
                 {
@@ -637,23 +678,86 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
-        public uint GetSellCost(WorldObject item) => GetSellCost(item.Value, item.ItemType);
-
-        public uint GetSellCost(Weenie item) => GetSellCost(item.GetValue(), item.GetItemType());
-
-        private uint GetSellCost(int? value, ItemType? itemType)
+        /// <summary>
+        /// Price of a purchase item, priced PER UNIT and multiplied by the stack size.
+        ///
+        /// A quantity-N buy of a stackable arrives here as ONE WorldObject with StackSize = N
+        /// (ItemProfileToWorldObjects), whose Value SetStackSize has already rewritten to
+        /// StackUnitValue * N. Pricing that aggregate Value directly looks equivalent, but it is not,
+        /// because the Math.Max(1, ...) floor and the Ceiling then apply ONCE to the whole stack
+        /// instead of once per unit:
+        ///   - a Value-0 stackable (whose price comes entirely from the floor) cost 1 for the WHOLE
+        ///     stack - 100 Black Market Health Elixirs for 1 MMD on the Marketplace sundries vendor;
+        ///   - any item whose per-unit price is fractional was rounded up once rather than N times -
+        ///     1000 Promissory Notes at SellPrice 1.25 cost 1250 instead of 2000.
+        /// The client prices the same purchase as (unit price) x (quantity) - GameEventApproachVendor
+        /// sends it only the sell rate and the item's unit Value, so it cannot do anything else - so
+        /// per-unit is also the arithmetic that makes the charge match what the player was shown.
+        /// </summary>
+        public virtual uint GetSellCost(WorldObject item)
         {
-            var sellRate = SellPrice ?? 1.0;
+            var stackSize = Math.Max(1, item.StackSize ?? 1);
+
+            return CalcSellCost(SellPrice ?? 1.0, GetStackUnitValue(item.StackUnitValue, item.Value, stackSize), item.ItemType, stackSize);
+        }
+
+        /// <summary>
+        /// Weenie overload: a weenie's Value is already the UNIT value (a shop listing, never a stack),
+        /// so this is the per-unit price and takes no stack multiplier.
+        /// </summary>
+        public virtual uint GetSellCost(Weenie item) => CalcSellCost(SellPrice ?? 1.0, item.GetValue(), item.GetItemType(), 1);
+
+        /// <summary>
+        /// The value of ONE unit of a (possibly stacked) item.
+        ///
+        /// StackUnitValue is the authoritative per-unit figure and is used whenever it is set. It is NOT
+        /// always set: a stackable weenie with no INT 15 row leaves it null while SetStackSize has still
+        /// rewritten Value to 0 * StackSize. The stackSize > 1 fallback divides the aggregate Value back
+        /// out rather than treating a whole stack's worth as one unit's, which would then be multiplied
+        /// by the stack size a second time.
+        /// Internal rather than private so ACE.Server.Tests can pin it (InternalsVisibleTo, ACE.Server.csproj:15).
+        /// </summary>
+        internal static int? GetStackUnitValue(int? stackUnitValue, int? value, int stackSize)
+        {
+            if (stackUnitValue != null)
+                return stackUnitValue;
+
+            if (stackSize > 1)
+                return (value ?? 0) / stackSize;
+
+            return value;
+        }
+
+        /// <summary>
+        /// max(1, ceil(sellRate * unitValue - 0.1)) per unit, times stackSize, clamped to uint range.
+        /// Internal rather than private so ACE.Server.Tests can pin it (InternalsVisibleTo, ACE.Server.csproj:15).
+        /// </summary>
+        internal static uint CalcSellCost(double sellRate, int? unitValue, ItemType? itemType, int stackSize)
+        {
             if (itemType == ItemType.PromissoryNote)
                 sellRate = 1.15;
 
-            var cost = Math.Max(1, (uint)Math.Ceiling(((float)sellRate * (value ?? 0)) - 0.1));
-            return cost;
+            var unitCost = Math.Max(1, (uint)Math.Ceiling(((float)sellRate * (unitValue ?? 0)) - 0.1));
+
+            // Nothing legitimate reaches uint range, and BuyItems_ValidateTransaction rejects a basket
+            // total above it anyway, but clamp rather than let a hostile stack size wrap the product.
+            var total = (ulong)unitCost * (ulong)Math.Max(1, stackSize);
+
+            return (uint)Math.Min(total, uint.MaxValue);
         }
 
-        public int GetBuyCost(WorldObject item) => GetBuyCost(item.Value, item.ItemType);
+        /// <summary>
+        /// What the vendor PAYS the player for an item. Deliberately still priced off the whole stack's
+        /// aggregate Value, unlike GetSellCost above, because it does not share that method's failure
+        /// mode: this one Floors rather than Ceilings, so the difference between pricing a stack once
+        /// and pricing each unit is under one currency unit no matter how large the stack, and it errs
+        /// toward the player rather than away from them. There is a pre-existing quirk at any vendor
+        /// with BuyPrice below 1, where splitting a stack into singles first collects the Math.Max(1, ...)
+        /// floor once per item instead of once per stack; that is untouched here and out of scope.
+        /// </summary>
+        public virtual int GetBuyCost(WorldObject item) => GetBuyCost(item.Value, item.ItemType);
 
-        public int GetBuyCost(Weenie item) => GetBuyCost(item.GetValue(), item.GetItemType());
+        public virtual int GetBuyCost(Weenie item) => GetBuyCost(item.GetValue(), item.GetItemType());
 
         private int GetBuyCost(int? value, ItemType? itemType)
         {
@@ -665,7 +769,7 @@ namespace ACE.Server.WorldObjects
             return cost;
         }
 
-        public int CalculatePayoutCoinAmount(Dictionary<uint, WorldObject> items)
+        public virtual int CalculatePayoutCoinAmount(Dictionary<uint, WorldObject> items)
         {
             var payout = 0;
 
@@ -676,11 +780,48 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// A NON-MUTATING preflight, checked BEFORE VerifySellItems detaches an item from the player's
+        /// pack. Retail's own ProcessItemsForPurchase can never decline (it always either resells or
+        /// destroys), so retail never needed this - a subclass whose ProcessItemsForPurchase CAN
+        /// decline (PersonalVendor's can, on a full or inaccessible vault) needs a way to say so before
+        /// the item is already detached and persisted in that state, not just after. Base is a no-op
+        /// pass so ordinary vendors are unaffected. This check is TOCTOU by nature - a second window on
+        /// the same store can change the answer between this call and the actual deposit - so whatever
+        /// consults it must still handle a later refusal from the deposit itself; this only shrinks the
+        /// window, it does not close it.
+        /// </summary>
+        public virtual bool CanAccept(WorldObject wo, Player player, out string reason)
+        {
+            reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// Resolves any per-transaction state the vendor's per-item CanAccept needs, once, before the
+        /// caller's profile loop. A plain vendor has none and answers with the permissive default.
+        /// </summary>
+        public virtual bool TryResolveSellAccess(Player player, out VaultAccess resolvedAccess, out string failReason)
+        {
+            resolvedAccess = VaultAccess.DepositWithdraw;
+            failReason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// Per-item acceptance, given access already resolved by TryResolveSellAccess. The base
+        /// implementation ignores the resolved value and defers to the existing single-item overload.
+        /// </summary>
+        public virtual bool CanAccept(WorldObject wo, Player player, VaultAccess resolvedAccess, out string reason)
+        {
+            return CanAccept(wo, player, out reason);
+        }
+
+        /// <summary>
         /// This will either add the item to the vendors temporary sellables, or destroy it.<para />
         /// In both cases, the item will be removed from the database.<para />
         /// The item should already have been removed from the players inventory
         /// </summary>
-        public void ProcessItemsForPurchase(Player player, Dictionary<uint, WorldObject> items)
+        public virtual void ProcessItemsForPurchase(Player player, Dictionary<uint, WorldObject> items)
         {
             foreach (var item in items.Values)
             {
@@ -762,7 +903,7 @@ namespace ACE.Server.WorldObjects
         /// Unique items in the vendor's inventory sold to the vendor by players
         /// expire after vendor_unique_rot_time seconds
         /// </summary>
-        private void RotUniques()
+        protected virtual void RotUniques()
         {
             List<WorldObject> itemsToRemove = null;
 

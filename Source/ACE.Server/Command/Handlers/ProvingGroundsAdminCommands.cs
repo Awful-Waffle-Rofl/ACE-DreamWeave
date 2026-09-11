@@ -14,11 +14,19 @@ using ACE.Server.Network;
 namespace ACE.Server.Command.Handlers
 {
     /// <summary>
-    /// Admin tooling for the Proving Grounds leaderboards (/top). The leaderboards are served entirely from the
-    /// in-memory PlayerManager collections (online Player + offline OfflinePlayer objects), never re-read from
-    /// the shard database, so clearing scores requires mutating those in-memory biotas through IPlayer and then
-    /// persisting via SaveBiotaToDatabase. Deleting the rows directly in MySQL would do nothing until the next
-    /// server restart, and would be silently overwritten by the next save of an already-loaded player.
+    /// Admin tooling for the three BIOTA-BACKED Proving Grounds leaderboards (/top dps, /top defense,
+    /// /top wave). Those three are served entirely from the in-memory PlayerManager collections (online Player +
+    /// offline OfflinePlayer objects), never re-read from the shard database, so clearing their scores requires
+    /// mutating those in-memory biotas through IPlayer and then persisting via SaveBiotaToDatabase. Deleting
+    /// the rows directly in MySQL would do nothing until the next server restart, and would be silently
+    /// overwritten by the next save of an already-loaded player.
+    ///
+    /// SPEED IS THE EXCEPTION, AND IT INVERTS ALL OF THE ABOVE. /top speed keeps no score on the biota at all:
+    /// its `character_speed_run` shard table is the RECORD OF TRUTH and SpeedBoardManager's board cache is
+    /// DERIVED from that table and refreshed on write. It is therefore reset with /resetspeedboard (see
+    /// SpeedSeasonAdminCommands), which deletes the rows and then refreshes the cache - NOT with
+    /// /resetleaderboard, which cannot reach it, because nothing about that board lives on a biota. See
+    /// Docs/ProvingGroundsSpeed/DESIGN.md section 3.5.
     /// </summary>
     public static class ProvingGroundsAdminCommands
     {
@@ -67,15 +75,24 @@ namespace ACE.Server.Command.Handlers
                     return true;
 
                 case "wave":
-                    boards = new List<(PropertyInt64, string)> { (PropertyInt64.BestWaveScore, "Wave (wave)") };
+                    boards = new List<(PropertyInt64, string)>
+                    {
+                        (PropertyInt64.BestWaveScoreCenti, "Wave (wave)"),
+                        (PropertyInt64.BestWaveScore, "Wave legacy (wave)"),
+                    };
                     return true;
 
+                // "all" means all the BIOTA-BACKED boards, which is all this command can reach: every entry
+                // here is a PropertyInt64 on a character biota, and Speed deliberately stores nothing on a
+                // biota. Its board is the `character_speed_run` table plus a derived cache, so it is reset with
+                // /resetspeedboard instead. The omission is deliberate, not an oversight.
                 case "all":
                     boards = new List<(PropertyInt64, string)>
                     {
                         (PropertyInt64.BestDpsScore, "Attack (dps)"),
                         (PropertyInt64.BestSurvivalScore, "Defense (defense)"),
-                        (PropertyInt64.BestWaveScore, "Wave (wave)"),
+                        (PropertyInt64.BestWaveScoreCenti, "Wave (wave)"),
+                        (PropertyInt64.BestWaveScore, "Wave legacy (wave)"),
                     };
                     return true;
 

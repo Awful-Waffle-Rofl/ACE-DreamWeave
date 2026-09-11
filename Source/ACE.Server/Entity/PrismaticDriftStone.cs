@@ -21,6 +21,10 @@ namespace ACE.Server.Entity
     ///   1. A rend imbue matched to the weapon's own damage type (see <see cref="GetRend"/>).
     ///   2. Between <see cref="MinBoosts"/> and <see cref="MaxBoosts"/> incremental damage tinkers,
     ///      class-appropriate (see <see cref="GetBoostClass"/>).
+    ///   3. Attuned + Bonded, so the finished weapon stays with the player who spent the stone: it
+    ///      cannot be given to another player or put in a trade window, and it survives death rather
+    ///      than dropping on the corpse. Attuned does NOT block a vendor sale - see Player_Commerce's
+    ///      VerifySellItems, which reads IsSellable and Retained and never looks at either property.
     ///
     /// The property changes mirror the retail imbue / weapon tinkering side effects. The readable
     /// reference for which retail material produces which effect is the dead legacy code in
@@ -109,7 +113,13 @@ namespace ACE.Server.Entity
         /// Maps a weapon's damage type to the rend it earns.
         ///
         /// Deterministic priority for multi-type weapons - elemental bits beat physical ones:
-        ///   Fire > Cold > Acid > Electric > Nether > Slash > Pierce > Bludgeon.
+        ///   Fire > Cold > Acid > Electric > Health > Nether > Slash > Pierce > Bludgeon.
+        ///
+        /// Health is the fork's own element (life casters declare W_DamageType Health - see
+        /// LifeCasterDisplay.IsLifeCaster) and earns HealthRending ("Life Rending"), the same effect
+        /// the White Quartz imbue applies: full combat handling via GetRendDamageType's Health case
+        /// and a registered icon underlay. It ranks above Nether so a hypothetical Health|Nether
+        /// hybrid still earns a real rend.
         ///
         /// Nether has no rend in ImbuedEffectType's usable set (NetherRending exists but has no icon
         /// underlay and no combat handling), so nether wands get CriticalStrike instead.
@@ -124,6 +134,7 @@ namespace ACE.Server.Entity
             if ((damageType & DamageType.Cold) != 0)     return ImbuedEffectType.ColdRending;
             if ((damageType & DamageType.Acid) != 0)     return ImbuedEffectType.AcidRending;
             if ((damageType & DamageType.Electric) != 0) return ImbuedEffectType.ElectricRending;
+            if ((damageType & DamageType.Health) != 0)   return ImbuedEffectType.HealthRending;
 
             if ((damageType & DamageType.Nether) != 0)   return ImbuedEffectType.CriticalStrike;
 
@@ -156,6 +167,7 @@ namespace ACE.Server.Entity
                 case ImbuedEffectType.FireRending:     return MaterialType.RedGarnet;       // 0x3800003E
                 case ImbuedEffectType.AcidRending:     return MaterialType.Emerald;         // 0x3800003A
                 case ImbuedEffectType.ElectricRending: return MaterialType.Jet;             // 0x3800003D
+                case ImbuedEffectType.HealthRending:   return MaterialType.WhiteQuartz;     // fork imbue, mutation 0x3A000000
                 case ImbuedEffectType.CriticalStrike:  return MaterialType.BlackOpal;       // 0x38000023
             }
 
@@ -173,6 +185,7 @@ namespace ACE.Server.Entity
                 case ImbuedEffectType.FireRending:     return "Fire Rending";
                 case ImbuedEffectType.AcidRending:     return "Acid Rending";
                 case ImbuedEffectType.ElectricRending: return "Electric Rending";
+                case ImbuedEffectType.HealthRending:   return "Life Rending";
                 case ImbuedEffectType.CriticalStrike:  return "Critical Strike";
             }
 
@@ -268,7 +281,22 @@ namespace ACE.Server.Entity
             var rend = GetRend(weapon);
 
             if (weapon.ImbuedEffect != rend)
-                return false;
+            {
+                // LEGACY HEALTH STAMP. Before GetRend grew its Health branch, a life caster
+                // (W_DamageType Health) fell through to the CriticalStrike fallback, so weapons
+                // stoned then carry the rend the old mapping produced - Health masked out - with
+                // that rend's material closing the TinkerLog. Accept that stamp too: recomputing
+                // only the new rend would silently unseal every pre-fix life wand, and the Swap
+                // path has no integrity-gate backstop (it is reroll-only by 2026-08-07 policy -
+                // see WeaponModManager.ResolveAction).
+                if ((weapon.W_DamageType & DamageType.Health) == 0)
+                    return false;
+
+                rend = GetRend(weapon.W_DamageType & ~DamageType.Health, weapon.ItemType);
+
+                if (weapon.ImbuedEffect != rend)
+                    return false;
+            }
 
             var boostMaterial = GetBoostMaterial(GetBoostClass(weapon));
 
@@ -400,16 +428,15 @@ namespace ACE.Server.Entity
 
         /// <summary>
         /// A caster carrying no elemental alignment at all - no DamageType bit. These are the
-        /// weapons that take the CriticalStrike fallback rather than a rend, and the ones an
-        /// Attuned Drift Prism could otherwise have given an element to first.
+        /// weapons that take the CriticalStrike fallback rather than a rend.
         ///
-        /// Scope note: the Attuned Drift Prism feature discriminates orbs specifically, via a table
-        /// of orb-shaped Setup DataIds (AttunedDriftPrism.OrbSetupIds on its own branch). That table
-        /// is deliberately NOT duplicated here - two copies of a mesh id list would drift the moment
-        /// either side added an orb. So the warning is raised for every unaligned caster, not only
-        /// orbs. The sentence stays true either way: what forecloses a later attunement is this
-        /// stone's permanent tinker lock, which applies to wands, staves and sceptres exactly as it
-        /// does to orbs, whether or not a prism exists for that shape today.
+        /// What forecloses any later alignment is this stone's permanent tinker lock: once a
+        /// caster takes this stone, it can never be tinkered again, so an unaligned caster stays
+        /// unaligned for good. That applies uniformly to wands, staves, sceptres and orbs alike.
+        ///
+        /// "Aligned", not "attuned", deliberately: this file's other use of attunement is the
+        /// ownership flag ApplyToWeapon stamps (AttunedStatus), and the two must not share a word
+        /// in the same confirmation dialog.
         /// </summary>
         public static bool IsUnalignedCaster(WorldObject target)
         {
@@ -422,10 +449,10 @@ namespace ACE.Server.Entity
         /// <summary>Kept under the client confirmation panel's silent ~600 character clip.</summary>
         public static string GetConfirmationText(WorldObject target)
         {
-            var text = $"Use the Prismatic Drift Stone on {target.Name}? The weapon gains a rending matched to its own damage type, plus between {MinBoosts} and {MaxBoosts} damage tinkers. It will then count as fully tinkered and can never be tinkered again. The stone is consumed.";
+            var text = $"Use the Prismatic Drift Stone on {target.Name}? The weapon gains a rending matched to its own damage type, plus between {MinBoosts} and {MaxBoosts} damage tinkers. It will then count as fully tinkered and can never be tinkered again, and it becomes attuned and bonded - it can no longer be given away or traded to another player, and it stays with you through death. The stone is consumed.";
 
             if (IsUnalignedCaster(target))
-                text += " This caster has no elemental alignment, and the lock is permanent, so it can never be attuned to an element afterward.";
+                text += " This caster has no elemental alignment, and the lock is permanent, so it can never gain an elemental alignment afterward.";
 
             return text;
         }
@@ -533,6 +560,29 @@ namespace ACE.Server.Entity
 
             // the permanent lock: fully tinkered regardless of how many boosts landed
             target.NumTimesTinkered = LockedTinkerCount;
+
+            // the weapon belongs to whoever spent the stone on it: Attuned blocks trading and giving,
+            // Bonded keeps it off the corpse on death.
+            //
+            // NEITHER LINE OVERWRITES A DELIBERATE STATUS. The clean-weapon gate reads the tinker
+            // budget only, so a weapon already carrying a content-authored status reaches this line
+            // and a flat assignment would silently rewrite it.
+            //
+            // Attuned: raise only, because Sticky outranks Attuned (a no-drop quest weapon).
+            //
+            // Bonded: raise only FROM NORMAL. BondedStatus is not a ladder - Sticky (2) outranks
+            // Bonded, but Destroy (-2) and Slippery (-1) are the OPPOSITE intent, not weaker
+            // protection: Destroy removes the item on death and Slippery forces it to drop anyway
+            // (Player_Death.cs). Fork boss weapons carry Bonded = -2 on purpose so they never
+            // survive (e.g. Content/sql/weenies/1002669 Dynamo Edge.sql), so a "< Bonded" test alone
+            // would flip that intent on its head.
+            if ((target.Attuned ?? AttunedStatus.Normal) < AttunedStatus.Attuned)
+                target.Attuned = AttunedStatus.Attuned;
+
+            var bonded = target.Bonded ?? BondedStatus.Normal;
+
+            if (bonded == BondedStatus.Normal)
+                target.Bonded = BondedStatus.Bonded;
 
             return result;
         }

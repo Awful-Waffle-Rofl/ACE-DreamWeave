@@ -19,6 +19,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.CombatSimulator;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
@@ -1625,6 +1626,174 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
+        /// Probe for opcode 0xF754 (PlayScriptId). See GameMessagePlayScriptId.
+        ///
+        /// Sends a RAW 0x33xxxxxx script DataID at an object, bypassing the PhysicsScriptTable lookup
+        /// that 0xF755 (PlayEffect) requires. If the client honours it, effects stop being constrained
+        /// by setup shape entirely and bows become solvable without touching the model.
+        ///
+        /// The wire format is unknown, so `variant` selects between candidate payloads - try 1, then 2,
+        /// then 3. A wrong guess is expected to do nothing visible; it should not disconnect, but a
+        /// malformed smartbox message is exactly the kind of thing that can, so run this on a test
+        /// character. Nothing is persisted either way.
+        /// </summary>
+        [CommandHandler("playscriptid", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1,
+            "PROBE: send a raw script DataID (opcode 0xF754) at the last appraised object, or at yourself.",
+            "<scriptIdHex> [variant 1-3] [speed]\nExample: /playscriptid 3300101B")]
+        public static void HandlePlayScriptId(Session session, params string[] parameters)
+        {
+            var raw = parameters[0];
+            if (raw.StartsWith("0x") || raw.StartsWith("0X"))
+                raw = raw.Substring(2);
+
+            if (!uint.TryParse(raw, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var scriptId))
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat($"Could not parse '{parameters[0]}' as a hex script id.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // Default 2 (guid + DataID + speed). The client's physics layer exposes play_script in
+            // both a DataID and an enum form and BOTH take a float mod, so the two messages most
+            // likely have the same shape. Starting with the longer payload is also the safer guess:
+            // a game message carries its own length, so trailing bytes the client ignores are
+            // harmless, while a payload SHORTER than expected makes it read past the end.
+            var variant = 2;
+            if (parameters.Length > 1 && int.TryParse(parameters[1], out var v))
+                variant = v;
+
+            var speed = 1.0f;
+            if (parameters.Length > 2 && float.TryParse(parameters[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var s))
+                speed = s;
+
+            // Prefer the appraised object so a wielded bow can be targeted directly; fall back to the
+            // player, which is the easiest thing to see a persistent emitter on.
+            var target = CommandHandlerHelper.GetLastAppraisedObject(session) ?? session.Player;
+
+            // Default is a direct session send, not a broadcast: the probe only needs to know whether
+            // OUR client renders it, and an inventory item is not in anyone's visibility set, so a
+            // broadcast could silently reach nobody and read as a negative result. Pass a 4th arg to
+            // broadcast instead, which is the separate question of whether other players see it.
+            var broadcast = parameters.Length > 3 && parameters[3] != "0";
+
+            // Variants 4/5 append a part index. Scripts bake their emitter part index into the dat,
+            // so an effect authored at part 0 rides a bow's upper limb instead of the grip; -1 means
+            // the object's own frame, which IS the grip. Long shot - variant 2 working suggests the
+            // client just ignores trailing bytes - but cheap to settle.
+            var partIndex = 0xFFFFFFFFu;
+            if (parameters.Length > 4)
+            {
+                var pi = parameters[4];
+                if (pi.StartsWith("-")) partIndex = unchecked((uint)int.Parse(pi));
+                else partIndex = uint.Parse(pi);
+            }
+
+            var msg = new GameMessagePlayScriptId(target.Guid, scriptId, variant, speed, partIndex);
+
+            if (broadcast)
+                target.EnqueueBroadcast(msg);
+            else
+                session.Network.EnqueueSend(msg);
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(
+                $"Sent 0xF754 script 0x{scriptId:X8} (variant {variant}, speed {speed}, {(broadcast ? "broadcast" : "session")}) at {target.Name} [0x{target.Guid.Full:X8}].", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Attaches a script to an object so it is re-sent every time a client rebuilds that object.
+        /// This is the durability half of the 0xF754 probe - /playscriptid fires once and is lost on
+        /// relog, this survives it. In-memory only; a server restart clears it. See VisualEffectManager.
+        /// </summary>
+        [CommandHandler("vfxstick", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1,
+            "PROBE: attach a raw script DataID to the last appraised object (or yourself) so it is re-sent on every object rebuild.",
+            "<scriptIdHex>\nExample: /vfxstick 330010F1     (then /vfxclear to remove)")]
+        public static void HandleVfxStick(Session session, params string[] parameters)
+        {
+            var raw = parameters[0];
+            if (raw.StartsWith("0x") || raw.StartsWith("0X"))
+                raw = raw.Substring(2);
+
+            if (!uint.TryParse(raw, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var scriptId))
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat($"Could not parse '{parameters[0]}' as a hex script id.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            var target = CommandHandlerHelper.GetLastAppraisedObject(session) ?? session.Player;
+
+            VisualEffectManager.Attach(target.Guid.Full, scriptId);
+
+            // Play it now as well, so the attach is visible without waiting for a rebuild.
+            session.Network.EnqueueSend(new GameMessagePlayScriptId(target.Guid, scriptId));
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(
+                $"Attached script 0x{scriptId:X8} to {target.Name} [0x{target.Guid.Full:X8}]. It will be re-sent on every rebuild until /vfxclear or a server restart.", ChatMessageType.Broadcast));
+        }
+
+        [CommandHandler("vfxclear", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0,
+            "PROBE: remove all scripts attached by /vfxstick from the last appraised object (or yourself).")]
+        public static void HandleVfxClear(Session session, params string[] parameters)
+        {
+            var target = CommandHandlerHelper.GetLastAppraisedObject(session) ?? session.Player;
+            var removed = VisualEffectManager.Clear(target.Guid.Full);
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(
+                removed
+                    ? $"Cleared attached scripts from {target.Name} [0x{target.Guid.Full:X8}]. Already-running emitters persist until the object is rebuilt."
+                    : $"{target.Name} [0x{target.Guid.Full:X8}] had no attached scripts.", ChatMessageType.Broadcast));
+        }
+
+        [CommandHandler("vfxlist", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0,
+            "PROBE: list every object currently carrying a /vfxstick script.")]
+        public static void HandleVfxList(Session session, params string[] parameters)
+        {
+            var any = false;
+            foreach (var (guid, scripts) in VisualEffectManager.AllScratch())
+            {
+                any = true;
+                session.Network.EnqueueSend(new GameMessageSystemChat(
+                    $"0x{guid:X8}: {string.Join(", ", scripts.Select(s => $"0x{s:X8}"))}", ChatMessageType.Broadcast));
+            }
+
+            if (!any)
+                session.Network.EnqueueSend(new GameMessageSystemChat("No objects carry an attached script.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Sets PropertyDataId.VisualEffectScript on an object. Unlike /vfxstick this is the real
+        /// storage: it persists on the instance and is replayed on every rebuild by VisualEffectManager.
+        /// </summary>
+        [CommandHandler("vfxprop", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1,
+            "Set (or clear) the persistent visual effect script on the last appraised object.",
+            "<scriptIdHex|clear>\nExample: /vfxprop 330011BE")]
+        public static void HandleVfxProp(Session session, params string[] parameters)
+        {
+            var target = CommandHandlerHelper.GetLastAppraisedObject(session) ?? session.Player;
+
+            if (parameters[0].Equals("clear", System.StringComparison.OrdinalIgnoreCase))
+            {
+                target.VisualEffectScript = null;
+                session.Network.EnqueueSend(new GameMessageSystemChat(
+                    $"Cleared VisualEffectScript on {target.Name}. An effect already running stays until the object is rebuilt.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            var raw = parameters[0];
+            if (raw.StartsWith("0x") || raw.StartsWith("0X"))
+                raw = raw.Substring(2);
+
+            if (!uint.TryParse(raw, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var scriptId))
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat($"Could not parse '{parameters[0]}' as a hex script id.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            target.VisualEffectScript = scriptId;
+            session.Network.EnqueueSend(new GameMessagePlayScriptId(target.Guid, scriptId));
+            session.Network.EnqueueSend(new GameMessageSystemChat(
+                $"Set VisualEffectScript 0x{scriptId:X8} on {target.Name} [0x{target.Guid.Full:X8}].", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
         /// Returns the distance to the last appraised object
         /// </summary>
         [CommandHandler("dist", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0, "Returns the distance to the last appraised object")]
@@ -1825,6 +1994,57 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
+        /// Shows per-session counters of client ForceObjectDescSend requests, used to detect the
+        /// client's stranded-object memory leak (a guid repeating at ~20 s intervals is a stranded
+        /// client-side placeholder - see Docs/Perf/CLIENT-MEMORY-LEAK.md).
+        /// </summary>
+        [CommandHandler("forceobjdescprobe", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0,
+            "Shows counters of client ForceObjDesc requests for a player, to detect the client stranded-object leak",
+            "[player name] or [clear] - no args = self; 'clear' as sole arg resets your own counters")]
+        public static void HandleForceObjDescProbe(Session session, params string[] parameters)
+        {
+            var target = session.Player;
+
+            if (parameters.Length == 1 && parameters[0].Equals("clear", StringComparison.OrdinalIgnoreCase))
+            {
+                target.ClearForceObjDescProbe();
+                CommandHandlerHelper.WriteOutputInfo(session, "ForceObjDesc probe counters cleared.");
+                return;
+            }
+
+            if (parameters.Length > 0)
+            {
+                var playerName = string.Join(" ", parameters);
+                target = PlayerManager.GetOnlinePlayer(playerName);
+                if (target == null)
+                {
+                    CommandHandlerHelper.WriteOutputInfo(session, $"Player {playerName} not found or not online.");
+                    return;
+                }
+            }
+
+            var snapshot = target.GetForceObjDescProbeSnapshot();
+
+            var totalHits = snapshot.Sum(kvp => kvp.Value.Hits);
+            var repeating = snapshot.Count(kvp => kvp.Value.Hits >= 3);
+            var notFound = snapshot.Count(kvp => !kvp.Value.LastFound);
+
+            CommandHandlerHelper.WriteOutputInfo(session,
+                $"ForceObjDesc probe for {target.Name}: {snapshot.Count} distinct guids, {totalHits} total requests, " +
+                $"{repeating} repeating (>=3 hits), {notFound} not found server-side, {target.ForceObjDescProbeOverflow} dropped past cap.");
+
+            var now = DateTime.UtcNow;
+            foreach (var kvp in snapshot.OrderByDescending(k => k.Value.Hits).Take(20))
+            {
+                var e = kvp.Value;
+                var interval = e.Hits > 1 ? (e.LastSeen - e.FirstSeen).TotalSeconds / (e.Hits - 1) : 0;
+                CommandHandlerHelper.WriteOutputInfo(session,
+                    $"  0x{kvp.Key:X8}: {e.Hits} hits, found={(e.LastFound ? "yes" : "no")}, " +
+                    $"first {(now - e.FirstSeen).TotalMinutes:F1} min ago, last {(now - e.LastSeen).TotalSeconds:F0} s ago, ~{interval:F0} s interval");
+            }
+        }
+
+        /// <summary>
         /// Enables emote debugging for the last appraised object
         /// </summary>
         [CommandHandler("debugemote", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0, "Enables emote debugging for the last appraised object")]
@@ -1844,7 +2064,16 @@ namespace ACE.Server.Command.Handlers
         [CommandHandler("myloc", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 0, "Shows the current player location, from the server perspective")]
         public static void HandleMyLoc(Session session, params string[] parameters)
         {
+            var instance = session.Player.Location.Instance;
+
+            // Realms: reported as its own line - ToLOCString is the paste-into-a-command
+            // format and has ~90 callers, so it stays byte-for-byte what it was
+            ACE.Entity.Position.ParseInstanceID(instance, out var isEphemeral, out var realmId, out var shortInstanceId);
+
+            var realmName = RealmManager.GetRealm(realmId)?.Name ?? "unregistered";
+
             session.Network.EnqueueSend(new GameMessageSystemChat($"CurrentLandblock: {session.Player.CurrentLandblock.Id.Landblock:X4}", ChatMessageType.Broadcast));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Instance: 0x{instance:X8} - realm {realmId} ({realmName}), instance {shortInstanceId}{(isEphemeral ? ", ephemeral" : "")}", ChatMessageType.Broadcast));
             session.Network.EnqueueSend(new GameMessageSystemChat($"Location: {session.Player.Location.ToLOCString()}", ChatMessageType.Broadcast));
             session.Network.EnqueueSend(new GameMessageSystemChat($"Physics : {session.Player.PhysicsObj.Position}", ChatMessageType.Broadcast));
         }
@@ -4036,6 +4265,777 @@ namespace ACE.Server.Command.Handlers
             }
         }
 
+        /// <summary>
+        /// The eight damage types a DefenderProfile actually carries rows for, read off the two
+        /// arrays ProfileBuilder.Walk concatenates to key its armor, resistance and shield tables:
+        /// PhysicalDamageTypes and ElementalDamageTypes
+        /// (Source\ACE.Server\CombatSimulator\ProfileBuilder.cs:92-105).
+        ///
+        /// This list is a GATE, not decoration. Every lookup in MitigationMath fails soft to that
+        /// term's neutral value when the key is absent, deliberately, so a spec carrying any OTHER
+        /// damage type measures as fully unmitigated: armor mod 1.0, shield mod 1.0, and a
+        /// resistance mod of the attacker's own weaponResistanceMod. The command would then print a
+        /// damage figure that is too high with nothing in the output saying so, which is exactly the
+        /// error this tool exists to prevent. /simhit refuses the measurement instead.
+        /// </summary>
+        private static readonly DamageType[] SimHitProfiledDamageTypes =
+        {
+            DamageType.Slash, DamageType.Pierce, DamageType.Bludgeon,
+            DamageType.Fire, DamageType.Cold, DamageType.Acid, DamageType.Electric, DamageType.Nether,
+        };
+
+        /// <summary>
+        /// The moment the in-flight /simhit run started, or default(DateTime) when none is. Read
+        /// and written only under <see cref="simHitRunLock"/>, because a ProfileBuilder callback can
+        /// land on a pool thread while another admin's invocation is on a world thread.
+        ///
+        /// WHY A TIMESTAMP AND NOT A BOOL. A run clears this from inside a ProfileBuilder callback,
+        /// and per the build ledger's Ruling P19 that callback can be DROPPED entirely:
+        /// SerializedShardDatabase.RunStandalone catches a throw from the queued read, logs
+        /// "[DATABASE] DoWork task failed" and swallows it (SerializedShardDatabase.cs:246-258), so
+        /// the completion never arrives and nothing on that path has a timeout. A bare boolean
+        /// would then be stuck true for the life of the process and the command would be dead until
+        /// a restart. Pairing the flag with its start time means a stranded run ages out.
+        /// </summary>
+        private static DateTime simHitRunStartedUtc;
+
+        private static readonly object simHitRunLock = new object();
+
+        /// <summary>
+        /// How long a /simhit run may hold the in-flight guard before a fresh invocation is allowed
+        /// to take it over.
+        ///
+        /// Two minutes, and the reasoning is the cost of being wrong in each direction rather than
+        /// a measured duration. Too short and a second run stacks on top of a first that is merely
+        /// slow, which is the pile-up this guard exists to prevent; too long and a dropped callback
+        /// locks an admin out of a diagnostic command for that whole window. A normal run is ten
+        /// BuildAsync calls that each do one GetCharacter, one possession load and one GetBiota on
+        /// the shard worker, so it completes in seconds even against the mule-sized inventories the
+        /// tool targets - two minutes is far outside that, which makes an expiry here strong
+        /// evidence that a callback really was lost rather than that a run is still working.
+        /// </summary>
+        private static readonly TimeSpan SimHitRunMaxAge = TimeSpan.FromMinutes(2);
+
+        /// <summary>
+        /// Takes the in-flight guard, or returns the age of the run already holding it.
+        ///
+        /// Returns null on success. On failure returns how long the incumbent has been running, so
+        /// the caller can say something specific instead of "try again".
+        /// </summary>
+        private static TimeSpan? TrySimHitRunStart()
+        {
+            lock (simHitRunLock)
+            {
+                if (simHitRunStartedUtc != default)
+                {
+                    var age = DateTime.UtcNow - simHitRunStartedUtc;
+
+                    if (age < SimHitRunMaxAge)
+                        return age;
+
+                    // the incumbent has aged out - its completion was lost, so take it over
+                }
+
+                simHitRunStartedUtc = DateTime.UtcNow;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Releases the in-flight guard. MUST be called on every path out of HandleSimHit that took
+        /// it, including every early return, not only on completion.
+        /// </summary>
+        private static void SimHitRunEnd()
+        {
+            lock (simHitRunLock)
+                simHitRunStartedUtc = default;
+        }
+
+        [CommandHandler("simhit", AccessLevel.Admin, CommandHandlerFlag.RequiresWorld, 1,
+            "Measures how hard a boss hits the seeded prod roster.",
+            "<boss wcid> [target landed hits]\n" +
+            "Reports hit chance, mean damage per landed hit, and landed hits to kill for each\n" +
+            "of the ten parked roster source slots, then the damage scale factor that puts the\n" +
+            "roster mean on the target (default 3).")]
+        public static void HandleSimHit(Session session, params string[] parameters)
+        {
+            // ONE RUN AT A TIME. Each invocation fans out ten ProfileBuilder.BuildAsync calls, and
+            // each of those costs a GetCharacter, a full possession load and a synchronous GetBiota
+            // on the SINGLE shard worker thread, plus a blocking auth read on the pool leg. The
+            // tool's stated targets are mule and heavy-tinker builds, which are the largest
+            // inventories on the shard, so a few impatient repeats would queue a hundred possession
+            // loads ahead of every player save, login and landblock read on the server.
+            //
+            // Refusing is the right answer rather than queueing: a second run measures the same ten
+            // slots against the same weenie and tells the admin nothing the first will not.
+            var inFlightAge = TrySimHitRunStart();
+
+            if (inFlightAge != null)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session,
+                    $"A /simhit run has been in flight for {inFlightAge.Value.TotalSeconds:N0}s. Each run queues ten full character loads " +
+                    "on the single shard worker thread, so only one is allowed at a time. Wait for its rows to finish printing, or for the " +
+                    $"guard to expire after {SimHitRunMaxAge.TotalMinutes:N0} minutes if that run's completion was lost.",
+                    ChatMessageType.WorldBroadcast);
+                return;
+            }
+
+            if (!uint.TryParse(parameters[0], out var wcid))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "Could not parse the boss wcid.", ChatMessageType.WorldBroadcast);
+                SimHitRunEnd();
+                return;
+            }
+
+            var targetLandedHits = 3.0f;
+
+            if (parameters.Length > 1 && !float.TryParse(parameters[1], out targetLandedHits))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "Could not parse the target landed hits.", ChatMessageType.WorldBroadcast);
+                SimHitRunEnd();
+                return;
+            }
+
+            // Rejected here rather than left to the solver. TimeToKillSolver.ScaleForTarget returns
+            // 1.0f for a non-positive target, and 1.0f is also its answer for "already exactly on
+            // target" - the one reading an admin would take from it. Refusing up front removes that
+            // collision instead of printing a number that means the opposite of what it looks like.
+            //
+            // The finite check is not redundant with it. float.TryParse ACCEPTS "NaN", "Infinity"
+            // and "-Infinity", and NaN fails every comparison, so "NaN <= 0.0f" is false and a NaN
+            // target would sail through a bare positivity guard and come back out as a NaN scale.
+            // "Infinity" is worse, because it prints as a confident 0.000.
+            if (!float.IsFinite(targetLandedHits) || targetLandedHits <= 0.0f)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "The target landed hits must be a finite number greater than zero.", ChatMessageType.WorldBroadcast);
+                SimHitRunEnd();
+                return;
+            }
+
+            // Captured as a WorldObject FIRST, not as "CreateNewWorldObject(wcid) as Creature".
+            // CreateNewWorldObject takes a dynamic guid from GuidManager and recycles it only when
+            // the factory itself returns null (Factories\WorldObjectFactory.cs:406-413); a
+            // successfully created object that fails the cast has already consumed one, and only
+            // Destroy gives it back (WorldObjects\WorldObject.cs:975-976). Same shape, and for the
+            // same reason, as Entity\AccountVault\MuleSummonHandler.cs:270-272.
+            var created = WorldObjectFactory.CreateNewWorldObject(wcid);
+            var boss = created as Creature;
+
+            if (boss == null)
+            {
+                created?.Destroy();
+
+                CommandHandlerHelper.WriteOutputInfo(session, $"No creature weenie found for wcid {wcid}.", ChatMessageType.WorldBroadcast);
+                SimHitRunEnd();
+                return;
+            }
+
+            AttackerSpec spec;
+            List<string> notes;
+            string bossLabel;
+
+            try
+            {
+                spec = BuildSpecFromCreature(boss);
+                notes = DescribeSpecLimits(boss, spec);
+                bossLabel = $"{boss.Name} (wcid {wcid})";
+            }
+            catch
+            {
+                // the in-flight guard is released on the way out of every path that took it,
+                // including a throw - otherwise one bad weenie would hold it until it aged out
+                SimHitRunEnd();
+                throw;
+            }
+            finally
+            {
+                // NOT merely dropped. The Creature constructor already ran GenerateWieldList,
+                // EquipInventoryItems and GenerateWieldedTreasure (WorldObjects\Creature.cs:202-212),
+                // so this boss may own several more freshly created WorldObjects, each holding a
+                // dynamic guid of its own. Destroy walks the inventory and the equipped set and
+                // recycles all of them. Nothing reaches the shard database: RemoveBiotaFromDatabase
+                // returns early for a biota that was never saved
+                // (WorldObjects\WorldObject_Database.cs:85-89), and this object is in no landblock.
+                boss.Destroy();
+            }
+
+            // RULING C. MitigationMath fails soft to a neutral term on a damage type the profile has
+            // no rows for, so an unprofiled type would be reported as a fully unmitigated hit. That
+            // is a number that is too high and looks authoritative, so this refuses outright rather
+            // than printing rows with a warning attached: a warning is one line among twelve, it
+            // scrolls, and the figures survive a screenshot without it. There is nothing to salvage
+            // from the run anyway - every row would be wrong in the same direction.
+            if (!SimHitProfiledDamageTypes.Contains(spec.DamageType))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session,
+                    $"Refusing to measure {bossLabel}: its melee damage type is {spec.DamageType.GetName()}, and a roster profile carries " +
+                    $"armor, resistance and shield rows for only these eight: " +
+                    $"{string.Join(", ", SimHitProfiledDamageTypes.Select(d => d.GetName()))}. " +
+                    "Every mitigation lookup fails soft to neutral on a type it has no rows for, so the figures would come out " +
+                    "fully unmitigated - too high, with nothing marking them as wrong. No measurement was taken.",
+                    ChatMessageType.WorldBroadcast);
+                SimHitRunEnd();
+                return;
+            }
+
+            CommandHandlerHelper.WriteOutputInfo(session,
+                $"Measuring {bossLabel} against the roster. Rows follow as profiles load; the trailing scale line needs all " +
+                $"{TesterRoster.SourceSlots.Count} slots to answer, and a database failure can drop one silently.",
+                ChatMessageType.WorldBroadcast);
+
+            // SNAPSHOT AGE, stated because the spec asks for it and the honest answer is not the
+            // obvious one. Every profile below is hydrated from the shard on THIS invocation, so
+            // the defensive numbers are current as of now and DefenderProfile.SnapshotUtc is always
+            // moments old. What can actually be stale is the roster SEED - the ten source slots hold
+            // copies of prod characters taken the last time seed-stage-roster.yml was dispatched,
+            // and nothing on this shard records when that was.
+            CommandHandlerHelper.WriteOutputInfo(session,
+                "Freshness: profiles are rebuilt from the shard on every run, so they are current. The roster SEED behind them is not " +
+                "dated anywhere the server can read - check the last seed-stage-roster.yml run if these characters look out of date.",
+                ChatMessageType.WorldBroadcast);
+
+            foreach (var note in notes)
+                CommandHandlerHelper.WriteOutputInfo(session, note, ChatMessageType.WorldBroadcast);
+
+            // the profile AND the row already computed from it, so the summary does not walk every
+            // profile's mitigation a second time just to ask whether its result was finite
+            var measured = new List<(DefenderProfile Profile, SimResult Result)>();
+            var pending = TesterRoster.SourceSlots.Count;
+            var queued = 0;
+
+            try
+            {
+                foreach (var slotGuid in TesterRoster.SourceSlots)
+                {
+                    // captured per iteration so the callback names the right slot on the failure line
+                    var guid = slotGuid;
+
+                    ProfileBuilder.BuildAsync(guid, profile =>
+                    {
+                        // RULING A, part one: everything in this block is pure arithmetic and string
+                        // building, which is safe on any of the three threads ProfileBuilder can call
+                        // back on. Nothing here touches world state.
+                        string line;
+
+                        if (profile != null)
+                        {
+                            var result = ACE.Server.CombatSimulator.CombatSimulator.Analytic(spec, profile);
+
+                            lock (measured)
+                                measured.Add((profile, result));
+
+                            line = $"{result.Label} (lvl {result.Level}) hp {result.MaxHealth} " +
+                                   $"hit {result.HitChance:P1} mean {result.MeanDamagePerLandedHit:N0} " +
+                                   $"landed-hits-to-kill {result.LandedHitsToKill:N2} swings {result.SwingsToKill:N2}";
+                        }
+                        else
+                        {
+                            // RULING B. The per-slot failure is reported HERE rather than only through
+                            // the "no profiles could be built" branch below, because that branch is
+                            // reachable only when the counter hits zero, and a callback that is dropped
+                            // outright means it never does (ProfileBuilder.BuildAsync's "TWO SHAPES
+                            // YIELD NO CALLBACK AT ALL"). An admin who is told nothing per slot would be
+                            // left staring at a header line with no idea which slot failed or why.
+                            line = $"slot 0x{guid:X8}: no profile - the slot is unseeded, its character is online, or the load failed. See the server log.";
+                        }
+
+                        string summary = null;
+
+                        if (System.Threading.Interlocked.Decrement(ref pending) == 0)
+                        {
+                            List<(DefenderProfile Profile, SimResult Result)> snapshot;
+
+                            lock (measured)
+                                snapshot = new List<(DefenderProfile, SimResult)>(measured);
+
+                            if (snapshot.Count == 0)
+                            {
+                                summary = "No roster profiles could be built. Has the roster been seeded on this shard?";
+                            }
+                            else
+                            {
+                                // ScaleForTarget answers 1.0f both for "already on target" and for "no
+                                // scale could be determined", and its own doc-comment says to tell them
+                                // apart by looking for a non-finite LandedHitsToKill. The non-positive
+                                // target and the empty list, its other two unsolvable cases, are already
+                                // refused above and handled by the branch above respectively. The value
+                                // is read off the row this callback already computed rather than by
+                                // running Analytic over every profile a second time.
+                                var unhittable = snapshot.Count(m => !float.IsFinite(m.Result.LandedHitsToKill));
+
+                                if (unhittable > 0)
+                                {
+                                    summary = $"{snapshot.Count} profiles measured, but {unhittable} of them take no damage at all from this attacker, " +
+                                              "so no scale factor could be solved. Raise the damage source until every row shows a finite landed-hits-to-kill.";
+                                }
+                                else
+                                {
+                                    var scale = TimeToKillSolver.ScaleForTarget(spec, snapshot.Select(m => m.Profile).ToList(), targetLandedHits);
+
+                                    summary = $"{snapshot.Count} profiles measured. To reach {targetLandedHits:N1} landed hits to kill, " +
+                                              $"scale the damage source by {scale:N3}x " +
+                                              "(DVal/DVar on the combat body parts, or the wielded weapon's Damage/DamageVariance). " +
+                                              "A scale of 1.000 here means it is already on target.";
+                                }
+                            }
+
+                            // the run is over: release the in-flight guard. This is the ONLY completion
+                            // path, and per Ruling P19 it is a path that can be missed entirely if a
+                            // shard read throws inside RunStandalone and its callback is swallowed -
+                            // which is why the guard also expires on age rather than relying on this.
+                            SimHitRunEnd();
+                        }
+
+                        // RULING A, part two: MARSHAL THE OUTPUT ONTO THE WORLD THREAD.
+                        //
+                        // ProfileBuilder.BuildAsync's doc-comment states that its callback runs on one
+                        // of three threads and never on a world thread - the caller's own thread on the
+                        // online refusal, the shard worker when the load fails or cannot be queued, and
+                        // a pool thread on success - and that a consumer "must not touch world state:
+                        // no sending network messages to a session". CommandHandlerHelper.WriteOutputInfo
+                        // does exactly that, through ChatPacket.SendServerMessage
+                        // (Command\Handlers\CommandHandlerHelper.cs:22-26).
+                        //
+                        // This is the codebase's own mechanism for that hop, not a new one:
+                        // AllegianceManager.HandlePlayerDelete wraps its work in the identical call
+                        // under the comment "This function is called from a database callback. We must
+                        // add thread safety" (Managers\AllegianceManager.cs:417-422), and
+                        // @refreshtestroster re-establishes the same guarantee the same way
+                        // (Command\Handlers\TesterRosterCommands.cs:109).
+                        WorldManager.EnqueueAction(new ActionEventDelegate(() =>
+                        {
+                            CommandHandlerHelper.WriteOutputInfo(session, line, ChatMessageType.WorldBroadcast);
+
+                            if (summary != null)
+                                CommandHandlerHelper.WriteOutputInfo(session, summary, ChatMessageType.WorldBroadcast);
+                        }));
+                    });
+
+                    queued++;
+                }
+            }
+            catch (Exception ex)
+            {
+                // A synchronous throw out of BuildAsync leaves the slots after it unqueued, so their
+                // callbacks never arrive and the completion counter never reaches zero. Account for
+                // them here rather than leaving the in-flight guard to age out: the guard is
+                // released only by whichever party actually drives the counter to zero, so this
+                // cannot steal it from a later run.
+                log.Error("/simhit failed while dispatching roster profile builds", ex);
+
+                var unqueued = TesterRoster.SourceSlots.Count - queued;
+
+                CommandHandlerHelper.WriteOutputInfo(session,
+                    $"Dispatch failed after {queued} of {TesterRoster.SourceSlots.Count} slots; the remaining {unqueued} were not measured. See the server log.",
+                    ChatMessageType.WorldBroadcast);
+
+                if (unqueued > 0 && System.Threading.Interlocked.Add(ref pending, -unqueued) == 0)
+                    SimHitRunEnd();
+            }
+        }
+
+        /// <summary>
+        /// Builds an AttackerSpec from a creature constructed in memory and never placed in the
+        /// world, mirroring the melee path the engine takes for a NON-player attacker:
+        /// DamageEvent.DoCalculateDamage -> Creature.GetBaseDamage(attackPart)
+        /// (Entity\DamageEvent.cs:255-256, WorldObjects\Monster_Melee.cs:387-406).
+        ///
+        /// CRITICAL HITS ARE MODELLED, with one term omitted. Leaving CritChance at zero understates
+        /// mean damage per landed hit by roughly a sixth at the retail base rate, and biases
+        /// landed-hits-to-kill, swings-to-kill and the solved scale the same way, so the crit branch
+        /// of CombatSimulator.Analytic is populated rather than switched off. Every attacker-side and
+        /// weapon-side term is read from production code; the ONE term dropped is the defender's
+        /// crit-resist rating, because DefenderProfile carries none - see the crit block below for
+        /// how it is dropped without reimplementing the four terms around it. Two smaller defender
+        /// terms go with it and cannot be reinstated from a profile either: the Critical Defense
+        /// augmentation (Entity\DamageEvent.cs:300-308) and the crit damage resist rating (:330).
+        ///
+        /// A crit figure from this command is therefore an upper bound against a defender who
+        /// carries crit resistance, and exact against one who carries none. There is also a
+        /// structural limit in AttackerSpec itself, recorded rather than worked around: it has one
+        /// PreMitigationMod for both branches, while the engine recomposes DamageRatingMod entirely
+        /// on a crit - dropping Recklessness and adding the crit damage rating
+        /// (Entity\DamageEvent.cs:325-333). Closing that needs a second modifier field on
+        /// AttackerSpec, which is a Task 1 change, not a change to this command.
+        ///
+        /// WHAT IS DELIBERATELY LEFT AT ITS DEFAULT, and why. Each of these is a term the engine
+        /// computes from the DEFENDER, or from live combat state a creature standing in no landblock
+        /// does not have. Guessing one would misrepresent the boss in a way no reader could see, so
+        /// they stay at the documented neutral value and DescribeSpecLimits prints them.
+        ///
+        /// WithinShieldArc stays true. It is a positional gate on the 180 degree frontal arc
+        /// (CombatSimulator\MitigationMath.cs:43-46), so there is no attacker-side value to read; the
+        /// defender is credited with its shield in full, which is the conservative direction.
+        ///
+        /// Recklessness, Sneak Attack and the creature slayer bonus fold into PreMitigationMod at
+        /// 1.0. Recklessness reads the PLAYER DEFENDER (WorldObjects\Creature_Combat.cs:800-801),
+        /// Sneak Attack needs a live target (:806-815), and the slayer bonus compares the weapon's
+        /// SlayerCreatureType against the defender's CreatureType
+        /// (WorldObjects\WorldObject_Weapon.cs:504-514) - passing a null target returns its neutral
+        /// 1.0, which is what this does.
+        ///
+        /// AttackHeight falls back to Medium, the engine's own fallback at Entity\DamageEvent.cs:196.
+        /// A live monster sets it per swing from its combat maneuver table, which needs a target.
+        ///
+        /// THE BOSS IS PUT INTO MELEE COMBAT MODE FIRST, and that is load-bearing rather than
+        /// cosmetic. GetEffectiveAttackSkill multiplies the raw skill by GetWeaponOffenseModifier,
+        /// which returns 1.0 outright while the wielder is CombatMode.NonCombat
+        /// (WorldObjects\WorldObject_Weapon.cs:244-245), and a factory-built creature is NonCombat
+        /// (WorldObjects\Creature.cs:169). Measuring it there would drop the wielded weapon's
+        /// WeaponOffense and its attack enchantments and understate hit chance.
+        ///
+        /// Creature.SetCombatMode is public (WorldObjects\Creature_Combat.cs:59-62) and is already
+        /// called from outside the class in production - AdvocateFane.cs:103, Bindstone.cs:67,
+        /// Lifestone.cs:52, PetDevice.cs:564 - so no access modifier is widened to do this. It is
+        /// also the same call the engine itself makes before a monster's first swing, through
+        /// DoAttackStance (WorldObjects\Monster_Combat.cs:129-133, from Monster_Melee.cs:59).
+        ///
+        /// This mirrors the decision already taken on the DEFENDER side: ProfileBuilder.Walk
+        /// deliberately does not honour GetShieldMod's matching NonCombat early return, because a
+        /// hydrated Player is always NonCombat and honouring it would zero every shield row ever
+        /// profiled. Both halves of the simulator therefore describe combat stance.
+        ///
+        /// The call is guarded because it is the one thing here that reaches the motion and dat
+        /// layer on an object that never entered the world. Every path it takes is null-safe for
+        /// that case - ExecuteMotion gates its physics block on PhysicsObj != null
+        /// (WorldObjects\WorldObject.cs:1017), EnqueueBroadcast returns early on a null PhysicsObj or
+        /// landblock (WorldObjects\WorldObject_Networking.cs:1421), the physics-motion apply is
+        /// skipped because applyPhysics is false for a non-Player (:1352-1356), and
+        /// MotionTable.GetAnimationLength returns 0 for a zero motion table
+        /// (Physics\Animation\MotionTable.cs:480) - but a diagnostic command must not die on its
+        /// subject, so a throw falls back to NonCombat and DescribeSpecLimits says which state the
+        /// figures were measured in.
+        /// </summary>
+        private static AttackerSpec BuildSpecFromCreature(Creature boss)
+        {
+            try
+            {
+                boss.SetCombatMode(CombatMode.Melee);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"/simhit could not put wcid {boss.WeenieClassId} into melee combat mode; measuring it out of stance.", ex);
+            }
+
+            // Entity\DamageEvent.cs:193 - the wielded melee weapon IS the damage source when there
+            // is one. Creature.SetEphemeralValues already ran GenerateWieldList,
+            // EquipInventoryItems and GenerateWieldedTreasure inside the constructor
+            // (WorldObjects\Creature.cs:202-212), so a boss that wields in play wields here too.
+            var weapon = boss.GetEquippedMeleeWeapon();
+
+            // NOT the same lookup, and the engine does not treat them as the same either. Base
+            // damage comes off the MELEE weapon (WorldObjects\Monster_Melee.cs:393), but the damage
+            // type comes off GetEquippedWeapon (WorldObjects\Monster_Combat.cs:289-292), which falls
+            // through to the missile weapon when there is no melee one
+            // (WorldObjects\Creature_Equipment.cs:112-116). Collapsing the two onto
+            // GetEquippedMeleeWeapon gave a bow-wielding boss swinging melee its BODY PARTS' damage
+            // type where the engine gives it the bow's - a different armor row, a different
+            // resistance row, and every mitigation figure quietly shifted.
+            var damageTypeWeapon = boss.GetEquippedWeapon();
+
+            // Entity\DamageEvent.cs:292 - the same CreatureSkill object the engine hands to every
+            // weapon-derived modifier below. GetCreatureSkill writes on read (it inserts a missing
+            // PropertiesSkill row and sets ChangesDetected), which lands only on this throwaway: its
+            // biota was never saved, so the caller's Destroy enqueues no database work.
+            var attackSkill = boss.GetCreatureSkill(boss.GetCurrentWeaponSkill());
+
+            float baseDamageMin;
+            float baseDamageMax;
+            DamageType damageType;
+
+            if (weapon != null)
+            {
+                // WorldObjects\Monster_Melee.cs:394-399
+                var weaponDamage = weapon.GetDamageMod(boss);
+
+                baseDamageMin = weaponDamage.MinDamage;
+                baseDamageMax = weaponDamage.MaxDamage;
+            }
+            else
+            {
+                // WorldObjects\Monster_Melee.cs:401-405, AVERAGED over the pool rather than rolled
+                // from one part. GetAttackPart picks uniformly from exactly this set per swing
+                // (:608), so the unweighted mean IS the expected base damage, and it is also what
+                // makes the reported scale factor apply uniformly to DVal on every part.
+                var parts = CombatAttackParts(boss);
+
+                baseDamageMin = 0.0f;
+                baseDamageMax = 0.0f;
+
+                foreach (var part in parts)
+                {
+                    // Entity\BaseDamage.cs:9 - MinDamage is MaxDamage * (1 - Variance)
+                    baseDamageMin += part.DVal * (1.0f - part.DVar);
+                    baseDamageMax += part.DVal;
+                }
+
+                if (parts.Count > 0)
+                {
+                    baseDamageMin /= parts.Count;
+                    baseDamageMax /= parts.Count;
+                }
+            }
+
+            // Resolved on its OWN branch, off the equipped weapon rather than the melee weapon, which
+            // is where the engine splits them - see the damageTypeWeapon comment above.
+            if (damageTypeWeapon != null)
+            {
+                // WorldObjects\Monster_Combat.cs:289-291 defers to the weapon's own damage type
+                damageType = boss.GetDamageType(false, CombatType.Melee);
+            }
+            else
+            {
+                damageType = DamageType.Undef;
+
+                foreach (var part in CombatAttackParts(boss))
+                    damageType |= part.DType;
+
+                // The engine resolves a multi-damage part by picking one of its flags at random per
+                // swing (WorldObjects\Monster_Combat.cs:295-296). A measurement cannot roll, so this
+                // fixes on the first single flag set, which is the deterministic rule the engine
+                // itself uses on the weapon path (WorldObjects\Creature_Combat.cs:1239-1250).
+                if (damageType.IsMultiDamage())
+                    damageType = FirstSingleDamageType(damageType);
+            }
+
+            // Entity\DamageEvent.cs:287 composes the pre-mitigation multiply as
+            // BaseDamage * AttributeMod * PowerMod * SlayerMod * DamageRatingMod. The first three
+            // are read from production code here; the fourth is AdditiveCombine over the damage
+            // rating plus the three defender-dependent terms named in the doc-comment, passed as
+            // their neutral 1.0 so the engine's own rating rounding is preserved rather than
+            // approximated (WorldObjects\Creature_Rating.cs:193-201).
+            var attributeMod = boss.GetAttributeMod(weapon);
+            var powerMod = boss.GetPowerMod(weapon);
+            var slayerMod = WorldObject.GetWeaponCreatureSlayerModifier(weapon, boss, null);
+
+            var damageRatingMod = Creature.AdditiveCombine(
+                Creature.GetPositiveRatingMod(boss.GetDamageRating()), 1.0f, 1.0f, 1.0f);
+
+            // Entity\DamageEvent.cs:340-346 - rending and cleaving reach the armor curve as a single
+            // minimum, which is what AttackerSpec.ArmorRendingMod carries.
+            var armorRendingMod = 1.0f;
+
+            if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
+                armorRendingMod = WorldObject.GetArmorRendingMod(attackSkill);
+
+            var ignoreArmorMod = Math.Min(armorRendingMod, boss.GetArmorCleavingMod(weapon));
+
+            // CRIT DAMAGE. Entity\DamageEvent.cs:318-323, and AttackerSpec.CritDamageMod wants the
+            // full multiplier with the +1.0 base already folded in. GetWeaponCritDamageMod never
+            // reads its target argument at all (WorldObjects\WorldObject_Weapon.cs:427-438), so a
+            // null defender here is exact, not an approximation. The base is
+            // defaultCritDamageMultiplier = 1.0f (:422), which is why an unimbued weaponless monster
+            // comes out at 2.0 - the value CombatSimulatorParityTests pinned against the engine.
+            var critDamageMod = (1.0f + WorldObject.GetWeaponCritDamageMod(weapon, boss, attackSkill, null))
+                * (1.0f + (float)ACE.Server.WeaponMods.WeaponModCombat.ReadWeaponOnly(weapon, ACE.Server.WeaponMods.WeaponModId.Execution));
+
+            // CRIT CHANCE. Entity\DamageEvent.cs:293. GetWeaponCriticalChance DOES read its target,
+            // at exactly one place: the final multiply by the defender's crit-resist rating
+            // (WorldObjects\WorldObject_Weapon.cs:373-374). Everything before it is attacker-side and
+            // is exactly what this wants - the weapon's CriticalFrequency or the base
+            // defaultPhysicalCritFrequency = 0.1f (:348, :355), the Critical Strike imbue (:357-362),
+            // the attacker's own crit rating (:364-365) and the Focus weapon mod (:370).
+            //
+            // So the boss is passed as its own target and that single term is divided straight back
+            // out, rather than the four attacker-side terms being copied into this file. Copying them
+            // is the tempting shortcut and it is the wrong one: the simulator's whole discipline is
+            // that no factor is reimplemented, only the composition
+            // (Source\ACE.Server.Tests\CombatSimulatorParityTests.cs:17-22), and a copy here would go
+            // silently out of step the next time a crit term is added. This form picks such a change
+            // up automatically; it fails only if a SECOND defender-side term is ever appended, which
+            // would be visible as a new dereference of target in that method.
+            //
+            // GetNegativeRatingMod is strictly positive for any rating when allowBug is false - a
+            // negative rating routes to GetPositiveRatingMod and a non-negative one gives
+            // 100/(100+rating) (WorldObjects\Creature_Rating.cs:43-62) - so the divisor cannot be
+            // zero. The guard is belt and braces.
+            var selfCritResistMod = Creature.GetNegativeRatingMod(boss.GetCritResistRating());
+
+            var critChance = WorldObject.GetWeaponCriticalChance(weapon, boss, attackSkill, boss);
+
+            if (selfCritResistMod > 0.0f)
+                critChance /= selfCritResistMod;
+
+            // Saturated HERE as well as inside CombatSimulator, and the duplication is deliberate.
+            // A crit rating is added unbounded as "rating * 0.01f" (WorldObjects\WorldObject_Weapon.cs:365),
+            // so a weenie carrying CritRating 100 derives 1.1; the engine never notices because its
+            // consumer saturates against a random draw (Entity\DamageEvent.cs:302), and the simulator
+            // now reproduces that. But the simulator's clamp is invisible to this command's
+            // disclosure preamble, which would go on printing "Crits: 110.0% chance" beside figures
+            // computed at 100 percent. Clamping the spec makes the number the admin reads the number
+            // the arithmetic used.
+            critChance = Math.Clamp(critChance, 0.0f, 1.0f);
+
+            // named local so the object initializer below cannot be read as touching the Creature
+            // field of the same name (WorldObjects\Monster_Combat.cs:33)
+            var attackHeight = boss.AttackHeight ?? ACE.Entity.Enum.AttackHeight.Medium;
+
+            return new AttackerSpec
+            {
+                Label = $"{boss.Name} (wcid {boss.WeenieClassId})",
+
+                // Entity\DamageEvent.cs:189 - a non-projectile damage source is Melee
+                CombatType = CombatType.Melee,
+                DamageType = damageType,
+                AttackHeight = attackHeight,
+
+                AttackSkill = boss.GetEffectiveAttackSkill(),
+
+                BaseDamageMin = baseDamageMin,
+                BaseDamageMax = baseDamageMax,
+
+                CritChance = critChance,
+                CritDamageMod = critDamageMod,
+
+                PreMitigationMod = attributeMod * powerMod * slayerMod * damageRatingMod,
+
+                ArmorRendingMod = ignoreArmorMod,
+                IgnoreShieldMod = boss.GetIgnoreShieldMod(weapon),
+
+                // WorldObjects\Monster_Melee.cs:429-430 - each is an OR of the weapon's flag and the
+                // creature's own
+                IgnoreMagicArmor = (weapon?.IgnoreMagicArmor ?? false) || boss.IgnoreMagicArmor,
+                IgnoreMagicResist = (weapon?.IgnoreMagicResist ?? false) || boss.IgnoreMagicResist,
+
+                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, boss, attackSkill, damageType),
+                IgnoreAllArmor = weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor),
+
+                WithinShieldArc = true,
+                AttackerIsPlayer = false,
+            };
+        }
+
+        /// <summary>
+        /// The lines /simhit prints before its rows, naming the places the spec is narrower than the
+        /// live fight. A reader who cannot see these has no way to tell a measurement from a default.
+        ///
+        /// This does NOT claim to be exhaustive, and must not be written as though it were - the
+        /// engine's melee path is long and a claim of completeness here would rot on the first
+        /// unrelated change to it. What it does promise is that every term this command deliberately
+        /// defaulted, stubbed or fixed appears below, plus the two pre-evade branches it cannot see:
+        /// Overpower and the defender's class-ability avoidance.
+        /// </summary>
+        private static List<string> DescribeSpecLimits(Creature boss, AttackerSpec spec)
+        {
+            var notes = new List<string>();
+            var weapon = boss.GetEquippedMeleeWeapon();
+
+            if (weapon != null)
+            {
+                notes.Add($"Damage source: the wielded {weapon.Name}, which the engine prefers over the combat body parts, " +
+                          "so the scale factor applies to that weapon's Damage and DamageVariance. " +
+                          $"Attack skill {spec.AttackSkill}.");
+            }
+            else
+            {
+                var parts = CombatAttackParts(boss);
+
+                notes.Add($"Damage source: averaged over the {parts.Count} combat body part(s) GetAttackPart draws from, " +
+                          "so the scale factor applies to DVal and DVar on all of them. " +
+                          $"Attack skill {spec.AttackSkill}.");
+            }
+
+            // Gated on the EQUIPPED weapon, not the melee one, because that is which lookup actually
+            // supplied the damage type - a bow-wielding boss takes the bow's type even while its base
+            // damage comes off the body parts, so the multi-type note below would be about parts that
+            // were never consulted.
+            var damageTypeWeapon = boss.GetEquippedWeapon();
+
+            if (damageTypeWeapon != null && damageTypeWeapon != weapon)
+            {
+                notes.Add($"Damage TYPE comes from the wielded {damageTypeWeapon.Name} rather than the combat body parts, which is the " +
+                          "engine's own split - base damage reads the melee weapon, damage type reads the equipped weapon.");
+            }
+            else if (damageTypeWeapon == null)
+            {
+                var composite = DamageType.Undef;
+
+                foreach (var part in CombatAttackParts(boss))
+                    composite |= part.DType;
+
+                if (composite.IsMultiDamage())
+                {
+                    notes.Add($"The combat body parts carry more than one damage type ({composite}); the engine picks one at random per swing, " +
+                              $"and this measurement fixes on {spec.DamageType.GetName()}.");
+                }
+            }
+
+            notes.Add($"Attack: melee, {spec.DamageType.GetName()}, height {spec.AttackHeight}. A live monster picks its height per swing " +
+                      "from its combat maneuver table; Medium is the engine's own fallback when none is set.");
+
+            if (boss.CombatMode == CombatMode.NonCombat)
+            {
+                notes.Add("Measured OUT OF COMBAT STANCE: putting this creature into melee stance failed, so the attack skill above " +
+                          "omits any weapon offense bonus and hit chance is understated. See the server log.");
+            }
+
+            notes.Add($"Crits: {spec.CritChance:P1} chance at a {spec.CritDamageMod:N2}x multiplier, folded into the figures below. " +
+                      "The defender's own crit-resist rating is NOT applied - a roster profile carries none - so against a defender " +
+                      "with crit resistance the crit share, and only the crit share, is an upper bound. The Critical Defense " +
+                      "augmentation and crit damage resist rating are omitted for the same reason.");
+
+            // Overpower is read straight off the boss, so this is a fact about THIS boss rather than
+            // a standing caveat, and is emitted only when it is true. A successful Overpower skips
+            // the evade roll (Entity\DamageEvent.cs:210-211 sets it, and the three "if (!Overpower)"
+            // guards at :217, :235 and :242 gate avoidance and evasion on it), and the hit chance
+            // printed above is that evade roll reproduced in closed form.
+            //
+            // But SUCCEEDING is itself a roll, not a certainty, and both formulas consume the
+            // defender's OverpowerResist. Method A rolls once against
+            // (Overpower - OverpowerResist) * 0.01 (WorldObjects\Creature_Combat.cs:1270-1288);
+            // Method B - the default, since OverpowerMethod is false (:1260) - rolls Overpower
+            // first and then makes OverpowerResist a second, separate save (:1289-1312). Different
+            // arithmetic, same dependency. A DefenderProfile carries no OverpowerResist, so the size
+            // of the correction is not knowable here. The note therefore claims a DIRECTION and not
+            // a magnitude, in the same voice as the crit caveat above.
+            if ((boss.Overpower ?? 0) != 0)
+            {
+                notes.Add($"Overpower: this boss carries {boss.Overpower}, which can bypass the evade roll. Whether it does is itself " +
+                          "a roll against the defender's Overpower resist, which is NOT applied - a roster profile carries none - " +
+                          "so the hit chance below is a lower bound, by an amount this tool cannot quantify.");
+            }
+
+            notes.Add("Not modelled: Recklessness, Sneak Attack and creature slayer (all defender-dependent, left neutral), " +
+                      "the damage-rating recomposition the engine performs on a crit, attack position " +
+                      "(the defender is credited with its shield in full), and the defender's class-ability avoidance - " +
+                      "Shield Block and Parry remove a share of landed hits before the evade roll, so hit chance is " +
+                      "OVERSTATED for any roster character who has learned one.");
+
+            return notes;
+        }
+
+        /// <summary>
+        /// The combat body parts a monster's melee swing draws from - the same filter
+        /// GetAttackPart applies for a normal attack, DVal non-zero and not the Breath part
+        /// (WorldObjects\Monster_Melee.cs:606-608).
+        /// </summary>
+        private static List<PropertiesBodyPart> CombatAttackParts(Creature boss)
+        {
+            if (boss.Biota.PropertiesBodyPart == null)
+                return new List<PropertiesBodyPart>();
+
+            return boss.Biota.PropertiesBodyPart
+                .Where(b => b.Value.DVal != 0 && b.Key != CombatBodyPart.Breath)
+                .Select(b => b.Value)
+                .ToList();
+        }
+
+        /// <summary>
+        /// The first single damage-type flag set on a composite, in the enum's own declaration
+        /// order. Mirrors the loop at WorldObjects\Creature_Combat.cs:1239-1250, minus its
+        /// motion-dependent Thrust exception, which needs a live swing. Returns the input unchanged
+        /// when no single flag is set, matching that method's fall-through.
+        /// </summary>
+        private static DamageType FirstSingleDamageType(DamageType damageTypes)
+        {
+            foreach (DamageType damageType in Enum.GetValues(typeof(DamageType)))
+            {
+                if ((damageTypes & damageType) != 0 && !damageType.IsMultiDamage())
+                    return damageType;
+            }
+
+            return damageTypes;
+        }
 
     }
 }

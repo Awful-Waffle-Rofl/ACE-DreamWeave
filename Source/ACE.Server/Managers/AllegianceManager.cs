@@ -175,15 +175,101 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
-        /// DreamWeave: the percentage of a vassal's earned XP passed up to their patron
+        /// DreamWeave: the maximum number of direct vassals a patron may hold.
+        /// Enforced in Player_Allegiance.SwearAllegiance, and the point at which the passup
+        /// curve below reaches its maximum combined rate.
+        /// </summary>
+        public const int MaxDirectVassals = 11;
+
+        /// <summary>
+        /// DreamWeave: default share of a vassal's earned XP passed up to their patron when that
+        /// patron holds exactly one vassal. Compiled default for the allegiance_passup_first_vassal
+        /// tunable.
         /// </summary>
         public const double PatronPassupRate = 0.25;
 
         /// <summary>
-        /// DreamWeave: the percentage of a vassal's earned XP passed up to their grandpatron.
-        /// Passup stops here — no layers beyond the grandpatron.
+        /// DreamWeave: default combined share a patron receives across all of their vassals once
+        /// they hold <see cref="MaxDirectVassals"/> of them. Compiled default for the
+        /// allegiance_passup_max_total tunable.
         /// </summary>
-        public const double GrandPatronPassupRate = 0.05;
+        public const double MaxTotalPassupRate = 1.0;
+
+        /// <summary>
+        /// DreamWeave: the grandpatron receives this fraction of whatever the patron receives,
+        /// which preserves the original 25% / 5% ratio at every point on the passup curve.
+        /// Passup stops here - no layers beyond the grandpatron.
+        /// </summary>
+        public const double GrandPatronPassupShare = 0.2;
+
+        /// <summary>
+        /// DreamWeave: the share of ONE vassal's earned XP that their patron receives, given how
+        /// many direct vassals that patron currently holds. Diminishing returns: the per-vassal
+        /// share shrinks as vassals are added, so the patron's combined take across all of them
+        /// climbs from <paramref name="firstVassalRate"/> at a single vassal to
+        /// <paramref name="maxTotalRate"/> at <see cref="MaxDirectVassals"/>.
+        ///
+        /// Pure function so it is testable without a shard config; the tunable reads live in
+        /// <see cref="GetPatronPassupRate(int)"/>.
+        /// </summary>
+        public static double CalculatePatronPassupRate(int vassalCount, double firstVassalRate, double maxTotalRate)
+        {
+            // Both endpoints are admin-set tunables, so every result below is clamped: a typo must
+            // not be able to hand a patron more XP than the vassal actually earned. The ulong cast
+            // in DoPassXP saturates rather than throwing, so an unclamped rate would silently mint
+            // XP instead of failing loudly.
+            if (double.IsNaN(firstVassalRate) || double.IsNaN(maxTotalRate))
+                return 0.0;
+
+            firstVassalRate = Math.Clamp(firstVassalRate, 0.0, 1.0);
+
+            if (firstVassalRate <= 0.0)
+                return 0.0;
+
+            if (vassalCount <= 1)
+                return firstVassalRate;
+
+            // A combined take of MaxDirectVassals is the ceiling worth allowing: every vassal
+            // passing up 100% of their XP.
+            maxTotalRate = Math.Clamp(maxTotalRate, firstVassalRate, MaxDirectVassals);
+
+            // combined take across n vassals is first * n^k, with k solved so that
+            // first * MaxDirectVassals^k == maxTotal. Each individual vassal therefore
+            // contributes that divided by n, ie. first * n^(k-1).
+            var exponent = Math.Log(maxTotalRate / firstVassalRate) / Math.Log(MaxDirectVassals);
+
+            return Math.Clamp(firstVassalRate * Math.Pow(vassalCount, exponent - 1.0), 0.0, 1.0);
+        }
+
+        /// <summary>
+        /// DreamWeave: <see cref="CalculatePatronPassupRate"/> against the live tunables.
+        /// </summary>
+        public static double GetPatronPassupRate(int vassalCount)
+        {
+            return CalculatePatronPassupRate(vassalCount,
+                GetPassupTunable("allegiance_passup_first_vassal", PatronPassupRate),
+                GetPassupTunable("allegiance_passup_max_total", MaxTotalPassupRate));
+        }
+
+        /// <summary>
+        /// Reads a server property, falling back to the compiled default when there is no shard
+        /// config to read from. PropertyManager.GetDouble dereferences a null shard config on a
+        /// cache miss, which is exactly the situation in ACE.Server.Tests; a real DB fault still
+        /// propagates, like every other PropertyManager call site.
+        /// </summary>
+        private static double GetPassupTunable(string key, double fallback)
+        {
+            try
+            {
+                var value = PropertyManager.GetDouble(key, fallback).Item;
+
+                return double.IsFinite(value) ? value : fallback;
+            }
+            catch (NullReferenceException)
+            {
+                return fallback;
+            }
+        }
 
         // This function can be called from multi-threaded operations
         // We must add thread safety to prevent AllegianceManager corruption
@@ -195,9 +281,10 @@ namespace ACE.Server.Managers
 
         private static void DoPassXP(AllegianceNode vassalNode, ulong amount)
         {
-            // DreamWeave: flat passup, replacing the retail loyalty / leadership / time-sworn formula.
-            // The vassal's patron receives a flat 25% of the vassal's earned XP,
-            // and the vassal's grandpatron receives a flat 5%. No layers beyond that.
+            // DreamWeave: diminishing-returns passup, replacing the retail loyalty / leadership /
+            // time-sworn formula. A patron's per-vassal share shrinks as they take on more vassals,
+            // so their combined take rises from 25% with one vassal to 100% at the 11-vassal cap.
+            // The grandpatron receives a fifth of whatever the patron gets. No layers beyond that.
 
             var patronNode = vassalNode.Patron;
             if (patronNode == null)
@@ -208,10 +295,12 @@ namespace ACE.Server.Managers
             if (!vassal.ExistedBeforeAllegianceXpChanges)
                 return;
 
-            var patronAmount = (ulong)(amount * PatronPassupRate);
+            var passupRate = GetPatronPassupRate(patronNode.TotalVassals);
+
+            var patronAmount = (ulong)(amount * passupRate);
 
             var grandPatronNode = patronNode.Patron;
-            var grandPatronAmount = grandPatronNode != null ? (ulong)(amount * GrandPatronPassupRate) : 0;
+            var grandPatronAmount = grandPatronNode != null ? (ulong)(amount * passupRate * GrandPatronPassupShare) : 0;
 
             vassal.AllegianceXPGenerated += patronAmount + grandPatronAmount;
 
@@ -332,7 +421,7 @@ namespace ACE.Server.Managers
             WorldManager.EnqueueAction(new ActionEventDelegate(() => DoHandlePlayerDelete(playerGuid)));
         }
 
-        private static void DoHandlePlayerDelete(uint playerGuid)
+        internal static void DoHandlePlayerDelete(uint playerGuid)
         {
             var player = PlayerManager.FindByGuid(playerGuid);
             if (player == null)

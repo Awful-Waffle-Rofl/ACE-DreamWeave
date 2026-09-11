@@ -358,8 +358,8 @@ namespace ACE.Server.WorldObjects
 
             if (targetNode != null)
             {
-                // maximum # of direct vassals = 11
-                if (targetNode.TotalVassals >= 11)
+                // maximum # of direct vassals; also the point where the passup curve tops out
+                if (targetNode.TotalVassals >= AllegianceManager.MaxDirectVassals)
                 {
                     //Console.WriteLine(target.Name + " already has the maximum # of vassals");
                     Session.Network.EnqueueSend(new GameMessageSystemChat($"{target.Name} already has the maximum # of vassals", ChatMessageType.Broadcast));

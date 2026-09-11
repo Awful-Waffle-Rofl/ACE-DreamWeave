@@ -30,10 +30,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "poisonweapon",
             DisplayName = "Poison Weapon",
             Description = "Your weapon strikes against monsters deal separate poison damage per rank on every landed hit, " +
-                          "increased further by high Alchemy.",
+                          "increased further by high Alchemy. Ranks in Acid Proc raise this damage further still.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 2, 3 },   // Tier-1 GC: rank 1 always 1 point (the class's power splash)
             Implemented = true,
+            AffinitySkill = Skill.Alchemy, // the Item Tinkering read in FlatBonus/GetReadout is ACID PROC's rider, not this ability's
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
@@ -86,6 +87,13 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// value). Returns 0 at rank 0. Carries NO equipment-mod term: the Venom mod is added later, in
         /// <see cref="ComputePoisonDamage"/>, so that a single Venom roll cannot pay out into two separate
         /// damage streams (Acid Proc derives its tick from this value and has its own Caustic mod).
+        ///
+        /// ACID PROC POISON-DAMAGE BONUS (2026-08-17 rework): gated on the attacker owning Acid Proc
+        /// rank &gt; 0, the flat is multiplied by <c>1 + AcidProcAbility.PoisonDamageBonus(...)</c>. This is
+        /// the single shared source both the per-hit Poison Weapon proc AND every Acid Proc DoT tick read,
+        /// so a rank in Acid Proc raises both automatically without either path restating the math. A
+        /// player with zero Acid Proc ranks is unaffected (the multiplier term is skipped entirely, not
+        /// applied at 1.0), so this method stays bit-identical to before for every non-Acid-Proc build.
         /// </summary>
         public static double FlatBonus(Player attacker, int rank)
         {
@@ -100,7 +108,24 @@ namespace ACE.Server.ClassAbilities.Abilities
                 PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_per_spec").Item,
                 PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_threshold").Item);
 
-            return perRank + alchemy;
+            var flat = perRank + alchemy;
+
+            if (attacker != null && attacker.TryGetClassAbility(ClassAbilityId.AcidProc, out var acidRank) && acidRank > 0)
+            {
+                var itemTinker = attacker.GetClassAbilityScaling(Skill.ItemTinkering,
+                    PropertyManager.GetDouble("class_ability_acidproc_itemtink_per_trained").Item,
+                    PropertyManager.GetDouble("class_ability_acidproc_itemtink_per_spec").Item) * 0.01;
+
+                var poisonDamageBonus = AcidProcAbility.PoisonDamageBonus(acidRank,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_base").Item,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_step").Item,
+                    itemTinker,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_affinity_cap").Item);
+
+                flat *= 1.0 + poisonDamageBonus;
+            }
+
+            return flat;
         }
 
         /// <summary>
@@ -129,29 +154,47 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Mirrors FlatBonus (rank term + thresholded Alchemy rider) plus the Venom gear term from
-        /// ComputePoisonDamage above - the three must stay in step. Flat "" unit (already a damage amount,
-        /// not a percentage), so no x100 conversion. No cap on the flat bonus itself (only the final integer
-        /// rounding, which isn't a clamp), so Effective always equals Total.
+        /// Mirrors FlatBonus (rank term + thresholded Alchemy rider, both scaled by the Acid Proc
+        /// poison-damage bonus when owned - see FlatBonus's doc comment) plus the Venom gear term from
+        /// ComputePoisonDamage above, which is NOT scaled by that bonus (Venom is added after FlatBonus, not
+        /// inside it). Flat "" unit (already a damage amount, not a percentage), so no x100 conversion. No
+        /// cap on the flat bonus itself (only the final integer rounding, which isn't a clamp), so Effective
+        /// always equals Total.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var perRank = rank * PropertyManager.GetDouble("class_ability_poisonweapon_damage_per_rank").Item;
 
-            var alchemy = player.GetClassAbilityScaling(Skill.Alchemy,
+            var alchemy = player?.GetClassAbilityScaling(Skill.Alchemy,
                 PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_per_trained").Item,
                 PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_per_spec").Item,
-                PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_threshold").Item);
+                PropertyManager.GetDouble("class_ability_poisonweapon_alchemy_threshold").Item) ?? 0.0;
+
+            var acidProcMultiplier = 1.0;
+            if (player != null && player.TryGetClassAbility(ClassAbilityId.AcidProc, out var acidRank) && acidRank > 0)
+            {
+                var itemTinker = player.GetClassAbilityScaling(Skill.ItemTinkering,
+                    PropertyManager.GetDouble("class_ability_acidproc_itemtink_per_trained").Item,
+                    PropertyManager.GetDouble("class_ability_acidproc_itemtink_per_spec").Item) * 0.01;
+
+                var poisonDamageBonus = AcidProcAbility.PoisonDamageBonus(acidRank,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_base").Item,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_step").Item,
+                    itemTinker,
+                    PropertyManager.GetDouble("class_ability_acidproc_damage_affinity_cap").Item);
+
+                acidProcMultiplier = 1.0 + poisonDamageBonus;
+            }
 
             var gear = player.GetEquippedModValue(EquipmentModId.Venom);
 
-            var total = perRank + alchemy + gear;
+            var total = (perRank + alchemy) * acidProcMultiplier + gear;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
-                Skill = perRank,
-                Affinity = alchemy,
+                Skill = perRank * acidProcMultiplier,
+                Affinity = alchemy * acidProcMultiplier,
                 Gear = gear,
                 Effective = total,
                 Unit = "",

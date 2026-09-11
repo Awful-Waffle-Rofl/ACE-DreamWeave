@@ -21,6 +21,7 @@ using ACE.Server.EquipmentMods;
 using ACE.Server.Factories;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.SpellReroll;
 using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
@@ -77,8 +78,51 @@ namespace ACE.Server.Managers
                 return;
             }
 
-            // Equipment mods (WaffleACE): a bag of one of the two designated salvage materials is claimed here,
-            // before the cookbook lookup, and handled in C#. There is no cookbook row that could express this
+            // Salvage forge (WaffleACE): a Hollow Hammer (wcid 1002650) used on a full salvage bag is claimed
+            // here, ahead of every other salvage intercept below. It is keyed on the SOURCE being a Hollow
+            // Hammer, not on the target's material - the four claims below are each keyed on the source
+            // being one particular material's bag, and a Hollow Hammer is never any of those, so placement
+            // relative to them would not matter for correctness. It runs first anyway to keep the claim order
+            // legible: a Hollow Hammer is tested and dispatched before anything below assumes its source is a
+            // salvage bag.
+            //
+            // There is nothing to forward: SalvageForge has no confirmed parameter, for the same reason as
+            // every claim below - the source is ItemType.TinkeringMaterial, so the client's own generic
+            // tinkering-material confirmation fires before the server is ever contacted.
+            //
+            // When salvage_forge_enabled is FALSE this falls through silently to normal recipe handling; no
+            // cookbook row or intercept below claims a Hollow Hammer either, so the fallthrough ends in the
+            // ordinary "cannot be used on" refusal a few lines down, never anything destructive.
+            if (PropertyManager.GetBool("salvage_forge_enabled").Item && SalvageForge.IsHollowHammer(source))
+            {
+                SalvageForge.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
+            // Tiger eye armor tinkers (WaffleACE): a FULL bag of tiger eye is claimed here and handled in C#.
+            // Placed AHEAD of the equipment-mod intercept below on purpose - tiger eye used to be that
+            // system's low tier, and this claim is what takes it out of it; the mod system is Obsidian-only
+            // now, so the two can no longer race for the same bag.
+            //
+            // Claiming the use HERE, before the cookbook lookup, is also what puts this outside the
+            // data-driven retail tinker cap: the "NumTimesTinkered >= 10" refusal lives in VerifyRequirements,
+            // which this never reaches. That matters because the feature WRITES that same counter as its
+            // permanent lock - retail tinkering refuses the item afterwards, while this path is gated by its
+            // own clean-item rule instead.
+            //
+            // This is always on, like the Prismatic Drift Stone, so there is no server property to consult.
+            // There is nothing to forward either: TigerEyeArmorTinker has no confirmed parameter, because the
+            // client already fires its generic tinkering-material confirmation before the server is contacted
+            // (the same reasoning as the two intercepts below).
+            if (TigerEyeArmorTinker.IsTigerEyeSalvage(source))
+            {
+                TigerEyeArmorTinker.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
+            // Equipment mods (WaffleACE): a bag of the designated salvage material - Obsidian, and only
+            // Obsidian since tiger eye moved to the armor-tinker intercept above - is claimed here, before the
+            // cookbook lookup, and handled in C#. There is no cookbook row that could express this
             // (it would need one row per eligible target wcid) and the potency rolls need code regardless.
             // When the feature is off this falls through silently to normal recipe handling, so the bags keep
             // their ordinary tinkering behavior.
@@ -112,6 +156,32 @@ namespace ACE.Server.Managers
             if (PropertyManager.GetBool("weapon_mods_enabled").Item && WeaponModManager.IsModMaterial(source))
             {
                 WeaponModManager.UseObjectOnTarget(player, source, target);
+                return;
+            }
+
+            // Serpentine spell reroll (WaffleACE): a Bag or Hammer of Serpentine salvage replaces a piece of
+            // gear's non-cantrip item enchantments with different ones of the SAME LEVEL. Claimed here for the
+            // same two reasons as the mod systems above - no cookbook row could express "any gear", and the
+            // draw needs C# - plus a third that is specific to this feature.
+            //
+            // THE THIRD REASON IS THE TINKER HISTORY, AND IT IS DELIBERATE. Returning here means GetRecipe,
+            // VerifyRequirements and TryMutate are never reached, and TryMutate is the ONLY caller of
+            // HandleTinkerLog. So a reroll increments neither NumTimesTinkered (PropertyInt 171) nor TinkerLog
+            // (PropertyString 9007). That is the point: a reroll is meant to be repeatable until the player
+            // likes the result, and charging it against the retail ten-tinker budget - or writing a log entry
+            // per attempt - would make the item unusable for actual tinkering after a few tries and turn the
+            // appraisal panel into a wall of Serpentine entries.
+            //
+            // As with both claims above there is nothing to forward: SpellRerollManager has no confirmed
+            // parameter. The client fires its own generic tinkering-material confirmation before the server is
+            // contacted, so there is no destructive prompt on this path for a replayed
+            // Confirmation_CraftInteration response to skip.
+            //
+            // When the feature is off this falls through silently to normal recipe handling, so the bags keep
+            // their ordinary tinkering behavior.
+            if (PropertyManager.GetBool("serpentine_reroll_enabled").Item && SpellRerollManager.IsRerollMaterial(source))
+            {
+                SpellRerollManager.UseObjectOnTarget(player, source, target);
                 return;
             }
 
@@ -294,7 +364,7 @@ namespace ACE.Server.Managers
             }
 
             // todo: remove this once foolproof salvage recipes are updated
-            if (foolproofTinkers.Contains((WeenieClassName)tool.WeenieClassId))
+            if (foolproofTinkers.Contains(tool.WeenieClassId))
                 successChance = 1.0;
 
             return successChance;
@@ -452,6 +522,15 @@ namespace ACE.Server.Managers
                 // retail possibly required sources / targets to be in the player's inventory,
                 // and not equipped. this scenario might already be prevented beforehand in VerifyUse()
                 player.EnqueueBroadcast(new GameMessageObjDescEvent(player));
+
+                // Reopen the once-only aura send guard, same as the packed path below. Deliberately NOT a
+                // resend: unlike that path this branch returns without MoveItemToFirstContainerSlot, and the
+                // container remove/re-add is what actually makes the client rebuild the object - a bare
+                // UpdateObject does not (Docs/WeaponMods/VISUAL-EFFECTS.md 3.1, live-tested). So it is
+                // unproven that the emitter was dropped here at all, and sending on top of a live handle-0
+                // emitter allocates a SECOND endless one that cannot be stopped by id. Reopening the guard
+                // is the safe half: the aura returns on the next genuine rebuild (re-equip, zoning, relog).
+                VisualEffectManager.Forget(player.Session, obj);
                 return;
             }
 
@@ -465,6 +544,12 @@ namespace ACE.Server.Managers
 
             if (invObj != null)
                 player.MoveItemToFirstContainerSlot(obj);
+
+            // obj is packed, not drawn - the UpdateObject above still rebuilt it client-side and dropped
+            // any persistent particle aura, but sending the script to an un-rendered item would attach it
+            // to nothing while spending the once-only guard equipping it later depends on. Reopen the
+            // guard only; the next TrackObject (on equip) sends it for real. See VisualEffectManager.
+            VisualEffectManager.Forget(player.Session, obj);
         }
 
         public static bool TryMutateNative(Player player, WorldObject source, WorldObject target, Recipe recipe, uint dataId)
@@ -802,6 +887,11 @@ namespace ACE.Server.Managers
             { ImbuedEffectType.BludgeonRending, 0x0600335a },
             { ImbuedEffectType.PierceRending,   0x0600335b },
             { ImbuedEffectType.SlashRending,    0x0600335c },
+
+            // WaffleACE addition - Life Rending (HealthRending). Not a retail imbue; retail Honeyed Life
+            // Mead underlay (dark crimson radial glow), chosen and previewed at
+            // Content/preview/item_life_rending_underlay/OPTIONS.md.
+            { ImbuedEffectType.HealthRending,   0x0600678D },
         };
 
         public static ImbuedEffectType GetImbuedEffects(WorldObject target)
@@ -1578,38 +1668,58 @@ namespace ACE.Server.Managers
         }
 
         // todo: remove this once foolproof salvage recipes are updated
-        private static readonly HashSet<WeenieClassName> foolproofTinkers = new HashSet<WeenieClassName>()
+        //
+        // WaffleACE: stored as raw wcids (uint), NOT WeenieClassName, because WeenieClassName is backed by
+        // ushort (max 65535) and the fork's own foolproof wcid (1002700, Foolproof White Quartz) is well
+        // above that. `(WeenieClassName)wcid` on a value > 65535 silently TRUNCATES rather than erroring
+        // (confirmed: the enum-typed HashSet compiled fine but 1002700 as a case/enum-member constant does
+        // not - `Constant value '1002700' cannot be converted to a 'ushort'`), so casting up into the enum
+        // here would risk a false match against whatever unrelated wcid the truncated value happens to
+        // collide with. Retail/lower-range members are still listed via `(uint)WeenieClassName.X` for
+        // readability; the set itself only ever compares raw wcids.
+        private static readonly HashSet<uint> foolproofTinkers = new HashSet<uint>()
         {
             // rare foolproof
-            WeenieClassName.W_MATERIALRAREFOOLPROOFAQUAMARINE_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFBLACKGARNET_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFBLACKOPAL_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFEMERALD_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFFIREOPAL_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFIMPERIALTOPAZ_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFJET_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFPERIDOT_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFREDGARNET_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFSUNSTONE_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFWHITESAPPHIRE_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFYELLOWTOPAZ_CLASS,
-            WeenieClassName.W_MATERIALRAREFOOLPROOFZIRCON_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFAQUAMARINE_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFBLACKGARNET_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFBLACKOPAL_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFEMERALD_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFFIREOPAL_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFIMPERIALTOPAZ_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFJET_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFPERIDOT_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFREDGARNET_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFSUNSTONE_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFWHITESAPPHIRE_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFYELLOWTOPAZ_CLASS,
+            (uint)WeenieClassName.W_MATERIALRAREFOOLPROOFZIRCON_CLASS,
 
             // regular foolproof
-            WeenieClassName.W_MATERIALACE36619FOOLPROOFAQUAMARINE,
-            WeenieClassName.W_MATERIALACE36620FOOLPROOFBLACKGARNET,
-            WeenieClassName.W_MATERIALACE36621FOOLPROOFBLACKOPAL,
-            WeenieClassName.W_MATERIALACE36622FOOLPROOFEMERALD,
-            WeenieClassName.W_MATERIALACE36623FOOLPROOFFIREOPAL,
-            WeenieClassName.W_MATERIALACE36624FOOLPROOFIMPERIALTOPAZ,
-            WeenieClassName.W_MATERIALACE36625FOOLPROOFJET,
-            WeenieClassName.W_MATERIALACE36626FOOLPROOFREDGARNET,
-            WeenieClassName.W_MATERIALACE36627FOOLPROOFSUNSTONE,
-            WeenieClassName.W_MATERIALACE36628FOOLPROOFWHITESAPPHIRE,
-            WeenieClassName.W_MATERIALACE36634FOOLPROOFPERIDOT,
-            WeenieClassName.W_MATERIALACE36635FOOLPROOFYELLOWTOPAZ,
-            WeenieClassName.W_MATERIALACE36636FOOLPROOFZIRCON,
+            (uint)WeenieClassName.W_MATERIALACE36619FOOLPROOFAQUAMARINE,
+            (uint)WeenieClassName.W_MATERIALACE36620FOOLPROOFBLACKGARNET,
+            (uint)WeenieClassName.W_MATERIALACE36621FOOLPROOFBLACKOPAL,
+            (uint)WeenieClassName.W_MATERIALACE36622FOOLPROOFEMERALD,
+            (uint)WeenieClassName.W_MATERIALACE36623FOOLPROOFFIREOPAL,
+            (uint)WeenieClassName.W_MATERIALACE36624FOOLPROOFIMPERIALTOPAZ,
+            (uint)WeenieClassName.W_MATERIALACE36625FOOLPROOFJET,
+            (uint)WeenieClassName.W_MATERIALACE36626FOOLPROOFREDGARNET,
+            (uint)WeenieClassName.W_MATERIALACE36627FOOLPROOFSUNSTONE,
+            (uint)WeenieClassName.W_MATERIALACE36628FOOLPROOFWHITESAPPHIRE,
+            (uint)WeenieClassName.W_MATERIALACE36634FOOLPROOFPERIDOT,
+            (uint)WeenieClassName.W_MATERIALACE36635FOOLPROOFYELLOWTOPAZ,
+            (uint)WeenieClassName.W_MATERIALACE36636FOOLPROOFZIRCON,
+
+            // WaffleACE foolproof - 1002700 (Foolproof White Quartz) has no WeenieClassName enum member;
+            // see the comment above the field.
+            1002700,
         };
+
+        /// <summary>
+        /// True if the given wcid is a guaranteed-success ("foolproof") tinkering/imbue material,
+        /// retail or fork-added. Used by AppraiseInfo to decide whether to suppress the raw Structure
+        /// property on a salvage/foolproof bag (see foolproofTinkers above and its callers).
+        /// </summary>
+        public static bool IsFoolproofTinker(uint wcid) => foolproofTinkers.Contains(wcid);
     }
 
     public static class RecipeExtensions

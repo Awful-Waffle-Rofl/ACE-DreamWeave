@@ -41892,8 +41892,13 @@ namespace ACE.Server.Factories.Enum
         // Content/sql/weenies/<wcid> for the SQL, Content/wcid-registry.tsv for the allocation.
         // Referenced from CasterWcids.cs's ChanceTables so the loot generator can roll them.
         // ---------------------------------------------------------------
-        driftwardensanguinewand = 1000242,
+        // The sceptre/baton/staff trio are the loot-rolled ninth element. driftwardensanguineorb is
+        // deliberately NOT in any ChanceTable: retail has no elemental orb, so the orb shape has no
+        // place in an element's line-up (2026-08-25). It is kept here because the weenie still
+        // exists; do not read its presence in this enum as loot-pool membership.
+        driftwardensanguinesceptre = 1000242,
         driftwardensanguineorb = 1000243,
         driftwardensanguinestaff = 1000244,
+        driftwardensanguinebaton = 1000247,
     }
 }

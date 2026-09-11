@@ -45,10 +45,40 @@ namespace ACE.Database.Models.World
         public virtual LandblockInstanceRealm Parent { get; set; }
     }
 
+    /// <summary>
+    /// Realms Phase 4: a per-(realm, landblock) content rule - the realm_landblock_rule
+    /// table created by Database/Updates/World/2026-08-19-01-Add-Realm-Landblock-Rule.sql.
+    /// A row says the landblock does not inherit base-world content in that realm.
+    /// An absent row means the landblock is not stripped and inherits retail content.
+    /// </summary>
+    public partial class RealmLandblockRule
+    {
+        public ushort RealmId { get; set; }
+
+        /// <summary>
+        /// The 16-bit landblock id, e.g. 0x019E.
+        /// </summary>
+        public ushort Landblock { get; set; }
+
+        /// <summary>
+        /// Suppresses the base landblock_instance content for this landblock in this realm.
+        /// Authored landblock_instance_realm rows still win over the rule.
+        /// </summary>
+        public bool StripStatics { get; set; }
+
+        /// <summary>
+        /// Suppresses this landblock's encounter spawns in this realm.
+        /// </summary>
+        public bool StripEncounters { get; set; }
+
+        public DateTime LastModified { get; set; }
+    }
+
     public partial class WorldDbContext
     {
         public virtual DbSet<LandblockInstanceRealm> LandblockInstanceRealm { get; set; }
         public virtual DbSet<LandblockInstanceLinkRealm> LandblockInstanceLinkRealm { get; set; }
+        public virtual DbSet<RealmLandblockRule> RealmLandblockRule { get; set; }
 
         internal static void ConfigureRealmContent(ModelBuilder modelBuilder)
         {
@@ -102,6 +132,23 @@ namespace ACE.Database.Models.World
                 entity.HasOne(d => d.Parent).WithMany(p => p.LandblockInstanceLinkRealm)
                     .HasForeignKey(d => new { d.RealmId, d.ParentGuid })
                     .HasConstraintName("realm_instance_link");
+            });
+
+            modelBuilder.Entity<RealmLandblockRule>(entity =>
+            {
+                entity.ToTable("realm_landblock_rule");
+
+                entity.HasKey(e => new { e.RealmId, e.Landblock });
+
+                entity.Property(e => e.RealmId).HasColumnName("realm_id");
+                entity.Property(e => e.Landblock).HasColumnName("landblock");
+                entity.Property(e => e.StripStatics).HasColumnName("strip_statics");
+                entity.Property(e => e.StripEncounters).HasColumnName("strip_encounters");
+                entity.Property(e => e.LastModified)
+                    .ValueGeneratedOnAddOrUpdate()
+                    .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                    .HasColumnType("datetime")
+                    .HasColumnName("last_Modified");
             });
         }
     }

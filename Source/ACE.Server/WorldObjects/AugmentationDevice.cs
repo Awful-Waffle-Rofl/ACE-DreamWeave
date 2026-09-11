@@ -66,8 +66,11 @@ namespace ACE.Server.WorldObjects
 
             if (!confirmed)
             {
-                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Augmentation(player.Guid, Guid),
-                    $"This action will augment your character with {Name} and will cost {AugmentationCost:N0} available experience."))
+                var confirmationText = (AugmentationCost ?? 0) == 0
+                    ? $"This action will augment your character with {Name}."
+                    : $"This action will augment your character with {Name} and will cost {AugmentationCost:N0} available experience.";
+
+                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Augmentation(player.Guid, Guid), confirmationText))
                     player.SendWeenieError(WeenieError.ConfirmationInProgress);
 
                 return;
@@ -121,6 +124,25 @@ namespace ACE.Server.WorldObjects
             {
                 var capacity = player.GetEncumbranceCapacity();
                 player.Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.EncumbranceCapacity, capacity));
+            }
+            else if (type == AugmentationType.MuleSpace)
+            {
+                // Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05). This branch is an
+                // INTENTIONAL SUPERSESSION of the phase 1 instruction "no new branch in DoAugmentation".
+                // That instruction was specifically about the immediate CLIENT-refresh branches PackSlot and
+                // BurdenLimit use; this is a SERVER-side cache refresh and is a different thing.
+                //
+                // Why it is needed: CustomAugBroker's grant path already calls RefreshMuleSpaceBonus, but at
+                // that moment the trade has handed over a GEM and PropertyInt.AugmentationMuleSpace has not
+                // moved yet - it only rises HERE, when the gem is used. Without this call the buyer does not
+                // see the extra entries until their AccountVaultStore is next constructed. The grant-site
+                // call is kept as well: it is free, and it covers a store constructed between the purchase
+                // and the use.
+                //
+                // The account id is resolved exactly as CustomAugBroker.HandleConfirm resolves it, and
+                // AccountVaultManager.RefreshMuleSpaceBonus is a no-op for account 0 and for an account with
+                // no loaded store.
+                AccountVaultManager.RefreshMuleSpaceBonus(player.Account?.AccountId ?? 0);
             }
 
             // consume xp
@@ -257,6 +279,11 @@ namespace ACE.Server.WorldObjects
             { AugmentationType.DamageResist, 1 },
             { AugmentationType.AllStats, 1 },
             { AugmentationType.FociVoid, 1 },
+
+            // Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): uncapped by design.
+            { AugmentationType.MuleSpace, int.MaxValue },
+            { AugmentationType.PickupSpeedCustom, int.MaxValue },
+            { AugmentationType.SpellDurationCustom, int.MaxValue },
         };
 
         public static Dictionary<AugmentationType, PropertyInt> AugProps = new Dictionary<AugmentationType, PropertyInt>()
@@ -302,6 +329,11 @@ namespace ACE.Server.WorldObjects
             { AugmentationType.DamageResist, PropertyInt.AugmentationDamageReduction },
             { AugmentationType.AllStats, PropertyInt.AugmentationJackOfAllTrades },
             { AugmentationType.FociVoid, PropertyInt.AugmentationInfusedVoidMagic },
+
+            // Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05).
+            { AugmentationType.MuleSpace, PropertyInt.AugmentationMuleSpace },
+            { AugmentationType.PickupSpeedCustom, PropertyInt.AugmentationPickupSpeed },
+            { AugmentationType.SpellDurationCustom, PropertyInt.AugmentationSpellDurationCustom },
         };
     }
 }

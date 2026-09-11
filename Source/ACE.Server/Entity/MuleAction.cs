@@ -31,6 +31,14 @@ namespace ACE.Server.Entity
         AcceptContract,
         GainTitle,
         BuyHouse,
-        StartChallenge
+        StartChallenge,
+
+        /// <summary>
+        /// Switching to another Player Facet slot. A mule has TotalSkillCredits 0 and every untrainable
+        /// skill forced to Untrained (Player_Mule), so letting one switch would capture that zeroed state
+        /// into a slot row as if it were a build. Unreachable at stock config, because mule_level (180) is
+        /// below facet_slot2_level (300), but both are live tunables and neither knows about the other.
+        /// </summary>
+        ChangeFacet
     }
 }

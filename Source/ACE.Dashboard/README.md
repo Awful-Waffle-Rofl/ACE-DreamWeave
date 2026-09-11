@@ -20,7 +20,14 @@ Standalone (no reference to the game assemblies) — item names etc. are stored 
   ```
 - `Dashboard:Username` / `Dashboard:Password` — HTTP Basic auth. **Empty password ⇒ the dashboard
   refuses all requests (503)**, so it's safe by default until you set one.
-- `Kestrel:Endpoints:Http:Url` — bind address. Defaults to `http://127.0.0.1:5080` (loopback).
+- `Kestrel:Endpoints:Http:Url` — bind address. Defaults to `http://127.0.0.1:5080` (loopback),
+  which is right when running the app directly on a host and wrong inside a container, where
+  loopback is the container's own. The Dockerfile therefore overrides this exact key with
+  `Kestrel__Endpoints__Http__Url=http://+:8080`. **Do not "fix" a container bind with
+  `ASPNETCORE_URLS`** — an explicit Kestrel endpoint in configuration beats it, and the app will
+  log `Overriding address(es) ... Binding to endpoints defined via IConfiguration` and keep
+  binding 127.0.0.1:5080. Nothing then listens on the published port, so the container looks
+  healthy and answers nothing.
 
 ## Run
 

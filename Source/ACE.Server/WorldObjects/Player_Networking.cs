@@ -30,6 +30,9 @@ namespace ACE.Server.WorldObjects
             LoginTimestamp = lastLoginTimestamp;
             LastTeleportStartTimestamp = lastLoginTimestamp;
 
+            // The /lph window opens at login and is reset by /lph start.
+            ResetLumRateWindow();
+
             Character.LastLoginTimestamp = lastLoginTimestamp;
             Character.TotalLogins++;
             CharacterChangesDetected = true;
@@ -49,6 +52,12 @@ namespace ACE.Server.WorldObjects
             // account-wide total for the session. Same one-character-per-account assumption as above: the
             // other characters' counts are frozen until this one logs out. See Player_QuestStamps.
             InitQuestStamps();
+
+            // Warm this account's pooled pyreal balance and fold in any legacy per-character balance
+            // this character still carries. MUST run before SendSelf() below: GameEventPlayerDescription
+            // snapshots GetSpendableCoinValue, which reads BankedPyreals, so a cold pool would put the
+            // session's first coin figure at 0. See Player_Bank.InitAccountBank.
+            InitAccountBank();
 
             Sequences.SetSequence(SequenceType.ObjectInstance, new UShortSequence((ushort)Character.TotalLogins));
 
@@ -129,7 +138,7 @@ namespace ACE.Server.WorldObjects
             HandleHouseOnLogin();
 
             // let the player know if they have offline bonus time banked from being logged out
-            if (IsOfflineExperienceBonusActive)
+            if (PropertyManager.GetBool("offline_bonus_enabled").Item && GetOfflineExperienceBonusRemaining() > 0)
             {
                 var actionChain = new ActionChain();
                 actionChain.AddDelaySeconds(3.0f);
@@ -151,14 +160,29 @@ namespace ACE.Server.WorldObjects
             // characters, immune to missed level-ups) - DESIGN.md sec 2a
             GrantMilestoneClassAbilityPoints();
 
-            // pay out any enlightenment-milestone class ability points not yet granted (retroactive for
-            // characters enlightened before this lane existed) - DESIGN.md sec 2c
+            // catch up the facet slot-2 unlock notice for a character who was already eligible before
+            // this login (retroactive, same idempotent shape as the milestone grant above)
+            SendFacetUnlockNoticeIfDue();
+
+            // pay out any enlightenment-milestone class ability points not yet granted. Enlightenment is
+            // RETIRED, so this entitlement is frozen rather than growing - it stays only to finish paying
+            // characters who were mid-catch-up when the system was retired. DESIGN.md sec 2c.
             GrantEnlightenmentClassAbilityPoints();
+
+            // return the experience the retired enlightenment system consumed, as levels and unassigned xp
+            // (Docs/ClassAbilities/XP-LANE-SPEC.md sec 5.2). Idempotent floor; no-op for the unenlightened.
+            GrantEnlightenmentRetirementCredit();
 
             // refund class ability points orphaned by a since-retired ability (e.g. Advanced Weaponry,
             // Questionable Tactics) and clean up the dead quest registry row - runs regardless of
             // class_abilities_enabled, unlike the two grants above
             SweepRetiredClassAbilities();
+
+            // CAP audit ledger, round 3: detect a ledger/counter mismatch at login. Must run AFTER the
+            // three calls above - they mutate the CAP counters and/or the quest-registry rows this
+            // audit reads, so auditing before them would measure a state about to change. Read-only;
+            // completes asynchronously (queued shard read) and never blocks login.
+            AuditClassAbilityPointLedger();
 
             HandleSkillCreditRefund();
             HandleSkillTemplesReset();
@@ -262,6 +286,10 @@ namespace ACE.Server.WorldObjects
             Placement = null;
             Session.Network.EnqueueSend(new GameMessagePlayerCreate(Guid), new GameMessageCreateObject(this));
 
+            // Relog is the case the probe exists to fix: the client rebuilds everything here and any
+            // previously-sent particle script is gone unless it is re-emitted. See VisualEffectManager.
+            VisualEffectManager.SendTo(Session, this);
+
             SendInventoryAndWieldedItems();
 
             SendContractTrackerTable();
@@ -280,6 +308,8 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void SendInventoryAndWieldedItems()
         {
+            // Pack contents get no visual effect: they are not drawn, so a script sent here would
+            // attach to nothing AND consume the once-per-lifetime send that equipping needs.
             foreach (var item in Inventory.Values)
             {
                 Session.Network.EnqueueSend(new GameMessageCreateObject(item));
@@ -294,10 +324,12 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
+            // Equipped items ARE drawn, so these do get their effect.
             foreach (var item in EquippedObjects.Values)
             {
                 item.Wielder = this;
                 Session.Network.EnqueueSend(new GameMessageCreateObject(item));
+                VisualEffectManager.SendTo(Session, item);
             }
         }
 

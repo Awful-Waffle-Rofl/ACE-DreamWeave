@@ -3,6 +3,8 @@ using System.Linq;
 
 using log4net;
 
+using ACE.Database;
+using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
@@ -16,9 +18,11 @@ namespace ACE.Server.Command.Handlers
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
+        private const string Usage = "list | all | enhanced [skills|attributes|vitals] | info <skill> | learn <skill> | unlearn <skill> | points | buy <skill> | buyxp [count] | token [list|buy <skill> <tier>]";
+
         [CommandHandler("abilities", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
             "Manage your class abilities",
-            "list | all | enhanced [skills|attributes|vitals] | info <skill> | token [list|buy <skill> <tier>] | unlearn <skill> | points")]
+            Usage)]
         public static void HandleSkills(Session session, params string[] parameters)
         {
             if (!PropertyManager.GetBool("class_abilities_enabled").Item)
@@ -56,11 +60,14 @@ namespace ACE.Server.Command.Handlers
                 case "buy":
                     HandleBuy(session, arg);
                     break;
+                case "buyxp":
+                    HandleBuyXp(session, arg);
+                    break;
                 case "token":
                     HandleToken(session, parameters);
                     break;
                 default:
-                    Reply(session, "Usage: /abilities list | all | enhanced [skills|attributes|vitals] | info <skill> | token [list|buy <skill> <tier>] | unlearn <skill> | points");
+                    Reply(session, $"Usage: /abilities {Usage}");
                     break;
             }
         }
@@ -88,7 +95,7 @@ namespace ACE.Server.Command.Handlers
                 Reply(session, "You have not learned any class abilities. Use /abilities all to see what is available.");
             else
             {
-                Reply(session, "Your class abilities:  (skill/affinity/gear)");
+                Reply(session, "Your class abilities:  [skill/affinity/gear]");
                 foreach (var (skill, rank) in owned)
                 {
                     var readout = ClassAbilityRegistry.GetHandler(skill.Id) is IAbilityReadout readoutSource
@@ -115,8 +122,10 @@ namespace ACE.Server.Command.Handlers
             if (!readout.HasValue)
                 return header;
 
-            var triple = $"({Num(readout.Skill)}/{Num(readout.Affinity)}/{Num(readout.Gear)})";
-            var line = $"{header}  {Num(readout.Effective)}{readout.Unit}{readout.Per} {readout.Label}  {triple}";
+            var triple = $"[{Num(readout.Skill)}/{Num(readout.Affinity)}/{Num(readout.Gear)}]";
+            var line = $"{header}  {readout.Prefix}{Num(readout.Effective)}{readout.Unit}{readout.Per} {readout.Label}  {triple}";
+            // readout.Prefix is null unless the handler opted in (e.g. EnhancedStatAbility's "+"); the
+            // interpolation above already renders a null as "", so no null-coalescing is needed here.
 
             if (readout.Capped)
                 line += $" capped: {readout.CapNote}";
@@ -327,6 +336,16 @@ namespace ACE.Server.Command.Handlers
 
             Reply(session, PointsSummary(session));
             Reply(session, $"Luminance purchases: {purchased:N0} bought so far; the next point costs {nextCost:N0} Luminance. Exchange it at the reckoning-stone by the Skillmaster in the Drift Network. Prices rise with each point and there is no cap.");
+
+            // the xp lane runs its own counter and its own curve, so both prices are quoted (XP-LANE-SPEC sec 3.3)
+            var xpPurchased = player.ClassAbilityPointsPurchasedWithXp;
+            var nextXpCost = WorldObjects.Player.XpCostForClassAbilityPoints(xpPurchased, 1);
+            var minLevel = WorldObjects.Player.ClassAbilityXpMinLevel;
+
+            if ((player.Level ?? 1) < minLevel)
+                Reply(session, $"Experience purchases: unlocked at level {minLevel:N0} (you are {player.Level ?? 1:N0}).");
+            else
+                Reply(session, $"Experience purchases: {xpPurchased:N0} bought so far; the next point costs {nextXpCost:N0} experience and you have {player.AvailableExperience ?? 0:N0} unassigned. Prices rise with each point and there is no cap.");
         }
 
         private static void HandleBuy(Session session, string arg)
@@ -348,6 +367,33 @@ namespace ACE.Server.Command.Handlers
             }
 
             if (!session.Player.TryBuyClassAbilityPoints(count, out var error))
+                Reply(session, error);
+            // success message comes from GrantClassAbilityPoints
+        }
+
+        /// <summary>
+        /// Exchanges unassigned EXPERIENCE for class ability points. Unlike /abilities buy this is a PLAYER
+        /// command - the xp lane is the replacement for the enlightenment lane, and its in-game front end is
+        /// the companion exchange stone in the Drift Network (XP-LANE-SPEC sec 3.7). The level gate and the
+        /// price both live in TryBuyClassAbilityPointsWithXp, so this only parses the count.
+        /// </summary>
+        private static void HandleBuyXp(Session session, string arg)
+        {
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+            {
+                Reply(session, "Class abilities are not currently enabled on this server.");
+                return;
+            }
+
+            var count = 1;
+
+            if (arg != null && (!int.TryParse(arg, out count) || count < 1))
+            {
+                Reply(session, "Usage: /abilities buyxp [count] - count must be a positive number.");
+                return;
+            }
+
+            if (!session.Player.TryBuyClassAbilityPointsWithXp(count, out var error))
                 Reply(session, error);
             // success message comes from GrantClassAbilityPoints
         }
@@ -447,11 +493,13 @@ namespace ACE.Server.Command.Handlers
 
         /// <summary>
         /// Admin/developer tooling: grant class ability points to yourself (or another online player)
-        /// without farming point items. Bypasses the lifetime earned cap so testing isn't blocked
-        /// by the economy - the cap still applies to all player-facing sources.
+        /// without farming point items. There is NO lifetime cap to bypass - the no-caps redesign
+        /// (DESIGN.md sec 1) limits power by the Luminance price curve rather than a wall, and
+        /// <see cref="Player.GrantClassAbilityPoints"/>, which this calls, succeeds for any positive
+        /// amount from any source. This command exists purely to skip the earning, not a cap.
         /// </summary>
         [CommandHandler("grantabilitypoints", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1,
-            "Grants class ability points to yourself or another online player, ignoring the lifetime cap",
+            "Grants class ability points to yourself or another online player, skipping the normal earning",
             "<amount> [playerName]")]
         public static void HandleGrantSkillPoints(Session session, params string[] parameters)
         {
@@ -482,10 +530,187 @@ namespace ACE.Server.Command.Handlers
             }
 
             // messages the target and saves their biota
-            target.GrantClassAbilityPoints(amount, "an admin grant");
+            target.GrantClassAbilityPoints(amount, "an admin grant", CapLedgerReason.GrantAdmin);
 
             if (target != session.Player)
                 Reply(session, $"Granted {amount:N0} class ability point{(amount == 1 ? "" : "s")} to {target.Name} ({target.AvailableClassAbilityPoints:N0} now available).");
+        }
+
+        /// <summary>
+        /// CAP audit ledger, round 3: staff-facing observability over `character_cap_audit` and
+        /// `character_cap_ledger`. With no argument, lists every character currently flagged out of
+        /// balance (unexplained &lt;&gt; 0 or rank_Divergences &lt;&gt; 0). With a name, shows that
+        /// character's audit row (found by id via GetCapAudit, whether balanced or not, or a distinct
+        /// "never audited" message if none has ever been recorded) plus their last 20 ledger rows.
+        ///
+        /// A NULL read result means the shard ledger read FAILED - this is reported distinctly from
+        /// "no rows", per the read-failure contract on ShardDatabase_CapLedger.cs. Never confuse the
+        /// two: reporting "no rows" on a failed read would tell an admin a character's ledger is clean
+        /// when nothing was actually examined.
+        /// </summary>
+        [CommandHandler("caaudit", AccessLevel.Admin, CommandHandlerFlag.RequiresWorld, 0,
+            "Shows CAP audit ledger status: with no name, every character flagged out of balance; with a name, that character's audit row plus their last 20 ledger rows",
+            "[playerName]")]
+        public static void HandleCapAudit(Session session, params string[] parameters)
+        {
+            if (parameters.Length == 0)
+            {
+                DatabaseManager.Shard.GetCapAuditFailures(ShardDatabase.MaxCapLedgerRows, rows =>
+                {
+                    if (rows == null)
+                    {
+                        Reply(session, "The shard ledger is unavailable - the CAP audit read failed.");
+                        return;
+                    }
+
+                    if (rows.Count == 0)
+                    {
+                        Reply(session, "No character is currently flagged out of balance.");
+                        return;
+                    }
+
+                    Reply(session, $"{rows.Count} character(s) flagged out of balance:");
+                    foreach (var row in rows)
+                        Reply(session, FormatAuditRow(row));
+                });
+                return;
+            }
+
+            var playerName = string.Join(" ", parameters);
+            var target = PlayerManager.FindByName(playerName);
+
+            if (target == null)
+            {
+                Reply(session, $"No character named '{playerName}' was found.");
+                return;
+            }
+
+            var characterId = target.Guid.Full;
+            var characterName = target.Name;
+
+            DatabaseManager.Shard.GetCapAudit(characterId, (row, found) =>
+            {
+                if (!found)
+                {
+                    Reply(session, "The shard ledger is unavailable - the CAP audit read failed.");
+                }
+                else if (row == null)
+                {
+                    Reply(session, $"{characterName} (0x{characterId:X8}) has no recorded CAP audit row yet.");
+                }
+                else
+                {
+                    Reply(session, FormatAuditRow(row));
+                }
+            });
+
+            DatabaseManager.Shard.GetCapLedger(characterId, 20, ledgerRows =>
+            {
+                if (ledgerRows == null)
+                {
+                    Reply(session, "The shard ledger is unavailable - the CAP ledger read failed.");
+                    return;
+                }
+
+                if (ledgerRows.Count == 0)
+                {
+                    Reply(session, $"{characterName} (0x{characterId:X8}) has no recorded CAP ledger history.");
+                    return;
+                }
+
+                Reply(session, $"{characterName} (0x{characterId:X8}) - last {ledgerRows.Count} ledger row(s), newest first:");
+                foreach (var ledgerRow in ledgerRows)
+                    Reply(session, FormatLedgerRow(ledgerRow));
+            });
+        }
+
+        private static string FormatAuditRow(CharacterCapAudit row)
+        {
+            var firstDetected = row.FirstDetectedAt.HasValue ? row.FirstDetectedAt.Value.ToString("u") : "n/a";
+            return $"  {row.CharacterName} (0x{row.CharacterId:X8}): totalEarned {row.TotalEarned}, available {row.Available}, " +
+                $"ownedCost {row.OwnedCost}, sinkSpend {row.SinkSpend}, unexplained {row.Unexplained}, orphanRows {row.OrphanRows}, " +
+                $"rankDivergences {row.RankDivergences}, firstDetected {firstDetected}, lastChecked {row.LastCheckedAt:u}.";
+        }
+
+        private static string FormatLedgerRow(CharacterCapLedger row)
+        {
+            var line = $"  #{row.Id} {row.Ts:u} {row.Reason} deltaAvailable {row.DeltaAvailable} deltaTotal {row.DeltaTotal} " +
+                $"availableAfter {row.AvailableAfter} totalAfter {row.TotalAfter} ownedCostAfter {row.OwnedCostAfter}";
+
+            if (row.Ability != null)
+                line += $" ability {row.Ability} rankAfter {(row.RankAfter.HasValue ? row.RankAfter.Value.ToString() : "n/a")}";
+
+            if (row.BatchId != null)
+                line += $" batch {row.BatchId}";
+
+            if (row.Detail != null)
+                line += $" - {row.Detail}";
+
+            return line;
+        }
+
+        /// <summary>
+        /// CAP audit ledger, round 3: the manual remediation route for a CAP-shortfall incident, and
+        /// the durable tool for the next one. Applies a signed correction to an ONLINE player's
+        /// AvailableClassAbilityPoints through <see cref="Player.TryAdminAdjustClassAbilityPoints"/> -
+        /// the ONLY public route onto the CAP mutator - so the correction is ledgered (reason
+        /// admin_correct) exactly like every other CAP write site.
+        ///
+        /// NEVER touches TotalClassAbilityPointsEarned: <see cref="Player.GrantClassAbilityPoints"/>
+        /// raises both counters, and Total is what MeetsClassAbilityTierUnlock reads
+        /// (Player_ClassAbilities.cs's `TotalClassAbilityPointsEarned &lt; cspRequired` check) to gate
+        /// Tier 2/3 class-ability access, so crediting a correction through it would silently hand out
+        /// tier access along with the point. This command's mutator only ever changes Available.
+        /// </summary>
+        [CommandHandler("capadjust", AccessLevel.Admin, CommandHandlerFlag.RequiresWorld, 3,
+            "Applies a signed correction to an online player's available class ability points, ledgered as an admin correction. Never grants lifetime-earned points or tier access.",
+            "<playerName> <signed amount> <reason text>")]
+        public static void HandleCapAdjust(Session session, params string[] parameters)
+        {
+            if (parameters.Length < 3)
+            {
+                Reply(session, "Usage: /capadjust <playerName> <signed amount> <reason text>");
+                return;
+            }
+
+            var playerName = parameters[0];
+            var target = PlayerManager.GetOnlinePlayer(playerName);
+
+            if (target == null)
+            {
+                Reply(session, $"Player '{playerName}' is not online.");
+                return;
+            }
+
+            if (!int.TryParse(parameters[1], NumberStyles.AllowLeadingSign | NumberStyles.AllowLeadingWhite, CultureInfo.InvariantCulture, out var amount) || amount == 0)
+            {
+                Reply(session, "Usage: /capadjust <playerName> <signed amount> <reason text> - amount must be a nonzero signed number, e.g. +1 or -2.");
+                return;
+            }
+
+            var reasonText = string.Join(" ", parameters.Skip(2));
+
+            if (string.IsNullOrWhiteSpace(reasonText))
+            {
+                Reply(session, "Usage: /capadjust <playerName> <signed amount> <reason text> - a reason is required.");
+                return;
+            }
+
+            var detail = $"{session.Player.Name}: {reasonText}";
+
+            if (!target.TryAdminAdjustClassAbilityPoints(amount, detail, out var availableAfter))
+            {
+                Reply(session, $"Refused: {target.Name} has {target.AvailableClassAbilityPoints:N0} available; that adjustment would take it below zero.");
+                return;
+            }
+
+            target.SaveBiotaToDatabase();
+
+            var sign = amount > 0 ? "+" : "";
+            Reply(session, $"Adjusted {target.Name} (0x{target.Guid.Full:X8}) by {sign}{amount:N0} class ability point{(System.Math.Abs(amount) == 1 ? "" : "s")}. Available is now {availableAfter:N0}. Reason: {reasonText}");
+
+            if (target != session.Player)
+                Reply(target.Session, $"An admin adjusted your available class ability points by {sign}{amount:N0}. Available is now {availableAfter:N0}.");
         }
 
         /// <summary>

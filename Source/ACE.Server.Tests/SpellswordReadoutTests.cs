@@ -81,7 +81,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0, readout.Affinity, 1e-9);
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
-            Assert.AreEqual("pp", readout.Unit);
+            Assert.AreEqual("%", readout.Unit);
             Assert.AreEqual("proc chance", readout.Label);
             Assert.AreEqual("/stack", readout.Per);
             Assert.IsFalse(readout.Capped);
@@ -111,7 +111,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0, readout.Affinity, 1e-9, "this entry carries no affinity rider by design");
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
-            Assert.AreEqual("pp", readout.Unit);
+            Assert.AreEqual("%", readout.Unit);
             Assert.AreEqual("proc", readout.Label);
             Assert.IsNull(readout.Per);
             Assert.IsFalse(readout.Capped, "no rider means no cap can ever bite");
@@ -140,7 +140,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0, readout.Affinity, 1e-9);
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
-            Assert.AreEqual("pp", readout.Unit);
+            Assert.AreEqual("%", readout.Unit);
             Assert.AreEqual("chain", readout.Label);
             Assert.IsNull(readout.Per);
             Assert.IsFalse(readout.Capped);

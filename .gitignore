@@ -331,3 +331,8 @@ Content/json/weenies/
 # Claude Code personal/local settings (machine-specific, not shared)
 .claude/settings.local.json
 Source/.claude/settings.local.json
+
+# Live in-game verification queue. Session-local scratch: every session appends
+# rows and the repo owner retires them, so a shared copy conflicts constantly and
+# carries no value once a row is retired.
+Docs/VERIFY-QUEUE.md

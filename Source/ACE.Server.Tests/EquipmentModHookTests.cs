@@ -280,22 +280,10 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.23, LongDrawAbility.DistanceBonus(50.0, 1, 2 * 0.10 + 0.03, min, max), Epsilon);
         }
 
-        [TestMethod]
-        public void BloodFury_ModRidesTheAbilitysHealthRamp()
-        {
-            const double start = 0.75;
-            const double peak = 0.25;
-
-            // the rank-0 path passes the mod value as peakBonus, so a 3% mod pays nothing at full health
-            Assert.AreEqual(0.0, BloodFuryAbility.LowHealthBonus(1.00, 0.03, start, peak), Epsilon);
-            Assert.AreEqual(0.0, BloodFuryAbility.LowHealthBonus(0.75, 0.03, start, peak), Epsilon);
-            Assert.AreEqual(0.015, BloodFuryAbility.LowHealthBonus(0.50, 0.03, start, peak), Epsilon);
-            Assert.AreEqual(0.03, BloodFuryAbility.LowHealthBonus(0.25, 0.03, start, peak), Epsilon);
-            Assert.AreEqual(0.03, BloodFuryAbility.LowHealthBonus(0.01, 0.03, start, peak), Epsilon);
-
-            // owned: rank 2 (0.10/rank) plus a 0.03 mod is one peak of 0.23
-            Assert.AreEqual(0.23, BloodFuryAbility.LowHealthBonus(0.25, 2 * 0.10 + 0.03, start, peak), Epsilon);
-        }
+        // BloodFury_ModRidesTheAbilitysHealthRamp lived here until 2026-08-17. Blood Fury was retired and mod
+        // id 18 / PropertyFloat 8117 repurposed IN PLACE as Break Armor's proc-chance machinery mod, so there
+        // is no longer a rank-0 ramp for it to ride. Its replacement coverage is Phase 1's, alongside the
+        // Break Armor handler (see PendingHandlers below).
 
         [TestMethod]
         public void Venom_FlatBonusIsTheAbilityAloneAndTheModIsAddedAtApplication()
@@ -531,22 +519,25 @@ namespace ACE.Server.Tests
             Assert.IsTrue(sawHigh, "floored rolls never landed near the maximum");
         }
 
+        /// <summary>
+        /// Replaces LowTierApply_TakesTheGreaterOfTheTunableAndTheFloor, which pinned the removed
+        /// equipment_mod_lowtier_potency stamp. The surviving subject is the mod's OWN declared floor, which
+        /// is now the single lower bound on every stamped potency: a Venom at its floor must still be worth a
+        /// whole point of poison after ComputePoisonDamage rounds it.
+        /// </summary>
         [TestMethod]
-        public void LowTierApply_TakesTheGreaterOfTheTunableAndTheFloor()
+        public void EveryModsFloorIsWorthSomethingOnceResolved()
         {
             var venom = EquipmentModRegistry.Get(EquipmentModId.Venom);
             var deadeye = EquipmentModRegistry.Get(EquipmentModId.Deadeye);
 
-            // Venom's floor (0.25) beats the 0.2 tunable, so a TigerEye Venom is worth 1.025 flat, not 0.82
-            Assert.AreEqual(0.25, EquipmentModRoller.LowTierPotency(venom), Epsilon);
-            Assert.AreEqual(1.025, EquipmentModValue.Resolve(venom, EquipmentModRoller.LowTierPotency(venom)), Epsilon);
-            Assert.AreEqual(1u, PoisonWeaponAbility.ComputePoisonDamage(0.0, EquipmentModValue.Resolve(venom, EquipmentModRoller.LowTierPotency(venom))));
+            // Venom declares its own floor of 0.25, above the catalog default
+            Assert.AreEqual(0.25, EquipmentModRoller.MinPotency(venom), Epsilon);
+            Assert.AreEqual(1.025, EquipmentModValue.Resolve(venom, EquipmentModRoller.MinPotency(venom)), Epsilon);
+            Assert.AreEqual(1u, PoisonWeaponAbility.ComputePoisonDamage(0.0, EquipmentModValue.Resolve(venom, EquipmentModRoller.MinPotency(venom))));
 
-            // a mod on the catalog default floor (0.10) is untouched: the 0.2 tunable is already above it, so
-            // raising the default floor did not change any low-tier payout
-            Assert.AreEqual(0.2, EquipmentModRoller.LowTierPotency(deadeye), Epsilon);
-            Assert.IsTrue(EquipmentModRoller.DefaultMinPotency < PropertyManager.GetDouble("equipment_mod_lowtier_potency").Item,
-                "a default floor above the low-tier tunable would silently buff every TigerEye application");
+            // a mod that declares no floor of its own falls back to the catalog default
+            Assert.AreEqual(EquipmentModRoller.DefaultMinPotency, EquipmentModRoller.MinPotency(deadeye), Epsilon);
         }
 
         [TestMethod]
@@ -610,7 +601,7 @@ namespace ACE.Server.Tests
         {
             // the defining machinery property: no ability, no effect, however large the mod
             Assert.AreEqual(0.0f, DoubleVolleyAbility.Chance(0, 0.06, 0.06, 0.99));
-            Assert.AreEqual(0.0f, AcidProcAbility.Chance(0, 0.08, 0.06, 0.0, 0.99));
+            Assert.AreEqual(0.0f, AcidProcAbility.Chance(0, 0.25, 0.99));
             Assert.AreEqual(0.0f, EchoCastAbility.EchoChance(0, 0.06, 0.06, 0.0, 0.99));
             Assert.AreEqual(0.0f, ElementalRendAbility.RendChance(0, 0.08, 0.06, 0.0, 0.99));
             Assert.AreEqual(0.0, ShieldCheckAbility.ReflectStrength(0, 0.40, 0.30, 0.99), Epsilon);
@@ -625,8 +616,8 @@ namespace ACE.Server.Tests
             // rank 3 = 6 + 2*6 = 18%, + 1.5pp = 19.5%
             Assert.AreEqual(0.195f, DoubleVolleyAbility.Chance(3, 0.06, 0.06, 0.015), 1e-6f);
 
-            // acid proc: base 8% at rank 1, a 1% skill rider, and a 2pp mod = 11%
-            Assert.AreEqual(0.11f, AcidProcAbility.Chance(1, 0.08, 0.06, 0.01, 0.02), 1e-6f);
+            // acid proc: flat 25% base (rank-invariant since the 2026-08-17 rework) + a 2pp mod = 27%
+            Assert.AreEqual(0.27f, AcidProcAbility.Chance(1, 0.25, 0.02), 1e-6f);
 
             Assert.AreEqual(0.075f, EchoCastAbility.EchoChance(1, 0.06, 0.06, 0.0, 0.015), 1e-6f);
             Assert.AreEqual(0.10f, ElementalRendAbility.RendChance(1, 0.08, 0.06, 0.0, 0.02), 1e-6f);
@@ -640,7 +631,7 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(0.06f, DoubleVolleyAbility.Chance(1, 0.06, 0.06));
             Assert.AreEqual(0.18f, DoubleVolleyAbility.Chance(3, 0.06, 0.06));
-            Assert.AreEqual(0.08f, AcidProcAbility.Chance(1, 0.08, 0.06, 0.0));
+            Assert.AreEqual(0.25f, AcidProcAbility.Chance(1, 0.25, 0.0));
             Assert.AreEqual(0.06f, EchoCastAbility.EchoChance(1, 0.06, 0.06, 0.0));
             Assert.AreEqual(0.08f, ElementalRendAbility.RendChance(1, 0.08, 0.06, 0.0));
             Assert.AreEqual(0.40, RiposteAbility.CounterFraction(1, 0.40, 0.30), Epsilon);
@@ -676,6 +667,18 @@ namespace ACE.Server.Tests
 
         // ---------------- registry-to-hook wiring ----------------
 
+        /// <summary>
+        /// Class abilities that an equipment-mod row may name BEFORE their handler is registered, because the
+        /// id was reserved ahead of the handler on purpose.
+        ///
+        /// EMPTIED 2026-08-17 (Phase 1, Berserker/Rogue balance pass): BreakArmorAbility is registered, so
+        /// the check this set suspends - catching a mod pointing at a retired or misspelled ability - applies
+        /// to it like every other row now.
+        /// </summary>
+        private static readonly HashSet<ACE.Server.ClassAbilities.ClassAbilityId> PendingHandlers = new()
+        {
+        };
+
         [TestMethod]
         public void EveryMachineryModsLinkedAbilityIsRealAndEveryStandaloneHasAHookKind()
         {
@@ -683,7 +686,8 @@ namespace ACE.Server.Tests
             // silently inert (machinery) or silently double-applied (standalone)
             foreach (var mod in EquipmentModRegistry.AllMods)
             {
-                Assert.IsTrue(ACE.Server.ClassAbilities.ClassAbilityRegistry.Abilities.ContainsKey(mod.LinkedAbility),
+                Assert.IsTrue(ACE.Server.ClassAbilities.ClassAbilityRegistry.Abilities.ContainsKey(mod.LinkedAbility)
+                        || PendingHandlers.Contains(mod.LinkedAbility),
                     $"{mod.Id}: LinkedAbility {mod.LinkedAbility} is not a registered class ability");
 
                 if (mod.Standalone)
@@ -694,18 +698,21 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void TheSevenRankZeroOutgoingModsAreExactlyTheOutgoingDamageStandalones()
+        public void TheSixRankZeroOutgoingModsAreExactlyTheOutgoingDamageStandalones()
         {
             // Player_EquipmentMods.ApplyEquipmentModOutgoingDamage is the rank-0 mirror for precisely the
             // standalone mods whose ability is an IOutgoingDamageAbility - every other standalone mod folds
             // into a getter the core site already calls and needs no mirror. If this set changes, that
             // method must change with it.
+            //
+            // Was SEVEN until 2026-08-17: Blood Fury was retired and mod 18 became Break Armor, a MACHINERY
+            // mod, which by definition has no rank-0 mirror - so its row dropped out of this set and its
+            // block came out of ApplyEquipmentModOutgoingDamage in the same change.
             var expected = new[]
             {
                 EquipmentModId.Deadeye,
                 EquipmentModId.LongDraw,
                 EquipmentModId.SavageBlows,
-                EquipmentModId.BloodFury,
                 EquipmentModId.Executioner,
                 EquipmentModId.Bloodlust,
                 EquipmentModId.Venom,

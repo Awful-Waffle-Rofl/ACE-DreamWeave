@@ -107,7 +107,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public double GetHealthDrainResistanceOnly()
         {
-            return (ResistHealthDrain ?? 1.0) * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod();
+            return GetEffectiveResistHealthDrain() * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod();
         }
     }
 }

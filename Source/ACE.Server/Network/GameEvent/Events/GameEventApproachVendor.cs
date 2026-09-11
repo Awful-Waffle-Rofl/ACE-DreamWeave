@@ -50,7 +50,12 @@ namespace ACE.Server.Network.GameEvent.Events
                 Writer.WriteString16L(string.Empty);
             }
 
-            var numItems = vendor.DefaultItemsForSale.Count + vendor.UniqueItemsForSale.Count;
+            // Routed through the virtual count rather than re-deriving it from the two base
+            // dictionaries here: PersonalVendor's forEachItem also enumerates a private storeItems
+            // dictionary neither of these two contains, and a hardcoded sum here previously wrote 0
+            // for a mule holding only stored (non-ledger) items while forEachItem still serialized
+            // them - the panel rendered empty for the most common vault state (Mule Vendor fix round 1, I1).
+            var numItems = vendor.ItemsForSaleCount;
 
             Writer.Write(numItems);
 

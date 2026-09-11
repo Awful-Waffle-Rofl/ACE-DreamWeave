@@ -22,8 +22,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Executioner",
             Description = "Deal 4% more melee damage per rank to targets below 25% health. Higher Dirty Fighting increases the bonus.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.DirtyFighting,
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)

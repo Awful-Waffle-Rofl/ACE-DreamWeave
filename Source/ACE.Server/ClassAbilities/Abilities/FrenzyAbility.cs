@@ -2,8 +2,6 @@ using System;
 
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
-using ACE.Server.EquipmentMods;
-using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities.Abilities
@@ -45,6 +43,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 3,
             CostPerRank = new[] { 1, 2, 3 },   // Tier-1 GC: rank 1 always 1 point (the class's power splash)
             Implemented = true,
+            AffinitySkill = Skill.Recklessness, // rider computed in Player_ClassAbilityBuffs.GetFrenzyPerStackTerms, not in this file
         };
 
         // Trigger only: bumps the attacker's transient Frenzy stack. Damage is deliberately untouched.
@@ -90,8 +89,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             (float)(1.0 + Math.Max(0, stacks) * percentPerStack);
 
         /// <summary>
-        /// Reports the PER-STACK rate (Skill/Affinity/Gear mirror the three terms summed into perStack in
-        /// Player.GetFrenzyAttackSpeedMod above - the two must stay in step), not a total-stacks bonus.
+        /// Reports the PER-STACK rate, not a total-stacks bonus. Skill/Affinity/Gear come from
+        /// Player.GetFrenzyPerStackTerms - the SAME call the applied multiplier and the peak announcement
+        /// make - rather than being restated here, so the three cannot drift.
         ///
         /// The anim-speed ceiling (class_ability_attack_speed_ceiling) composes Frenzy MULTIPLICATIVELY
         /// with Attack Speed and weapon mods and clamps the PRODUCT
@@ -103,17 +103,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var percentPerStack = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item;
+            var terms = player.GetFrenzyPerStackTerms();
 
-            var reckless = player.GetClassAbilityScaling(Skill.Recklessness,
-                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_trained").Item,
-                PropertyManager.GetDouble("class_ability_frenzy_reckless_per_spec").Item) * 0.01;
-
-            var gearPerStack = player.GetEquippedModValue(EquipmentModId.FrenziedPace);
-
-            var skill = percentPerStack * 100.0;
-            var affinity = reckless * 100.0;
-            var gear = gearPerStack * 100.0;
+            var skill = terms.Skill * 100.0;
+            var affinity = terms.Affinity * 100.0;
+            var gear = terms.Gear * 100.0;
             var total = skill + affinity + gear;
 
             // Creature.MaxAttackSpeed is the documented saturating base the ceiling clamp is written

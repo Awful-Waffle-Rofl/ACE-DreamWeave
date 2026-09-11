@@ -26,22 +26,42 @@ namespace ACE.Server.Entity
         {
             if (level < 0)
                 level = 0;
-            if (enlightenment < 0)
-                enlightenment = 0;
-            if (maxLevel < 0)
-                maxLevel = 0;
 
-            return (long)enlightenment * maxLevel + level;
+            // ENLIGHTENMENT IS RETIRED and its term is deliberately dropped (XP-LANE-SPEC sec 4). This used
+            // to return enlightenment * maxLevel + level, because a reset character's level 1 badly
+            // understated its progress. That reasoning is now inverted: the retirement credit converts an
+            // enlightened character's count INTO level (Player.GrantEnlightenmentRetirementCredit), so
+            // level already carries everything enlightenment used to stand for. Keeping the term would
+            // count the same progress twice - an ENL 20 character credited to level 531 would score
+            // 20 * 275 + 531, and every one of its alts would read as hopelessly behind and take a
+            // permanent catch-up bonus.
+            //
+            // The parameters are kept so the persisted call sites and their tests stay honest about what
+            // they used to pass; both are ignored.
+            _ = enlightenment;
+            _ = maxLevel;
+
+            return level;
         }
 
         /// <summary>
-        /// TRUE when <paramref name="selfProgression"/> is strictly below <paramref name="highestProgression"/>,
-        /// i.e. some other character on the account is further along. Equality yields FALSE, so the bonus turns
-        /// off the instant an alt reaches (or a character already sits at) the account's high-water mark.
+        /// TRUE when <paramref name="selfProgression"/> trails <paramref name="highestProgression"/> by at least
+        /// <paramref name="gap"/> progression points, i.e. some other character on the account is far enough
+        /// ahead to justify the catch-up boost. A negative <paramref name="gap"/> (bad config) is clamped to 0.
+        /// At <paramref name="gap"/> = 5: exactly 5 behind is TRUE, 4 behind is FALSE, and being AHEAD (a negative
+        /// difference) is always FALSE regardless of gap. At gap = 0 this restores the old bare-equality
+        /// behaviour (any nonzero deficit qualifies).
         /// </summary>
-        public static bool IsBelow(long selfProgression, long highestProgression)
+        public static bool IsBelow(long selfProgression, long highestProgression, long gap)
         {
-            return selfProgression < highestProgression;
+            if (gap < 0)
+                gap = 0;
+
+            var deficit = highestProgression - selfProgression;
+
+            // deficit > 0 is always required (equal or ahead never qualifies, even at gap 0) on top of
+            // meeting the configured gap, so gap 0 reproduces the old strict "<" behaviour exactly.
+            return deficit > 0 && deficit >= gap;
         }
 
         /// <summary>

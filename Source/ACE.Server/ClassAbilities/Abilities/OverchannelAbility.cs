@@ -30,8 +30,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "Arcane Lore increases the bonus. Boosted casts cost +100% mana (stacking with " +
                           "Spell AOE to +200% on an Arc war cast).",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.ArcaneLore,
         };
 
         /// <summary>

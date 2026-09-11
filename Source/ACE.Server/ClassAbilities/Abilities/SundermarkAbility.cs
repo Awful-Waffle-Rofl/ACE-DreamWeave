@@ -55,8 +55,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "matching element's Vulnerability on the target. The level applied is set by your " +
                           "Life Magic, and higher Life Magic also increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 2, 2, 2 },
             Implemented = true,
+            AffinitySkill = Skill.LifeMagic,
         };
 
         /// <summary>
@@ -208,7 +209,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = effective,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,

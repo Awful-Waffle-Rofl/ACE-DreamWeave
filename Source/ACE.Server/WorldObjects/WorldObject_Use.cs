@@ -93,6 +93,67 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // speed challenge (WaffleACE): using an object flagged PropertyBool.SpeedChallengeStart REBASES a
+            // timed Proving Grounds run's clock to now (Docs/ProvingGroundsSpeed/DESIGN.md; see
+            // Player_SpeedChallenge.cs's class doc comment and TryStartSpeedChallengeClock). It sits BEFORE the
+            // goal hook immediately below for the same two reasons that hook sits where it does: AFTER the
+            // CheckUseRequirements gate above, so a locked/inactive/on-cooldown start object cannot arm early,
+            // and INDEPENDENT of the ActivationResponse dispatch below, so a decorative lever with no
+            // ActivationResponse.Use still rebases the clock. It is a rebase, not a gate - the run is already
+            // armed and bound from arrival regardless of whether this hook ever fires, so a player who never
+            // reaches or uses the start object is simply timed from arrival rather than left in any kind of
+            // stuck or unfinishable state. TryStartSpeedChallengeClock re-validates everything that matters
+            // (a valid, active run; the season's declared StartWcid) and refuses a second rebase.
+            if (player != null && GetProperty(PropertyBool.SpeedChallengeStart) == true)
+                player.TryStartSpeedChallengeClock(this);
+
+            // speed challenge (WaffleACE): using an object flagged PropertyBool.SpeedChallengeGoal can complete a
+            // timed Proving Grounds run (Docs/ProvingGroundsSpeed/DESIGN.md section 3.4). It lives HERE, on the
+            // generic activation path, and not on any one type's ActOnUse, because a season's objective may be an
+            // altar, a lever, a pedestal or an exit portal - i.e. any WorldObject subclass. Two placement
+            // decisions, both load-bearing:
+            //   * AFTER the CheckUseRequirements gate above, so an object that is locked, inactive, on cooldown
+            //     or otherwise refused cannot finish a run;
+            //   * INDEPENDENT of the ActivationResponse flag dispatch below, so a decorative prop that carries no
+            //     ActivationResponse.Use still finishes the run, and so completing a run never depends on
+            //     reaching the base ActOnUse "undefined for wcid" error path (WorldObject_Use.cs:143-152).
+            // The funnel re-validates everything that matters - the run must be armed and the player still
+            // standing in the exact ephemeral instance it is bound to, and this object's wcid must be the
+            // SEASON's declared objective - so a stray flagged prop is inert.
+            //
+            // When the goal object is itself the in-dungeon exit portal, note what actually happens: the funnel
+            // runs first, consumes the run and CLEARS PositionType.EphemeralRealmExitTo after capturing it, then
+            // schedules its own exit teleport 3 seconds later. Portal.ActOnUse's PortalExitInstance block then
+            // runs in the same activation and finds that stamp already gone, so it logs its "no
+            // EphemeralRealmExitTo" warning and teleports to the portal's own static Destination fallback - the
+            // player is bounced there first and lands at the captured exit position 3 seconds after. The run is
+            // safe either way (it is already consumed, so CheckSpeedChallengeInstanceExit no-ops on both
+            // teleports), but it is not tidy: prefer a non-portal goal object, or a goal object placed alongside
+            // the exit portal rather than on it.
+            if (player != null && GetProperty(PropertyBool.SpeedChallengeGoal) == true)
+                player.TryFinishSpeedChallenge(this);
+
+            // objective locks (WaffleACE): an object carrying PropertyString.ObjectiveLockKey is a
+            // CONTRIBUTOR to a count-based puzzle gate - a bell in "ring three of five", a lever in "hold
+            // three at once" (see WorldObject_Objective.cs). It lives HERE, on the generic activation path,
+            // for the same reason the speed hook above does: a contributor may be a lever, a bell, a
+            // pedestal, a pressure plate or a piece of scenery, i.e. any WorldObject subclass, and it must
+            // still count when the object carries no ActivationResponse.Use of its own.
+            //
+            // Placement inside OnActivate is load-bearing twice over. AFTER the CheckUseRequirements gate
+            // above, so an object that is locked, inactive, on cooldown or otherwise refused cannot advance
+            // the puzzle - a player must not be able to bank progress off a use the server just denied. And
+            // BEFORE the ActivationResponse dispatch below, so the contribution is independent of whether
+            // the contributor also does something visible when used.
+            //
+            // The guard is a single property read so a normal activation - every door, chest, NPC and
+            // portal in the game - pays one dictionary miss and nothing else. `activator as Player` is
+            // already resolved above and may legitimately be null (a pressure plate tripped by a monster,
+            // one object activating another through a link); that only costs the progress message, never
+            // the contribution.
+            if (ObjectiveLockKey != null)
+                ContributeToObjectiveLock(player);
+
             if (player != null)
                 player.EnchantmentManager.StartCooldown(this);
 

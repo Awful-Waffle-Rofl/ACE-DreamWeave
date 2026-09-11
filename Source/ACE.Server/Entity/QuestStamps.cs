@@ -8,8 +8,10 @@ namespace ACE.Server.Entity
     /// Pure logic for the "quest stamp" system. A character earns one stamp the first time it is ever stamped
     /// for a given quest name, so the count is the number of distinct quests that character has ever touched -
     /// monotonic, never reduced by a quest being erased, decremented or re-solved, and never increased a second
-    /// time by the same quest. The account-wide total (the sum across all of the account's characters) is what
-    /// the Quest Stamp Registrar NPC rewards against, so alts contribute to one shared pool.
+    /// time by the same quest. The account-wide total is the count of distinct quest names stamped anywhere on
+    /// the account, derived from the union of the per-character QuestStampSeen_ ledger rows - so two characters
+    /// completing the SAME quest are worth one stamp to the account, while each still earns its own
+    /// per-character stamp. That account total is what the Quest Stamp Registrar NPC rewards against.
     ///
     /// "Ever stamped" cannot be read off the quest registry, because a registry row is not durable evidence:
     /// retail content erases a quest flag and immediately re-stamps it as its normal way of resetting a
@@ -58,7 +60,12 @@ namespace ACE.Server.Entity
         /// contract-pickup hook was non-standard versus other servers. The prefix stays listed so that any rows
         /// created on a dev shard while the hook was briefly live are neutralized - login backfills and recounts
         /// must never count them. Do not reuse this prefix for anything real.
-        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_" };
+        ///
+        /// "DynDungeonSurvey" covers the six internal rows the Threads survey writes per character
+        /// (DungeonSurveyRules.Window / Count / Total and their per-dungeon siblings). They are a rolling
+        /// counter, not a quest: without this the player sees "You've earned a quest stamp:
+        /// DynDungeonSurveyWindow" every time a run is surveyed, and the account total inflates on a timer.
+        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_", "DynDungeonSurvey" };
 
         /// <summary>
         /// TRUE when a quest registry row by this name is worth a stamp: a non-empty name that does not carry
@@ -133,6 +140,83 @@ namespace ACE.Server.Entity
                 .Where(IsEligible)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Count();
+        }
+
+        /// <summary>
+        /// Splits a stamp ledger row name back into the quest name it records, so a ledger row can stand in for
+        /// a quest the character no longer holds. TRUE only when the row carries the <see cref="LedgerPrefix"/>
+        /// and something follows it. The prefix match is case-insensitive, matching how the quest registry
+        /// itself compares names.
+        /// </summary>
+        public static bool TryGetLedgeredQuestName(string rowName, out string questName)
+        {
+            questName = null;
+
+            if (string.IsNullOrEmpty(rowName))
+                return false;
+
+            if (!rowName.StartsWith(LedgerPrefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var name = rowName.Substring(LedgerPrefix.Length);
+
+            if (name.Length == 0)
+                return false;
+
+            questName = name;
+
+            return true;
+        }
+
+        /// <summary>
+        /// Folds one character's quest registry row names into an account-wide set of stamped quest names.
+        ///
+        /// A ledger row contributes the quest name it records, which is the durable evidence: content erases the
+        /// QUEST row on completion but never the QuestStampSeen_ row beside it, so a quest a character was paid
+        /// for still counts for the account after its flag is gone. A plain eligible quest row also contributes,
+        /// which covers a character that has not yet logged in since the ledger shipped and so has no ledger
+        /// rows of its own. A ledger row whose stripped name is not itself eligible contributes nothing, so a
+        /// stray ledger row over an excluded name cannot inflate the account.
+        ///
+        /// <paramref name="into"/> MUST be built with <see cref="StringComparer.OrdinalIgnoreCase"/> - the quest
+        /// registry compares names case-insensitively, so two spellings of one quest are one stamp.
+        /// </summary>
+        public static void CollectAccountStamps(IEnumerable<string> registryRowNames, HashSet<string> into)
+        {
+            if (registryRowNames == null || into == null)
+                return;
+
+            foreach (var rowName in registryRowNames)
+            {
+                if (TryGetLedgeredQuestName(rowName, out var ledgeredQuestName))
+                {
+                    if (IsEligible(ledgeredQuestName))
+                        into.Add(ledgeredQuestName);
+
+                    continue;
+                }
+
+                if (IsEligible(rowName))
+                    into.Add(rowName);
+            }
+        }
+
+        /// <summary>
+        /// The account-wide stamp total: how many DISTINCT quest names have been stamped anywhere on the
+        /// account, given each character's quest registry row names. Two characters that completed the same
+        /// quest are worth one, not two.
+        /// </summary>
+        public static int CountAccountStamps(IEnumerable<IEnumerable<string>> perCharacterRowNames)
+        {
+            var stamped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (perCharacterRowNames == null)
+                return 0;
+
+            foreach (var rowNames in perCharacterRowNames)
+                CollectAccountStamps(rowNames, stamped);
+
+            return stamped.Count;
         }
 
         /// <summary>

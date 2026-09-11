@@ -508,12 +508,25 @@ namespace ACE.Database
             {
                 var locationPointers = context.BiotaPropertiesPosition.AsNoTracking().Where(i => i.PositionType == (ushort)PositionType.Location).Select(i => i.ObjectId).ToHashSet();
 
+                // Mule Vendor (WaffleACE): the account_vault index, read here so the keep-test below can
+                // exempt every vault container by guid. See the exemption itself for why it exists.
+                var vaultContainers = context.AccountVault.AsNoTracking().Select(i => i.ContainerGuid).ToHashSet();
+
                 var results = new List<uint>();
 
                 foreach (var kvp in biotas)
                 {
                     // exclude allegiances
                     if (kvp.Value == WeenieType.Allegiance)
+                        continue;
+
+                    // Mule Vendor (WaffleACE): a vault container has no Container and no Wielder, and its
+                    // Location is a reserved landblock that nothing else references - so a content edit that
+                    // clears that Location would make every vault look orphaned here, and this purge also
+                    // deletes children whose parent container is missing, taking every stored item with it.
+                    // This exemption is the redundant second half of DESIGN 7.2's mitigation; the Location is
+                    // the first. Neither may be removed as "already covered by the other".
+                    if (vaultContainers.Contains(kvp.Key))
                         continue;
 
                     // exclude objects that have either a container, wielder, or location

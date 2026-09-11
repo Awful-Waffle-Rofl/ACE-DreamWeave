@@ -96,7 +96,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.025,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp extra-arrow damage multiplier",
+                DisplayFormat = "+{0:0.##}% extra-arrow damage multiplier",
             },
             new EquipmentModDefinition
             {
@@ -111,7 +111,7 @@ namespace ACE.Server.EquipmentMods
                 // rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp volley re-fire chance",
+                DisplayFormat = "+{0:0.##}% volley re-fire chance",
             },
 
             // --- Rogue ---
@@ -146,7 +146,7 @@ namespace ACE.Server.EquipmentMods
                 // cross-item sum to 40% + 3.0 x 10.3pp = 70.9%, well short of a guarantee at any stack depth.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp acid proc chance",
+                DisplayFormat = "+{0:0.##}% acid proc chance",
             },
             new EquipmentModDefinition
             {
@@ -177,7 +177,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.10,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp counter-strike weapon damage",
+                DisplayFormat = "+{0:0.##}% counter-strike weapon damage",
             },
             new EquipmentModDefinition
             {
@@ -218,7 +218,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.10,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp thorns-on-parry strength",
+                DisplayFormat = "+{0:0.##}% thorns-on-parry strength",
             },
             new EquipmentModDefinition
             {
@@ -274,14 +274,23 @@ namespace ACE.Server.EquipmentMods
             },
             new EquipmentModDefinition
             {
-                Id = EquipmentModId.BloodFury,
-                Property = PropertyFloat.GearModBloodFury,
-                DisplayName = "Blood Fury",
-                LinkedAbility = ClassAbilityId.BloodFury,
-                Standalone = true,
+                Id = EquipmentModId.BreakArmor,
+                Property = PropertyFloat.GearModBreakArmor,
+                DisplayName = "Break Armor",
+                LinkedAbility = ClassAbilityId.BreakArmor,
+                // MACHINERY, not standalone, and that is load-bearing: Break Armor's proc has no rank-0 half
+                // to mirror, and a standalone row here would be read through GetStandaloneEquipmentModValue,
+                // which returns 0 whenever the linked ability IS owned - i.e. it would zero the gear bonus
+                // for precisely the players who have the ability the mod exists to amplify.
+                Standalone = false,
                 MaxMagnitude = 0.03,
-                HookKind = EquipmentModHookKind.StreamDamagePercentMelee,
-                DisplayFormat = "+{0:0.##}% melee damage at lowest health",
+                // Proc-chance mod, so it takes the catalog's standing proc cap (Double Volley / Acid Proc /
+                // Echo Cast / Elemental Rend / Nether Bloom all carry it): an uncapped six-piece stack would
+                // add +18pp to a 15% base and walk a chance-on-hit ability toward a guarantee. StackCap = 3.0
+                // (three perfect rolls) holds the cross-item sum to 15% + 3 x 3pp = 24% at any stack depth.
+                StackCap = 3.0,
+                HookKind = EquipmentModHookKind.AbilityMachinery,
+                DisplayFormat = "+{0:0.##}% Break Armor proc chance",
             },
             new EquipmentModDefinition
             {
@@ -340,7 +349,7 @@ namespace ACE.Server.EquipmentMods
                 // rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp recast chance",
+                DisplayFormat = "+{0:0.##}% recast chance",
             },
             new EquipmentModDefinition
             {
@@ -355,7 +364,7 @@ namespace ACE.Server.EquipmentMods
                 // rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp vulnerability proc chance",
+                DisplayFormat = "+{0:0.##}% vulnerability proc chance",
             },
             new EquipmentModDefinition
             {
@@ -366,7 +375,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.02,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp radiated blast damage",
+                DisplayFormat = "+{0:0.##}% radiated blast damage",
             },
 
             // --- Void / Summon ---
@@ -412,7 +421,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = true,
                 MaxMagnitude = 0.03,
                 HookKind = EquipmentModHookKind.AbilityCompose,
-                DisplayFormat = "+{0:0.##}pp combat pet damage reduction",
+                DisplayFormat = "+{0:0.##}% combat pet damage reduction",
             },
             new EquipmentModDefinition
             {
@@ -440,7 +449,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = true,
                 MaxMagnitude = 0.03,
                 HookKind = EquipmentModHookKind.AbilityCompose,
-                DisplayFormat = "+{0:0.##}pp damage diverted from Health to Mana",
+                DisplayFormat = "+{0:0.##}% damage diverted from Health to Mana",
             },
 
             // --- Class-catalog reconciliation (2026-08-04): closes the BloodMage/Spellsword mod gap and
@@ -471,7 +480,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.10,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp of Drain surplus redistributed",
+                DisplayFormat = "+{0:0.##}% of Drain surplus redistributed",
             },
             new EquipmentModDefinition
             {
@@ -494,7 +503,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.02,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp debuff intensity",
+                DisplayFormat = "+{0:0.##}% debuff intensity",
             },
             new EquipmentModDefinition
             {
@@ -540,7 +549,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.10,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp of the Sanguine Ward absorb",
+                DisplayFormat = "+{0:0.##}% of the Sanguine Ward absorb",
             },
 
             // --- Spellsword ---
@@ -557,7 +566,7 @@ namespace ACE.Server.EquipmentMods
                 // a chance-on-hit ability toward a guarantee. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Spellblade proc chance",
+                DisplayFormat = "+{0:0.##}% Spellblade proc chance",
             },
             new EquipmentModDefinition
             {
@@ -587,7 +596,7 @@ namespace ACE.Server.EquipmentMods
                 // Dispelling Edge. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Runeblade proc chance",
+                DisplayFormat = "+{0:0.##}% Runeblade proc chance",
             },
             new EquipmentModDefinition
             {
@@ -601,7 +610,7 @@ namespace ACE.Server.EquipmentMods
                 // Dispelling Edge. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Sundermark proc chance",
+                DisplayFormat = "+{0:0.##}% Sundermark proc chance",
             },
             new EquipmentModDefinition
             {
@@ -615,7 +624,7 @@ namespace ACE.Server.EquipmentMods
                 // Dispelling Edge. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.###}pp war proc chance per Spellsurge stack",
+                DisplayFormat = "+{0:0.###}% war proc chance per Spellsurge stack",
             },
             new EquipmentModDefinition
             {
@@ -629,7 +638,7 @@ namespace ACE.Server.EquipmentMods
                 // Dispelling Edge. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Spellstorm proc chance",
+                DisplayFormat = "+{0:0.##}% Spellstorm proc chance",
             },
             new EquipmentModDefinition
             {
@@ -643,7 +652,7 @@ namespace ACE.Server.EquipmentMods
                 // Dispelling Edge. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Cascade chain chance",
+                DisplayFormat = "+{0:0.##}% Cascade chain chance",
             },
             new EquipmentModDefinition
             {
@@ -657,7 +666,7 @@ namespace ACE.Server.EquipmentMods
                 // Cascade. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp Dispelling Edge proc chance",
+                DisplayFormat = "+{0:0.##}% Dispelling Edge proc chance",
             },
 
             // --- Vanguard correction (Provoke, Bellow) ---
@@ -701,7 +710,7 @@ namespace ACE.Server.EquipmentMods
                 // affinity clamp before this row could ship (DESIGN.md sections 2.2/2.3).
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}pp shield block chance",
+                DisplayFormat = "+{0:0.##}% shield block chance",
             },
         };
 

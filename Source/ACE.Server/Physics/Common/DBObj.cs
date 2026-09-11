@@ -81,7 +81,11 @@ namespace ACE.Server.Physics.Common
         /// </summary>
         public static SetupModel GetSetup(uint id)
         {
-            return DatManager.PortalDat.ReadFromDat<SetupModel>(id);
+            // second reader of a Setup DID, alongside WorldObject.CSetup. The callers that reach here
+            // without passing through Landblock.AddWorldObjectInternal (Creature_Missile, Creature_Death,
+            // SpellProjectile all call InitPhysicsObj directly) would otherwise carry an unparseable setup
+            // straight into SetupModel.Unpack on the world thread. See WorldObject_Setup.cs.
+            return WorldObjects.WorldObject.GetSetupModel(id);
         }
 
         /// <summary>

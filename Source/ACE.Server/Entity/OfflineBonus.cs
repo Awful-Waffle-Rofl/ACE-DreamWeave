@@ -43,6 +43,25 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
+        /// Splits an online interval [<paramref name="intervalStart"/>, <paramref name="intervalEnd"/>] into an
+        /// "active" prefix (before <paramref name="activeUntil"/>, the end of the trailing idle-timeout window
+        /// from the character's most recent qualifying XP/Luminance grant) and the remaining "idle" tail. The
+        /// active portion drains the bank; the idle portion accrues it. <paramref name="activeUntil"/> at or
+        /// before <paramref name="intervalStart"/> (including 0, meaning no qualifying grant has happened yet)
+        /// yields an entirely idle interval. The two returned values are always non-negative and always sum to
+        /// exactly Max(0, intervalEnd - intervalStart).
+        /// </summary>
+        public static (double activeSeconds, double idleSeconds) SplitOnlineInterval(double intervalStart, double intervalEnd, double activeUntil)
+        {
+            var elapsed = Math.Max(0, intervalEnd - intervalStart);
+
+            var active = Math.Clamp(activeUntil - intervalStart, 0, elapsed);
+            var idle = elapsed - active;
+
+            return (active, idle);
+        }
+
+        /// <summary>
         /// Scales <paramref name="amount"/> by (1 + <paramref name="multiplier"/>) when the character has bonus
         /// time remaining. Returns the amount unchanged when the bonus is inactive (no time left, non-positive
         /// multiplier, or a non-positive amount) or when the boosted value would overflow a long.
@@ -58,6 +77,51 @@ namespace ACE.Server.Entity
                 return amount;
 
             return (long)Math.Round(boosted);
+        }
+
+        /// <summary>
+        /// The player-facing chat notice (if any) that a reconcile should produce, given the active/idle and
+        /// banked/empty state before and after it. See <see cref="ClassifyTransition"/>.
+        /// </summary>
+        public enum OfflineBonusTransition
+        {
+            None,
+            Activated,
+            Banking,
+            Exhausted
+        }
+
+        /// <summary>
+        /// Decides which offline-bonus chat notice, if any, a reconcile should produce from the active/idle and
+        /// banked/empty state immediately before and after it:
+        ///  - Activated: the idle -> active edge, but only when the bank is non-empty. Starting to fight with an
+        ///    empty bank produces no notice - there's nothing "now active" about it.
+        ///  - Banking: the active -> idle edge, unconditionally. Going idle genuinely starts banking again even
+        ///    at a zero balance.
+        ///  - Exhausted: the bank goes from banked to empty WHILE still active (i.e. combat burned through the
+        ///    last of it). Never fires when the bank empties while idle - that's ordinary accrual having nothing
+        ///    to accrue from, not an exhaustion event - and never fires in the same reconcile as Banking: if the
+        ///    active window closes in the same reconcile the bank empties, Banking wins, since going idle is the
+        ///    more informative fact for the player.
+        ///  - None otherwise.
+        /// Pure and free of <see cref="WorldObjects.Player"/> state, so it is unit-testable without a live
+        /// Player/Session - see Player_OfflineBonus.cs's UpdateOfflineBonus for the caller, which owns all the
+        /// IO (reading the bank, sending the resulting chat, updating the tracked before-state).
+        /// </summary>
+        public static OfflineBonusTransition ClassifyTransition(bool wasActive, bool isActive, bool wasBanked, bool isBanked)
+        {
+            if (wasActive != isActive)
+            {
+                if (isActive)
+                    return isBanked ? OfflineBonusTransition.Activated : OfflineBonusTransition.None;
+
+                return OfflineBonusTransition.Banking;
+            }
+
+            if (isActive && wasBanked && !isBanked)
+                return OfflineBonusTransition.Exhausted;
+
+            return OfflineBonusTransition.None;
         }
     }
 }

@@ -1,12 +1,14 @@
 using System;
 
 using ACE.Common;
+using ACE.Database;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
+using ACE.Server.Entity.AccountVault;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
@@ -128,6 +130,27 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Mule Vendor: the summoning contract opts in by PropertyBool and runs its summon here,
+            // sharing every gate with the /mule command (DESIGN 11.1).
+            //
+            // The IsDead check above and ActOnUse's IsBusy / Teleporting / suicideInProgress /
+            // IsJumping checks are now ALSO enforced inside MuleSummonHandler.TrySummonerState, so the
+            // /mule command path inherits them (fix round A, A4). The copies here are deliberately
+            // left in place - they gate every other gem type in this file as well, so they are not the
+            // mule feature's to remove - and they simply refuse a little earlier, with the retail
+            // WeenieError wording. Do not delete them as "duplicates".
+            if (GetProperty(PropertyBool.MuleVendorContract) == true && MuleSummonHandler.TryHandleUse(this, player))
+                return;
+
+            // Mule Form Token: used with NO target. Keyed on the PropertyBool rather than on a wcid -
+            // deliberately unlike the Prismatic neighbour in HandleActionUseOnTarget - so a second
+            // token weenie with different art and a different kill count is pure content.
+            //
+            // The token is NEVER consumed, on any branch. This returns before every consumption branch
+            // below, the same way the summoning contract does.
+            if (MuleFormToken.IsToken(this) && TryHandleMuleFormTokenUse(player))
+                return;
+
             // class ability point item - a gem whose function is granting class ability points
             // (see ClassAbilityRegistry / Player_ClassAbilities). Data-driven: any Gem weenie with
             // PropertyInt.ClassAbilityPointValue set becomes a point item, no per-item code.
@@ -142,7 +165,7 @@ namespace ACE.Server.WorldObjects
 
                 // defensive: only consume the item if the grant took (it can only be refused for a
                 // non-positive amount, which the > 0 guard above already excludes - there is no cap)
-                if (!player.GrantClassAbilityPoints(classAbilityPoints, Name))
+                if (!player.GrantClassAbilityPoints(classAbilityPoints, Name, CapLedgerReason.GrantItem))
                     return;
 
                 if (UseSound > 0)
@@ -164,6 +187,22 @@ namespace ACE.Server.WorldObjects
                 UseClassAbilityToken(player, tokenSkillId, GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, false);
                 return;
             }
+
+            // pick-up speed quest boon gem - a Gem with PropertyString.PickupBoonKey set claims a permanent
+            // per-character pick-up speed bonus when used. Data-driven, mirroring the class ability token
+            // branch above. See UsePickupBoonGem / Player_PickupBoons.cs.
+            var pickupBoonKey = GetProperty(PropertyString.PickupBoonKey);
+            if (!string.IsNullOrEmpty(pickupBoonKey))
+            {
+                UsePickupBoonGem(player);
+                return;
+            }
+
+            // Threads (WaffleACE): a Gem carrying PropertyString.DungeonGemSpec opens or re-enters a
+            // private dungeon copy. Sits before the portal-gem branch on purpose: a dungeon gem carries no
+            // Destination, and every refusal or consume happens inside the handler. See ThreadDungeonGemHandler.
+            if (ACE.Server.ThreadDungeons.ThreadDungeonGemHandler.TryHandleUse(this, player))
+                return;
 
             // portal gem - a Gem with a Destination position teleports the player there instantly on use
             // (no recall animation). Data-driven: realm-aware via PortalRealm, guarded against combat use
@@ -304,6 +343,18 @@ namespace ACE.Server.WorldObjects
             if (tokenSkillId <= 0 ||
                 !ClassAbilityRegistry.Abilities.TryGetValue((ClassAbilityId)tokenSkillId, out var skill))
             {
+                // A token for a RETIRED ability is not misconfigured - it was legitimately bought, and its
+                // points are recoverable at the exchanger (Player.RefundUnusedVoucher). Say so, instead of
+                // telling the player their prepaid token is broken.
+                if (tokenSkillId > 0 &&
+                    RetiredClassAbilities.TryGetRefund((ClassAbilityId)tokenSkillId, GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0, out _, out var retiredName))
+                {
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                        $"{retiredName} has been retired and can no longer be learned. Return the {Name} to a Drift Network exchanger to recover the class ability points it cost.",
+                        ChatMessageType.Broadcast));
+                    return;
+                }
+
                 player.SendTransientError($"The {Name} is misconfigured and cannot be used.");
                 return;
             }
@@ -380,6 +431,33 @@ namespace ACE.Server.WorldObjects
                 $"You use {Name} and learn {skill.DisplayName} rank {newRank}/{skill.MaxRank}.", ChatMessageType.Broadcast));
 
             // The item level-up burst, so learning the rank reads as an upgrade.
+            player.PlayParticleEffect(PlayScript.LevelUp, player.Guid);
+
+            if (UseSound > 0)
+                player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
+
+            if ((GetProperty(PropertyBool.UnlimitedUse) ?? false) == false)
+                player.TryConsumeFromInventoryWithNetworking(this, 1);
+        }
+
+        /// <summary>
+        /// Pick-up speed quest boon gem use: claims the permanent bonus named by the gem's PickupBoonKey,
+        /// mirroring UseClassAbilityToken's shape - every failure branch (misconfigured, mule, already
+        /// claimed) leaves the gem in the pack, and it is consumed only after a successful claim.
+        /// </summary>
+        private void UsePickupBoonGem(Player player)
+        {
+            var key = GetProperty(PropertyString.PickupBoonKey);
+
+            if (!player.TryClaimPickupBoon(key, Name, out var error))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(error, ChatMessageType.Advancement));
+                return;
+            }
+
+            player.Session.Network.EnqueueSend(new GameMessageSystemChat(player.FormatPickupBoonClaimedMessage(Name), ChatMessageType.Advancement));
+
+            // The item level-up burst, so claiming the boon reads as an upgrade (same as UseClassAbilityToken).
             player.PlayParticleEffect(PlayScript.LevelUp, player.Guid);
 
             if (UseSound > 0)
@@ -468,16 +546,186 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // Attuned Drift Prism: permanently aligns an orb to one damage type. Self-contained
-            // wcid-set check (AttunedDriftPrism.PrismElements) so this dispatch stays one block.
-            if (AttunedDriftPrism.IsPrism(WeenieClassId))
+            // Mule Form Token: used ON a creature to attune it. Keyed on the PropertyBool, not on the
+            // wcid the two neighbours above key on, so a second token weenie is pure content.
+            //
+            // The token is NEVER consumed, on any branch, and never falls through to the recipe
+            // manager once it has been recognised.
+            //
+            // The token carries a Usable Target bit only while UNATTUNED (no Self bit), so the
+            // ordinary no-target path is a plain double-click through UseGem once attunement has
+            // rewritten the item to Contained (see HandleMuleFormTokenUseOnTarget). A self-target can
+            // still arrive here if the player aims the use-on cursor at themselves; route it to the
+            // same no-target handler rather than refusing it as an invalid donor.
+            if (MuleFormToken.IsToken(this))
             {
-                AttunedDriftPrism.UseObjectOnTarget(player, this, target);
+                if (target == player)
+                    TryHandleMuleFormTokenUse(player);
+                else
+                    HandleMuleFormTokenUseOnTarget(player, target);
+
+                // Player_Use.HandleActionUseWithTarget sends no GameEventUseDone after this call; the
+                // handler that ends a use-on-target owns it (RecipeManager, PrismaticDriftStone and
+                // Healer all send it on every branch), or the client's use state stays locked. The
+                // double-click path does not need it: TryUseItem sends it after OnActivate returns.
+                player.SendUseDoneEvent();
+                return;
+            }
+
+            // Threads: a Raw Fragment is a Gem carrying DungeonGemSpec whose ItemUseable has target
+            // bits. Keyed on the property already reserved for the spec rather than on a wcid or a second
+            // bool, so the ten rung weenies (and any later rung) are pure content. A finished Thread Gem
+            // carries the same property but ItemUseable Contained, so the client never sends a use-on for
+            // one; if one ever arrives, RawFragment refuses it by name.
+            if (GetProperty(PropertyString.DungeonGemSpec) != null)
+            {
+                ACE.Server.ThreadDungeons.RawFragment.UseObjectOnTarget(player, this, target);
+
+                // Same reason as the Mule branch above: Player_Use.HandleActionUseWithTarget sends no
+                // GameEventUseDone after this call, so the handler that ends a use-on-target owns it.
+                player.SendUseDoneEvent();
                 return;
             }
 
             // fallback on recipe manager?
             base.HandleActionUseOnTarget(player, target);
+        }
+
+        /// <summary>
+        /// The no-target use of a mule form token. Returns true when it handled the use.
+        ///
+        /// Thin by design: every decision it makes belongs to
+        /// <see cref="ACE.Server.Entity.AccountVault.MuleFormToken"/>, which is unit-tested, and every
+        /// player-facing string here is one of that class's constants or one of its Compose results.
+        /// Nothing in this method can be unit-tested, because Player.UpdateProperty's SendNetwork
+        /// dereferences Session with no null check.
+        /// </summary>
+        private bool TryHandleMuleFormTokenUse(Player player)
+        {
+            var formWcid = MuleFormToken.GetFormWcid(this);
+
+            if (formWcid == null)
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(MuleFormToken.NeedsATargetMessage, ChatMessageType.Broadcast));
+                return true;
+            }
+
+            if (!MuleFormToken.IsComplete(this))
+            {
+                // Chat gets only the short status line, never the item's full instructions. Recomposed
+                // from the attuned WCID, never from this item's Name: the Name has already been
+                // rewritten to "Beast Effigy (Tusker Guard)" by the time any token can reach this
+                // branch, so passing it as the donor name would read "Attuned to Beast Effigy (Tusker
+                // Guard). 37 of 100 slain."
+                var status = MuleFormToken.ComposeStatus(
+                    ResolveDonorName(formWcid.Value), MuleFormToken.GetStructure(this), MuleFormToken.GetMaxStructure(this));
+
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(status, ChatMessageType.Broadcast));
+                return true;
+            }
+
+            var accountId = player.Account?.AccountId ?? 0;
+
+            if (accountId == 0)
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(AccountVaultStore.UnavailableMessage, ChatMessageType.Broadcast));
+                return true;
+            }
+
+            var store = AccountVaultManager.GetStore(accountId);
+
+            if (store == null)
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(AccountVaultStore.UnavailableMessage, ChatMessageType.Broadcast));
+                return true;
+            }
+
+            // THE WRITE COMES FIRST, AND THE TWO DECISIONS ARE DELIBERATELY SEPARATE (design section 8).
+            // A summon can be refused for reasons that have nothing to do with the look - wrong
+            // landblock, cooldown, mid-jump - and a player who spent a hundred kills earning a form must
+            // never be told it was wasted because of where they happened to be standing.
+            if (!store.TrySetMuleForm(formWcid.Value, ResolveDonorName(formWcid.Value), VaultActor.From(player), out var saveFailure))
+            {
+                // The look was NOT saved, so there is nothing to summon in and no summon is attempted.
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(saveFailure ?? AccountVaultStore.UnavailableMessage, ChatMessageType.Broadcast));
+                return true;
+            }
+
+            if (!MuleSummonHandler.TrySummon(player, accountId, out var summonFailure, player.Name))
+            {
+                var reason = summonFailure ?? AccountVaultStore.UnavailableMessage;
+
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat($"{reason} {MuleFormToken.LookSavedSuffix}", ChatMessageType.Broadcast));
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// The use-on-target path of a mule form token: attunement. There is no re-attunement by
+        /// design, so an already-attuned token refuses every target rather than being rewritten.
+        ///
+        /// Every client-visible write goes through <see cref="Player.UpdateProperty(WorldObject, PropertyInt, int?, bool)"/>
+        /// and its string and data id siblings, never SetProperty: SetProperty alone writes the biota
+        /// and sends nothing, so the renamed token, its new description, and its icon overlay (set
+        /// from the donor's own Icon property) would not reach the client until some unrelated update
+        /// happened to re-send them.
+        /// </summary>
+        private void HandleMuleFormTokenUseOnTarget(Player player, WorldObject target)
+        {
+            if (MuleFormToken.IsAttuned(this))
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(MuleFormToken.AlreadyAttunedMessage, ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (!MuleFormToken.IsValidAttunementTarget(target, MuleFormToken.DatSetupHeight, MuleFormToken.DatSetupEffectScale, out var refusal))
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(refusal, ChatMessageType.Broadcast));
+                return;
+            }
+
+            var donorName = target.Name;
+            var maxStructure = MuleFormToken.GetMaxStructure(this);
+            var structure = MuleFormToken.GetStructure(this);
+            var longDesc = MuleFormToken.ComposeLongDesc(donorName, structure, maxStructure);
+
+            player.UpdateProperty(this, PropertyInt.MuleFormWcid, (int)target.WeenieClassId);
+
+            // The overlay is the donor's own inventory icon, so the red gem visually shows the attuned monster.
+            // The full-object refresh sent below (GameMessageUpdateObject) carries the new overlay to the client.
+            player.UpdateProperty(this, PropertyDataId.IconOverlay, target.GetProperty(PropertyDataId.Icon));
+
+            player.UpdateProperty(this, PropertyString.Name, MuleFormToken.ComposeName(MuleFormToken.GetBaseName(this), donorName, complete: false));
+            player.UpdateProperty(this, PropertyString.LongDesc, longDesc);
+
+            // The token is attuned for good, so the use-on cursor has no further purpose and would
+            // stop a plain double-click from ever reaching UseGem (with a Usable Target bit the client
+            // sends nothing for a target-less use; seen live 2026-09-02). Rewrite the item to plain
+            // Contained and push a full object refresh, since the client reads usability from the
+            // object description rather than from the property update alone. From here on a
+            // double-click is the status line while filling and the summon once complete.
+            player.UpdateProperty(this, PropertyInt.ItemUseable, (int)Usable.Contained);
+            player.EnqueueBroadcast(new GameMessageUpdateObject(this));
+            if (player.FindObject(Guid.Full, Player.SearchLocations.MyInventory) != null)
+                player.MoveItemToFirstContainerSlot(this);
+
+            // The confirmation is the short status line, not the item's full description: chat gets
+            // only the status, the item carries the full instructions.
+            player.Session?.Network.EnqueueSend(new GameMessageSystemChat(MuleFormToken.ComposeStatus(donorName, structure, maxStructure), ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// The donor's name for the account_mule_form snapshot column. A world-cache read, so it stays
+        /// out of <see cref="ACE.Server.Entity.AccountVault.MuleFormToken"/>, which is otherwise pure.
+        /// The column is operator convenience and nothing keys on it, so a donor whose weenie has since
+        /// been deleted gets a legible placeholder rather than failing the write.
+        /// </summary>
+        private static string ResolveDonorName(uint wcid)
+        {
+            var name = DatabaseManager.World.GetCachedWeenie(wcid)?.GetName();
+
+            return string.IsNullOrWhiteSpace(name) ? $"wcid {wcid}" : name;
         }
 
         /// <summary>

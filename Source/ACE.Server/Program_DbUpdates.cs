@@ -391,6 +391,7 @@ namespace ACE.Server
             var byRelKey = new Dictionary<string, DiscoveredContentFile>(StringComparer.Ordinal);
             var plannerInputs = new List<ContentFileInput>();
             var previewExcludedCount = 0;
+            var landblockExportExcludedCount = 0;
 
             foreach (var (rootPath, isAddedPath) in roots)
             {
@@ -417,6 +418,18 @@ namespace ACE.Server
                         continue;
                     }
 
+                    // sql/landblocks/ is the /createinst export folder: a whole-landblock DELETE + re-insert
+                    // snapshot, operator scratch never versioned as content. Same absolute-path double-check
+                    // as preview/ above, for the same reason (an added root pointing inside Content/sql/landblocks
+                    // would otherwise carry no "landblocks" segment in its relative key).
+                    if (WorldContentPlanner.IsLandblockExport(relKey) ||
+                        WorldContentPlanner.IsLandblockExport(file.FullName))
+                    {
+                        landblockExportExcludedCount++;
+                        log.Warn($"World Customization: skipped landblock export '{relKey}' -- sql/landblocks/ is the /createinst snapshot folder and is never applied; delete it from the checkout and place through a placements/ unit.");
+                        continue;
+                    }
+
                     // First root to claim a relative key wins (primary content folder has precedence).
                     if (byRelKey.ContainsKey(relKey))
                         continue;
@@ -433,6 +446,9 @@ namespace ACE.Server
 
             if (previewExcludedCount > 0)
                 Console.WriteLine($"Skipped {previewExcludedCount} preview .sql file(s) -- preview/ is human sign-off material and is never applied to the World database.");
+
+            if (landblockExportExcludedCount > 0)
+                Console.WriteLine($"Skipped {landblockExportExcludedCount} landblock export .sql file(s) -- sql/landblocks/ holds /createinst snapshots (DELETE + re-insert of a whole landblock) that would override placements/ units. Delete them from the checkout.");
 
             // --- plan: deterministic, dependency-correct order (or hard-fail with diagnostics) ---
             var plan = WorldContentPlanner.CreatePlan(plannerInputs);
@@ -587,6 +603,63 @@ namespace ACE.Server
             log.Info($"Automatic Database Patching complete.");
         }
 
+        // Outcome of applying (or failing to apply) one update script, decided by EvaluateDbPatchScriptResult.
+        internal enum DbPatchOutcome
+        {
+            // Record the script as applied and keep processing the remaining scripts in the directory.
+            Continue,
+            // Do not record the script as applied; stop processing the remaining scripts in the directory
+            // this boot so they retry (in order) next boot, once this failure is fixed.
+            Stop
+        }
+
+        // Pure result of EvaluateDbPatchScriptResult: what PatchDatabase's loop should do after one script.
+        internal readonly struct DbPatchScriptResult
+        {
+            public string RecordedFileName { get; }
+            public DbPatchOutcome Outcome { get; }
+            public int SkippedCount { get; }
+
+            private DbPatchScriptResult(string recordedFileName, DbPatchOutcome outcome, int skippedCount)
+            {
+                RecordedFileName = recordedFileName;
+                Outcome = outcome;
+                SkippedCount = skippedCount;
+            }
+
+            public static DbPatchScriptResult Success(string fileName)
+            {
+                return new DbPatchScriptResult(fileName, DbPatchOutcome.Continue, 0);
+            }
+
+            public static DbPatchScriptResult Failure(int skippedCount)
+            {
+                return new DbPatchScriptResult(null, DbPatchOutcome.Stop, skippedCount);
+            }
+        }
+
+        // Pure helper (no I/O): of the scripts still to come after the failed one, only the ones NOT already
+        // recorded in applied_updates.txt are actually going to be skipped by a Stop -- an already-applied
+        // name in the remaining list would have been skipped by the loop's own appliedUpdates.Contains check
+        // regardless, so it must not inflate the reported skipped count.
+        internal static List<string> GetPendingFileNames(IEnumerable<string> remainingFileNames, IReadOnlyCollection<string> appliedUpdates)
+        {
+            return remainingFileNames.Where(f => !appliedUpdates.Contains(f)).ToList();
+        }
+
+        // Pure decision helper (no I/O) for the per-script outcome inside PatchDatabase's loop, so it can be
+        // unit tested without a database or filesystem. `applied` is whether ExecuteScript succeeded for
+        // `fileName`; `remainingFileNames` is the ordered list of PENDING (not already-applied) scripts still
+        // to come after `fileName` in this directory (not including `fileName` itself) -- see
+        // GetPendingFileNames, which callers should filter through first.
+        internal static DbPatchScriptResult EvaluateDbPatchScriptResult(string fileName, IReadOnlyList<string> remainingFileNames, bool applied)
+        {
+            if (applied)
+                return DbPatchScriptResult.Success(fileName);
+
+            return DbPatchScriptResult.Failure(remainingFileNames.Count);
+        }
+
         private static void PatchDatabase(string dbType, string host, uint port, string username, string password, string authDB, string shardDB, string worldDB)
         {
             var updatesPath = $"DatabaseSetupScripts{Path.DirectorySeparatorChar}Updates{Path.DirectorySeparatorChar}{dbType}";
@@ -624,8 +697,11 @@ namespace ACE.Server
                 appliedUpdates = File.ReadAllLines(updatesFile);
 
             Console.WriteLine($"Searching for {dbType} update SQL scripts .... ");
-            foreach (var file in new DirectoryInfo(updatesPath).GetFiles("*.sql").OrderBy(f => f.Name))
+            var orderedFiles = new DirectoryInfo(updatesPath).GetFiles("*.sql").OrderBy(f => f.Name).ToList();
+            for (var fileIndex = 0; fileIndex < orderedFiles.Count; fileIndex++)
             {
+                var file = orderedFiles[fileIndex];
+
                 if (appliedUpdates.Contains(file.Name))
                     continue;
 
@@ -644,13 +720,24 @@ namespace ACE.Server
                         database = worldDB;
                         break;
                 }
-                var sqlConnect = new MySqlConnector.MySqlConnection($"server={host};port={port};user={username};password={password};database={database};DefaultCommandTimeout=120;SslMode=None;AllowPublicKeyRetrieval=true");
+                // AllowUserVariables=true is what lets an update script guard its own DDL. MySqlConnector
+                // otherwise reads `@name` as a command PARAMETER and throws "Parameter '@x' must be defined"
+                // before the statement ever reaches the server, which rules out the SET/PREPARE/EXECUTE idiom
+                // that stands in for MySQL 8.0's missing ADD COLUMN IF NOT EXISTS. Scripts need that guard
+                // because this ledger (applied_updates.txt) lives in the build output directory while the
+                // database is shared: a second checkout, a clean bin, or a restored backup all present a
+                // database that already carries changes this ledger has never seen, and since #830 a script
+                // that throws is (correctly) not recorded, so an unguarded ALTER then fails on EVERY boot and
+                // blocks every later script in the directory. No script here is ever given parameters, so
+                // reinterpreting `@name` costs nothing.
+                var sqlConnect = new MySqlConnector.MySqlConnection($"server={host};port={port};user={username};password={password};database={database};DefaultCommandTimeout=120;SslMode=None;AllowPublicKeyRetrieval=true;AllowUserVariables=true");
                 sqlDBFile = sqlDBFile.Replace("ace_auth", authDB);
                 sqlDBFile = sqlDBFile.Replace("ace_shard", shardDB);
                 sqlDBFile = sqlDBFile.Replace("ace_world", worldDB);
                 var script = new MySqlConnector.MySqlCommand(sqlDBFile, sqlConnect);
 
                 Console.Write($"Importing into {database} database on SQL server at {host}:{port} .... ");
+                var applied = true;
                 try
                 {
                     ExecuteScript(script);
@@ -659,11 +746,25 @@ namespace ACE.Server
                 }
                 catch (MySqlConnector.MySqlException ex)
                 {
+                    applied = false;
                     Console.WriteLine($" error!");
                     Console.WriteLine($" Unable to apply patch due to following exception: {ex}");
+                    log.Error($"[DBPATCH] Failed to apply {file.Name} against {dbType} ({database}): {ex}");
                 }
-                File.AppendAllText(updatesFile, file.Name + Environment.NewLine);
+
                 CleanupConnection(sqlConnect);
+
+                var remainingFileNames = GetPendingFileNames(orderedFiles.Skip(fileIndex + 1).Select(f => f.Name), appliedUpdates);
+                var result = EvaluateDbPatchScriptResult(file.Name, remainingFileNames, applied);
+
+                if (result.RecordedFileName != null)
+                    File.AppendAllText(updatesFile, result.RecordedFileName + Environment.NewLine);
+
+                if (result.Outcome == DbPatchOutcome.Stop)
+                {
+                    log.Error($"[DBPATCH] {file.Name} will be retried next boot; skipping {result.SkippedCount} remaining {dbType} update script(s) this boot.");
+                    break;
+                }
             }
 
             if (IsRunningInContainer && File.Exists(updatesFile))

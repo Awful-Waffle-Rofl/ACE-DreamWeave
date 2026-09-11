@@ -35,22 +35,24 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Wave_MapsToBestWaveScore_9021()
+        public void Wave_MapsToBestWaveScoreCenti_9022_ThenLegacy_9021()
         {
             Assert.IsTrue(ProvingGroundsAdminCommands.TryGetBoards("wave", out var boards));
-            Assert.AreEqual(1, boards.Count);
-            Assert.AreEqual(9021, (int)boards[0].Property);
+            Assert.AreEqual(2, boards.Count);
+            Assert.AreEqual(9022, (int)boards[0].Property);
+            Assert.AreEqual(9021, (int)boards[1].Property);
+            Assert.AreEqual(9022, (int)PropertyInt64.BestWaveScoreCenti);
             Assert.AreEqual(9021, (int)PropertyInt64.BestWaveScore);
         }
 
         [TestMethod]
-        public void All_ReturnsExactlyTheThreeBoards_InOrder()
+        public void All_ReturnsExactlyTheFourBoards_InOrder()
         {
             Assert.IsTrue(ProvingGroundsAdminCommands.TryGetBoards("all", out var boards));
-            Assert.AreEqual(3, boards.Count);
+            Assert.AreEqual(4, boards.Count);
 
             var properties = boards.Select(b => (int)b.Property).ToList();
-            CollectionAssert.AreEqual(new[] { 9017, 9020, 9021 }, properties);
+            CollectionAssert.AreEqual(new[] { 9017, 9020, 9022, 9021 }, properties);
         }
 
         [TestMethod]
@@ -60,10 +62,10 @@ namespace ACE.Server.Tests
             Assert.AreEqual(9017, (int)upper[0].Property);
 
             Assert.IsTrue(ProvingGroundsAdminCommands.TryGetBoards("Wave", out var mixed));
-            Assert.AreEqual(9021, (int)mixed[0].Property);
+            Assert.AreEqual(9022, (int)mixed[0].Property);
 
             Assert.IsTrue(ProvingGroundsAdminCommands.TryGetBoards("ALL", out var all));
-            Assert.AreEqual(3, all.Count);
+            Assert.AreEqual(4, all.Count);
         }
 
         [TestMethod]

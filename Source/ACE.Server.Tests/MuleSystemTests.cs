@@ -72,7 +72,6 @@ namespace ACE.Server.Tests
         {
             var eligible = Player.IsEligibleForMule(
                 systemEnabled: true, alreadyMule: false, level: 8, maxConvertLevel: 50,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var reason);
 
             Assert.IsTrue(eligible, reason);
@@ -93,7 +92,6 @@ namespace ACE.Server.Tests
             {
                 var eligible = Player.IsEligibleForMule(
                     systemEnabled: true, alreadyMule: false, level: level, maxConvertLevel: 50,
-                    existingAccountMules: 0, maxPerAccount: 2,
                     out var reason);
 
                 Assert.IsTrue(eligible, $"level {level} is inside the cap and must be eligible, got: {reason}");
@@ -105,7 +103,6 @@ namespace ACE.Server.Tests
         {
             var eligible = Player.IsEligibleForMule(
                 systemEnabled: false, alreadyMule: false, level: 8, maxConvertLevel: 50,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var reason);
 
             Assert.IsFalse(eligible);
@@ -117,7 +114,6 @@ namespace ACE.Server.Tests
         {
             var eligible = Player.IsEligibleForMule(
                 systemEnabled: true, alreadyMule: true, level: 8, maxConvertLevel: 50,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var reason);
 
             Assert.IsFalse(eligible);
@@ -129,14 +125,12 @@ namespace ACE.Server.Tests
         {
             var atCap = Player.IsEligibleForMule(
                 systemEnabled: true, alreadyMule: false, level: 50, maxConvertLevel: 50,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var atCapReason);
 
             Assert.IsTrue(atCap, $"level 50 against a cap of 50 must be eligible, got: {atCapReason}");
 
             var aboveCap = Player.IsEligibleForMule(
                 systemEnabled: true, alreadyMule: false, level: 51, maxConvertLevel: 50,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var aboveCapReason);
 
             Assert.IsFalse(aboveCap);
@@ -149,44 +143,35 @@ namespace ACE.Server.Tests
         {
             var eligible = Player.IsEligibleForMule(
                 systemEnabled: true, alreadyMule: false, level: 120, maxConvertLevel: 150,
-                existingAccountMules: 0, maxPerAccount: 2,
                 out var reason);
 
             Assert.IsTrue(eligible, $"the cap is config-driven, not the hardcoded 50, got: {reason}");
         }
 
+        /// <summary>
+        /// Regression guard for the per-account mule cap removed on 2026-08-31 ('mule_max_per_account',
+        /// default 2). How many of an account's characters are mules is no longer an input to eligibility at
+        /// all, so the guard is on the SIGNATURE rather than on a value: a reintroduced cap has to arrive as
+        /// a new parameter, and the pure rule cannot see the account any other way. The only limit that still
+        /// constrains an account is the separate simultaneous-login rule in IpLimitManager, which gates who
+        /// may be in-world at once and never gates conversion.
+        ///
+        /// The whole parameter list is pinned, not just names containing 'account', because a cap can be
+        /// reintroduced under any name ('existingMules', 'muleLimit') and a substring match would miss it.
+        /// A deliberate new input to eligibility is expected to update this list in the same change.
+        /// </summary>
         [TestMethod]
-        public void Eligibility_RefusedAtTheAccountCap()
+        public void Eligibility_TakesNoAccountMuleCount()
         {
-            var atCap = Player.IsEligibleForMule(
-                systemEnabled: true, alreadyMule: false, level: 8, maxConvertLevel: 50,
-                existingAccountMules: 2, maxPerAccount: 2,
-                out var atCapReason);
+            var method = typeof(Player).GetMethod(nameof(Player.IsEligibleForMule));
 
-            Assert.IsFalse(atCap);
-            StringAssert.Contains(atCapReason, "limit is 2");
+            Assert.IsNotNull(method, "Player.IsEligibleForMule not found - was it renamed, or made non-public or overloaded?");
 
-            var underCap = Player.IsEligibleForMule(
-                systemEnabled: true, alreadyMule: false, level: 8, maxConvertLevel: 50,
-                existingAccountMules: 1, maxPerAccount: 2,
-                out _);
+            var actual = string.Join(", ", method.GetParameters().Select(p => p.Name));
 
-            Assert.IsTrue(underCap);
-        }
-
-        [TestMethod]
-        public void Eligibility_RefusedWhenAccountCapIsZeroOrNegative()
-        {
-            foreach (var cap in new long[] { 0, -1 })
-            {
-                var eligible = Player.IsEligibleForMule(
-                    systemEnabled: true, alreadyMule: false, level: 8, maxConvertLevel: 50,
-                    existingAccountMules: 0, maxPerAccount: cap,
-                    out var reason);
-
-                Assert.IsFalse(eligible, $"maxPerAccount {cap} must refuse conversion outright.");
-                Assert.IsNotNull(reason);
-            }
+            Assert.AreEqual("systemEnabled, alreadyMule, level, maxConvertLevel, reason", actual,
+                "IsEligibleForMule's parameter list changed. If this is a reintroduced per-account mule cap, " +
+                "it was removed deliberately - see Player_Mule.");
         }
 
         /// <summary>

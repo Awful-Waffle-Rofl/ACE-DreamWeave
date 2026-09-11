@@ -129,14 +129,34 @@ namespace ACE.Server.Tests
             // See AlwaysTrainedSkills_MatchTheRespecExceptionList - touching Player requires a reachable world DB.
             TestEnvironment.RequireDatabases();
 
-            // These are exactly the skills /myrespec's confirm-result message must call out as
-            // "stays Specialized, XP refunded only" when the player also holds the matching augmentation.
+            // These are exactly the skills that a matching augmentation specializes for free, rather than
+            // with skill credits - so /myrespec and the Gem of Forgetfulness both untrain them outright
+            // and refund the TRAINED cost, never UpgradeCostFromTrainedToSpecialized.
             var expected = new[]
             {
                 Skill.ArmorTinkering, Skill.ItemTinkering, Skill.MagicItemTinkering, Skill.WeaponTinkering, Skill.Salvaging
             };
 
             CollectionAssert.AreEquivalent(expected, Player.AugSpecSkills);
+        }
+
+        [TestMethod]
+        public void AugSpecSkills_UntrainExceptForTheAlwaysTrainedOne()
+        {
+            // See AlwaysTrainedSkills_MatchTheRespecExceptionList - touching Player requires a reachable world DB.
+            TestEnvironment.RequireDatabases();
+
+            // Salvaging is the single skill on both lists, so it is the only augmentation specialization
+            // that a Gem of Forgetfulness cannot untrain - it recovers the invested XP and stays put. The
+            // four tinkering skills DO untrain, which is the behaviour /myrespec's summary and
+            // SkillAlterationDevice's message selection both branch on.
+            foreach (var skill in Player.AugSpecSkills)
+            {
+                if (skill == Skill.Salvaging)
+                    Assert.IsFalse(Player.IsSkillUntrainable(skill), "Salvaging is AlwaysTrained and must stay Specialized under the augmentation");
+                else
+                    Assert.IsTrue(Player.IsSkillUntrainable(skill), $"{skill} is augmentation-specialized only and must untrain outright");
+            }
         }
     }
 }

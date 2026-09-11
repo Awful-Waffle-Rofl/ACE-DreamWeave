@@ -27,8 +27,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "With insufficient stamina the shot lands normally with no bonus. " +
                           "Higher Run reduces the extra stamina cost.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.Run,
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)

@@ -170,6 +170,21 @@ namespace ACE.Entity.Enum
         /// Infused Void Magic - foci for void magic
         /// </summary>
         FociVoid = 42,
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): +100 account-wide mule
+        /// vault entries, uncapped. Bought from Nacci for Blank Augmentation Gems at a Fibonacci price.
+        /// </summary>
+        MuleSpace = 43,
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): +10% pick-up speed per
+        /// character, uncapped, stacking with the shipped Quickhand pick-up boons. Bought from Bo.
+        /// </summary>
+        PickupSpeedCustom = 44,
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): +10% spell duration per
+        /// character, uncapped, stacking with the retail SpellDuration augmentation. Bought from Fi.
+        /// </summary>
+        SpellDurationCustom = 45,
     }
 
     public static class AugTypeHelper

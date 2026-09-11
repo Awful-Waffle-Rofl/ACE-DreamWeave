@@ -71,6 +71,14 @@ namespace ACE.Server.Tests
         /// <summary>
         /// Reserved slots 0 through 10, built from real ImbuedEffectType combinations including the three high
         /// bits, which are what an unclamped popcount gets wrong.
+        ///
+        /// REWRITTEN 2026-08-07 FOR THE SPECIAL-ONLY REROLL. The sweep used to end each iteration on
+        /// "bits + tinkers == 10", which held only because the reroll refilled the budget on every use. It no
+        /// longer lays down a tinker at all, so the assertion that replaces it is that the SLOT ARITHMETIC is
+        /// still exactly right - ReservedImbueSlots and AvailableSlots are pure and unchanged, and they are
+        /// what the refusal gate still reads - while the reroll itself provably spends none of it.
+        ///
+        /// The name is unchanged because the subject is unchanged: this is still the reserved-slot sweep.
         /// </summary>
         [TestMethod]
         public void Imbues_ReservedSlotSweepZeroThroughTenUsingRealImbueCombinations()
@@ -94,12 +102,21 @@ namespace ACE.Server.Tests
                 probe.AssertInvariants(weapon, WeaponClass.Melee, $"{bits} imbue bits after a reroll");
 
                 var specials = WeaponModTinkerSet.SpecialCount(weapon);
-                var tinkers = weapon.GetProperty(PropertyInt.WeaponModTinkerCount) ?? -1;
 
-                Assert.IsTrue(tinkers >= 0, $"{bits} imbue bits: negative tinker count {tinkers}");
-                Assert.IsTrue(specials <= Math.Min(WeaponModRegistry.MaxSpecials, WeaponModRegistry.TotalSlots - bits),
-                    $"{bits} imbue bits: {specials} specials exceeds min(3, 10 - reserved)");
-                Assert.AreEqual(WeaponModRegistry.TotalSlots, bits + specials + tinkers, $"{bits} imbue bits: the budget does not add to 10");
+                Assert.IsTrue(specials <= WeaponModRegistry.MaxSpecials,
+                    $"{bits} imbue bits: {specials} specials exceeds the permanent bound");
+
+                // the reroll spent NONE of the unreserved budget, whatever it rolled: no tinker count, no
+                // counter, neither log. The reserved figure the gate reads is therefore unmoved too, which is
+                // what makes the sweep above still describe the weapon AFTER a reroll and not just before one.
+                Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                    $"{bits} imbue bits: the reroll wrote a tinker count (specials held: {specials}) - it is special-only and spends no slot");
+
+                Assert.IsNull(weapon.GetProperty(PropertyInt.NumTimesTinkered), $"{bits} imbue bits: the reroll wrote NumTimesTinkered");
+                Assert.IsNull(weapon.GetProperty(PropertyString.WeaponModTinkerLog), $"{bits} imbue bits: the reroll wrote its own tinker log");
+
+                Assert.AreEqual(bits, WeaponModTinkerSet.ReadReservedSlots(weapon),
+                    $"{bits} imbue bits: the reserved figure moved across the reroll, so a later use would budget against a different weapon than the one it is looking at");
             }
 
             // every real bit at once - popcount 12, clamped to 10 rather than driving the tinker count to -2
@@ -107,7 +124,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(WeaponModRegistry.TotalSlots, WeaponModTinkerSet.ReservedImbueSlots(everything),
                 "an over-full imbue mask must clamp to 10, never exceed it");
-            Assert.AreEqual(0, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReservedImbueSlots(everything), 0));
+            Assert.AreEqual(0, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReservedImbueSlots(everything)));
         }
 
         [TestMethod]
@@ -148,21 +165,41 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Nine imbues leave exactly one movable slot. Thirty swaps must move only that one slot, never an imbue,
-        /// and the ten-slot arithmetic must survive being run right up against its edge.
+        /// REWORKED 2026-08-06 for the Amethyst rework. Nine imbues leave exactly one tinker slot, and that
+        /// slot is now COMPLETELY UNTOUCHABLE by a swap - Amethyst never reaches tinkers any more. So this test
+        /// no longer describes "the one free slot moving" (there is nothing left for a swap to move it with);
+        /// instead it seeds one special into the specials budget (independent of the imbue-reserved tinker
+        /// slots since the 2026-08-06 decoupling) and confirms thirty swaps reroll ONLY that special - the
+        /// imbue mask and the one tinker slot are byte-identical throughout.
         /// </summary>
         [TestMethod]
-        public void Imbues_NineReservedSlotsSurviveThirtySwapsWithOnlyTheOneFreeSlotMoving()
+        public void Imbues_NineReservedSlotsSurviveThirtySwapsWithTheTinkerSlotUntouched()
         {
             var mask = ImbueMask(9);
 
             var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee, mask);
+
+            // PRE-EXISTING TEST-HELPER QUIRK, surfaced by this change rather than caused by it: MakeHandTinkered
+            // sets NumTimesTinkered to the TINKER count alone (1, behind nine imbues) rather than the imbues +
+            // tinkers total (10). That was invisible before 2026-08-06 because ApplySwap's WriteComposition
+            // unconditionally forced NumTimesTinkered back to 10 on every successful call; now that swap never
+            // touches it at all, the helper's own value has to be correct going in.
+            weapon.SetProperty(PropertyInt.NumTimesTinkered, WeaponModRegistry.TotalSlots);
+
+            WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.ShieldBypass), 0.3);
+
             var probe = new WeaponModProbe(weapon);
 
             Assert.AreEqual(9, WeaponModTinkerSet.ReadReservedImbueSlots(weapon));
 
+            var beforeTinkerCount = weapon.GetProperty(PropertyInt.WeaponModTinkerCount);
+            var beforeTinkerLog = weapon.GetProperty(PropertyString.WeaponModTinkerLog);
+
             for (var i = 1; i <= 30; i++)
             {
+                if (WeaponModTinkerSet.SpecialCount(weapon) <= 0)
+                    break; // a zero-magnitude replacement can drain the one seeded special - nothing left to reroll
+
                 Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0), $"swap {i}: produced no result");
 
                 Assert.AreEqual(mask, weapon.GetProperty(PropertyInt.ImbuedEffect), $"swap {i}: an imbue bit was destroyed");
@@ -170,15 +207,28 @@ namespace ACE.Server.Tests
                 probe.AssertInvariants(weapon, WeaponClass.Melee, $"nine imbues swap {i}");
 
                 var specials = WeaponModTinkerSet.SpecialCount(weapon);
-                var tinkers = weapon.GetProperty(PropertyInt.WeaponModTinkerCount) ?? -1;
 
-                Assert.AreEqual(1, specials + tinkers, $"swap {i}: {specials} specials and {tinkers} tinkers - only ONE slot is free behind nine imbues");
-                Assert.IsTrue(specials <= 1, $"swap {i}: {specials} specials cannot fit behind nine imbues");
+                // SINCE THE 2026-08-06 DECOUPLING the ONE free slot is a TINKER slot, and specials no longer
+                // compete for it, AND since the same-day Amethyst rework a swap never touches tinkers at all -
+                // so the tinker count and log must be byte-identical to before the first swap, every time.
+                Assert.AreEqual(beforeTinkerCount, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), $"swap {i}: the tinker count moved");
+                Assert.AreEqual(beforeTinkerLog, weapon.GetProperty(PropertyString.WeaponModTinkerLog), $"swap {i}: the tinker log moved");
+                Assert.IsTrue(specials <= WeaponModRegistry.MaxSpecials, $"swap {i}: {specials} specials, above the permanent bound");
             }
         }
 
+        /// <summary>
+        /// RENAMED 2026-08-07 (was Imbues_TenReservedSlotsAreRefusedRatherThanProducingANegativeTinkerCount).
+        ///
+        /// THE REFUSALS ARE UNCHANGED AND ARE STILL THE SUBJECT. What changed is the second half: the old name
+        /// promised a negative tinker count was the hazard being avoided, and pinned WeaponModTinkerCount at 0
+        /// on the direct path to show the subtraction had bottomed out safely. The special-only reroll does not
+        /// compute a tinker count at all, so there is no subtraction left to go negative - the hazard is gone
+        /// by construction rather than guarded against. Asserting that NOTHING is written is what replaces it,
+        /// and it fails against any implementation that starts computing a budget here again.
+        /// </summary>
         [TestMethod]
-        public void Imbues_TenReservedSlotsAreRefusedRatherThanProducingANegativeTinkerCount()
+        public void Imbues_TenReservedSlotsAreRefusedAndNoTinkerBudgetIsEverWritten()
         {
             var mask = ImbueMask(10);
             var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee, mask);
@@ -187,27 +237,49 @@ namespace ACE.Server.Tests
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
                 "a weapon whose imbues take all ten slots has nothing to reroll");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
+            // INVERTED 2026-08-07: the tinker budget no longer gates Amethyst, so ten imbues refuse the
+            // reroll and permit the swap. Amethyst adds or rerolls a SPECIAL, which has its own budget.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
-                "a weapon whose imbues take all ten slots has nothing to swap");
+                "ten imbues must not refuse a swap - the tinker budget has no bearing on Amethyst");
 
-            // and the arithmetic underneath is still safe if the application path is ever reached directly
+            // and the application path is still safe if it is ever reached directly, bypassing those refusals
             Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0));
 
-            Assert.AreEqual(0, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), "ten reserved slots leaves no room for a tinker");
-            Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(weapon), "ten reserved slots leaves no room for a special");
-            Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered));
+            Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                "the reroll wrote a tinker count on a weapon with zero available slots. Since 2026-08-07 it writes one on NO weapon, which is why the count can no longer come out negative here or anywhere else");
+
+            Assert.IsNull(weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                "the reroll wrote NumTimesTinkered on a weapon that was never tinkered");
+
+            // SINCE THE 2026-08-06 DECOUPLING a special no longer needs a free slot, so reaching this path
+            // directly CAN mint one. That is not a hole: the two NoAvailableSlots refusals asserted above are
+            // what make the path unreachable from play, and they are the guard - the arithmetic below never was.
+            Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) <= WeaponModRegistry.MaxSpecials,
+                "even on the unreachable path the permanent special bound holds");
+
             Assert.AreEqual(mask, weapon.GetProperty(PropertyInt.ImbuedEffect));
         }
 
         // ================= D. standard retail tinkering interaction =================
 
         /// <summary>
-        /// A part-tinkered retail weapon: the reroll ACCEPTS and fills the budget to ten, while the swap refuses,
-        /// because a swap trades one slot for another and must not be a cheaper way of filling empty ones.
+        /// A part-tinkered retail weapon: the reroll ACCEPTS while the swap refuses, because a swap trades one
+        /// slot for another and must not be a cheaper way of filling empty ones.
+        ///
+        /// REWRITTEN 2026-08-07 FOR THE SPECIAL-ONLY REROLL, and this test is where the change is most visible
+        /// to a player. The reroll used to ACCEPT AND THEN FILL: the weapon walked in at three tinkers and
+        /// walked out at ten, which is why the swap became available immediately afterwards. It no longer
+        /// touches layer 1, so a part-tinkered weapon stays part-tinkered - it can now gain specials from a
+        /// reroll and STILL be refused a swap, permanently, until the player finishes tinkering it by hand.
+        /// That is the intended shape: the reroll is a layer on top of ordinary tinkering rather than a
+        /// substitute for it.
+        ///
+        /// The name is unchanged because the headline is unchanged - reroll accepts, swap refuses. What moved
+        /// is everything the reroll does after it accepts.
         /// </summary>
         [TestMethod]
-        public void Retail_APartTinkeredWeaponAcceptsARerollAndRefusesASwap()
+        public void Retail_APartTinkeredWeaponAcceptsBothToolsNow()
         {
             var weapon = WeaponModTestKit.MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
                 new Dictionary<PropertyInt, int> { { PropertyInt.NumTimesTinkered, 3 }, { PropertyInt.Damage, 15 } });
@@ -216,8 +288,11 @@ namespace ACE.Server.Tests
 
             Assert.IsTrue(WeaponModTinkerSet.PassesIntegrityGate(weapon), "a 3-entry log against NumTimesTinkered 3 is consistent");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.SwapNeedsFullBudget,
-                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon));
+            // INVERTED 2026-08-07. A part-tinkered weapon used to be the canonical SwapNeedsFullBudget case:
+            // the swap demanded NumTimesTinkered == 10. That rule is gone, so both tools now accept it.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
+                "a part-tinkered weapon must accept a swap - the tinker counter has no bearing on Amethyst");
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon));
@@ -228,28 +303,29 @@ namespace ACE.Server.Tests
 
             probe.AssertInvariants(weapon, WeaponClass.Melee, "reroll of a part-tinkered weapon");
 
-            Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered),
-                "the reroll fills the budget, so the counter lands on exactly ten");
+            Assert.AreEqual(3, weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                "the reroll must leave the player's own tinker count exactly where it found it - three, not filled to ten");
 
-            // the two retail Iron and one Brass were reversed before the refill: Damage is back off 15 by two
-            // and then rebuilt, so it can only be inside the fresh band
-            var damage = weapon.GetProperty(PropertyInt.Damage) ?? 0;
+            Assert.AreEqual("61,61,57", weapon.GetProperty(PropertyString.TinkerLog),
+                "the reroll must leave the retail log byte-identical - the three entries are the player's work, not this system's");
 
-            Assert.IsTrue(damage >= 13 && damage <= 23, $"Damage {damage} is outside the band a 15-base weapon reaches once its two retail Iron are reversed");
+            Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                "the reroll must not mark a hand-tinkered weapon as managed - doing so would suppress the retail integrity gate on it for good");
 
-            // ... and now that it is full, the swap is available - unless the reroll happened to land a full
-            // trio, which is a 2% draw at the default odds and refuses for a completely different reason.
-            //
-            // PRE-EXISTING FLAKE, fixed 2026-07-30: this asserted None unconditionally and failed about one run
-            // in fifty on the trio draw. The unconditional form is not a stronger assertion, it is a wrong one -
-            // SwapAtSpecialCap is the correct answer in that state, and it is the SAME assertion for both.
+            // the two retail Iron are NOT reversed and NOT rebuilt: the reroll never reaches layer 1, so the
+            // weapon's Damage is exactly the number it walked in with
+            Assert.AreEqual(15, weapon.GetProperty(PropertyInt.Damage),
+                "Damage moved, so the reroll reversed or re-applied a layer 1 tinker. It must do neither");
+
+            // ... and the swap is accepted afterwards too. This assertion is kept as a SECOND check rather
+            // than folded into the first because it was the sharp consequence of the old rule: the reroll
+            // deliberately stopped filling the tinker budget, which used to mean a rerolled part-tinkered
+            // weapon could never be swapped. With the budget requirement gone, the sequence works end to end.
             var specials = WeaponModTinkerSet.SpecialCount(weapon);
 
-            Assert.AreEqual(specials >= WeaponModRegistry.MaxSpecials
-                    ? WeaponModManager.WeaponModRefusal.SwapAtSpecialCap
-                    : WeaponModManager.WeaponModRefusal.None,
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
-                $"a full budget makes the swap available, and only the three-special bound may take it away (the reroll left {specials} specials)");
+                $"the reroll left {specials} specials on a weapon with a 3-tinker budget, and the swap must accept it - the tinker budget is no longer a swap precondition");
         }
 
         /// <summary>
@@ -269,8 +345,11 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.TinkerLogMismatch,
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon));
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.TinkerLogMismatch,
-                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon));
+            // INVERTED 2026-08-07: only the REROLL reverses a tinker set, so only the reroll needs the log
+            // to be trustworthy. Amethyst never reads or reverses one.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
+                "a mismatched log must not refuse a swap - Amethyst never reverses a tinker");
 
             // an unreadable log is refused the same way, rather than being treated as empty
             weapon.SetProperty(PropertyString.TinkerLog, "61,iron,57");
@@ -397,63 +476,73 @@ namespace ACE.Server.Tests
                 WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
                 "a weapon whose ten tinkers are all unreversible has no slots to offer, so a reroll would be a second free budget on top of the first");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
-                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon));
+            // INVERTED 2026-08-07: the "second free budget" hazard above is a REROLL hazard - it is the reroll
+            // that would refill slots. Amethyst adds or rerolls a special and never issues a tinker budget at
+            // all, so ten unreversible tinkers are simply not its problem.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Amethyst), weapon),
+                "ten unreversible tinkers must not refuse a swap - Amethyst never hands out a tinker budget");
         }
 
         /// <summary>
-        /// CONFIRMED DEFECT (asserts the CORRECT behaviour and therefore fails). A partly unknown log must keep
-        /// its unaccounted entries: they cost slots, they stay in the retail log, and the refill only covers what
-        /// this system actually reversed. Dropping them from the log is what would hand the slots back on the
-        /// NEXT reroll even after the reserved arithmetic is fixed.
+        /// RENAMED AND REWRITTEN 2026-08-07 (was Reroll_UnknownLogEntriesKeepTheirSlotsAndStayInTheRetailLog).
+        ///
+        /// The old contract was a carry-forward: the reroll rewrote both logs, so the five Oak entries it could
+        /// not reverse had to be copied into the new log verbatim or their slots would be handed back on the
+        /// NEXT use. The special-only reroll does not rewrite the log at all, which retires the whole class of
+        /// bug rather than guarding it - there is no rewrite for the carry-forward to be omitted from.
+        ///
+        /// WHAT THIS TEST NOW PINS IS STRICTLY STRONGER, and it is a byte comparison rather than a count. The
+        /// old form asserted the Oak entries SURVIVED and that the totals still summed to ten; it would have
+        /// passed against an implementation that reordered the log, or that reversed the five Iron and laid
+        /// down five different ones. This asserts the whole row is character-for-character the string the
+        /// player's own tinkering left, and that the Iron's effect on Damage is likewise untouched.
+        ///
+        /// The Oak case is kept as the fixture rather than simplified away because it is the state where the
+        /// old code did the most work, and therefore the state where a partial revert would show up first.
         /// </summary>
         [TestMethod]
-        public void Reroll_UnknownLogEntriesKeepTheirSlotsAndStayInTheRetailLog()
+        public void Reroll_LeavesAPartlyUnknownTinkerLogByteIdentical()
         {
+            const string log = "75,75,75,75,75,61,61,61,61,61";
+
             var weapon = WeaponModTestKit.MakeWeapon(ItemType.MeleeWeapon, CombatUse.Melee,
                 new Dictionary<PropertyInt, int> { { PropertyInt.NumTimesTinkered, 10 }, { PropertyInt.WeaponTime, 0 }, { PropertyInt.Damage, 18 } });
 
-            weapon.SetProperty(PropertyString.TinkerLog, "75,75,75,75,75,61,61,61,61,61");
+            weapon.SetProperty(PropertyString.TinkerLog, log);
+
+            // the reserved arithmetic still reads five, and the refusal gate still budgets against it - that is
+            // unchanged by the rework and is the reason the weapon is accepted at all
+            Assert.AreEqual(5, WeaponModTinkerSet.ReadReservedSlots(weapon), "precondition: five Oak entries reserve five slots");
 
             for (var pass = 1; pass <= 3; pass++)
             {
                 Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"pass {pass}");
 
                 var specials = WeaponModTinkerSet.SpecialCount(weapon);
-                var tinkers = weapon.GetProperty(PropertyInt.WeaponModTinkerCount) ?? -1;
 
-                Assert.AreEqual(5, specials + tinkers,
-                    $"pass {pass}: five Oak entries hold five slots, so only five may be refilled - {specials} specials plus {tinkers} tinkers is a budget of {specials + tinkers + 5}");
+                Assert.AreEqual(log, weapon.GetProperty(PropertyString.TinkerLog),
+                    $"pass {pass}: TinkerLog moved. The reroll is special-only since 2026-08-07 - it must not reorder, rewrite or re-serialize this row, let alone drop the five Oak entries (specials held: {specials})");
 
-                Assert.IsTrue(WeaponModTinkerSet.TryParseLog(weapon.GetProperty(PropertyString.TinkerLog), out var retail), $"pass {pass}: TinkerLog does not parse");
+                Assert.IsNull(weapon.GetProperty(PropertyString.WeaponModTinkerLog),
+                    $"pass {pass}: WeaponModTinkerLog was written, which would switch reversal onto a log this system did not build");
 
-                Assert.AreEqual(5, retail.Count(m => m == MaterialType.Oak),
-                    $"pass {pass}: the five Oak entries were dropped from TinkerLog. They are the only record that those slots are spent, so dropping them hands them back on the next reroll.");
+                Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                    $"pass {pass}: a tinker count was written, which would mark this hand-tinkered weapon as managed and suppress the retail integrity gate on it");
 
-                // TEST DEFECT, fixed 2026-07-30: this used to require TinkerLog to hold exactly ten entries. A
-                // rolled SPECIAL occupies a slot but is not a tinker and has no MaterialType, so by design it is
-                // not a log entry at all (WeaponModTinkerSet.WriteComposition writes carried entries + tinkers,
-                // and the specials live in their own PropertyFloat records). With one special the log is
-                // legitimately 5 + 4 = 9, so the old assert failed only on the passes where a special happened to
-                // roll - a flaky test pinning an invariant the system never had. The three relations below are
-                // what actually hold, and together they are stricter: they tie the log length to the carried
-                // entries and the tinker counter, and the whole budget to the carried entries rather than to a
-                // hardcoded 5.
-                var unaccounted = WeaponModTinkerSet.ReadUnaccountedEntries(weapon);
+                Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered), $"pass {pass}: NumTimesTinkered moved");
 
-                CollectionAssert.AreEqual(Enumerable.Repeat(MaterialType.Oak, 5).ToList(), unaccounted,
-                    $"pass {pass}: the carried-forward entries must be exactly the five Oak, in log order");
+                // the five Iron are neither reversed nor rebuilt, so Damage is exactly what it was
+                Assert.AreEqual(18, weapon.GetProperty(PropertyInt.Damage),
+                    $"pass {pass}: Damage moved, so the reroll reached layer 1. The five Iron in this log belong to the player's tinkering and must be left alone");
 
-                Assert.AreEqual(unaccounted.Count + tinkers, retail.Count,
-                    $"pass {pass}: TinkerLog holds {retail.Count} entries against {unaccounted.Count} carried Oak plus {tinkers} fresh tinkers - the log describes the carried entries and the tinkers, and nothing else");
+                Assert.AreEqual(0, weapon.GetProperty(PropertyInt.WeaponTime), $"pass {pass}: WeaponTime moved - Oak is unreversible and must never be touched");
 
-                Assert.AreEqual(WeaponModRegistry.TotalSlots, unaccounted.Count + specials + tinkers,
-                    $"pass {pass}: {unaccounted.Count} unreversible entries + {specials} specials + {tinkers} tinkers must be exactly the ten-slot budget");
+                // and the carried-forward reading of the log is unchanged, so the NEXT use budgets identically
+                CollectionAssert.AreEqual(Enumerable.Repeat(MaterialType.Oak, 5).ToList(), WeaponModTinkerSet.ReadUnaccountedEntries(weapon),
+                    $"pass {pass}: the unreversible entries must still read as exactly the five Oak, in log order");
 
-                Assert.IsTrue(WeaponModTinkerSet.TryParseLog(weapon.GetProperty(PropertyString.WeaponModTinkerLog), out var own), $"pass {pass}: WeaponModTinkerLog does not parse");
-                CollectionAssert.AreEqual(retail, own, $"pass {pass}: both logs must describe the same composition");
-                Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered), $"pass {pass}: NumTimesTinkered");
-                Assert.AreEqual(0, weapon.GetProperty(PropertyInt.WeaponTime), $"pass {pass}: WeaponTime moved");
+                Assert.AreEqual(5, WeaponModTinkerSet.ReadReservedSlots(weapon), $"pass {pass}: the reserved figure moved, so a later use would budget against a different weapon");
             }
         }
 
@@ -486,12 +575,21 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// After ANY operation the counter reads exactly ten, which is what leaves the retail
-        /// recipe_requirements_int gate blocking further ordinary tinkering. Eleven would be worse than a refusal:
-        /// TinkeringDifficulty is an unguarded ten-element list indexed by this counter.
+        /// RENAMED AND REWRITTEN 2026-08-07 (was Retail_EveryOperationLeavesNumTimesTinkeredAtExactlyTen).
+        ///
+        /// The old contract was that both operations SET the counter to ten, which is what left the retail
+        /// recipe_requirements_int gate blocking further ordinary tinkering. Neither operation writes it any
+        /// more, so the property that replaces it is CONSERVATION: whatever the counter read going in, it reads
+        /// coming out, across every starting state including having no counter at all.
+        ///
+        /// THE UNDERLYING SAFETY CONCERN IS UNCHANGED AND IS NOW SATISFIED MORE DIRECTLY. Eleven would be worse
+        /// than a refusal - TinkeringDifficulty is an unguarded ten-element list indexed by this counter - and a
+        /// path that never writes the counter can never drive it out of range. The starting value 10 is kept in
+        /// the sweep because it is the state where a write and a no-write are indistinguishable, so it is the
+        /// one that would let a partial revert through if it were dropped.
         /// </summary>
         [TestMethod]
-        public void Retail_EveryOperationLeavesNumTimesTinkeredAtExactlyTen()
+        public void Retail_NoOperationEverMovesNumTimesTinkered()
         {
             foreach (var weaponClass in AllClasses)
             {
@@ -508,15 +606,26 @@ namespace ACE.Server.Tests
                         weapon.SetProperty(PropertyInt.NumTimesTinkered, startCount);
                     }
 
-                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0));
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered),
-                        $"{weaponClass} from {startCount} tinkers: a reroll must leave the counter on exactly ten");
+                    // null at startCount 0: the weapon carries no counter at all, and must not acquire one
+                    var expected = startCount > 0 ? (int?)startCount : null;
+                    var expectedLog = weapon.GetProperty(PropertyString.TinkerLog);
 
-                    // refuses only when the reroll happened to land a full trio, which leaves the counter alone
+                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0));
+
+                    Assert.AreEqual(expected, weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                        $"{weaponClass} from {startCount} tinkers: a reroll must leave the counter exactly as it found it, including leaving it ABSENT");
+
+                    Assert.AreEqual(expectedLog, weapon.GetProperty(PropertyString.TinkerLog),
+                        $"{weaponClass} from {startCount} tinkers: a reroll must leave the retail log exactly as it found it");
+
+                    // refuses only when the reroll happened to land zero specials, which leaves the counter alone
                     WeaponModTestKit.Swap(weapon, weaponClass, 10.0, $"{weaponClass} from {startCount} tinkers");
 
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.NumTimesTinkered),
-                        $"{weaponClass} from {startCount} tinkers: a swap must leave the counter on exactly ten");
+                    Assert.AreEqual(expected, weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                        $"{weaponClass} from {startCount} tinkers: a swap must leave the counter exactly as it found it");
+
+                    Assert.AreEqual(expectedLog, weapon.GetProperty(PropertyString.TinkerLog),
+                        $"{weaponClass} from {startCount} tinkers: a swap must leave the retail log exactly as it found it");
                 }
             }
         }
@@ -848,19 +957,37 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// CONFIRMED DEFECT (asserts the CORRECT behaviour and therefore fails).
+        /// CONFIRMED DEFECT, ORIGINALLY FOUND AGAINST SWIFT FLIGHT (asserts the CORRECT behaviour and
+        /// therefore fails on a broken implementation).
         ///
-        /// WeaponModDefinition.ReverseValue:160-162 removes the native row whenever the restored value equals the
-        /// engine default. For Swift Flight that default is 20.0 (Creature_Missile.cs:517), and six ace_world
-        /// launchers carry MaximumVelocity exactly 20.0 - so reversing Swift Flight deletes their velocity row,
-        /// and WeaponProfile.cs:57 then reads "?? 1.0f" and shows the player a velocity of 1.0.
+        /// WeaponModDefinition.ReverseValue:160-162 removes the native row whenever the restored value equals
+        /// the engine default. Swift Flight's default was 20.0 (Creature_Missile.cs:517), and six ace_world
+        /// launchers carried MaximumVelocity exactly 20.0 - so reversing Swift Flight deleted their velocity
+        /// row, and WeaponProfile.cs:57 then read "?? 1.0f" and showed the player a velocity of 1.0.
         ///
         /// MaximumVelocity has no single agreed engine default, so the row must never be removed.
+        ///
+        /// RETARGETED TO A SYNTHETIC DEFINITION, 2026-08-17. Swift Flight was retired in the catalog v4 pass
+        /// and was the only row that ever set RemoveOnDefault = false, so this test would otherwise lose its
+        /// only live subject - see WeaponModFixTests.Fix3_ARemoveOnDefaultFalseRowRestoresTheDefaultRatherThanRemovingTheRow
+        /// for the sibling test retargeted the same way, with the fuller reasoning for why the test is kept
+        /// rather than deleted.
         /// </summary>
         [TestMethod]
-        public void Specials_SwiftFlightNeverRemovesMaximumVelocity()
+        public void Specials_ARemoveOnDefaultFalseRowNeverRemovesMaximumVelocity()
         {
-            var definition = WeaponModRegistry.Get(WeaponModId.SwiftFlight);
+            var definition = new WeaponModDefinition
+            {
+                Id = WeaponModId.PanicReload,          // any id; nothing here reads the registry
+                DisplayName = "Synthetic Disagreeing Default",
+                Record = PropertyFloat.WeaponModPanicReload,
+                NativeFloat = PropertyFloat.MaximumVelocity,
+                MaxRoll = 6.0,
+                NativeDefault = 20.0,
+                RemoveOnDefault = false,
+                Classes = WeaponClass.Missile,
+                DisplayFormat = "+{0:0.##} missile velocity",
+            };
 
             Assert.AreEqual(PropertyFloat.MaximumVelocity, definition.NativeFloat);
 
@@ -910,9 +1037,12 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// A native property that is PRESENT but zero is a different starting state from one that is absent, and
-        /// the two must be indistinguishable after a full apply/reverse cycle. Cleave is excluded on purpose: its
-        /// native is a TOTAL target count whose floor is 1, so 0 is not a value the property can legally hold.
-        /// Tier B is excluded because it has no native property to start present or absent.
+        /// the two must be indistinguishable after a full apply/reverse cycle. Rows with a non-zero NativeFloor
+        /// are excluded on purpose - their native cannot legally hold 0, so the premise does not apply - and
+        /// the filter is written against the FLOOR rather than against a name so it keeps working whatever the
+        /// catalog holds. (It excluded exactly one row, Cleave, until Cleave was removed on 2026-08-07; it
+        /// excludes none today and is kept as the rule, not as a workaround for a specific row.) Tier B is
+        /// excluded because it has no native property to start present or absent.
         /// </summary>
         [TestMethod]
         public void Specials_APresentButZeroNativeIsEffectivelyUnchangedByApplyThenReverse()
@@ -1019,25 +1149,34 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Specials_ARerollClearsARecordThatIsOutsideTheTargetsClassPool()
         {
-            var cleave = WeaponModRegistry.Get(WeaponModId.Cleave);
-            var swiftFlight = WeaponModRegistry.Get(WeaponModId.SwiftFlight);
+            // UPDATED 2026-08-07: this used Cleave as the first stranded record until Cleave was removed from
+            // the catalog. Shield Bypass replaces it - it is the Tier A row no caster can roll.
+            //
+            // UPDATED AGAIN 2026-08-17: this used Swift Flight as the second stranded record until it was
+            // retired in the catalog v4 pass - it was the other Tier A row no caster can roll, and with it
+            // gone Shield Bypass is now the ONLY Tier A row outside the caster pool. Quickening (Tier B,
+            // melee-and-missile-only) replaces it, keeping the test's real point intact: TWO records outside
+            // the class pool are cleared rather than one, so the walk cannot be passing by luck on a
+            // single-element list.
+            var shieldBypass = WeaponModRegistry.Get(WeaponModId.ShieldBypass);
+            var quickening = WeaponModRegistry.Get(WeaponModId.Quickening);
 
-            Assert.IsFalse(cleave.AppliesTo(WeaponClass.Caster), "precondition: Cleave is not a caster modifier");
-            Assert.IsFalse(swiftFlight.AppliesTo(WeaponClass.Caster), "precondition: Swift Flight is not a caster modifier");
+            Assert.IsFalse(shieldBypass.AppliesTo(WeaponClass.Caster), "precondition: Shield Bypass is not a caster modifier");
+            Assert.IsFalse(quickening.AppliesTo(WeaponClass.Caster), "precondition: Quickening is not a caster modifier");
 
             var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Caster);
             var probe = new WeaponModProbe(weapon);
 
-            WeaponModTinkerSet.ApplySpecial(weapon, cleave, 1.0);
-            WeaponModTinkerSet.ApplySpecial(weapon, swiftFlight, 6.0);
+            WeaponModTinkerSet.ApplySpecial(weapon, shieldBypass, 0.3);
+            WeaponModTinkerSet.ApplySpecial(weapon, quickening, quickening.MaxRoll);
 
             Assert.AreEqual(2, WeaponModTinkerSet.SpecialCount(weapon), "precondition: both stranded records are present");
 
             Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Caster, 10.0));
 
-            Assert.IsNull(weapon.GetProperty(cleave.Record), "the reroll must clear a record from outside the class pool, not skip it");
-            Assert.IsNull(weapon.GetProperty(swiftFlight.Record), "the reroll must clear a record from outside the class pool, not skip it");
-            Assert.IsNull(weapon.GetProperty(PropertyInt.Cleaving), "Cleaving must go back to absent when the stranded Cleave record is cleared");
+            Assert.IsNull(weapon.GetProperty(shieldBypass.Record), "the reroll must clear a record from outside the class pool, not skip it");
+            Assert.IsNull(weapon.GetProperty(quickening.Record), "the reroll must clear a record from outside the class pool, not skip it");
+            Assert.IsNull(weapon.GetProperty(PropertyFloat.IgnoreShield), "IgnoreShield must go back to absent when the stranded Shield Bypass record is cleared");
 
             probe.AssertInvariants(weapon, WeaponClass.Caster, "after clearing stranded out-of-class records");
         }
@@ -1082,12 +1221,19 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Classes_SpecialPoolsRespectTheClassRestrictions()
         {
-            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Missile).Any(m => m.Id == WeaponModId.Cleave), "Cleave is melee only");
-            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Caster).Any(m => m.Id == WeaponModId.Cleave), "Cleave is melee only");
+            // Cleave (melee only) was the first two assertions here until it was removed on 2026-08-07, and
+            // Swift Flight (missile only) was the next three until it was removed on 2026-08-17. Their absence
+            // from EVERY pool is asserted in WeaponModPoolCutTests rather than restated here. Panic Reload
+            // (Tier B v4, missile only) replaces Swift Flight as the missile-only case, but UNLIKE Swift
+            // Flight it is Tier B and therefore gated by weapon_mods_enabled - the "not reachable" checks hold
+            // regardless of gate state (an unreachable row stays unreachable with the gate on too), but the
+            // positive "must be available" check needs the gate forced on explicitly rather than relying on
+            // the live default either way.
+            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Melee).Any(m => m.Id == (WeaponModId)4), "Cleave's retired id must not be reachable from the melee pool");
             Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Caster).Any(m => m.Id == WeaponModId.ShieldBypass), "Shield Bypass is not a caster modifier");
-            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Caster).Any(m => m.Id == WeaponModId.SwiftFlight), "Swift Flight is not a caster modifier");
-            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Melee).Any(m => m.Id == WeaponModId.SwiftFlight), "Swift Flight is missile only");
-            Assert.IsTrue(WeaponModRegistry.Pool(WeaponClass.Missile).Any(m => m.Id == WeaponModId.SwiftFlight), "Swift Flight must be available to missile weapons");
+            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Caster).Any(m => m.Id == WeaponModId.PanicReload), "Panic Reload is not a caster modifier");
+            Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Melee).Any(m => m.Id == WeaponModId.PanicReload), "Panic Reload is missile only");
+            Assert.IsTrue(WeaponModRegistry.Pool(WeaponClass.Missile, true).Any(m => m.Id == WeaponModId.PanicReload), "Panic Reload must be available to missile weapons with the gate on");
 
             // and again through the real roll, so a pool that is right but a draw that is wrong still fails
             foreach (var weaponClass in AllClasses)
@@ -1193,69 +1339,107 @@ namespace ACE.Server.Tests
 
             partTinkered.SetProperty(PropertyString.TinkerLog, "61,61,61,61,61,61");
 
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.SwapNeedsFullBudget, WeaponModTestKit.Refusal(amethyst, partTinkered), "part-tinkered, swap");
+            // BOTH accept a part-tinkered weapon as of 2026-08-07. This line was the SwapNeedsFullBudget case
+            // until the tinker counter stopped gating Amethyst; there is no swap-only refusal left to assert.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, partTinkered), "part-tinkered, swap");
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(tourmaline, partTinkered), "part-tinkered, reroll");
 
+            // a weapon loaded to exactly the cap. A FOURTH row is needed because the cap went from three to four
+            // on 2026-08-06; the first three alone no longer reach it. Shield Bypass is that fourth as of
+            // 2026-08-07 - it was Cleave until Cleave was removed, and Shield Bypass is what the melee Tier A
+            // pool has left, which is also why the melee pool is now exactly as deep as the cap.
             var trio = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
 
-            foreach (var id in new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst })
-                WeaponModTinkerSet.ApplySpecial(trio, WeaponModRegistry.Get(id), 5.0);
+            foreach (var (id, magnitude) in new[]
+            {
+                (WeaponModId.Devastation,  5.0),
+                (WeaponModId.WeakPoint,    3.0),
+                (WeaponModId.Bloodthirst,  5.0),
+                (WeaponModId.ShieldBypass, 0.3),
+            })
+            {
+                WeaponModTinkerSet.ApplySpecial(trio, WeaponModRegistry.Get(id), magnitude);
+            }
 
             Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(trio));
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.SwapAtSpecialCap, WeaponModTestKit.Refusal(amethyst, trio), "three specials, swap");
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(tourmaline, trio), "three specials, reroll");
+
+            // SUPERSEDED 2026-08-06: SwapAtSpecialCap is gone. A full set is swappable now - Amethyst rerolls a
+            // special AT the cap by design.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, trio), "at the special cap, swap");
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(tourmaline, trio), "at the special cap, reroll");
 
             // --- ten imbues ---
             var imbued = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee, ImbueMask(10));
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots, WeaponModTestKit.Refusal(tourmaline, imbued), "ten imbues");
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots, WeaponModTestKit.Refusal(amethyst, imbued), "ten imbues, swap");
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, imbued), "ten imbues, swap - the tinker budget is reroll-only since 2026-08-07");
         }
 
         /// <summary>
-        /// The three-special bound now has TWO enforcement points on the swap path, and this pins the second one.
-        ///
-        /// It previously had exactly one - ResolveRefusal returning SwapAtSpecialCap - and an earlier revision of
-        /// this test asserted the resulting gap as a known fact: ApplySwap entered at a full trio would remove one
-        /// of the three and roll a replacement, which is precisely the "reroll a single special" capability design
-        /// section 5 says invalidates its +101.1% power assessment. Anything that reached ApplySwap without going
-        /// through the refusal - a new caller, an admin command, a refactor - reopened it.
-        ///
-        /// ApplySwap now refuses on its own. This drives the weapon to a full trio through the real swap path,
-        /// then calls ApplySwap DIRECTLY, with no refusal in front of it, and requires the trio to survive
-        /// byte for byte.
+        /// SUPERSEDED 2026-08-06: this used to pin ApplySwap refusing a weapon already at the special cap, on
+        /// the "reroll a single special" concern design section 5 raised. That concern is now moot BY DESIGN:
+        /// Amethyst IS the "reroll a single special" tool, deliberately, as of the same-day rework. This test
+        /// now pins the opposite: at a full set, ApplySwap succeeds, replaces EXACTLY ONE special, and leaves
+        /// tinkers and the tinker log byte-identical, because the new path never reaches them.
         /// </summary>
         [TestMethod]
-        public void Swap_ApplySwapRefusesAtThreeSpecialsWithoutTheRefusalInFrontOfIt()
+        public void Swap_ApplySwapRerollsExactlyOneSpecialAtTheCapAndNeverTouchesTinkers()
         {
             for (var attempt = 0; attempt < 20; attempt++)
             {
-                // build the realistic managed state - seven tinkers and a full trio - by playing the swap
+                // build the realistic managed state directly - seven tinkers and a full set. Amethyst can no
+                // longer grind a weapon up to a full set from zero (it needs a special to reroll, not add), so
+                // the set is seeded with ApplySpecial rather than by playing the swap repeatedly.
                 var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
 
-                var uses = 0;
-
-                while (WeaponModTinkerSet.SpecialCount(weapon) < WeaponModRegistry.MaxSpecials)
+                // Shield Bypass is the fourth row as of 2026-08-07 - it was Cleave until Cleave was removed
+                foreach (var (id, magnitude) in new[]
                 {
-                    Assert.IsTrue(++uses < 500, "could not reach three specials");
-                    Assert.IsNotNull(WeaponModTestKit.Swap(weapon, WeaponClass.Melee, 10.0, $"attempt {attempt} use {uses}"));
+                    (WeaponModId.Devastation,  5.0),
+                    (WeaponModId.WeakPoint,    3.0),
+                    (WeaponModId.Bloodthirst,  5.0),
+                    (WeaponModId.ShieldBypass, 0.3),
+                })
+                {
+                    WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(id), magnitude);
                 }
 
-                var before = WeaponModTinkerSet.ReadSpecials(weapon).Select(s => (s.Definition.Id, s.Magnitude)).OrderBy(s => s.Id).ToList();
+                Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(weapon), $"attempt {attempt}: precondition - a full set");
+
+                var before = WeaponModTinkerSet.ReadSpecials(weapon).Select(s => s.Definition.Id).OrderBy(id => id).ToList();
                 var beforeTinkers = weapon.GetProperty(PropertyString.WeaponModTinkerLog);
+                var beforeTinkerCount = weapon.GetProperty(PropertyInt.WeaponModTinkerCount);
 
-                Assert.IsNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0),
-                    $"attempt {attempt}: ApplySwap ran on a weapon already holding three specials - the ONLY other guard is ResolveRefusal, and a caller that skips it can then reroll one special of a chosen trio");
+                var lines = WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0);
 
-                Assert.IsFalse(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap),
-                    $"attempt {attempt}: CanApply still says yes at three specials, so the bag would be consumed for a refusal");
+                Assert.IsNotNull(lines, $"attempt {attempt}: ApplySwap must succeed on a full set - rerolling a special AT the cap is its purpose");
 
-                var after = WeaponModTinkerSet.ReadSpecials(weapon).Select(s => (s.Definition.Id, s.Magnitude)).OrderBy(s => s.Id).ToList();
+                Assert.IsTrue(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap),
+                    $"attempt {attempt}: a full set must remain swappable, so a repeated Amethyst use is never refused");
 
-                CollectionAssert.AreEqual(before, after, $"attempt {attempt}: the refused swap still altered the trio");
+                // a reroll trades one special for one, EXCEPT the rare case where the replacement resolves to a
+                // zero magnitude and is dropped (WeaponModValue.IsLiveMagnitude) - the count can then be one
+                // lower, never more
+                var countAfter = WeaponModTinkerSet.SpecialCount(weapon);
+                Assert.IsTrue(countAfter == WeaponModRegistry.MaxSpecials || countAfter == WeaponModRegistry.MaxSpecials - 1,
+                    $"attempt {attempt}: expected {WeaponModRegistry.MaxSpecials} or {WeaponModRegistry.MaxSpecials - 1} specials after the swap, got {countAfter}");
+
+                var after = WeaponModTinkerSet.ReadSpecials(weapon).Select(s => s.Definition.Id).OrderBy(id => id).ToList();
+
+                // at most one identity changed: exactly one lost and one gained (a replacement landed), or one
+                // lost and none gained (a zero-magnitude replacement was dropped - see the count assertion
+                // above), or none lost at all only when the reroll landed back on the identity it just removed
+                var lost = before.Except(after).ToList();
+                var gained = after.Except(before).ToList();
+
+                Assert.IsTrue(lost.Count <= 1 && gained.Count <= lost.Count,
+                    $"attempt {attempt}: expected at most one special lost and no more gained than lost; before [{string.Join(",", before)}], after [{string.Join(",", after)}]");
 
                 Assert.AreEqual(beforeTinkers, weapon.GetProperty(PropertyString.WeaponModTinkerLog),
-                    $"attempt {attempt}: the refused swap still rewrote the tinker log");
+                    $"attempt {attempt}: the swap must never touch the tinker log");
+
+                Assert.AreEqual(beforeTinkerCount, weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                    $"attempt {attempt}: the swap must never touch the tinker count");
             }
         }
 
@@ -1319,7 +1503,7 @@ namespace ACE.Server.Tests
                 }
             }
 
-            Assert.AreEqual(0.25, WeaponModDefinition.DefaultMinPotency, 1e-12, "the design's potency floor is 0.25 for everything except the binary Cleave");
+            Assert.AreEqual(0.60, WeaponModDefinition.DefaultMinPotency, 1e-12, "the design's potency floor is 0.60 (retuned from 0.25 on 2026-08-06), and since the binary Cleave was removed on 2026-08-07 it applies to every row without exception");
         }
 
         // ================= J. tunable extremes =================
@@ -1360,9 +1544,15 @@ namespace ACE.Server.Tests
                     Assert.AreEqual(Math.Round(devastation.MaxRoll * scale, MidpointRounding.AwayFromZero),
                         WeaponModValue.Resolve(devastation, 1.0, 10.0, scale), 1e-9, $"scale {scale}: a perfect Devastation");
 
-                    // ... except on the binary modifier, which ignores it entirely
-                    Assert.AreEqual(1.0, WeaponModValue.Resolve(WeaponModRegistry.Get(WeaponModId.Cleave), 1.0, 10.0, scale), 1e-12,
-                        $"scale {scale}: Cleave is binary and must stay exactly +1");
+                    // ... and there is no longer any row it does NOT reach: Cleave was the one binary modifier
+                    // that ignored the scale entirely, and it was removed on 2026-08-07. Asserted as an
+                    // every-row rule rather than dropped, because "the scale reaches every magnitude" is a
+                    // stronger statement than the single exception it replaces.
+                    foreach (var mod in WeaponModRegistry.AllMods)
+                    {
+                        Assert.IsFalse(mod.Binary,
+                            $"scale {scale}: {mod.Id} is Binary, so it ignores weapon_mod_magnitude_scale. That is legitimate machinery, but no row has used it since Cleave was removed - widen this assertion deliberately rather than deleting it");
+                    }
                 }
 
                 // a negative or NaN scale is sanitized rather than producing a negative magnitude
@@ -1381,6 +1571,7 @@ namespace ACE.Server.Tests
             var prior1 = PropertyManager.GetDouble("weapon_mod_special_chance_1").Item;
             var prior2 = PropertyManager.GetDouble("weapon_mod_special_chance_2").Item;
             var prior3 = PropertyManager.GetDouble("weapon_mod_special_chance_3").Item;
+            var prior4 = PropertyManager.GetDouble("weapon_mod_special_chance_4").Item;
 
             try
             {
@@ -1389,11 +1580,16 @@ namespace ACE.Server.Tests
                     PropertyManager.ModifyDouble("weapon_mod_special_chance_1", chance);
                     PropertyManager.ModifyDouble("weapon_mod_special_chance_2", chance);
                     PropertyManager.ModifyDouble("weapon_mod_special_chance_3", chance);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_4", chance);
 
                     foreach (var weaponClass in AllClasses)
                     {
                         var weapon = WeaponModTestKit.MakeUntinkered(weaponClass);
                         var probe = new WeaponModProbe(weapon);
+
+                        // a draw is bounded by the POOL as well as by the cap, and the Tier A caster pool is
+                        // shallower than the cap since the 2026-08-06 raise
+                        var reachable = Math.Min(WeaponModRegistry.MaxSpecials, WeaponModRegistry.Pool(weaponClass).Count);
 
                         for (var i = 1; i <= 20; i++)
                         {
@@ -1402,11 +1598,23 @@ namespace ACE.Server.Tests
 
                             var specials = WeaponModTinkerSet.SpecialCount(weapon);
 
-                            Assert.AreEqual(chance == 0.0 ? 0 : WeaponModRegistry.MaxSpecials, specials,
+                            Assert.AreEqual(chance == 0.0 ? 0 : reachable, specials,
                                 $"special chance {chance}, {weaponClass}, reroll {i}: {specials} specials");
 
-                            Assert.AreEqual(WeaponModRegistry.TotalSlots - specials, weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
-                                $"special chance {chance}, {weaponClass}, reroll {i}: the remainder of the budget must go to tinkers");
+                            // REWRITTEN 2026-08-07 FOR THE SPECIAL-ONLY REROLL. This used to assert the tinker
+                            // budget came back FULL at both chance extremes, which was the 2026-08-06 decoupling
+                            // expressed through a refill. The stronger form of the same claim now that there is
+                            // no refill: the tinker side is not merely independent of the special count, it is
+                            // not written at all - so driving the special odds from 0 to 1 provably cannot reach
+                            // layer 1 by any route.
+                            Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                                $"special chance {chance}, {weaponClass}, reroll {i}: a tinker count was written on an untinkered weapon, so the special odds are reaching layer 1");
+
+                            Assert.IsNull(weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                                $"special chance {chance}, {weaponClass}, reroll {i}: NumTimesTinkered was written on an untinkered weapon");
+
+                            Assert.IsNull(weapon.GetProperty(PropertyString.WeaponModTinkerLog),
+                                $"special chance {chance}, {weaponClass}, reroll {i}: a tinker log was written on an untinkered weapon");
                         }
                     }
                 }
@@ -1416,68 +1624,48 @@ namespace ACE.Server.Tests
                 PropertyManager.ModifyDouble("weapon_mod_special_chance_1", prior1);
                 PropertyManager.ModifyDouble("weapon_mod_special_chance_2", prior2);
                 PropertyManager.ModifyDouble("weapon_mod_special_chance_3", prior3);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_4", prior4);
             }
         }
 
+        /// <summary>
+        /// SUPERSEDED 2026-08-06 (Amethyst rework). weapon_mod_swap_special_chance used to be the odds ApplySwap
+        /// added a special rather than a tinker; that whole "add" half of the swap is gone. THE TUNABLE IS NOW
+        /// DEAD ON THIS PATH - a reroll always replaces, unconditionally, per the explicit ruling in
+        /// WeaponModManager.ApplySwap's remarks. This test now pins that deadness directly: forcing the tunable
+        /// to either extreme changes nothing about ApplySwap's behaviour. The tunable is left declared (not
+        /// deleted) in case a future path reads it; if nothing ever does again, that is a separate cleanup.
+        /// </summary>
         [TestMethod]
-        public void Tunables_SwapChanceExtremesHoldEveryInvariant()
+        public void Tunables_SwapChanceIsDeadOnTheApplySwapPath()
         {
             var prior = PropertyManager.GetDouble("weapon_mod_swap_special_chance").Item;
 
             try
             {
-                // never a special: every swap trades a tinker for a tinker, forever
-                PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", 0.0);
-
-                var never = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
-                var neverProbe = new WeaponModProbe(never);
-
-                for (var i = 1; i <= 40; i++)
+                foreach (var chance in new[] { 0.0, 1.0 })
                 {
-                    Assert.IsNotNull(WeaponModManager.ApplySwap(never, WeaponClass.Melee, 10.0), $"swap chance 0: use {i}");
-                    neverProbe.AssertInvariants(never, WeaponClass.Melee, $"swap chance 0, use {i}");
+                    PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", chance);
 
-                    Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(never), $"swap chance 0: use {i} granted a special");
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots, never.GetProperty(PropertyInt.WeaponModTinkerCount), $"swap chance 0: use {i} lost a slot");
-                }
+                    var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
+                    WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.ShieldBypass), 0.3);
 
-                // always a special: the trio arrives in exactly three swaps, and the fourth swap is REFUSED by
-                // ApplySwap's own three-special guard rather than replacing one of the three
-                PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", 1.0);
+                    var beforeTinkerLog = weapon.GetProperty(PropertyString.WeaponModTinkerLog);
+                    var beforeTinkerCount = weapon.GetProperty(PropertyInt.WeaponModTinkerCount);
 
-                var always = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
-                var alwaysProbe = new WeaponModProbe(always);
+                    var probe = new WeaponModProbe(weapon);
 
-                var reachedThree = false;
-
-                for (var i = 1; i <= 40; i++)
-                {
-                    var count = WeaponModTinkerSet.SpecialCount(always);
-
-                    if (count >= WeaponModRegistry.MaxSpecials)
+                    for (var i = 1; i <= 20 && WeaponModTinkerSet.SpecialCount(weapon) > 0; i++)
                     {
-                        reachedThree = true;
+                        Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0), $"chance {chance}: use {i}");
+                        probe.AssertInvariants(weapon, WeaponClass.Melee, $"swap chance {chance}, use {i}");
 
-                        Assert.IsNull(WeaponModManager.ApplySwap(always, WeaponClass.Melee, 10.0),
-                            $"swap chance 1: use {i} ran on a full trio - the permanent bound must refuse, not replace one of the three");
-
-                        continue;
+                        // the tunable this test is about must move NOTHING - the swap never reaches tinkers
+                        // regardless of what weapon_mod_swap_special_chance is set to
+                        Assert.AreEqual(beforeTinkerLog, weapon.GetProperty(PropertyString.WeaponModTinkerLog), $"chance {chance}: use {i} touched the tinker log");
+                        Assert.AreEqual(beforeTinkerCount, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), $"chance {chance}: use {i} touched the tinker count");
                     }
-
-                    Assert.IsNotNull(WeaponModTestKit.Swap(always, WeaponClass.Melee, 10.0, $"swap chance 1 use {i}"), $"swap chance 1: use {i}");
-                    alwaysProbe.AssertInvariants(always, WeaponClass.Melee, $"swap chance 1, use {i}");
-
-                    var after = WeaponModTinkerSet.SpecialCount(always);
-
-                    // the removal may take one of the specials, but at a certain chance it is always replaced,
-                    // so the count never goes DOWN and never passes the bound
-                    Assert.IsTrue(after >= count && after <= WeaponModRegistry.MaxSpecials,
-                        $"swap chance 1: use {i} moved the special count from {count} to {after}");
                 }
-
-                Assert.IsTrue(reachedThree, "swap chance 1: forty swaps did not reach a full trio");
-
-                Assert.IsTrue(reachedThree, "forty swaps at a certain special chance must reach the bound of three");
             }
             finally
             {

@@ -47,7 +47,12 @@ namespace ACE.Server.Network.GameAction.Actions
                 targetPlayer.Session.Network.EnqueueSend(tell);
             }
             else
+            {
+                if (ACE.Server.Entity.SpellTutor.TryHandleTalkDirect(creature, session.Player, message))
+                    return;
+
                 creature.EmoteManager.OnTalkDirect(session.Player, message);
+            }
         }
     }
 }

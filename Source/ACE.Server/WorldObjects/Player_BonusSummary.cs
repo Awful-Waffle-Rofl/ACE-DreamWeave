@@ -47,7 +47,7 @@ namespace ACE.Server.WorldObjects
             if (altActive)
                 Send($"  Alternate character: +{alt * 100:0.#}% (until Enl {AltCharacterBonusTargetEnlightenment}, Level {AltCharacterBonusTargetLevel})");
             else
-                Send("  Alternate character: +0% (not active - this is your furthest-along character)");
+                Send("  Alternate character: +0% (not active - not far enough behind your furthest-along character)");
 
             if (offlineActive)
                 Send($"  Offline bonus: +{offline * 100:0.#}% ({OfflineExperienceBonusDisplay} remaining)");

@@ -2,6 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using log4net;
+
+using Microsoft.EntityFrameworkCore;
+
 using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -10,6 +14,48 @@ namespace ACE.Database.Adapter
 {
     public static class BiotaUpdater
     {
+        private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
+        /// <summary>
+        /// Marks every element of one of targetBiota's navigation collections that shouldRemove accepts as
+        /// Deleted on the context.
+        ///
+        /// The removals are collected first and applied afterwards, and that is the whole point of this
+        /// helper: DbSet.Remove CAN mutate the navigation collection it was handed an element of, so removing
+        /// while enumerating that collection throws "Collection was modified; enumeration operation may not
+        /// execute". It happens only for a dependent in the ADDED state - Remove detaches that one instead of
+        /// deleting it, and EF Core's navigation fixup takes a detached dependent out of its principal's
+        /// navigation collection immediately. Removing an Unchanged dependent only marks it Deleted and leaves
+        /// it in the collection, which is why the plain foreach this replaces worked for years and then failed
+        /// (2026-09-07/08 prod) once a save had left Added rows on a retained ShardDbContext.
+        /// BiotaUpdaterCollectionMutationTests pins both halves of that against the real EF model.
+        ///
+        /// Nothing is allocated when nothing needs removing, which is the common case for most of the ~24
+        /// property tables on any one save.
+        /// </summary>
+        private static void RemoveWhere<T>(DbSet<T> set, ICollection<T> values, Func<T, bool> shouldRemove) where T : class
+        {
+            if (values == null || values.Count == 0)
+                return;
+
+            List<T> removals = null;
+
+            foreach (var value in values)
+            {
+                if (!shouldRemove(value))
+                    continue;
+
+                removals ??= new List<T>();
+                removals.Add(value);
+            }
+
+            if (removals == null)
+                return;
+
+            foreach (var value in removals)
+                set.Remove(value);
+        }
+
         public static void UpdateDatabaseBiota(ShardDbContext context, ACE.Entity.Models.Biota sourceBiota, ACE.Database.Models.Shard.Biota targetBiota)
         {
             targetBiota.WeenieClassId = sourceBiota.WeenieClassId;
@@ -21,77 +67,56 @@ namespace ACE.Database.Adapter
                 foreach (var kvp in sourceBiota.PropertiesBool)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesBool)
-            {
-                if (sourceBiota.PropertiesBool == null || !sourceBiota.PropertiesBool.ContainsKey((PropertyBool)value.Type))
-                    context.BiotaPropertiesBool.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesBool, targetBiota.BiotaPropertiesBool,
+                value => sourceBiota.PropertiesBool == null || !sourceBiota.PropertiesBool.ContainsKey((PropertyBool)value.Type));
 
             if (sourceBiota.PropertiesDID != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesDID)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesDID)
-            {
-                if (sourceBiota.PropertiesDID == null || !sourceBiota.PropertiesDID.ContainsKey((PropertyDataId)value.Type))
-                    context.BiotaPropertiesDID.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesDID, targetBiota.BiotaPropertiesDID,
+                value => sourceBiota.PropertiesDID == null || !sourceBiota.PropertiesDID.ContainsKey((PropertyDataId)value.Type));
 
             if (sourceBiota.PropertiesFloat != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesFloat)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesFloat)
-            {
-                if (sourceBiota.PropertiesFloat == null || !sourceBiota.PropertiesFloat.ContainsKey((PropertyFloat)value.Type))
-                    context.BiotaPropertiesFloat.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesFloat, targetBiota.BiotaPropertiesFloat,
+                value => sourceBiota.PropertiesFloat == null || !sourceBiota.PropertiesFloat.ContainsKey((PropertyFloat)value.Type));
 
             if (sourceBiota.PropertiesIID != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesIID)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesIID)
-            {
-                if (sourceBiota.PropertiesIID == null || !sourceBiota.PropertiesIID.ContainsKey((PropertyInstanceId)value.Type))
-                    context.BiotaPropertiesIID.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesIID, targetBiota.BiotaPropertiesIID,
+                value => sourceBiota.PropertiesIID == null || !sourceBiota.PropertiesIID.ContainsKey((PropertyInstanceId)value.Type));
 
             if (sourceBiota.PropertiesInt != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesInt)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesInt)
-            {
-                if (sourceBiota.PropertiesInt == null || !sourceBiota.PropertiesInt.ContainsKey((PropertyInt)value.Type))
-                    context.BiotaPropertiesInt.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesInt, targetBiota.BiotaPropertiesInt,
+                value => sourceBiota.PropertiesInt == null || !sourceBiota.PropertiesInt.ContainsKey((PropertyInt)value.Type));
 
             if (sourceBiota.PropertiesInt64 != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesInt64)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesInt64)
-            {
-                if (sourceBiota.PropertiesInt64 == null || !sourceBiota.PropertiesInt64.ContainsKey((PropertyInt64)value.Type))
-                    context.BiotaPropertiesInt64.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesInt64, targetBiota.BiotaPropertiesInt64,
+                value => sourceBiota.PropertiesInt64 == null || !sourceBiota.PropertiesInt64.ContainsKey((PropertyInt64)value.Type));
 
             if (sourceBiota.PropertiesString != null)
             {
                 foreach (var kvp in sourceBiota.PropertiesString)
                     targetBiota.SetProperty(kvp.Key, kvp.Value);
             }
-            foreach (var value in targetBiota.BiotaPropertiesString)
-            {
-                if (sourceBiota.PropertiesString == null || !sourceBiota.PropertiesString.ContainsKey((PropertyString)value.Type))
-                    context.BiotaPropertiesString.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesString, targetBiota.BiotaPropertiesString,
+                value => sourceBiota.PropertiesString == null || !sourceBiota.PropertiesString.ContainsKey((PropertyString)value.Type));
 
 
             if (sourceBiota.PropertiesPosition != null)
@@ -129,11 +154,8 @@ namespace ACE.Database.Adapter
                     }
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesPosition)
-            {
-                if (sourceBiota.PropertiesPosition == null || !sourceBiota.PropertiesPosition.ContainsKey((PositionType)value.PositionType))
-                    context.BiotaPropertiesPosition.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesPosition, targetBiota.BiotaPropertiesPosition,
+                value => sourceBiota.PropertiesPosition == null || !sourceBiota.PropertiesPosition.ContainsKey((PositionType)value.PositionType));
 
 
             if (sourceBiota.PropertiesSpellBook != null)
@@ -154,11 +176,8 @@ namespace ACE.Database.Adapter
                     existingValue.Probability = kvp.Value;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesSpellBook)
-            {
-                if (sourceBiota.PropertiesSpellBook == null || !sourceBiota.PropertiesSpellBook.ContainsKey(value.Spell))
-                    context.BiotaPropertiesSpellBook.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesSpellBook, targetBiota.BiotaPropertiesSpellBook,
+                value => sourceBiota.PropertiesSpellBook == null || !sourceBiota.PropertiesSpellBook.ContainsKey(value.Spell));
 
 
             if (sourceBiota.PropertiesAnimPart != null)
@@ -181,11 +200,8 @@ namespace ACE.Database.Adapter
                     existingValue.Order = (byte)i;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesAnimPart)
-            {
-                if (sourceBiota.PropertiesAnimPart == null || value.Order == null || value.Order >= sourceBiota.PropertiesAnimPart.Count)
-                    context.BiotaPropertiesAnimPart.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesAnimPart, targetBiota.BiotaPropertiesAnimPart,
+                value => sourceBiota.PropertiesAnimPart == null || value.Order == null || value.Order >= sourceBiota.PropertiesAnimPart.Count);
 
             if (sourceBiota.PropertiesPalette != null)
             {
@@ -208,11 +224,8 @@ namespace ACE.Database.Adapter
                     existingValue.Order = (byte)i;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesPalette)
-            {
-                if (sourceBiota.PropertiesPalette == null || value.Order == null || value.Order >= sourceBiota.PropertiesPalette.Count)
-                    context.BiotaPropertiesPalette.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesPalette, targetBiota.BiotaPropertiesPalette,
+                value => sourceBiota.PropertiesPalette == null || value.Order == null || value.Order >= sourceBiota.PropertiesPalette.Count);
 
             if (sourceBiota.PropertiesTextureMap != null)
             {
@@ -235,11 +248,8 @@ namespace ACE.Database.Adapter
                     existingValue.Order = (byte)i;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesTextureMap)
-            {
-                if (sourceBiota.PropertiesTextureMap == null || value.Order == null || value.Order >= sourceBiota.PropertiesTextureMap.Count)
-                    context.BiotaPropertiesTextureMap.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesTextureMap, targetBiota.BiotaPropertiesTextureMap,
+                value => sourceBiota.PropertiesTextureMap == null || value.Order == null || value.Order >= sourceBiota.PropertiesTextureMap.Count);
 
 
             // Properties for all world objects that typically aren't modified over the original Biota
@@ -293,11 +303,8 @@ namespace ACE.Database.Adapter
                     usedTargetCreateList.Add(existingValue);
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesCreateList)
-            {
-                if (!usedTargetCreateList.Contains(value))
-                    context.BiotaPropertiesCreateList.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesCreateList, targetBiota.BiotaPropertiesCreateList,
+                value => !usedTargetCreateList.Contains(value));
 
             // This is a cluster... because there is no key per record, just the record id.
             // That poses a problem because when we add a new record to be saved, we don't know what the record id is yet.
@@ -345,11 +352,8 @@ namespace ACE.Database.Adapter
                     emoteMap[value] = existingValue;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesEmote)
-            {
-                if (!emoteMap.Values.Contains(value))
-                    context.BiotaPropertiesEmote.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesEmote, targetBiota.BiotaPropertiesEmote,
+                value => !emoteMap.Values.Contains(value));
             // Now process the emote actions
             foreach (var kvp in emoteMap)
             {
@@ -366,11 +370,8 @@ namespace ACE.Database.Adapter
 
                     CopyValueInto(kvp.Key.PropertiesEmoteAction[i], existingValue, (uint)i);
                 }
-                foreach (var value in kvp.Value.BiotaPropertiesEmoteAction)
-                {
-                    if (value.Order >= kvp.Key.PropertiesEmoteAction.Count)
-                        context.BiotaPropertiesEmoteAction.Remove(value);
-                }
+                RemoveWhere(context.BiotaPropertiesEmoteAction, kvp.Value.BiotaPropertiesEmoteAction,
+                    value => value.Order >= kvp.Key.PropertiesEmoteAction.Count);
             }
 
             if (sourceBiota.PropertiesEventFilter != null)
@@ -387,11 +388,8 @@ namespace ACE.Database.Adapter
                     }
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesEventFilter)
-            {
-                if (sourceBiota.PropertiesEventFilter == null || !sourceBiota.PropertiesEventFilter.Any(p => p == value.Event))
-                    context.BiotaPropertiesEventFilter.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesEventFilter, targetBiota.BiotaPropertiesEventFilter,
+                value => sourceBiota.PropertiesEventFilter == null || !sourceBiota.PropertiesEventFilter.Any(p => p == value.Event));
 
             // This is a cluster... because there is no key per record, just the record id.
             // That poses a problem because when we add a new record to be saved, we don't know what the record id is yet.
@@ -442,11 +440,8 @@ namespace ACE.Database.Adapter
                     usedTargetGenerators.Add(existingValue);
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesGenerator)
-            {
-                if (!usedTargetGenerators.Contains(value))
-                    context.BiotaPropertiesGenerator.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesGenerator, targetBiota.BiotaPropertiesGenerator,
+                value => !usedTargetGenerators.Contains(value));
 
 
             // Properties for creatures
@@ -470,11 +465,8 @@ namespace ACE.Database.Adapter
                     existingValue.CPSpent = kvp.Value.CPSpent;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesAttribute)
-            {
-                if (sourceBiota.PropertiesAttribute == null || !sourceBiota.PropertiesAttribute.ContainsKey((PropertyAttribute)value.Type))
-                    context.BiotaPropertiesAttribute.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesAttribute, targetBiota.BiotaPropertiesAttribute,
+                value => sourceBiota.PropertiesAttribute == null || !sourceBiota.PropertiesAttribute.ContainsKey((PropertyAttribute)value.Type));
 
             if (sourceBiota.PropertiesAttribute2nd != null)
             {
@@ -497,11 +489,8 @@ namespace ACE.Database.Adapter
                 }
 
             }
-            foreach (var value in targetBiota.BiotaPropertiesAttribute2nd)
-            {
-                if (sourceBiota.PropertiesAttribute2nd == null || !sourceBiota.PropertiesAttribute2nd.ContainsKey((PropertyAttribute2nd)value.Type))
-                    context.BiotaPropertiesAttribute2nd.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesAttribute2nd, targetBiota.BiotaPropertiesAttribute2nd,
+                value => sourceBiota.PropertiesAttribute2nd == null || !sourceBiota.PropertiesAttribute2nd.ContainsKey((PropertyAttribute2nd)value.Type));
 
             if (sourceBiota.PropertiesBodyPart != null)
             {
@@ -544,11 +533,8 @@ namespace ACE.Database.Adapter
                     existingValue.LRB = kvp.Value.LRB;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesBodyPart)
-            {
-                if (sourceBiota.PropertiesBodyPart == null || !sourceBiota.PropertiesBodyPart.ContainsKey((CombatBodyPart)value.Key))
-                    context.BiotaPropertiesBodyPart.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesBodyPart, targetBiota.BiotaPropertiesBodyPart,
+                value => sourceBiota.PropertiesBodyPart == null || !sourceBiota.PropertiesBodyPart.ContainsKey((CombatBodyPart)value.Key));
 
             if (sourceBiota.PropertiesSkill != null)
             {
@@ -572,11 +558,8 @@ namespace ACE.Database.Adapter
                     existingValue.LastUsedTime = kvp.Value.LastUsedTime;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesSkill)
-            {
-                if (sourceBiota.PropertiesSkill == null || !sourceBiota.PropertiesSkill.ContainsKey((Skill)value.Type))
-                    context.BiotaPropertiesSkill.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesSkill, targetBiota.BiotaPropertiesSkill,
+                value => sourceBiota.PropertiesSkill == null || !sourceBiota.PropertiesSkill.ContainsKey((Skill)value.Type));
 
 
             // Properties for books
@@ -618,11 +601,8 @@ namespace ACE.Database.Adapter
                     existingValue.PageText = value.PageText;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesBookPageData)
-            {
-                if (sourceBiota.PropertiesBookPageData == null || value.PageId >= sourceBiota.PropertiesBookPageData.Count)
-                    context.BiotaPropertiesBookPageData.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesBookPageData, targetBiota.BiotaPropertiesBookPageData,
+                value => sourceBiota.PropertiesBookPageData == null || value.PageId >= sourceBiota.PropertiesBookPageData.Count);
 
 
             // Biota additions over Weenie
@@ -645,16 +625,37 @@ namespace ACE.Database.Adapter
                     existingValue.ApprovedVassal = kvp.Value.ApprovedVassal;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesAllegiance)
-            {
-                if (sourceBiota.PropertiesAllegiance == null || !sourceBiota.PropertiesAllegiance.ContainsKey(value.CharacterId))
-                    context.BiotaPropertiesAllegiance.Remove(value);
-            }
+            RemoveWhere(context.BiotaPropertiesAllegiance, targetBiota.BiotaPropertiesAllegiance,
+                value => sourceBiota.PropertiesAllegiance == null || !sourceBiota.PropertiesAllegiance.ContainsKey(value.CharacterId));
+
+            // The shard schema permits at most ONE row per (object, spell, layer). The primary key is
+            // (object_Id, spell_Id, caster_Object_Id, layer_Id), but there is ALSO a narrower unique index
+            // wcid_enchantmentregistry_objectId_spellId_layerId_uidx over (object_Id, spell_Id, layer_Id)
+            // (Database/Base/ShardBase.sql:361, mapped at Models/Shard/ShardDbContext.cs:584). Both are
+            // upstream ACE, and they disagree: the runtime registry is keyed by the wider PK, so it can hold
+            // two entries for one spell at one layer as long as their casters differ, and the database cannot
+            // store that. Staging both produced MySQL error 1062 "Duplicate entry '<objectId>-<spellId>-1'",
+            // which failed the whole save on both attempts, set Player.BiotaSaveFailed and disconnected the
+            // player with CharacterError.AccountLogin (Player_Tick.cs). Observed in prod on 2026-09-06/07/08
+            // for four players, always on one of the Tinkerer's Inspiration spell ids at layer 1.
+            //
+            // The producer of that state is fixed at source (EnchantmentManager.AddClassAbilityDebuff now
+            // allocates a free layer), so this is the persistence-layer backstop: a registry that cannot be
+            // represented must cost the extra layer, never the player's session. Any entry beyond the first
+            // for a given (spell, layer) is dropped with a warning.
+            var stagedEnchantmentLayers = new HashSet<(int SpellId, ushort LayerId)>();
+            var stagedEnchantments = new HashSet<BiotaPropertiesEnchantmentRegistry>();
 
             if (sourceBiota.PropertiesEnchantmentRegistry != null)
             {
                 foreach (var value in sourceBiota.PropertiesEnchantmentRegistry)
                 {
+                    if (!stagedEnchantmentLayers.Add((value.SpellId, value.LayerId)))
+                    {
+                        log.Warn($"[DATABASE] Biota 0x{sourceBiota.Id:X8} holds more than one enchantment for spell {value.SpellId} at layer {value.LayerId}; the shard schema allows only one, so the entry cast by 0x{value.CasterObjectId:X8} is not being persisted.");
+                        continue;
+                    }
+
                     BiotaPropertiesEnchantmentRegistry existingValue = targetBiota.BiotaPropertiesEnchantmentRegistry.FirstOrDefault(r => r.SpellId == value.SpellId && r.LayerId == value.LayerId && r.CasterObjectId == value.CasterObjectId);
 
                     if (existingValue == null)
@@ -663,6 +664,8 @@ namespace ACE.Database.Adapter
 
                         targetBiota.BiotaPropertiesEnchantmentRegistry.Add(existingValue);
                     }
+
+                    stagedEnchantments.Add(existingValue);
 
                     existingValue.EnchantmentCategory = value.EnchantmentCategory;
                     existingValue.SpellId = value.SpellId;
@@ -682,11 +685,12 @@ namespace ACE.Database.Adapter
                     existingValue.SpellSetId = (uint)value.SpellSetId;
                 }
             }
-            foreach (var value in targetBiota.BiotaPropertiesEnchantmentRegistry)
-            {
-                if (sourceBiota.PropertiesEnchantmentRegistry == null || !sourceBiota.PropertiesEnchantmentRegistry.Any(p => p.SpellId == value.SpellId && p.LayerId == value.LayerId && p.CasterObjectId == value.CasterObjectId))
-                    context.BiotaPropertiesEnchantmentRegistry.Remove(value);
-            }
+            // Keyed on what was actually STAGED above rather than re-matching the source list, which is what
+            // makes the drop above safe: a target row that no staged source entry claimed is removed even if
+            // some dropped source entry would have matched it. Re-matching the source would have kept a
+            // second row alive at the same (spell, layer) and put the duplicate insert straight back.
+            RemoveWhere(context.BiotaPropertiesEnchantmentRegistry, targetBiota.BiotaPropertiesEnchantmentRegistry,
+                value => !stagedEnchantments.Contains(value));
 
             if (sourceBiota.HousePermissions != null)
             {
@@ -705,11 +709,8 @@ namespace ACE.Database.Adapter
                     existingValue.Storage = kvp.Value;
                 }
             }
-            foreach (var value in targetBiota.HousePermission)
-            {
-                if (sourceBiota.HousePermissions == null || !sourceBiota.HousePermissions.ContainsKey(value.PlayerGuid))
-                    context.HousePermission.Remove(value);
-            }
+            RemoveWhere(context.HousePermission, targetBiota.HousePermission,
+                value => sourceBiota.HousePermissions == null || !sourceBiota.HousePermissions.ContainsKey(value.PlayerGuid));
         }
 
         private static void CopyValueInto(ACE.Entity.Models.PropertiesCreateList value, ACE.Database.Models.Shard.BiotaPropertiesCreateList existingValue)

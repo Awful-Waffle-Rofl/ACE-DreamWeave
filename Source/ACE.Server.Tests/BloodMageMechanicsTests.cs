@@ -961,5 +961,52 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, CountOf(loop, "srcVitalChange"),
                 "the recipient payout must not touch srcVitalChange - the damage the victim took is settled before this point");
         }
+
+        // ---- life_drain_resist_floor: GetEffectiveResistHealthDrain -------------------------------
+
+        /// <summary>
+        /// Retail sets 116 creature weenies' ResistHealthDrain to exactly 0 (bloodless constructs, wisps,
+        /// crystals, plated tuskers), which made a Blood Mage's Life-school drains land for 0 damage on
+        /// them. GetEffectiveResistHealthDrain must floor that at the life_drain_resist_floor tunable
+        /// (default 0.75) rather than passing 0 through.
+        /// </summary>
+        [TestMethod]
+        public void GetEffectiveResistHealthDrain_ZeroResistIsFlooredAtTheTunable()
+        {
+            var creature = TestCreatures.CreateQuestBearer();
+            creature.ResistHealthDrain = 0.0;
+
+            Assert.AreEqual(D("life_drain_resist_floor"), creature.GetEffectiveResistHealthDrain(), 1e-9);
+        }
+
+        /// <summary>
+        /// The same floor must catch the retail cluster of creatures sitting below 0.75 but above 0
+        /// (~350 creatures at 0.5, 0.25, etc.), not just the exact-zero case.
+        /// </summary>
+        [TestMethod]
+        public void GetEffectiveResistHealthDrain_BelowFloorResistIsRaisedToTheFloor()
+        {
+            var creature = TestCreatures.CreateQuestBearer();
+            creature.ResistHealthDrain = 0.5;
+
+            Assert.AreEqual(D("life_drain_resist_floor"), creature.GetEffectiveResistHealthDrain(), 1e-9);
+        }
+
+        /// <summary>
+        /// A creature already at or above the floor must pass through untouched, and a creature with no
+        /// ResistHealthDrain property set at all must keep the existing "unset" default of 1.0 rather than
+        /// being pulled down (or up) by the floor.
+        /// </summary>
+        [TestMethod]
+        public void GetEffectiveResistHealthDrain_AtOrAboveFloorIsUnchanged()
+        {
+            var aboveFloor = TestCreatures.CreateQuestBearer();
+            aboveFloor.ResistHealthDrain = 0.9;
+            Assert.AreEqual(0.9, aboveFloor.GetEffectiveResistHealthDrain(), 1e-9);
+
+            var unset = TestCreatures.CreateQuestBearer();
+            Assert.IsNull(unset.ResistHealthDrain);
+            Assert.AreEqual(1.0, unset.GetEffectiveResistHealthDrain(), 1e-9);
+        }
     }
 }

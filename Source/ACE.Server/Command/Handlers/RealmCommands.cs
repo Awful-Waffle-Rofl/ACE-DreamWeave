@@ -1,6 +1,8 @@
 using ACE.Entity.Enum;
 using ACE.Server.Managers;
 using ACE.Server.Network;
+using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Realms;
 
 namespace ACE.Server.Command.Handlers
 {
@@ -11,6 +13,15 @@ namespace ACE.Server.Command.Handlers
     /// </summary>
     public static class RealmCommands
     {
+        [CommandHandler("realm", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0, "Shows which realm and instance you are currently in.")]
+        public static void HandleRealm(Session session, params string[] parameters)
+        {
+            if (session?.Player == null)
+                return;
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(RealmLine.ForPosition(session.Player.Location), ChatMessageType.Broadcast));
+        }
+
         [CommandHandler("realms", AccessLevel.Developer, CommandHandlerFlag.None, 0, "Lists all realms in the registry.")]
         public static void HandleRealms(Session session, params string[] parameters)
         {

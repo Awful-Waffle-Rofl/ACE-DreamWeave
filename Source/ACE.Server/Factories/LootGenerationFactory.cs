@@ -950,37 +950,135 @@ namespace ACE.Server.Factories
             // and any other necessary info (armorType / weaponType)
             // then just call the existing mutation method
 
+            var roll = GetTreasureRoll(item, item.ArmorLevel ?? 0);
+
+            if (roll == null)
+            {
+                // Aetheria is the one mundane ADD-ON that still mutates. It is deliberately outside
+                // GetTreasureRoll, because MutateAetheria takes no TreasureRoll and Aetheria never gets one
+                // anywhere in generation - so classifying it would mean inventing a roll nothing consumes.
+                if (AetheriaWcids.Contains((WeenieClassName)item.WeenieClassId))
+                {
+                    MutateAetheria(item, profile);
+                    return true;
+                }
+
+                // other mundane items (mana stones, food/drink, healing kits, lockpicks, and spell components/peas) don't get mutated
+                // it should be safe to return false here, for the 1 caller that currently uses this method
+                // since it's not this function's responsibility to determine if an item is a lootgen item,
+                // and only returns true if the item has been mutated.
+                return false;
+            }
+
+            switch (roll.ItemType)
+            {
+                case TreasureItemType.Pyreal:
+                    MutateCoins(item, profile);
+                    break;
+
+                case TreasureItemType.Gem:
+                    MutateGem(item, profile, isMagical, roll);
+                    break;
+
+                case TreasureItemType.Jewelry:
+
+                    if (!roll.HasArmorLevel(item))
+                        MutateJewelry(item, profile, isMagical, roll);
+                    else
+                    {
+                        // crowns, coronets, diadems, etc.
+                        MutateArmor(item, profile, isMagical, roll);
+                    }
+                    break;
+
+                case TreasureItemType.ArtObject:
+                    MutateDinnerware(item, profile, isMagical, roll);
+                    break;
+
+                case TreasureItemType.Weapon:
+
+                    // these three partition every non-Undef TreasureWeaponType between them
+                    // (see TreasureWeaponTypeExtensions), and the weapon type was set from the same
+                    // wcid table that used to select the mutate call directly
+                    if (roll.IsMeleeWeapon)
+                        MutateMeleeWeapon(item, profile, isMagical, roll);
+                    else if (roll.IsMissileWeapon)
+                        MutateMissileWeapon(item, profile, isMagical, roll);
+                    else
+                        MutateCaster(item, profile, isMagical, roll);
+                    break;
+
+                case TreasureItemType.Armor:
+                case TreasureItemType.SocietyArmor:
+                case TreasureItemType.Clothing:
+                    MutateArmor(item, profile, isMagical, roll);
+                    break;
+
+                // scrolls don't really get mutated, even though they are in the main mutation method still
+                case TreasureItemType.Cloak:
+                    MutateCloak(item, profile, roll);
+                    break;
+
+                case TreasureItemType.PetDevice:
+                    MutatePetDevice(item, profile.Tier);
+                    break;
+
+                default:
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Reconstructs the TreasureRoll that loot generation WOULD have produced for an item that already
+        /// exists, by classifying its wcid against the very same loot tables generation rolls from. Returns
+        /// NULL when the wcid is in none of them, i.e. the item is not a lootgen item at all.
+        ///
+        /// EXTRACTED FROM MutateItem SO THERE IS EXACTLY ONE COPY OF THIS CLASSIFICATION. The second caller is
+        /// ACE.Server.SpellReroll, which must draw a rerolled spell from precisely the pool the item could
+        /// have rolled from during generation - which means it needs generation's own answers to
+        /// IsMeleeWeapon / IsCaster / IsArmor / IsClothing / ItemType / Wcid, not a re-derivation from
+        /// PropertyInt.ItemType. A re-derivation would be a second source of truth that silently drifts;
+        /// worse, it would disagree today, because these tables are keyed by WCID and an item's ItemType mask
+        /// cannot distinguish (for example) a loot-table dagger from a quest dagger that never rolls spells.
+        ///
+        /// <paramref name="baseArmorLevel"/> is the BASE weenie's armor level, and the caller supplies it
+        /// because the two callers can only obtain it differently. Generation captures it from a freshly
+        /// created, UNMUTATED object (CreateAndMutateWcid, above) and MutateItem's own input is likewise
+        /// unmutated, so both pass the live value; a caller holding an item that has ALREADY been mutated must
+        /// look it up from the weenie instead, or it will read an inflated number. It feeds the two
+        /// "BaseArmorLevel > 20" tests in GetSpellCode_Dynamic_ClothingArmor and nothing else.
+        ///
+        /// Aetheria is deliberately NOT classified here - see MutateItem.
+        /// </summary>
+        public static TreasureRoll GetTreasureRoll(WorldObject item, int baseArmorLevel)
+        {
+            if (item == null)
+                return null;
+
             var roll = new TreasureRoll();
 
             roll.Wcid = (WeenieClassName)item.WeenieClassId;
-            roll.BaseArmorLevel = item.ArmorLevel ?? 0;
+            roll.BaseArmorLevel = baseArmorLevel;
 
+            // BRANCH ORDER IS LOAD-BEARING and is preserved exactly as MutateItem had it: several wcids
+            // appear in more than one table, and the first match is what generation would have used.
             if (roll.Wcid == WeenieClassName.coinstack)
             {
                 roll.ItemType = TreasureItemType.Pyreal;
-                MutateCoins(item, profile);
             }
             else if (GemMaterialChance.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.Gem;
-                MutateGem(item, profile, isMagical, roll);
             }
             else if (JewelryWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.Jewelry;
-
-                if (!roll.HasArmorLevel(item))
-                    MutateJewelry(item, profile, isMagical, roll);
-                else
-                {
-                    // crowns, coronets, diadems, etc.
-                    MutateArmor(item, profile, isMagical, roll);
-                }
             }
             else if (GenericWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.ArtObject;
-                MutateDinnerware(item, profile, isMagical, roll);
             }
             else if (HeavyWeaponWcids.TryGetValue(roll.Wcid, out var weaponType) ||
                 LightWeaponWcids.TryGetValue(roll.Wcid, out weaponType) ||
@@ -989,7 +1087,6 @@ namespace ACE.Server.Factories
             {
                 roll.ItemType = TreasureItemType.Weapon;
                 roll.WeaponType = weaponType;
-                MutateMeleeWeapon(item, profile, isMagical, roll);
             }
             else if (BowWcids_Aluvian.TryGetValue(roll.Wcid, out weaponType) ||
                 BowWcids_Gharundim.TryGetValue(roll.Wcid, out weaponType) ||
@@ -999,55 +1096,38 @@ namespace ACE.Server.Factories
             {
                 roll.ItemType = TreasureItemType.Weapon;
                 roll.WeaponType = weaponType;
-                MutateMissileWeapon(item, profile, isMagical, roll);
             }
             else if (CasterWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.Weapon;
                 roll.WeaponType = TreasureWeaponType.Caster;
-                MutateCaster(item, profile, isMagical, roll);
             }
             else if (ArmorWcids.TryGetValue(roll.Wcid, out var armorType))
             {
                 roll.ItemType = TreasureItemType.Armor;
                 roll.ArmorType = armorType;
-                MutateArmor(item, profile, isMagical, roll);
             }
             else if (SocietyArmorWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.SocietyArmor;     // collapsed for mutation
                 roll.ArmorType = TreasureArmorType.Society;
-                MutateArmor(item, profile, isMagical, roll);
             }
             else if (ClothingWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.Clothing;
-                MutateArmor(item, profile, isMagical, roll);
             }
-            // scrolls don't really get mutated, even though they are in the main mutation method still
             else if (CloakWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.Cloak;
-                MutateCloak(item, profile, roll);
             }
             else if (PetDeviceWcids.Contains(roll.Wcid))
             {
                 roll.ItemType = TreasureItemType.PetDevice;
-                MutatePetDevice(item, profile.Tier);
             }
-            else if (AetheriaWcids.Contains(roll.Wcid))
-            {
-                // mundane add-on
-                MutateAetheria(item, profile);
-            }
-            // other mundane items (mana stones, food/drink, healing kits, lockpicks, and spell components/peas) don't get mutated
-            // it should be safe to return false here, for the 1 caller that currently uses this method
-            // since it's not this function's responsibility to determine if an item is a lootgen item,
-            // and only returns true if the item has been mutated.
             else
-                return false;
+                return null;
 
-            return true;
+            return roll;
         }
     }
 }

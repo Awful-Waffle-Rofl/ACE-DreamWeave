@@ -623,8 +623,15 @@ namespace ACE.Entity.Enum.Properties
         // Client does not display accurately
         [SendOnLogin][AssessmentProperty]
         GearOverpowerResist                      = 389,
-        // Number of times a character has enlightened
-        [SendOnLogin][AssessmentProperty]
+        // Number of times a character has enlightened. RETIRED 2026-08-08 (XP-LANE-SPEC sec 4): the count
+        // is frozen and no longer shown. SendOnLogin/AssessmentProperty were REMOVED deliberately and must
+        // not be restored casually - the client adds Enlightenment * 2 to its own max-health formula when
+        // it receives this, so re-sending it without also restoring the matching correction in
+        // Player_Vitals inflates every affected health bar by 2 per enlightenment.
+        //
+        // The property itself STAYS on the biota: it is the input to the retirement credit
+        // (Player.GrantEnlightenmentRetirementCredit, whose idempotence depends on re-reading it) and to
+        // the grandfathered +1/enlightenment stat floor in CreatureSkill/CreatureAttribute. Never zero it.
         Enlightenment                            = 390,
 
         /* Custom Properties */
@@ -756,6 +763,164 @@ namespace ACE.Entity.Enum.Properties
         // never be sent to it, so the appraisal line is the only player-facing surface for the capacity.
         // (next free id is 9036)
         SalvageToolCharges                       = 9035,
+
+        // WaffleACE (custom band): ALPHA-TEST-ONLY marker. PRESENCE on a source item routes
+        // EquipmentModManager.HandleApply to the Maximize action instead of the normal
+        // material-driven paths - every equipment mod already on the target has its potency set to
+        // exactly 1.0 (the maximum roll), with no change to which mods are present. Kept out of
+        // production purely by wcid 1001909's absence from Content/prod-manifest.txt - there is no
+        // code-side gate. See ACE.Server.EquipmentMods.EquipmentModManager.
+        // (next free id is 9037)
+        EquipmentModMaximizer                    = 9036,
+
+        // WaffleACE (custom band): how many class ability points this character has bought with
+        // EXPERIENCE. Drives the geometric price curve for the next such point, so it must never be
+        // reset - it is the curve's position, not a balance. DELIBERATELY separate from 9019
+        // ClassAbilityPointsPurchasedWithLum: the two lanes escalate independently, so a character
+        // buys the cheap first point on each. See Docs/ClassAbilities/XP-LANE-SPEC.md sec 3.3 and
+        // Player.TryBuyClassAbilityPointsWithXp.
+        // (next free id is 9038)
+        ClassAbilityPointsPurchasedWithXp        = 9037,
+
+        // WaffleACE (custom band): the CreatureType whose death fills this item by one charge. PRESENCE
+        // with a value above 0 is what MARKS an item as a kill-fill vessel; nothing else does. The live
+        // count is PropertyInt.Structure and the capacity is MaxStructure, both of which the client already
+        // knows, so it draws the uses bar for free. See ACE.Server.Entity.KillFillVessel.
+        //
+        // Deliberately carries no [AssessmentProperty]: the client does not know this id, and the rule is
+        // explained to the player in the vessel's own description text instead.
+        // (next free id is 9039)
+        KillFillCreatureType                     = 9038,
+
+        // WaffleACE (custom band): OPTIONAL location filter on a 9038 vessel - the landblock (the high 16
+        // bits of a cell id, e.g. 0x564E) a kill must happen in. Absent or 0 means the vessel fills wherever
+        // its creature type appears.
+        //
+        // Optional because the two intended uses genuinely differ. A vessel handed out by a quest giver to
+        // send the player through a specific portal MUST carry one, or that portal is decorative and the
+        // player farms whatever is convenient instead - see
+        // Content/preview/quest_assay_row/PORTAL-PHASE-OPTIONS.md section 6. A vessel bought off a vendor
+        // has no portal to protect and can legitimately omit it.
+        // (next free id is 9040)
+        KillFillLandblock                        = 9039,
+
+        // WaffleACE (custom band): OPTIONAL realm filter on a 9038 vessel - the realm a kill must happen
+        // in. Pairs with 9039, and both are needed to scope a vessel to one dungeon copy: a landblock id
+        // is shared by every realm's copy of that block, so a landblock filter alone still admits the
+        // retail original. Bay 2 is the worked example - retail portal 22870 portalcrystalminelow has a
+        // destination byte-identical to bay 2's own portal 1002521, so without this filter the vessel
+        // fills on retail's copper, granite and sandstone golems (all CreatureType 13) in realm 0.
+        //
+        // ABSENCE, NOT ZERO, IS WHAT MEANS "ANY REALM" HERE, and that is deliberately unlike 9039. Realm
+        // 0 is a real, reachable realm - the base retail world - so 0 has to keep meaning "realm 0 only",
+        // which is what a vendor vessel intended for retail content would author. A landblock 0 is not a
+        // real place, so 9039 can afford to spend 0 as its "anywhere" sentinel and this one cannot.
+        // (next free id is 9041)
+        KillFillRealm                            = 9040,
+
+        // World Events (WaffleACE, Docs/WorldEvents/TECH-DESIGN.md 2.13). WorldEventId is the runtime stamp -
+        // the event's RunId - on every object a running event spawned (creatures, Rifts, Weave Caches). Its
+        // PRESENCE excludes the object from shard persistence (WorldObject_Database.IsDynamicThatShouldPersistToShard)
+        // and marks it for the orphan filter in Landblock.SpawnDynamicShardObjects; it is never authored in
+        // content. WorldEventsCompleted is an optional lifetime counter on a player. WorldEventRole is the
+        // catalog role of a WorldEventCreature-flagged weenie: 0 trash / 1 elite / 2 champion / 3 named
+        // boss. Role 3 joins the catalog but is never drawn by wave or champion selection - a named boss
+        // arrives only when the boss axis asks for it by id (BOSS-STANDARD.md section 1).
+        WorldEventId                             = 9041,
+        WorldEventsCompleted                     = 9042,
+        WorldEventRole                           = 9043,
+
+        // RefireStations (WaffleACE, DreamWeave, 2026-08-18). On a piece of equipment, ArcaneLoreOriginal
+        // records the ItemDifficulty (109, Arcane Lore requirement) it was born with, the FIRST time the
+        // Arcane Alignment Table (wcid 1002751) aligns it - the ceiling every later alignment clamps against.
+        // DefenseWieldOriginal records the WieldDifficulty of the first Melee/Missile/Magic Defense
+        // wield-requirement slot found, the first time the Defense Requirement Reforge (wcid 1002752) reforges
+        // it - same role, different property. Both are absent until the item's first reforge.
+        ArcaneLoreOriginal                       = 9044,
+        DefenseWieldOriginal                     = 9045,
+
+        // Equipment mods (WaffleACE, DreamWeave, 2026-08-26). The BORN-WITH value of each of the ten gear
+        // ratings, in the same order as EquipmentModManager.GearRatingProperties. Stamped once, at the
+        // moment the item is created - from its weenie template in WorldObjectFactory.CreateNewWorldObject,
+        // and again from the rolled value in LootGenerationFactory.TryMutateGearRating - and never written
+        // again after that. Nothing a player can do adds to one.
+        //
+        // This exists because the retail Luminous/Empowered Amber gems ADD gear ratings to an already-made
+        // item through ordinary recipes (RecipeManager.ModifyInt writing PropertyInt 370-383 directly), and
+        // Obsidian pays out one equipment mod per rating point. Without a record of what the item was born
+        // with, a crafted point is indistinguishable from a rolled one and buys a mod it never earned. So
+        // Obsidian sums THESE, not the live ratings - see EquipmentModManager.SumGearRatings.
+        //
+        // ABSENT MEANS ZERO, NOT UNKNOWN. An item carrying a live rating with no stamp beside it converts
+        // into nothing. That is the safe direction - a crafted point can never be mistaken for a natural
+        // one - and the one-time backfill in Database/Updates/Shard covers every item that predates this.
+        GearDamageOriginal                       = 9046,
+        GearDamageResistOriginal                 = 9047,
+        GearCritOriginal                         = 9048,
+        GearCritResistOriginal                   = 9049,
+        GearCritDamageOriginal                   = 9050,
+        GearCritDamageResistOriginal             = 9051,
+        GearHealingBoostOriginal                 = 9052,
+        GearMaxHealthOriginal                    = 9053,
+        GearPKDamageRatingOriginal               = 9054,
+        GearPKDamageResistRatingOriginal         = 9055,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): the speed_season id that
+        // BestSpeedRunCenti (PropertyInt64.BestSpeedRunCenti) was set under. A convenience cache on the
+        // player biota only - the character_speed_run shard table is the authority. When this does not
+        // match the active season, the cached best is treated as unset.
+        SpeedChallengeSeasonId                   = 9056,
+
+        // Objective Lock (ACE.Server.Entity.ObjectiveLock): the summed weight of live tokens the gate must
+        // reach or exceed to open. Carrying this property is what MAKES an object the gate rather than a
+        // contributor - see ObjectiveLock.Required.
+        ObjectiveLockRequired                    = 9057,
+        // Objective Lock: how much this contributor's token is worth toward the gate's ObjectiveLockRequired,
+        // passed as Contribute's weight. Defaults to 1 when unset.
+        ObjectiveLockWeight                      = 9058,
+
+        // Mule Form Token (WaffleACE, DreamWeave, 2026-09-01): on a token carrying PropertyBool
+        // MuleFormToken, the WeenieClassId of the creature the token is attuned to. Absent means the
+        // token is unattuned; once set it is never rewritten (there is no re-attunement).
+        MuleFormWcid                             = 9059,
+
+        /// <summary>
+        /// Threads (WaffleACE): on a creature, the run id of the ThreadDungeonRun that spawned it.
+        /// Stamped before EnterWorld by ThreadDungeonSpawner and excluded from persistence in
+        /// WorldObject_Database, exactly like WorldEventId. Absent means the creature is not run-owned.
+        /// </summary>
+        ThreadDungeonRunId                      = 9060,
+
+        /// <summary>
+        /// Player Facets: which facet slot the character is currently standing on. Absent or 1
+        /// means slot 1, the base build. Slot rows live in the character_facet shard table; this
+        /// property only records which one is live.
+        /// </summary>
+        ActiveFacetSlot                        = 9061,
+
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): on a player, how many
+        /// account-wide +100 mule vault entry augmentations have been bought on this character. Summed
+        /// across every character on the account by CustomAugBroker.AccountAugCount - this property
+        /// is per-character storage, but the benefit and the price index are account-wide.
+        /// </summary>
+        AugmentationMuleSpace                    = 9062,
+
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): on a player, how many
+        /// +10% pick-up speed augmentations have been bought on this character. Per-character, uncapped;
+        /// read by PickupSpeed.Compute alongside the shipped Quickhand pick-up boons.
+        /// </summary>
+        AugmentationPickupSpeed                  = 9063,
+
+        /// <summary>
+        /// Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): on a player, how many
+        /// +10% spell duration augmentations have been bought on this character. Per-character, uncapped;
+        /// read alongside the retail AugmentationIncreasedSpellDuration count at the same three
+        /// EnchantmentManager/AddEnchantmentResult sites.
+        /// </summary>
+        AugmentationSpellDurationCustom           = 9064,
+        // (next free id is 9065)
     }
 
     public static class PropertyIntExtensions

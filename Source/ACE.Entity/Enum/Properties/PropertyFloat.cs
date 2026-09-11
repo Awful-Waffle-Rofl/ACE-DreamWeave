@@ -225,6 +225,72 @@ namespace ACE.Entity.Enum.Properties
         MultiShotSpreadAngle           = 8019,
         MultiShotDamageMultiplier      = 8020,
 
+        /* Weapon mods (WaffleACE) - Tier B catalog expansion, v3 (2026-08-06). Six new Tier B rows,
+         * deliberately OUTSIDE the contiguous 8130-8149 Tier A/Tier B system: that block was filled edge
+         * to edge by the v1/v2 pass (6 Tier A active + 5 retired + 7 Tier B active + 2 Tier B reserved =
+         * 20 ids, 8130-8149 with none spare), so this expansion takes the next free ids after the
+         * multishot prototype pair above instead of extending that block. WeaponModRegistry carries a
+         * SECOND Tier B band pair (TierBExpansionBandStart/TierBExpansionBandEnd) for exactly this
+         * reason - a Tier B record now legally falls in EITHER Tier B band, and both are checked.
+         *
+         * ALL SIX ARE TIER B, NOT TIER A - this is a rework of the original v3 pass (also 2026-08-06),
+         * which shipped four of these six (Heft/Tension/Leverage/Attunement) as Tier A, writing directly
+         * to PropertyInt.Damage / PropertyFloat.DamageMod / PropertyFloat.ElementalDamageMod. Those three
+         * natives are ALL already owned by layer 1 tinker materials (WeaponTinkerMaterial.cs: Iron ->
+         * Damage 44, Mahogany -> DamageMod 63, Green Garnet -> ElementalDamageMod 152), which collided
+         * with the structural invariant that no Tier A special may share a native with a layer 1
+         * material (WeaponModInteractionTests.Registry_NoSpecialSharesANativePropertyWithALayerOneMaterial)
+         * - ApplyReroll reverses the whole layer 1 composition and then clears the specials, so a shared
+         * property would be reversed twice from a value only one of them put there. Moving all six to
+         * Tier B sidesteps this entirely: a Tier B row writes NO native property at all, so there is
+         * nothing to collide with a layer 1 material's native. Each id still holds the APPLIED MAGNITUDE
+         * as a plain FRACTION, exactly like the v2 Tier B band at 8141-8147, and each is read live at
+         * combat time by a hand-wired hook - see ACE.Server.WeaponMods.WeaponModRegistry for the
+         * one-row-per-modifier table and each row's HOOK comment for its exact call site.
+         *
+         * Focus and Execution (8025/8026) were ALSO blocked in the original v3 pass, for a different
+         * reason: they were proposed to write PropertyFloat.CriticalFrequency 147 / CriticalMultiplier 136
+         * directly, which collides head-on with the HARD invariant in WeaponModRegistry.cs ("CRIT ROUTES
+         * THROUGH RATINGS, NEVER THE RETAIL PROPERTIES") - both retail crit properties are consumed with
+         * Math.Max against the Critical Strike / Crippling Blow imbues rather than summed
+         * (WorldObject_Weapon.cs:351-356, :412-423), so a rolled value there would be silently swallowed
+         * on exactly the imbued weapons a player is likeliest to care about. As Tier B rows neither writes
+         * that native either: Focus adds to the LIVE crit-chance calculation AFTER the Math.Max, alongside
+         * the rating term, and Execution MULTIPLIES the final crit-damage multiplier after
+         * GetWeaponCritDamageMod returns, rather than writing into it. Both invariants - crit routes
+         * through ratings, and no Tier A/native collision with a layer 1 material - stand unchanged; this
+         * rework satisfies both by not writing a native property at all. */
+        WeaponModHeft                  = 8021,
+        WeaponModTension               = 8022,
+        WeaponModLeverage              = 8023,
+        WeaponModAttunement            = 8024,
+        WeaponModFocus                 = 8025,
+        WeaponModExecution             = 8026,
+
+        /* Weapon mods (WaffleACE) - Tier B catalog v4 (2026-08-17). Nine new Tier B utility rows,
+         * taking the next free ids after the v3 expansion pair above (8027-8035). These are registered
+         * but INERT in this pass - each is a hook site for a follow-up phase, not wired to any live
+         * combat/vital/enchantment code yet. Like the v3 rows, each stores the applied magnitude as a
+         * plain FRACTION (or a flat armor-level value for ArcaneDefender), writes no native property,
+         * and is read live at combat/tick time by a hand-wired hook once phase 2 lands - see
+         * ACE.Server.WeaponMods.WeaponModRegistry's TierBV4BandStart/TierBV4BandEnd rows for the
+         * one-row-per-modifier table and each row's HOOK comment for its intended call site.
+         *
+         * Retired the same pass: WeaponModSwiftFlight (8135), WeaponModLifeLeech/ManaLeech/StaminaLeech
+         * (8141-8143), and WeaponModOverload (8146) - repo-owner directive 2026-08-17 to cut the
+         * damage-oriented-only pool restriction and bring utility rows back in a new form. See the
+         * retirement comment blocks at each id's old declaration site in
+         * Source/property-registry.tsv for the DO-NOT-REUSE record. */
+        WeaponModEfficiency            = 8027,
+        WeaponModRecovery              = 8028,
+        WeaponModManaWell              = 8029,
+        WeaponModCleanse               = 8030,
+        WeaponModLongevity             = 8031,
+        WeaponModSiphon                = 8032,
+        WeaponModQuickRefresh          = 8033,
+        WeaponModArcaneDefender        = 8034,
+        WeaponModPanicReload           = 8035,
+
         /* Equipment mods (WaffleACE) - the band 8100-8199 is RESERVED WHOLESALE for equipment mods.
          * One id per mod type; append only, never renumber (live item rows carry these ids).
          *
@@ -254,7 +320,10 @@ namespace ACE.Entity.Enum.Properties
         GearModFrenziedPace            = 8114,
         GearModLingeringFury           = 8115,
         GearModSavageBlows             = 8116,
-        GearModBloodFury               = 8117,
+        /* 8117 was GearModBloodFury until 2026-08-17. Blood Fury (the class ability) was retired and the mod
+         * was repurposed IN PLACE as Break Armor's proc-chance machinery mod - same id, same [0, 1] potency
+         * scalar, same 0.03 magnitude ceiling - so items already carrying 8117 stay valid and simply re-label. */
+        GearModBreakArmor              = 8117,
         GearModExecutioner             = 8118,
         GearModBloodlust               = 8119,
         GearModOverchannel             = 8120,
@@ -299,7 +368,7 @@ namespace ACE.Entity.Enum.Properties
          *
          * DELIBERATELY UNLIKE the GearMod* ids above: each of these stores the APPLIED MAGNITUDE that
          * this system added to a native property, NOT a potency scalar. Tier A writes to native
-         * properties (the Gear* ratings, Cleaving, IgnoreShield, MaximumVelocity) that may already
+         * properties (the Gear* ratings, IgnoreShield, MaximumVelocity) that may already
          * carry a loot-generated value, so reversal has to subtract exactly what was added. A potency
          * scalar would go wrong the moment weapon_mod_magnitude_scale moved between application and
          * reversal, and the native property would drift permanently.
@@ -314,13 +383,28 @@ namespace ACE.Entity.Enum.Properties
          * cut to damage-oriented modifiers only and those five defensive/sustain rows were removed. The
          * members are gone rather than renamed so nothing can write them again, but weapons on dev shards
          * still carry records at those ids. Registered as RETIRED_DO_NOT_REUSE in Source/property-registry.tsv
-         * and guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated. */
+         * and guarded by WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated.
+         *
+         * 8133 IS RETIRED ON THE SAME TERMS AND MUST NEVER BE REUSED. It held WeaponModCleave until
+         * 2026-08-07, when the Cleave modifier was removed from the catalog outright. The retirement follows
+         * the 2026-07-30 precedent exactly, and for the same reason: a weapon on a dev shard that rolled
+         * Cleave still carries a record at 8133 AND the orphaned PropertyInt.Cleaving native that record
+         * was the reversal bookkeeping for. Nothing will ever come along to subtract that native back off,
+         * because the row that knew how to is gone - so a NEW property handed 8133 would read an existing
+         * stale magnitude as its own value, silently, on every weapon that still holds one. The member is
+         * deleted rather than renamed so nothing can write it again. Registered as RETIRED_DO_NOT_REUSE in
+         * Source/property-registry.tsv and guarded by
+         * WaveChallengePropertyTests.PropertyFloat_8133_8135_8136To8140_8141To8143_8146_StayUnallocated.
+         *
+         * 8135 IS RETIRED ON THE SAME TERMS AND MUST NEVER BE REUSED. It held WeaponModSwiftFlight until
+         * 2026-08-17, when the catalog v4 pass retired it as part of the repo-owner directive to bring
+         * utility rows back in a new form. Registered as RETIRED_DO_NOT_REUSE in
+         * Source/property-registry.tsv and guarded by
+         * WaveChallengePropertyTests.PropertyFloat_8133_8135_8136To8140_8141To8143_8146_StayUnallocated. */
         WeaponModDevastation           = 8130,
         WeaponModWeakPoint             = 8131,
         WeaponModBloodthirst           = 8132,
-        WeaponModCleave                = 8133,
         WeaponModShieldBypass          = 8134,
-        WeaponModSwiftFlight           = 8135,
 
         /* Weapon mods (WaffleACE) - Tier B special modifiers, v2.
          *
@@ -336,13 +420,15 @@ namespace ACE.Entity.Enum.Properties
          * 8148 and 8149 are RESERVED for Sunder and Rampage, which are phase 2 and deliberately have no
          * enum member yet: Sunder needs a new enchantment/spell row and Rampage needs per-target stack
          * state, neither of which exists. They are registered as reserved in Source/property-registry.tsv
-         * so nothing else can take them in the meantime. */
-        WeaponModLifeLeech             = 8141,
-        WeaponModManaLeech             = 8142,
-        WeaponModStaminaLeech          = 8143,
+         * so nothing else can take them in the meantime.
+         *
+         * 8141-8143 (WeaponModLifeLeech/ManaLeech/StaminaLeech) AND 8146 (WeaponModOverload) ARE RETIRED
+         * AND MUST NEVER BE REUSED. They were removed 2026-08-17 in the catalog v4 pass, on the same
+         * repo-owner directive as 8135 above. Registered as RETIRED_DO_NOT_REUSE in
+         * Source/property-registry.tsv and guarded by
+         * WaveChallengePropertyTests.PropertyFloat_8133_8135_8136To8140_8141To8143_8146_StayUnallocated. */
         WeaponModAmbush                = 8144,
         WeaponModQuickening            = 8145,
-        WeaponModOverload              = 8146,
         WeaponModSecondWind            = 8147,
 
         /* Offline experience bonus (WaffleACE) */
@@ -385,5 +471,23 @@ namespace ACE.Entity.Enum.Properties
         // player is warned at 2 minutes, 1 minute and 30 seconds remaining. 0 or less disables it entirely.
         // Default 300 when absent.
         WaveChallengeWaveTimeLimit      = 9006,
+        // Playback-rate multiplier for a static object's MotionTable idle cycle (the "Ready" animation the
+        // client runs on its own for spinning scenery such as the sky-portal swirl layers). Seeded into
+        // CurrentMotionState.MotionState.ForwardSpeed at construction, which the create packet already
+        // carries as InterpretedMotionState.ForwardSpeed whenever it differs from 1.0. 2.0 = twice dat
+        // speed, 0.5 = half. Absent or <= 0 = 1.0 (dat speed). Only read on objects with a MotionTable.
+        MotionSpeed                     = 9007,
+        // Objective Lock (ACE.Server.Entity.ObjectiveLock): seconds this contributor's token survives before
+        // it stops counting toward the gate, passed as Contribute's expiresAt (relative to now). 0 or absent
+        // means the token never expires. This is what expresses "three levers must be down at the same time" -
+        // a lever's token expires quickly enough that an earlier lever has already dropped out by the time a
+        // later one is pulled, unless they overlap.
+        ObjectiveLockExpiry             = 9008,
+        // World Events boss confinement: metres from this creature's Home position inside which it is
+        // allowed to hold a target. While set, target selection only ever considers creatures within this
+        // distance of Home, and stepping outside it forces an immediate retarget instead of waiting for the
+        // HomeRadius leash. Absent (or <= 0) leaves targeting exactly as it is for every other monster.
+        // Read in Creature.FindNextTarget / Creature.CheckMissHome.
+        TetherRadius                    = 9009,
     }
 }

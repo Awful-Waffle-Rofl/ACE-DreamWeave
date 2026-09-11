@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 
 using ACE.Common;
-using ACE.Server.Managers;
 
 namespace ACE.Server.EquipmentMods
 {
@@ -35,33 +34,17 @@ namespace ACE.Server.EquipmentMods
         public const double DefaultMinPotency = 0.10;
 
         /// <summary>
-        /// A uniform potency roll over [<see cref="EquipmentModDefinition.MinPotency"/>, 1]: the high-tier
-        /// (conversion / reroll) application's gamble. A converted roll can legitimately land below the
-        /// low-tier value - that is the intended risk of rerolling - but never below the mod's floor, which
-        /// exists so no mod can roll into a dead band (user rule 2026-07-25, widened to every mod 2026-08-01).
-        /// A definition that declares no floor of its own rolls over [<see cref="DefaultMinPotency"/>, 1].
+        /// A uniform potency roll over [<see cref="EquipmentModDefinition.MinPotency"/>, 1]: the conversion /
+        /// reroll application's gamble, and since the TigerEye low tier was removed the ONLY way a potency is
+        /// produced. It can never land below the mod's floor, which exists so no mod can roll into a dead band
+        /// (user rule 2026-07-25, widened to every mod 2026-08-01). A definition that declares no floor of its
+        /// own rolls over [<see cref="DefaultMinPotency"/>, 1].
         /// </summary>
         public static double RollPotency(EquipmentModDefinition definition)
         {
             var floor = MinPotency(definition);
 
             return Clamp01(floor + ThreadSafeRandom.Next(0.0f, 1.0f) * (1.0 - floor));
-        }
-
-        /// <summary>
-        /// The potency a low-tier application grants: the equipment_mod_lowtier_potency tunable (default 0.2 =
-        /// 20% of a mod's maximum magnitude), raised to the mod's floor. Not a roll - the low tier is a
-        /// guaranteed value. At the shipped defaults only Venom and Caustic (floor 0.25) are actually raised:
-        /// the 0.2 tunable already sits above <see cref="DefaultMinPotency"/>.
-        /// DETERMINISTIC BY DESIGN, NOT A MISSING ROLL: the TigerEye (low-tier) path always pays exactly this
-        /// value, because that path's gamble lives entirely in which mod TYPE comes up. Potency RNG is the
-        /// Obsidian (high-tier) path's differentiator - see <see cref="RollPotency"/>.
-        /// </summary>
-        public static double LowTierPotency(EquipmentModDefinition definition)
-        {
-            var tunable = Clamp01(PropertyManager.GetDouble("equipment_mod_lowtier_potency").Item);
-
-            return Math.Max(tunable, MinPotency(definition));
         }
 
         /// <summary>

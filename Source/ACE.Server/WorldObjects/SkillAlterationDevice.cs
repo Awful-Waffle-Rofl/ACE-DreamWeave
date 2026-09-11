@@ -89,7 +89,16 @@ namespace ACE.Server.WorldObjects
                         msg += $"specialize your {skill.Skill.ToSentence()} skill and cost {skillBase.UpgradeCostFromTrainedToSpecialized} credits.";
                         break;
                     case SkillAlterationType.Lower:
-                        msg += $"lower your {skill.Skill.ToSentence()} skill from {(skill.AdvancementClass == SkillAdvancementClass.Specialized ? "specialized to trained" : "trained to untrained")} and refund the skill credits and experience invested in this skill.";
+
+                        var augSpecialized = skill.AdvancementClass == SkillAdvancementClass.Specialized
+                            && player.IsSkillSpecializedViaAugmentation(skill.Skill, out var hasAugmentation) && hasAugmentation;
+
+                        if (augSpecialized && !Player.IsSkillUntrainable(skill.Skill))
+                            msg += $"recover the experience invested in your {skill.Skill.ToSentence()} skill. Your augmentation will keep the skill specialized.";
+                        else if (augSpecialized)
+                            msg += $"lower your {skill.Skill.ToSentence()} skill from specialized to untrained and refund the skill credits and experience invested in this skill.";
+                        else
+                            msg += $"lower your {skill.Skill.ToSentence()} skill from {(skill.AdvancementClass == SkillAdvancementClass.Specialized ? "specialized to trained" : "trained to untrained")} and refund the skill credits and experience invested in this skill.";
                         break;
                 }
 
@@ -188,16 +197,40 @@ namespace ACE.Server.WorldObjects
                 // Gem of Forgetfulness
                 case SkillAlterationType.Lower:
 
-                    // specialized => trained
+                    // specialized => trained, or specialized => untrained for an augmentation specialization
                     if (skill.AdvancementClass == SkillAdvancementClass.Specialized)
                     {
                         var specializedViaAugmentation = player.IsSkillSpecializedViaAugmentation(skill.Skill, out var playerHasAugmentation) && playerHasAugmentation;
 
-                        if (player.UnspecializeSkill(skill.Skill, skillBase.UpgradeCostFromTrainedToSpecialized))
+                        bool altered;
+                        WeenieErrorWithString msg;
+
+                        if (specializedViaAugmentation)
+                        {
+                            // The augmentation, not skill credits, is what specialized this skill, so there is no
+                            // Trained rung to step down to - stopping there would strand the credits the player did
+                            // spend to train it, and refunding UpgradeCostFromTrainedToSpecialized would hand back
+                            // credits that were never spent. Untrain outright and return the trained cost instead.
+                            // The augmentation itself is kept: TrainSkill re-specializes the skill for free if the
+                            // player ever trains it again.
+                            altered = player.UntrainSkill(skill.Skill, skillBase.TrainedCost, true);
+
+                            // Salvaging is both augmentation-specialized and AlwaysTrained, so it recovers its xp
+                            // but stays put - only the four tinkering skills actually untrain here.
+                            msg = Player.IsSkillUntrainable(skill.Skill)
+                                ? WeenieErrorWithString.YouHaveSucceededUntraining_Skill
+                                : WeenieErrorWithString.YouSucceededRecoveringXPFromSkill_AugmentationNotUntrainable;
+                        }
+                        else
+                        {
+                            altered = player.UnspecializeSkill(skill.Skill, skillBase.UpgradeCostFromTrainedToSpecialized);
+                            msg = WeenieErrorWithString.YouHaveSucceededUnspecializing_Skill;
+                        }
+
+                        if (altered)
                         {
                             var updateSkill = new GameMessagePrivateUpdateSkill(player, skill);
                             var availableSkillCredits = new GameMessagePrivateUpdatePropertyInt(player, PropertyInt.AvailableSkillCredits, player.AvailableSkillCredits ?? 0);
-                            var msg = specializedViaAugmentation ? WeenieErrorWithString.YouSucceededRecoveringXPFromSkill_AugmentationNotUntrainable : WeenieErrorWithString.YouHaveSucceededUnspecializing_Skill;
                             var message = new GameEventWeenieErrorWithString(player.Session, msg, skill.Skill.ToSentence());
 
                             player.Session.Network.EnqueueSend(updateSkill, availableSkillCredits, message);

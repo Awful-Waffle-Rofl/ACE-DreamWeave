@@ -241,5 +241,197 @@ namespace ACE.Entity.Enum.Properties
         // at once, refunding all spent points in one pass (see ClassAbilities.ClassAbilityTrainer.HandleRespec).
         // Tier unlocks are NOT touched - they are non-refundable and survive a respec (DESIGN.md sec 4).
         ClassAbilityRespecer               = 9024,
+
+        // On a Drift Network prop weenie: flags it as the EXPERIENCE-for-CAP exchange stone, which on use
+        // prompts to buy one class ability point at the xp curve price (Docs/ClassAbilities/XP-LANE-SPEC.md
+        // sec 3.7, ClassAbilities.ClassAbilityTrainer.HandleXpExchange). The sibling of 9014
+        // ClassAbilityLumExchanger; the two stones are the same statue model in different colours, and each
+        // lane keeps its own purchase counter so their prices escalate independently.
+        ClassAbilityXpExchanger            = 9025,
+
+        // World Events (WaffleACE, Docs/WorldEvents/TECH-DESIGN.md 2.13). WorldEventObjective marks a Rift or
+        // boss objective spawn (the Rift weenie carries it; family members never do). WorldEventCache marks the
+        // Weave Cache reward giver, dispatched by GenericObject.ActOnUse -> WorldEvents.WorldEventCacheHandler
+        // (same pattern as 9025). WorldEventCreature marks a creature weenie as a member of the world-event
+        // family catalog, which is built by scanning the world weenie cache; it needs PropertyString
+        // WorldEventFamily (9010) and PropertyInt WorldEventRole (9043) alongside. 9029 is reserved spare.
+        WorldEventObjective                = 9026,
+        WorldEventCache                    = 9027,
+        WorldEventCreature                 = 9028,
+
+        // Refire Forge (WaffleACE, DreamWeave): on the Marketplace Workmanship Reforge NPC weenie (wcid
+        // 1002750), flags it as the give-target the workmanship refire intercept looks for
+        // (Player_Inventory.GiveObjectToNPC -> RefireStations.WorkmanshipReforgeStation.HandleGive,
+        // ACE.Server/RefireStations/). 9029 is World Events' own reserved spare, not this one.
+        WorkmanshipRefireForge              = 9030,
+
+        // RefireStations (WaffleACE, DreamWeave, 2026-08-18): on the Marketplace Arcane Alignment Table NPC
+        // weenie (wcid 1002751), flags it as the give-target for the ItemDifficulty (Arcane Lore requirement)
+        // shift station - RefireStations.ArcaneAlignmentStation.HandleGive.
+        ArcaneAlignmentTable                = 9031,
+
+        // RefireStations: on the Marketplace Defense Requirement Reforge NPC weenie (wcid 1002752), flags it
+        // as the give-target for the Melee/Missile/Magic Defense wield-requirement reforge station -
+        // RefireStations.DefenseReforgeStation.HandleGive.
+        DefenseRequirementReforge           = 9032,
+
+        // Marketplace spell tutor (WaffleACE): on the NPC weenie (wcid 1002800), flags it as the combined
+        // magic-school spell tutor. Tells to it are intercepted in GameActionTalkDirect and handled by
+        // ACE.Server.Entity.SpellTutor, which reads the retail professor NPCs (53381-53385) for spell lists,
+        // prices and skill gates and takes payment in pyreals from pack then bank.
+        SpellTutor                         = 9033,
+
+        // RefireStations (2026-08-18): on one of the three station attendant NPC weenies (wcids 1002753-
+        // 1002755), flags it as an attendant that refuses ANY given item and hands it straight back -
+        // Player_Inventory.GiveObjectToNPC checks this before the three station intercepts above, since a
+        // Give/Refuse emote row only ever matches a specific item wcid and cannot express a blanket refusal
+        // (WorldObject.HasGiveOrRefuseEmoteForItem / EmoteManager.GetEmoteSet). 9033 collided with SpellTutor
+        // from #650, so this was renumbered from 9033 to 9034.
+        RefireStationAttendant              = 9034,
+
+        // RefireStations (WaffleACE, DreamWeave, 2026-08-18): on the Marketplace Weaver's Loom NPC weenie
+        // (wcid 1002757), flags it as the give-target for the undergarment coverage upgrade station -
+        // RefireStations.CoverageLoomStation.HandleGive.
+        CoverageLoom                        = 9035,
+
+        // RefireStations (WaffleACE, DreamWeave, 2026-08-19): on the Marketplace Brewer's Cauldron NPC weenie
+        // (wcid 1002759), flags it as the give-target for the jewelry blessing-brew station -
+        // RefireStations.BrewersCauldronStation.HandleGive.
+        BrewersCauldron                     = 9036,
+
+        // Marketplace Tinkerer's Inspiration pedestal (WaffleACE, DreamWeave, 2026-08-19): on the Generic
+        // pedestal weenie (wcid 1002761), flags it as the use-dispatch target for the free tinkering buff -
+        // GenericObject.ActOnUse -> Entity.TinkerersInspiration.TryHandleUse.
+        TinkerersInspiration                = 9037,
+
+        // World Events (WaffleACE, DreamWeave, 2026-08-19): on a CREATURE weenie, makes every create_list
+        // Wield item it spawns take the creature's own ObjScale (PropertyFloat.DefaultScale), multiplied by
+        // whatever scale the item weenie already carries, so a scaled-up boss holds a proportionate weapon,
+        // shield or bow instead of a normal-sized one. Read in Creature_Equipment.GenerateWieldList.
+        ScaleWieldedToBody                  = 9038,
+        // WaffleACE fork: far-visible scenery. The server normally withholds CreateObject for a not-yet-known
+        // object more than ObjectMaint.InitialClamp_Dist (112.5 m, 2D) from the player, and a spawning static
+        // only notifies players inside that radius. An object with this flag skips both clamps, so it is
+        // announced as soon as its landblock is in the player's 3x3 (the outdoor visibility window).
+        // Cached onto PhysicsObj.IgnoreInitialClamp at InitPhysicsObj. For inert decor only - never on
+        // creatures, players or anything that moves or broadcasts often.
+        IgnoreInitialClamp                  = 9039,
+
+        // Marketplace Salvage Forge (WaffleACE, DreamWeave, 2026-08-23): on the Salvage Forge NPC (wcid
+        // 1002652), flags it as the give-target for the sixth RefireStation - a player hands the forge one
+        // full salvage bag and it forges the material's multi-charge Hammer, replacing the Hollow Hammer
+        // (wcid 1002650) as the entry point while the Hollow Hammer itself stays usable on bags already in a
+        // player's pack. RefireStations.SalvageForgeStation.HandleGive.
+        SalvageForgeStation                 = 9040,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): on the season portal weenie, marks it
+        // as the entry point for the speed challenge. Portal.ActOnUse resolves the active season from
+        // SpeedSeasonManager and overrides portalDest with that season's entry position; a portal with no
+        // active season refuses use. See Docs/ProvingGroundsSpeed/DESIGN.md section 3.2.
+        SpeedChallengeEntry                 = 9041,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): on a player while a speed run is
+        // armed. Persisted so a mid-run logout is caught at next login in WorldManager.DoPlayerEnterWorld
+        // and the player is re-homed to their lifestone, matching the other three Proving Grounds arenas.
+        SpeedChallengeActive                = 9042,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): on a world object whose use path can
+        // finish a run (altar, lever, pedestal, exit portal). Gated by the active season's objective wcid,
+        // so a flagged prop left over from another season cannot end a run early.
+        SpeedChallengeGoal                  = 9043,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): on a creature whose death can finish a
+        // run. Gated by the active season's objective wcid; reports to the run controller in the same shape
+        // OnWaveCreatureDied uses.
+        SpeedChallengeBoss                  = 9044,
+
+        // NOTE: 9045 (SpeedChallengeScaledCreature) is deliberately reserved in property-registry.tsv for
+        // the deferred level-scaling phase (DESIGN.md section 12) and has NO enum member in v1. Do not add
+        // it here until that phase lands - see the registry row's notes.
+
+        // Objective Lock (ACE.Server.Entity.ObjectiveLock): on a contributor, marks it as the "wrong answer"
+        // punishment path - contributing it calls ObjectiveLock.Reset instead of Contribute, clearing every
+        // token on the lock. This is a no-op once the gate has latched open: Reset itself refuses to run
+        // while Latched is TRUE, so a gate that has already opened can never be re-closed by a later reset.
+        ObjectiveLockResets                 = 9046,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): on a world object, activating it starts
+        // the run clock. Gated by the active season's start_wcid, so a flagged object left over from another
+        // season cannot start a run.
+        SpeedChallengeStart                 = 9047,
+
+        // Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-27): on a plain (non-HousePortal) Portal,
+        // opts it into PlayerInstanceSelectMode.Same instead of the default HomeRealmDefault, so a chute
+        // portal at the far end of a dungeon wing can return the player to the hub inside the SAME
+        // ephemeral instance rather than the shared-world copy. PropertyBool because it is a plain on/off
+        // flag - unlike the sibling PortalExitInstance, which is a PropertyInt compared against 1 because
+        // it carries a second meaningful value. Portal.ActOnUse only honors this when the portal's
+        // Destination landblock matches the landblock the player is currently in; see the guard comment
+        // there for why a mismatch is refused rather than routed blindly.
+        PortalSameInstance                  = 9048,
+        // Mule Vendor: opt-in on a WeenieType.Vendor weenie. WorldObjectFactory constructs a
+        // PersonalVendor rather than a Vendor when this is set. Read at construction only.
+        PersonalVendor                       = 9049,
+
+        // Mule Vendor: opt-in on the summoning contract item. Gem.ActOnUse dispatches to
+        // MuleSummonHandler.TryHandleUse.
+        MuleVendorContract                   = 9050,
+
+        // Offline Experience Bonus (WaffleACE, DreamWeave, 2026-08-30): RETIRED 2026-08-31 - do not read or
+        // write. Was a player-set pause on the offline experience bonus, toggled by /offlinebonus on|off;
+        // superseded by the automatic activity-gated clock in Player_OfflineBonus.cs. The enum member is kept
+        // (and the id stays claimed) because existing shard biotas may still carry bool 9051 = true. Do not
+        // reuse the id. See property-registry.tsv.
+        OfflineExperienceBonusPaused        = 9051,
+
+        // World Events boss confinement (WaffleACE, DreamWeave, 2026-08-30): on a creature, omit the
+        // MovementParamFlags.Sticky flag every melee monster otherwise gets in Creature.GetMovementParameters.
+        // Sticky keeps the physics mover latched onto the target it started toward, which is what turns one
+        // fleeing player into a cross-landblock chase. Absent or false leaves movement exactly as it is.
+        DisableSticky                       = 9052,
+
+        // Mule Form Token (WaffleACE, DreamWeave, 2026-09-01): marks an item as a mule form token.
+        // Gem.UseGem and Gem.HandleActionUseOnTarget dispatch to MuleFormToken on this flag rather than
+        // on a wcid, so a second token weenie with different art or a different kill count is pure
+        // content. Absent or false leaves the item an ordinary gem.
+        MuleFormToken                       = 9053,
+
+        // WaffleACE fork (DreamWeave, 2026-09-03): per-character chat toggle, set by the player command
+        // "/summondamage on|off" and read in Pet.NotifyOwnerOfDamage. When set, the pet's owner - and only
+        // the owner - gets a chat line for every hit their own summoned pet lands. Absent or false is off,
+        // so the default is silence and existing characters need no migration. See NotifyOwnerOfDamage for
+        // the four hooked damage routes and the two gaps (vital drains, damage-over-time ticks).
+        SummonDamageMessages                = 9054,
+
+        // WaffleACE fork (Threads phase 2, 2026-09-04): marks the Fragment Press station.
+        // Read by Gem.HandleActionUseOnTarget -> RawFragment.UseObjectOnTarget (use a raw fragment on
+        // it to press) and by Player_Inventory.GiveObjectToNPC (give an unbound Thread Gem to
+        // re-open it into a raw fragment). Behind dynamic_dungeons_press_enabled.
+        DungeonGemPress                      = 9055,
+
+        // Player Facets (WaffleACE, DreamWeave, 2026-09-05): marks that the one-time slot-2 unlock notice
+        // has already been shown to this character. Set (and persisted) BEFORE the notice is sent, in
+        // Player_Facets.SendFacetUnlockNoticeIfDue, so a throw partway through delivery cannot cause the
+        // notice to fire again on a later login. Absent or false means the notice has not been shown yet.
+        FacetUnlockNoticeShown            = 9056,
+
+        // Custom Dreamweave Augmentations (WaffleACE, DreamWeave, 2026-09-05): marks the give-target NPC
+        // as a Custom Dreamweave Augmentation broker. Read by Player_Inventory.GiveObjectToNPC to
+        // intercept the give path before any emote logic, alongside PropertyInt.AugmentationStat
+        // naming which AugmentationType the NPC brokers.
+        CustomAugBroker                      = 9057,
+
+        // Threads (WaffleACE, 2026-09-07): marks the Survey-Archivist NPC (wcid 1003613) whose
+        // use pays the daily-survey reward. Read by Creature.ActOnUse ->
+        // ThreadDungeons.SurveyArchivistStation.TryHandleUse. The NPC's 19-set Use emote cascade was
+        // DELETED and reimplemented in C# because WorldObject.OnActivate runs EmoteManager.OnUse BEFORE
+        // ActOnUse, so there is no seam that lets the emotes run for flavour while C# pays the award.
+        DungeonSurveyArchivist               = 9058,
+
+        // Per-character preference for the outgoing damage-over-time combat message: the line the
+        // caster sees when their DoT spell ticks on a target. Absent means follow the server-wide
+        // PropertyManager tunable show_dot_messages (default false); set true/false by the player
+        // via /dotdamage on|off.
+        ShowDotDamage                         = 9059,
     }
 }

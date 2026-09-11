@@ -40,6 +40,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.Healing,
         };
 
         /// <summary>

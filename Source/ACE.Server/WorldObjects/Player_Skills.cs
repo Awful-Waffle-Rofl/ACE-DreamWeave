@@ -244,12 +244,29 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Sets the skill to untrained status
         /// </summary>
-        public bool UntrainSkill(Skill skill, int creditsSpent)
+        /// <param name="allowAugmentationSpecialized">
+        /// TRUE to also accept a skill that is Specialized only because the player holds the matching
+        /// augmentation (the tinkering skills, and Salvaging). Those skills were never upgraded with skill
+        /// credits - the augmentation did it for free - so the caller must pass the TRAINED cost as
+        /// creditsSpent, not UpgradeCostFromTrainedToSpecialized, or the player is refunded credits they
+        /// never spent. A skill specialized the ordinary way is still refused here and must go through
+        /// UnspecializeSkill first.
+        /// </param>
+        public bool UntrainSkill(Skill skill, int creditsSpent, bool allowAugmentationSpecialized = false)
         {
             var creatureSkill = GetCreatureSkill(skill);
 
-            if (creatureSkill == null || creatureSkill.AdvancementClass == SkillAdvancementClass.Specialized)
+            if (creatureSkill == null)
                 return false;
+
+            if (creatureSkill.AdvancementClass == SkillAdvancementClass.Specialized)
+            {
+                if (!allowAugmentationSpecialized)
+                    return false;
+
+                if (!IsSkillSpecializedViaAugmentation(skill, out var playerHasAugmentation) || !playerHasAugmentation)
+                    return false;
+            }
 
             if (creatureSkill.AdvancementClass < SkillAdvancementClass.Trained)
             {

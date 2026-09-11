@@ -345,7 +345,22 @@ namespace ACE.Server.Managers
                 RentQueue.Remove(nextEntry);
                 DecrementTotalOwnedHousingByType(nextEntry.House.HouseType);
 
-                ProcessRent(nextEntry);
+                // The real containment lives inside ProcessRent's GetHouse callback (see below), not here:
+                // ProcessRent can defer HandleRentPaid/HandleEviction to a later, different-thread callback
+                // when the house's landblock is not yet fully loaded, so a Tick-level try/catch around this
+                // call would miss the deferred path entirely. This thin backstop only covers a throw on the
+                // synchronous portion of ProcessRent (e.g. GetHouse itself) - it logs and does nothing else,
+                // for the same reason the callback guard does (ProcessRent's mutations are non-atomic and
+                // cannot be safely unwound from a catch). RentQueue is fully rebuilt from SlumLord biotas on
+                // every restart (HouseManager.Initialize -> BuildRentQueue), so a dropped entry self-heals.
+                try
+                {
+                    ProcessRent(nextEntry);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[HOUSE] HouseManager.Tick(): ProcessRent threw for {nextEntry.PlayerName} (0x{nextEntry.PlayerGuid:X8}), house 0x{nextEntry.House.Guid.Full:X8} [{nextEntry.House.HouseType}]", ex);
+                }
 
                 nextEntry = RentQueue.FirstOrDefault();
 
@@ -366,17 +381,42 @@ namespace ACE.Server.Managers
             // load the most up-to-date copy of the house data
             GetHouse(playerHouse.House.Guid.Full, (house) =>
             {
-                playerHouse.House = house;
+                // This callback is the single point that covers BOTH ProcessRent paths: GetHouse runs it
+                // synchronously when the house's landblock is loaded and its slumlord inventory is already
+                // in, but otherwise registers it and fires it LATER, on whatever thread completes the
+                // deferred inventory load. Either way the rent work (HandleRentPaid/HandleEviction, both of
+                // which touch DB state, online-player lookups and action chains that can NRE if a player
+                // disconnects mid-tick) runs here. An unhandled throw would escape to the world thread's
+                // fatal handler and stop the world, so it must be contained at this spot.
+                //
+                // On failure we log with full house identity and DO NOTHING ELSE. We deliberately do NOT
+                // re-add to RentQueue or touch TotalOwnedHousingByType: ProcessRent's mutations are
+                // non-atomic (HandleRentPaid builds a fresh PlayerHouse with a future RentDue and re-adds it
+                // internally; HandleEviction clears ownership and intentionally does not re-add), so a catch
+                // here cannot tell "threw before the mutation" from "threw after" and any blind restore
+                // would resurrect a ghost queue entry - for an evicted house, one that re-enters ProcessRent
+                // every tick against cleared owner state. That is strictly worse than the transient
+                // accounting drift of not restoring, and the drift self-heals anyway: RentQueue and the
+                // counters are fully rebuilt from SlumLord biotas on every restart
+                // (HouseManager.Initialize -> BuildRentQueue).
+                try
+                {
+                    playerHouse.House = house;
 
-                var isInActiveOrDisabled = playerHouse.House.HouseStatus <= HouseStatus.InActive;
-                var isPaid = IsRentPaid(playerHouse);
-                var hasRequirements = HasRequirements(playerHouse);
-                log.InfoFormat("[HOUSE] {0}.ProcessRent(): isPaid = {1} | HasRequirements = {2} | MaintenanceFree = {3}", playerHouse.PlayerName, isPaid, hasRequirements, (house.HouseStatus == HouseStatus.InActive));
+                    var isInActiveOrDisabled = playerHouse.House.HouseStatus <= HouseStatus.InActive;
+                    var isPaid = IsRentPaid(playerHouse);
+                    var hasRequirements = HasRequirements(playerHouse);
+                    log.InfoFormat("[HOUSE] {0}.ProcessRent(): isPaid = {1} | HasRequirements = {2} | MaintenanceFree = {3}", playerHouse.PlayerName, isPaid, hasRequirements, (house.HouseStatus == HouseStatus.InActive));
 
-                if (isInActiveOrDisabled || (isPaid && hasRequirements))
-                    HandleRentPaid(playerHouse);
-                else
-                    HandleEviction(playerHouse);
+                    if (isInActiveOrDisabled || (isPaid && hasRequirements))
+                        HandleRentPaid(playerHouse);
+                    else
+                        HandleEviction(playerHouse);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[HOUSE] HouseManager.ProcessRent(): rent processing threw for {playerHouse.PlayerName} (0x{playerHouse.PlayerGuid:X8}), house 0x{playerHouse.House.Guid.Full:X8} [{playerHouse.House.HouseType}]; dropped this cycle, will be rebuilt on next restart", ex);
+                }
             });
         }
 
@@ -638,7 +678,7 @@ namespace ACE.Server.Managers
         /// <summary>
         /// Called on character delete, evicts from house
         /// </summary>
-        private static void DoHandlePlayerDelete(uint playerGuid)
+        internal static void DoHandlePlayerDelete(uint playerGuid)
         {
             var player = PlayerManager.FindByGuid(playerGuid);
             if (player == null)

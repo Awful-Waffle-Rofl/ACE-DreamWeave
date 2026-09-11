@@ -218,8 +218,8 @@ namespace ACE.Server.Command.Handlers
             {
                 Case = "Tier B melee",
                 Wcid = 53315,
-                Expected = "EQUIP THIS AND FIGHT. Carries Life Leech, Ambush and Quickening at their MAXIMUM roll, so all three are visible without grinding rerolls.",
-                Note = "Life Leech 4% of damage dealt as health, Ambush +15% damage against a target still at FULL health (open on an untouched monster and compare the first hit against the second), Quickening +6% attack speed. Needs @modifybool weapon_mods_enabled true - that ONE bool is the whole system's gate, and with it off all three are inert AND the appraisal block does not render at all, which is itself worth checking.",
+                Expected = "EQUIP AND INSPECT. Carries Efficiency, Recovery and Mana Well at their MAXIMUM roll, so all three are visible on the appraisal panel without grinding rerolls.",
+                Note = "Efficiency, Recovery and Mana Well (WeaponModId.Efficiency/Recovery/ManaWell, catalog v4, 2026-08-17) are REGISTERED BUT INERT this pass - no combat/vital hook reads any of them yet, so this row proves the record roll, tinker-log accounting and appraisal display, not a live effect. Needs @modifybool weapon_mods_enabled true for the appraisal block to render at all.",
                 Ints = new (PropertyInt, int?)[]
                 {
                     (PropertyInt.NumTimesTinkered, 10),
@@ -227,9 +227,15 @@ namespace ACE.Server.Command.Handlers
                 },
                 Floats = new (PropertyFloat, double?)[]
                 {
-                    (PropertyFloat.WeaponModLifeLeech, 0.04),
-                    (PropertyFloat.WeaponModAmbush, 0.15),
-                    (PropertyFloat.WeaponModQuickening, 0.06),
+                    // 1.0 IS THE FULL ROLL FRACTION, NOT A MAGNITUDE. WeaponModCombat.ReadWeaponOnly (fixed
+                    // 2026-08-07) resolves a Tier B record as a fraction of the catalog's MaxRoll, so writing
+                    // the intended magnitude directly here (as the pre-2026-08-17 rows for this table did, e.g.
+                    // "WeaponModLifeLeech, 0.04" for a MaxRoll of 0.04) actually rolls a tiny fraction of a
+                    // fraction - a "max roll" kit item was really about 4% of max. 1.0 is the correct value for
+                    // a maximum-roll test row regardless of what the modifier's own MaxRoll happens to be.
+                    (PropertyFloat.WeaponModEfficiency, 1.0),
+                    (PropertyFloat.WeaponModRecovery, 1.0),
+                    (PropertyFloat.WeaponModManaWell, 1.0),
                 },
                 Strings = new (PropertyString, string)[]
                 {
@@ -240,10 +246,33 @@ namespace ACE.Server.Command.Handlers
             },
             new WeaponModKitEntry
             {
+                Case = "Tier B missile",
+                Wcid = 21964,
+                Expected = "EQUIP AND INSPECT. Carries Panic Reload, Cleanse and Siphon at their MAXIMUM roll (see the melee row above for why the record value is 1.0, not the modifier's MaxRoll).",
+                Note = "Panic Reload (missile-only), Cleanse and Siphon (WeaponModId.PanicReload/Cleanse/Siphon, catalog v4, 2026-08-17) are REGISTERED BUT INERT this pass - no combat hook reads any of them yet. This row is the only one in the table that exercises a missile-only v4 row.",
+                Ints = new (PropertyInt, int?)[]
+                {
+                    (PropertyInt.NumTimesTinkered, 10),
+                    (PropertyInt.WeaponModTinkerCount, 7),
+                },
+                Floats = new (PropertyFloat, double?)[]
+                {
+                    (PropertyFloat.WeaponModPanicReload, 1.0),
+                    (PropertyFloat.WeaponModCleanse, 1.0),
+                    (PropertyFloat.WeaponModSiphon, 1.0),
+                },
+                Strings = new (PropertyString, string)[]
+                {
+                    (PropertyString.TinkerLog, BuildLog((MaterialType.Mahogany, 7))),
+                    (PropertyString.WeaponModTinkerLog, BuildLog((MaterialType.Mahogany, 7))),
+                },
+            },
+            new WeaponModKitEntry
+            {
                 Case = "Tier B caster",
                 Wcid = 2472,
-                Expected = "EQUIP THIS AND CAST. Carries Overload, Life Leech and Second Wind at their MAXIMUM roll - the caster-side wiring, which is a different hook from the melee one in every case.",
-                Note = "Overload is a 20% chance a cast costs NO mana (watch the mana bar over ten casts), Life Leech 4% of SPELL damage as health, Second Wind restores 12% of maximum health, stamina and mana on a killing blow. Overload and the spell leech read the WAND slot specifically, so this row is the only one that exercises them.",
+                Expected = "EQUIP THIS AND CAST. Carries Longevity, Quick Refresh and Arcane Defender at their MAXIMUM roll - the three caster-only v4 rows (see the melee row above for why the record value is 1.0, not the modifier's MaxRoll).",
+                Note = "Longevity, Quick Refresh and Arcane Defender (WeaponModId.Longevity/QuickRefresh/ArcaneDefender, catalog v4, 2026-08-17) are REGISTERED BUT INERT this pass - no enchantment/combat hook reads any of them yet.",
                 Ints = new (PropertyInt, int?)[]
                 {
                     (PropertyInt.ItemWorkmanship, 8),
@@ -252,9 +281,9 @@ namespace ACE.Server.Command.Handlers
                 },
                 Floats = new (PropertyFloat, double?)[]
                 {
-                    (PropertyFloat.WeaponModOverload, 0.20),
-                    (PropertyFloat.WeaponModLifeLeech, 0.04),
-                    (PropertyFloat.WeaponModSecondWind, 0.12),
+                    (PropertyFloat.WeaponModLongevity, 1.0),
+                    (PropertyFloat.WeaponModQuickRefresh, 1.0),
+                    (PropertyFloat.WeaponModArcaneDefender, 1.0),
                 },
                 Strings = new (PropertyString, string)[]
                 {

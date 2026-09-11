@@ -353,6 +353,38 @@ namespace ACE.Server.Physics.Common
         }
 
         /// <summary>
+        /// Same as <see cref="GetVisibleObjectsValuesOfTypeCreature"/>, but excludes Players.
+        ///
+        /// Player derives from Creature, so in a crowd the unfiltered accessor materialises a list
+        /// that is mostly players, which every caller interested in monsters then skips one by one.
+        /// Filtering inside the lock keeps the allocation proportional to the number of monsters
+        /// rather than to the number of visible creatures.
+        ///
+        /// The exclusion is the WorldObject type test (is Player), not PhysicsObj.IsPlayer - the
+        /// latter is a guid-range check, and callers of this method branch on the CLR type.
+        /// </summary>
+        public List<Creature> GetVisibleObjectsValuesOfTypeNonPlayerCreature()
+        {
+            rwLock.EnterReadLock();
+            try
+            {
+                var results = new List<Creature>();
+
+                foreach (var obj in VisibleObjects.Values)
+                {
+                    if (obj.WeenieObj.WorldObject is Creature creature && !(creature is Player))
+                        results.Add(creature);
+                }
+
+                return results;
+            }
+            finally
+            {
+                rwLock.ExitReadLock();
+            }
+        }
+
+        /// <summary>
         /// Returns a list of objects that are currently visible from a cell
         /// </summary>
         public List<PhysicsObj> GetVisibleObjects(ObjCell cell, VisibleObjectType type = VisibleObjectType.All)
@@ -460,7 +492,9 @@ namespace ACE.Server.Physics.Common
                 if (VisibleObjects.ContainsKey(obj.ID))
                     return false;
 
-                if (InitialClamp && !KnownObjects.ContainsKey(obj.ID))
+                // WaffleACE fork: far-visible scenery (PropertyBool.IgnoreInitialClamp) skips the clamp, so it is
+                // announced as soon as its landblock is in this player's 3x3 rather than at 112.5 m.
+                if (InitialClamp && !obj.IgnoreInitialClamp && !KnownObjects.ContainsKey(obj.ID))
                 {
                     var distSq = PhysicsObj.Position.Distance2DSquared(obj.Position);
 
@@ -834,14 +868,23 @@ namespace ACE.Server.Physics.Common
         {
             //Console.WriteLine($"{PhysicsObj.Name} ({PhysicsObj.ID:X8}).ObjectMaint.RemoveKnownPlayer({obj.Name})");
 
-            rwLock.EnterReadLock();
+            // this mutates KnownPlayers, so it must hold the WRITE lock - it previously took the read
+            // lock, which allows concurrent readers (GetKnownPlayersValuesAsPlayer, the broadcast
+            // recipient enumeration) to run against a Dictionary that is being structurally modified.
+            //
+            // Every caller is safe to upgrade: RemoveKnownObject and RemoveObject already hold the
+            // write lock (recursive write acquisition is permitted), and the /auditobjectmaint handler
+            // calls this after GetKnownPlayersWhere has already released its read lock. Calling it
+            // while holding only a READ lock would throw LockRecursionException, since rwLock uses
+            // LockRecursionPolicy.SupportsRecursion and cannot upgrade read -> write.
+            rwLock.EnterWriteLock();
             try
             {
                 return KnownPlayers.Remove(obj.ID, out _);
             }
             finally
             {
-                rwLock.ExitReadLock();
+                rwLock.ExitWriteLock();
             }
         }
 

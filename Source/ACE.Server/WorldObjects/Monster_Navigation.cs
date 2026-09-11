@@ -87,6 +87,17 @@ namespace ACE.Server.WorldObjects
             // send network actions
             var targetDist = GetDistanceToTarget();
             var turnTo = IsRanged || (CurrentAttack == CombatType.Magic && targetDist <= GetSpellMaxRange()) || AiImmobile;
+            if (turnTo && !PhysicsObj.State.HasFlag(PhysicsState.Gravity))
+            {
+                // A creature without the Gravity bit never gains a contact plane, and MoveToManager.UseTime (the client
+                // runs the same code) returns before its pending actions while Contact is clear, so a TurnToObject on it
+                // never completes: its TurnRight motion spins it in place until another motion replaces it. Seen live
+                // 2026-09-01 on the Warspeaker's Gate tower garrison (1003551 / 1003554, PhysicsState 8 so they hold a
+                // mesh-only deck). Face the target directly and broadcast the position instead of starting a turn.
+                FaceTargetDirectly(AttackTarget);
+                IsTurning = false;
+                return;
+            }
             if (turnTo)
                 TurnTo(AttackTarget);
             else
@@ -382,6 +393,30 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Points the monster at its target with no turn animation: sets the heading on the physics object and on
+        /// Location, then broadcasts the position. For creatures that cannot run a turn (no Gravity bit, see StartTurn).
+        /// </summary>
+        private void FaceTargetDirectly(WorldObject target)
+        {
+            if (target?.Location == null) return;
+
+            // raw delta, not GetDirection: that normalizes, and normalizing a zero vector yields NaN, which a
+            // == Vector3.Zero test does not catch and which would otherwise be broadcast as the rotation
+            var targetDir = Location.Indoors == target.Location.Indoors
+                ? target.Location.ToGlobal() - Location.ToGlobal()
+                : target.Location.Pos - Location.Pos;
+            targetDir.Z = 0.0f;
+            if (targetDir.LengthSquared() < 0.0001f) return;
+
+            Location.Rotate(Vector3.Normalize(targetDir));
+            // deliberately set the orientation directly and set_frame, rather than set_heading(degrees): the
+            // quaternion is already exact, and a degrees round trip is lossy for nothing
+            PhysicsObj.Position.Frame.Orientation = Location.Rotation;
+            PhysicsObj.set_frame(PhysicsObj.Position.Frame);
+            SendUpdatePosition();
+        }
+
+        /// <summary>
         /// Returns TRUE if monster is facing towards the target
         /// </summary>
         public bool IsFacing(WorldObject target)
@@ -414,10 +449,30 @@ namespace ACE.Server.WorldObjects
 
             var turnTo = IsRanged || (CurrentAttack == CombatType.Magic && GetDistanceToTarget() <= GetSpellMaxRange()) || AiImmobile;
 
-            if (!turnTo)
-                mvp.Flags |= MovementParamFlags.FailWalk | MovementParamFlags.UseFinalHeading | MovementParamFlags.Sticky | MovementParamFlags.MoveAway;
+            mvp.Flags |= GetMonsterMoveToFlags(turnTo, DisableSticky);
 
             return mvp;
+        }
+
+        /// <summary>
+        /// The MoveTo flags a monster adds on top of the defaults. Pure, so the DisableSticky opt-out is
+        /// unit-testable without a physics object.
+        ///
+        /// WaffleACE fork (PropertyBool 9052): with <paramref name="disableSticky"/> set, Sticky is the ONLY
+        /// flag omitted - FailWalk, UseFinalHeading and MoveAway are unchanged. A monster with the property
+        /// absent gets exactly the flag set it got before the property existed.
+        /// </summary>
+        public static MovementParamFlags GetMonsterMoveToFlags(bool turnTo, bool disableSticky)
+        {
+            if (turnTo)
+                return default;
+
+            var flags = MovementParamFlags.FailWalk | MovementParamFlags.UseFinalHeading | MovementParamFlags.MoveAway;
+
+            if (!disableSticky)
+                flags |= MovementParamFlags.Sticky;
+
+            return flags;
         }
 
         /// <summary>
@@ -447,6 +502,49 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>
+        /// WaffleACE fork (PropertyFloat 9009). World Events boss confinement: metres from this creature's
+        /// Home position inside which it is allowed to hold a target. Absent (or <= 0) means the whole
+        /// feature is off for this creature and every targeting/movement path behaves exactly as before.
+        ///
+        /// Deliberately NOT cached the way <see cref="HomeRadiusSq"/> is: this is written by
+        /// WorldEventSpawner.TryPlace on an object that has not entered the world yet, and a cache filled by
+        /// an earlier read would have to be invalidated by hand.
+        /// </summary>
+        public double? TetherRadius
+        {
+            get => GetProperty(PropertyFloat.TetherRadius);
+            set { if (!value.HasValue) RemoveProperty(PropertyFloat.TetherRadius); else SetProperty(PropertyFloat.TetherRadius, value.Value); }
+        }
+
+        /// <summary>True when this creature carries a usable tether radius.</summary>
+        public bool IsTethered => (TetherRadius ?? 0.0) > 0.0;
+
+        /// <summary>
+        /// How long a tether-forced retarget must wait before it may fire again. <see cref="CheckMissHome"/>
+        /// runs on the monster tick, so without this a boss parked outside its tether would re-run target
+        /// selection every tick.
+        /// </summary>
+        public const float TetherRetargetCooldown = 2.0f;
+
+        /// <summary>Timers.RunningTime before which no further tether-forced retarget may run.</summary>
+        public double NextTetherRetarget;
+
+        /// <summary>
+        /// Whether <paramref name="globalTargetPos"/> is inside <paramref name="tetherRadius"/> of
+        /// <paramref name="globalHomePos"/>. A null or non-positive radius means "no tether", which admits
+        /// everything - the feature-off answer. Pure, and the single place the tether comparison is made.
+        /// </summary>
+        public static bool IsWithinTether(Vector3 globalHomePos, Vector3 globalTargetPos, double? tetherRadius)
+        {
+            if (tetherRadius == null || tetherRadius.Value <= 0.0)
+                return true;
+
+            var radiusSq = (float)(tetherRadius.Value * tetherRadius.Value);
+
+            return Vector3.DistanceSquared(globalHomePos, globalTargetPos) <= radiusSq;
+        }
+
         public void CheckMissHome()
         {
             if (MonsterState == State.Return)
@@ -463,6 +561,28 @@ namespace ACE.Server.WorldObjects
             var homeDistSq = Vector3.DistanceSquared(globalHomePos, globalPos);
 
             if (homeDistSq > HomeRadiusSq)
+            {
+                MoveToHome();
+                return;
+            }
+
+            // WaffleACE fork, World Events boss confinement. Past the tether but still inside HomeRadius:
+            // drop the current target (a Taunt hold included - the tether outranks it) and re-acquire from
+            // the in-tether candidates only, so a boss that has been walked out by one kiter turns on the
+            // players still standing at the event instead of finishing the walk. FindNextTarget falls back to
+            // MoveToHome on its own when nothing is in range, which is the old leash behaviour.
+            if (!IsTethered || IsWithinTether(globalHomePos, globalPos, TetherRadius))
+                return;
+
+            if (Timers.RunningTime < NextTetherRetarget)
+                return;
+
+            NextTetherRetarget = Timers.RunningTime + TetherRetargetCooldown;
+
+            TauntTarget = null;
+            AttackTarget = null;
+
+            if (!FindNextTarget() && MonsterState != State.Return)
                 MoveToHome();
         }
 

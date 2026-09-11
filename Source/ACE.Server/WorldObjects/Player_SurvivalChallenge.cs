@@ -305,12 +305,17 @@ namespace ACE.Server.WorldObjects
             // Server-record check: read the current max across ALL players BEFORE persisting this player's new best
             // (same online+offline scan the /top command uses). Doing it first is what lets the reigning
             // record-holder beat their own record - their stored best is still the old value here.
+            // Staff (WaffleACE): exempt players are excluded from the record bar real players are measured
+            // against, and don't trigger the world broadcast themselves - their own personal-best persist below
+            // still runs unconditionally, only the visibility of it is affected.
+            var exemptNames = LeaderboardExemptionManager.GetExemptAccountNames();
             var currentServerMax = PlayerManager.GetAllPlayers()
+                .Where(p => !LeaderboardExemptionManager.IsExempt(p, exemptNames))
                 .Select(p => p.GetProperty(PropertyInt64.BestSurvivalScore) ?? 0)
                 .DefaultIfEmpty(0)
                 .Max();
 
-            if (score > 0 && score > currentServerMax)
+            if (score > 0 && score > currentServerMax && !LeaderboardExemptionManager.IsExempt(this, exemptNames))
             {
                 PlayerManager.BroadcastToAll(new GameMessageSystemChat(
                     $"[The Proving Grounds] {Name} has weathered the storm for {score:N0} seconds - a new record!",
@@ -356,6 +361,63 @@ namespace ACE.Server.WorldObjects
         {
             if (IsInSurvivalChallengeInstance)
                 FinishSurvivalChallenge();
+        }
+
+        /// <summary>
+        /// Anti-barricade rule: putting anything on the arena floor ends the run on the spot.
+        /// <para/>
+        /// A dropped object is a solid collider that the melee AI will not path through, so players were walling
+        /// themselves in with dropped items and running the survived-seconds clock indefinitely without ever being
+        /// swung at. Stopping the clock at the moment of the drop makes the barricade worthless - it can only ever
+        /// exist after the run has already been scored.
+        /// <para/>
+        /// This is a SCORED finish, exactly like the exit portal: the seconds already stood are recorded and can
+        /// still take the personal best or the server record, so an honest misclick costs nothing that was earned.
+        /// The drop itself is REFUSED by the caller, which keeps the item in the player's pack rather than
+        /// stranding it in an ephemeral instance that is about to be torn down.
+        /// <para/>
+        /// The player is then returned the way a finished run returns them, because the run being over means the
+        /// Player_Death penalty waivers no longer apply - leaving them standing among unkillable, fully escalated
+        /// creatures would turn a misclick into vitae and item loss. Unlike the DPS arena's exit there is
+        /// deliberately no pause before the teleport, for exactly that reason: here the creatures are still
+        /// swinging during any pause.
+        /// </summary>
+        /// <returns>
+        /// true if a run was ended, meaning the caller must abandon the drop; false if the player is not standing
+        /// in an active run, meaning the drop proceeds normally.
+        /// </returns>
+        public bool TryEndSurvivalChallengeOnDrop()
+        {
+            if (!IsInSurvivalChallengeInstance)
+                return false;
+
+            SurvivalChallengeMsg("Dropping an item ends the trial. The item stays in your pack.");
+
+            FinishSurvivalChallenge();
+
+            // return the player to where they came from (fallback: their lifestone), clearing the exit stamp -
+            // same destination resolution the DPS arena uses when its run ends
+            var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
+            var dest = exitTo != null ? new Position(exitTo) : Sanctuary;
+
+            SetPosition(PositionType.EphemeralRealmExitTo, null);
+
+            if (dest != null)
+            {
+                var exitChain = new ActionChain();
+                exitChain.AddAction(this, () => Teleport(dest));   // Teleport self-validates the instance destination
+                exitChain.EnqueueChain();
+            }
+            else
+            {
+                // Nowhere to send them: no exit stamp AND no lifestone. The run is already scored and the
+                // death-penalty waivers are already off, so this leaves the player among fully escalated,
+                // unkillable creatures with a NORMAL death waiting - loud enough to be found in the log.
+                // Mirrors the same dead end in Player_WaveChallenge.FinishWaveChallengeRun.
+                log.Error($"[SURVIVAL] {Name} (0x{Guid}) - drop-ended run with no destination: EphemeralRealmExitTo is unset and Sanctuary is null. The player is stranded in the arena instance and must recall out.");
+            }
+
+            return true;
         }
 
         /// <summary>

@@ -25,7 +25,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "When you Parry a melee attack, counter with a free weapon strike at 40/70/100% damage by rank. " +
                           "The counter is a real hit, so Poison Weapon and Acid Proc apply. Requires Parry.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

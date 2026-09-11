@@ -27,5 +27,13 @@ namespace ACE.Common
         /// whether or not this landblock is included for preload.
         /// </summary>
         public bool Enabled { get; set; } = false;
+
+        /// <summary>
+        /// Realms: which realm's copy of this landblock to preload. 0 is the base world and
+        /// is what every entry without this field means, so existing configs are unchanged.
+        /// A nonzero value preloads the landblock in that realm's default (non-ephemeral)
+        /// instance instead. To permaload both, add a second entry for the same Id.
+        /// </summary>
+        public ushort Realm { get; set; } = 0;
     }
 }

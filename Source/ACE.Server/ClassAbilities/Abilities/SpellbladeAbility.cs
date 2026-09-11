@@ -45,6 +45,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 3,
             CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
+            AffinitySkill = Skill.ItemEnchantment,
         };
 
         /// <summary>
@@ -208,7 +209,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = effective,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,

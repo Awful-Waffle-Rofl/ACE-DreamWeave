@@ -23,7 +23,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Void Damage",
             Description = "Increases your void-magic damage by 8% per rank (+24% at rank 3).",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

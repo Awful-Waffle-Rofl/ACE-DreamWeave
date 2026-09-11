@@ -255,11 +255,102 @@ namespace ACE.Server.Network.Handlers
                 return;
             }
 
+            // WaffleACE: IP active-player limit. This is the last gate before the character actually enters
+            // the world, and it runs after every existing admission check so a character rejected for any
+            // other reason never counts against the IP's budget. The landblock read below is only a
+            // PREDICTION of where the character will end up - DoPlayerEnterWorld can still relocate it
+            // (no-log landblock handling, first-login routing, dead-instance relocation, spawn-failure
+            // fallback) - which is why IpLimitManager.Tick re-checks everyone periodically.
+            if (IpLimitManager.Enabled && !IpLimitManager.IsExempt(session))
+            {
+                if (!HandleIpLimitOnEnterWorld(session, character, offlinePlayer))
+                    return;
+            }
+
             session.InitSessionForWorldLogin();
 
             session.State = SessionState.WorldConnected;
 
             WorldManager.PlayerEnterWorld(session, character);
+        }
+
+        /// <summary>
+        /// WaffleACE: IP active-player limit login gate. Returns TRUE if the character may enter the world,
+        /// FALSE if it was refused (in which case the client has already been told). Any eviction of an
+        /// already-in-world character is started here and is deliberately NOT waited on - the incoming
+        /// character is admitted immediately, and the periodic sweep (IpLimitManager.Tick) is what makes the
+        /// end state correct if anything about that races.
+        ///
+        /// Callers must have already checked IpLimitManager.Enabled and IpLimitManager.IsExempt.
+        /// </summary>
+        private static bool HandleIpLimitOnEnterWorld(Session session, ACE.Database.Models.Shard.Character character, ACE.Server.Entity.OfflinePlayer offlinePlayer)
+        {
+            // The character's PERSISTED landblock, read straight off the offline biota - the same idiom
+            // Player.HandleNoLogLandblock uses (Player_Location.cs). If no persisted location can be read we
+            // treat the character as NOT confined, which is the conservative direction: it then counts
+            // against the stricter "outside the mule landblocks" cap rather than slipping past it.
+            var confined = false;
+
+            var persistedLocation = offlinePlayer.Biota.GetProperty(ACE.Entity.Enum.Properties.PositionType.Location, offlinePlayer.BiotaDatabaseLock);
+
+            if (persistedLocation != null)
+                confined = IpLimitManager.GetMuleLandblocks().Contains((ushort)(persistedLocation.ObjCellId >> 16));
+
+            // LoginTimestamp is HARDCODED to double.MaxValue here and must NEVER be read from the character's
+            // stored PropertyFloat.LoginTimestamp. That property is only written when a character actually
+            // enters the world (Player_Networking.cs, PlayerEnterWorld), so for an offline character it still
+            // holds the PREVIOUS session's value. A mule that last logged in days ago would therefore carry an
+            // OLDER timestamp than the character already in-world, and would win a level tie that it has to
+            // lose. double.MaxValue makes the incoming character unconditionally the most-recently-logged-in
+            // one, so on a level tie it is the character that gets refused and the character that has been on
+            // longest survives. Do not "clean this up" into a real timestamp - that silently inverts the rule.
+            var incoming = new IpLimitCandidate(0, offlinePlayer.Level ?? 0, confined, double.MaxValue);
+
+            // The excludeAccountId argument is load-bearing: a player reconnecting briefly leaves their own
+            // previous session still counted as online, and without this exclusion they would evict their own
+            // character. Always pass the real account id, never 0.
+            var residents = IpLimitManager.GetResidents(session.EndPointC2S?.Address, session.AccountId);
+
+            // Clamped, not bare-cast: see IpLimitManager.ClampCap for why an unchecked long -> int narrowing
+            // of these two is a server-wide lockout waiting on one admin typo.
+            var maxFree = IpLimitManager.ClampCap(PropertyManager.GetLong("ip_limit_max_free").Item);
+            var maxConfined = IpLimitManager.ClampCap(PropertyManager.GetLong("ip_limit_max_confined").Item);
+
+            var decision = IpLimitManager.Evaluate(incoming, residents, maxFree, maxConfined);
+
+            if (decision.Action == IpLimitAction.Refuse)
+            {
+                // EnterGameCharacterInWorld renders client-side as "One of your characters is still in the
+                // world". That wording is imprecise for a refusal caused by a DIFFERENT account on the same
+                // address, but the string lives in the client dat and cannot be changed server-side, and it is
+                // the closest existing CharacterError to what actually happened.
+                session.SendCharacterError(CharacterError.EnterGameCharacterInWorld);
+
+                PlayerManager.BroadcastToAuditChannel(null, $"IP limit: refused world entry for {character.Name} (account {session.Account}, address {session.EndPointC2S?.Address}) - the address is already at its in-world character limit ({maxFree} outside the mule landblocks, {maxFree + maxConfined} total).");
+
+                return false;
+            }
+
+            if (decision.Action == IpLimitAction.AdmitAfterEvicting)
+            {
+                foreach (var evictGuid in decision.Evict)
+                {
+                    var evictee = PlayerManager.GetOnlinePlayer(evictGuid);
+
+                    if (evictee?.Session == null)
+                        continue;
+
+                    evictee.Session.Network.EnqueueSend(new GameMessageSystemChat("You have been logged out because a higher level character from your network address has entered the world.", ChatMessageType.Broadcast));
+
+                    PlayerManager.BroadcastToAuditChannel(null, $"IP limit: logging off {evictee.Name} (level {evictee.Level ?? 0}, account {evictee.Session.Account}, address {session.EndPointC2S?.Address}) because {character.Name} (level {offlinePlayer.Level ?? 0}, account {session.Account}) entered the world from the same address.");
+
+                    // forceImmediate so a PK logout timer cannot stall the eviction. Session.LogOffPlayer, not
+                    // Player.ForceLogoff - the latter is documented as system use only.
+                    evictee.Session.LogOffPlayer(true);
+                }
+            }
+
+            return true;
         }
 
 

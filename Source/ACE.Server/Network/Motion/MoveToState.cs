@@ -23,7 +23,7 @@ namespace ACE.Server.Network.Structure
         public byte ContactLongJump;
 
         // not sent in packet directly as bools, parsed from above
-        public bool Contact;                // verify: contact (indicates if player is on ground), or sticky bit?
+        public bool Contact;                // TRUE = the player is on the ground. Verified live 2026-08-17 against a jump trace: clear for the airborne MoveToStates of a jump, set again on touchdown, and it tracks the AutonomousPosition contact byte
         public bool StandingLongJump;
 
         public MoveToState() { }

@@ -25,7 +25,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your missile volleys have a 6/12/18% chance (by rank) to immediately fire a full " +
                           "second volley at the same targets - no ammo, no stamina.",
             MaxRank = 3,
-            CostPerRank = new[] { 5, 5, 5 },
+            CostPerRank = new[] { 2, 2, 2 },
             Implemented = true,
         };
 
@@ -68,7 +68,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = 0.0,
                 Gear = gear,
                 Effective = total,
-                Unit = "pp",
+                Unit = "%",
                 Label = "re-fire",
                 Per = null,
                 CapNote = null,

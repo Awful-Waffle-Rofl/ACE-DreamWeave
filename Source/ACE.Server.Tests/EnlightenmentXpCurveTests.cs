@@ -109,6 +109,38 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void GetMaxLevelForEnlightenment_IsNoLongerThePlayerCap_ButStaysCorrect()
+        {
+            // Player.GetPlayerMaxLevel no longer calls this - every character caps at HardCeilingLevel now
+            // (Docs/ClassAbilities/XP-LANE-SPEC.md sec 2.2). The pure function is kept because the migration
+            // for already-enlightened characters derives their equivalent level from it, so it must keep
+            // reporting the OLD per-enlightenment cap exactly. This test pins that, not the live cap.
+            const int hardCeiling = 546;
+
+            Assert.AreEqual(275, EnlightenmentXpCurve.GetMaxLevelForEnlightenment(0, hardCeiling));
+            Assert.AreEqual(280, EnlightenmentXpCurve.GetMaxLevelForEnlightenment(1, hardCeiling));
+        }
+
+        [TestMethod]
+        public void ExtendedChart_IsStrictlyIncreasingAndStopsUnderTheOverflowCap()
+        {
+            // with levels uncapped, the synthesized tail is what every character now levels along, all the
+            // way to HardCeilingLevel. A non-monotonic or overflowing tail would break CheckForLevelup's
+            // walk, so assert the whole extension, not just its first entries.
+            var baseTotals = new List<ulong> { 0, 100, 210 };   // deltas 100, 110 => ratio 11/10
+            const ulong cap = 100000;
+
+            var extended = EnlightenmentXpCurve.Extend(baseTotals, cap);
+
+            Assert.IsTrue(extended.Count > baseTotals.Count, "tail should extend past the base chart");
+
+            for (var i = 1; i < extended.Count; i++)
+                Assert.IsTrue(extended[i] > extended[i - 1], $"chart must strictly increase at index {i}");
+
+            Assert.IsTrue(extended[extended.Count - 1] <= cap, "final total must not exceed the overflow cap");
+        }
+
+        [TestMethod]
         public void GetMaxLevelForEnlightenment_275PlusFivePerEnlightenment()
         {
             const int hardCeiling = 546;

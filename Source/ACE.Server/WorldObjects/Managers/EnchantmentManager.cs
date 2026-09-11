@@ -14,6 +14,7 @@ using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.Structure;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects.Entity;
 
 namespace ACE.Server.WorldObjects.Managers
@@ -27,6 +28,22 @@ namespace ACE.Server.WorldObjects.Managers
         Surpassed,
     };
 
+    /// <summary>
+    /// THIS FILE NOW DIVERGES FROM UPSTREAM 08471633e (2026-08-17), for the first time for weapon mods.
+    /// Longevity (WeaponModId.Longevity) is wired at both duration sites - the refresh path in Add() and
+    /// BuildEntry() - immediately after the pre-existing AugmentationIncreasedSpellDuration term, which is
+    /// the precedent this follows (same guard shape, same "!isWeaponSpell && spell.DotDuration == 0"-style
+    /// scoping, here expressed as "caster == WorldObject" for a self-cast rather than a DoT exclusion). Both
+    /// sites are required: leaving BuildEntry unwired would make Longevity dead on the first cast of a buff,
+    /// and leaving the refresh path unwired would make it dead on every re-cast of one already active. See
+    /// WeaponModRegistry.cs's Tier B v4 class remarks and Longevity's row comment for the full context.
+    ///
+    /// The AugmentationIncreasedSpellDuration term itself now also carries the Custom Dreamweave spell
+    /// duration augmentation (WaffleACE, DreamWeave, 2026-09-05), additively inside the SAME term via
+    /// CustomAugmentations.SpellDurationMultiplier - deliberately not as a third multiplicative factor
+    /// alongside Longevity. It is wired at those two sites AND at AddEnchantmentResult.BuildStack, which is
+    /// where the surpass/surpassed comparison reads a duration; all three or the effect is inconsistent.
+    /// </summary>
     public class EnchantmentManager
     {
         public WorldObject WorldObject { get; }
@@ -183,8 +200,25 @@ namespace ACE.Server.WorldObjects.Managers
                 // should be update the StatModVal here?
 
                 var duration = spell.Duration;
-                if (caster is Player player && player.AugmentationIncreasedSpellDuration > 0 && !isWeaponSpell && spell.DotDuration == 0)
-                    duration *= 1.0f + player.AugmentationIncreasedSpellDuration * 0.2f;
+
+                // The retail Archmage's Endurance augmentation and Fi's Lingering Casting (the Custom
+                // Dreamweave +10% spell duration augmentation) compose ADDITIVELY inside this one term - see
+                // CustomAugmentations.SpellDurationMultiplier for why it is not a second multiplicative
+                // factor. HasSpellDurationAug replaces ONLY the old "retail > 0" clause, which skipped the
+                // whole term and would have zeroed a custom-only holder; !isWeaponSpell and
+                // spell.DotDuration == 0 are preserved verbatim.
+                if (caster is Player player && CustomAugmentations.HasSpellDurationAug(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom) && !isWeaponSpell && spell.DotDuration == 0)
+                    duration *= CustomAugmentations.SpellDurationMultiplier(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom, CustomAugBroker.SpellDurationBonus);
+
+                // Longevity (WeaponModId.Longevity): extends duration on a self-cast beneficial enchantment.
+                // caster == WorldObject is "the caster cast this on themselves" - the same test the class
+                // remarks on Player_WeaponMods.cs use for a single-item read, here applied to identify a
+                // self-target rather than a carrier item. !isWeaponSpell excludes a wand's built-in cast, the
+                // same exclusion the AugmentationIncreasedSpellDuration term two lines above already carries -
+                // a wand's self-targeting beneficial spell must not additionally benefit from a weapon mod
+                // rolled on that same wand.
+                if (caster is Player longevityCaster && caster == WorldObject && !isWeaponSpell && spell.IsBeneficial)
+                    duration *= 1.0f + (float)longevityCaster.GetCasterOnlyModValue(WeaponModId.Longevity);
 
                 // Malediction (Blood Mage T2): a refresh recomputes the duration from the spell rather than
                 // rebuilding the entry, so the extension has to be reapplied here or re-casting the debuff
@@ -230,8 +264,18 @@ namespace ACE.Server.WorldObjects.Managers
             {
                 entry.Duration = spell.Duration;
 
-                if (caster is Player player && player.AugmentationIncreasedSpellDuration > 0 && !isWeaponSpell && spell.DotDuration == 0)
-                    entry.Duration *= 1.0f + player.AugmentationIncreasedSpellDuration * 0.2f;
+                // Additive retail + Custom Dreamweave duration term. Mirrors the refresh path in Add()
+                // exactly; see that site's comment. Both are required, or the effect is dead on either the
+                // first cast (BuildEntry) or every re-cast (Add) - the same two-site rule this file's class
+                // remark records for WeaponModId.Longevity.
+                if (caster is Player player && CustomAugmentations.HasSpellDurationAug(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom) && !isWeaponSpell && spell.DotDuration == 0)
+                    entry.Duration *= CustomAugmentations.SpellDurationMultiplier(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom, CustomAugBroker.SpellDurationBonus);
+
+                // Longevity (WeaponModId.Longevity): extends duration on a self-cast beneficial enchantment.
+                // See the refresh-path comment above (Add) for the caster == WorldObject self-cast test and
+                // why !isWeaponSpell is required.
+                if (caster is Player longevityCaster && caster == WorldObject && !isWeaponSpell && spell.IsBeneficial)
+                    entry.Duration *= 1.0f + (float)longevityCaster.GetCasterOnlyModValue(WeaponModId.Longevity);
             }
             else
             {
@@ -331,6 +375,98 @@ namespace ACE.Server.WorldObjects.Managers
             Player.Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Player.Session, new Enchantment(Player, newEntry)));
 
             return true;
+        }
+
+        /// <summary>
+        /// Adds (or refreshes) a hand-made class-ability enchantment on this object, in a synthetic
+        /// <see cref="SpellCategory_ClassAbility_Base"/> category. Built from <see cref="StartCooldown"/>
+        /// rather than <see cref="Add"/> deliberately: Add's whole job is the retail stack/surpass/refresh
+        /// duel against other entries in the SAME category, and a class ability that wants to sum with retail
+        /// magic rather than compete with it is precisely the case that must not go through it.
+        ///
+        /// <paramref name="spell"/> supplies only the client-facing identity - the spell id the enchantment
+        /// bar renders, and the power level used to order layers. It is NOT cast, resisted, or otherwise run;
+        /// pick a real spell whose icon and name describe the effect.
+        ///
+        /// Refreshing rather than layering is the rule here: a second application of the same
+        /// (category, spell id) resets the existing entry's clock instead of adding a second layer, so a
+        /// repeated proc can never stack its own magnitude on itself.
+        /// </summary>
+        public PropertiesEnchantmentRegistry AddClassAbilityDebuff(Spell spell, WorldObject caster, SpellCategory category, EnchantmentTypeFlags statModType, uint statModKey, float statModValue, double durationSeconds, bool refreshOnlyOwnCaster = false)
+        {
+            return AddClassAbilityDebuff(spell.Id, spell.Power, caster, category, statModType, statModKey, statModValue, durationSeconds, refreshOnlyOwnCaster);
+        }
+
+        /// <summary>
+        /// The Spell-free core of <see cref="AddClassAbilityDebuff(Spell, WorldObject, SpellCategory, EnchantmentTypeFlags, uint, float, double, bool)"/>,
+        /// taking the client-facing identity as raw values. This is the virtual one, so
+        /// <see cref="EnchantmentManagerWithCaching"/> only has to override a single method to cover both
+        /// entry points - and it is what a unit test calls, since constructing a <see cref="Spell"/> requires
+        /// a loaded client dat.
+        ///
+        /// <paramref name="refreshOnlyOwnCaster"/>: when true, the refresh lookup also requires the existing
+        /// entry's caster to match <paramref name="caster"/>. Needed when a hand-made application uses a REAL
+        /// spell id in its REAL category (e.g. Tinkerer's Inspiration reusing the retail Self Incantations) -
+        /// without this guard, the lookup would find and clip a player's own longer-duration cast of the same
+        /// spell instead of laying down an independent layer.
+        /// </summary>
+        public virtual PropertiesEnchantmentRegistry AddClassAbilityDebuff(uint spellId, uint powerLevel, WorldObject caster, SpellCategory category, EnchantmentTypeFlags statModType, uint statModKey, float statModValue, double durationSeconds, bool refreshOnlyOwnCaster = false)
+        {
+            // refresh an existing application of the same (category, spell) instead of layering a second one
+            var existing = GetEnchantments(category).FirstOrDefault(e => e.SpellId == (int)spellId
+                && (!refreshOnlyOwnCaster || e.CasterObjectId == (caster?.Guid.Full ?? 0)));
+
+            if (existing != null)
+            {
+                existing.StartTime = 0;
+                existing.Duration = durationSeconds;
+                existing.StatModValue = statModValue;
+                existing.CasterObjectId = caster?.Guid.Full ?? 0;
+
+                WorldObject.ChangesDetected = true;
+
+                if (Player != null)
+                    Player.Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Player.Session, new Enchantment(Player, existing)));
+
+                return existing;
+            }
+
+            var newEntry = new PropertiesEnchantmentRegistry
+            {
+                // TODO: BiotaPropertiesEnchantmentRegistry.SpellId should be uint
+                SpellId = (int)spellId,
+                SpellCategory = category,
+                // LayerId is assigned by AddEnchantmentAtFreeLayer below, not here. It used to be a hardcoded
+                // 1, which is only safe while nothing else can hold this spell id: with refreshOnlyOwnCaster
+                // the refresh lookup deliberately ignores an entry cast by anyone else, so a real spell id
+                // reused in its real category (Tinkerer's Inspiration) laid a SECOND layer-1 entry beside the
+                // player's own self-cast of the same spell. The shard table's unique index over
+                // (object_Id, spell_Id, layer_Id) cannot hold both, so the biota save failed with a duplicate
+                // entry and the player was disconnected (prod, 2026-09-06 through 09-08, four players, spells
+                // 4566 and 4592). The layer is now the lowest free one for this spell id, which is also what
+                // this call site's own documentation always claimed it was doing: an independent layer.
+                CasterObjectId = caster?.Guid.Full ?? 0,
+                PowerLevel = powerLevel,
+                StartTime = 0,
+                Duration = durationSeconds,
+                StatModType = statModType,
+                StatModKey = statModKey,
+                StatModValue = statModValue,
+                // BuildEntry writes the SPELL TYPE here for a real cast (see :224), not an EnchantmentMask
+                // value - the field is read back as both, depending on the entry. Enchantment is what a
+                // retail debuff spell would put here, so a hand-made debuff must match it.
+                EnchantmentCategory = (uint)SpellType.Enchantment,
+            };
+
+            WorldObject.Biota.PropertiesEnchantmentRegistry.AddEnchantmentAtFreeLayer(newEntry, WorldObject.BiotaDatabaseLock);
+            WorldObject.ChangesDetected = true;
+
+            // monsters have no session; only a player target sees the enchantment bar update. Sent AFTER the
+            // layer is assigned - Enchantment copies LayerId onto the wire, so this has to follow the append.
+            if (Player != null)
+                Player.Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Player.Session, new Enchantment(Player, newEntry)));
+
+            return newEntry;
         }
 
         /// <summary>
@@ -1204,6 +1340,31 @@ namespace ACE.Server.WorldObjects.Managers
         public static ushort SpellCategory_Cooldown = 0x8000;
 
         /// <summary>
+        /// Base of a fork-reserved band of SYNTHETIC spell categories for class-ability enchantments.
+        ///
+        /// Real <see cref="SpellCategory"/> values top out at 733 (GauntletCriticalDamageReductionRatingRaising,
+        /// the last member of ACE.Entity.Enum.SpellCategory) and 0x8000 is already taken by
+        /// <see cref="SpellCategory_Cooldown"/>, so 0x4000 + n sits clear of both. A class ability that needs
+        /// its own category takes 0x4000 + n, one n per ability, never reused.
+        ///
+        /// The POINT of a private category, and the only reason this band exists: effective values are summed
+        /// over the top layer of EACH spell category (see PropertiesEnchantmentRegistryExtensions.
+        /// GetEnchantmentsTopLayerByStatModType, which groups by SpellCategory and takes one winner per group,
+        /// and GetAttackDebuffMod above, which then adds those winners up). An entry in a category of its own
+        /// therefore stacks ADDITIVELY with same-StatModType entries from retail spells, instead of duelling
+        /// them for a single slot the way two entries in one category do.
+        /// </summary>
+        public const ushort SpellCategory_ClassAbility_Base = 0x4000;
+
+        /// <summary>
+        /// Slot 1 of the band: Pocket Sand (Rogue T3), whose -30 attack-skill debuff must SUM with retail
+        /// Dirty Fighting's rather than duel it for one category slot. One named constant per ability, never
+        /// re-used - a second ability quietly sharing this number would silently make the two overwrite each
+        /// other, which is precisely the failure the band exists to avoid.
+        /// </summary>
+        public const ushort SpellCategory_ClassAbility_PocketSand = SpellCategory_ClassAbility_Base + 1;
+
+        /// <summary>
         /// Adds 0x8000 to the sharedCooldownID
         /// </summary>
         public uint GetCooldownSpellID(int sharedCooldownID)
@@ -1342,13 +1503,26 @@ namespace ACE.Server.WorldObjects.Managers
             var creature = WorldObject as Creature;
             if (creature == null || creature.IsDead) return;
 
-            bool isDead = false;
-            var damagers = new Dictionary<WorldObject, float>();
+            // every contribution in enchantment-list order, grouped per damager below - the ORDER of that
+            // grouping decides who is recorded as landing the killing blow, see the block after the loop
+            var contributions = new List<KeyValuePair<WorldObject, float>>();
 
             var targetPlayer = WorldObject as Player;
 
-            // get the total tick amount
-            var tickAmountTotal = 0.0f;
+            // Accumulate the RAW, UNCAPPED tick. This loop used to clamp its running total to the victim's
+            // current Health as it went, and latch an `isDead` flag to break out once it had. That clamp was
+            // a second, upstream instance of the 2026-09-08 Mana Barrier overkill bug, and it survived the
+            // fix at the five damage sites because it sits above all of them: a defence handed a
+            // health-clamped figure can ALWAYS leave the victim alive, since any nonzero absorb applied to a
+            // number that is at most current Health leaves Health strictly positive. A player at 300 Health
+            // hit by a stacked DoT nominally worth 5000 had the tick clamped to 300, absorbed 90 of it, took
+            // 210 and lived at 90 - the same "no tick of any size can kill a barrier carrier" property the
+            // barrier fix was supposed to have removed. Sanguine Ward had the identical exposure at the
+            // identical line, which is why both are handled together below.
+            //
+            // The removed `isDead` latch only ever broke this loop. The real death gate is the
+            // `if (!creature.IsAlive) return;` after the TakeDamageOverTime call further down, which is
+            // unchanged, as is every damage, resistance and rating term computed inside the loop.
             foreach (var enchantment in enchantments)
             {
                 //var totalAmount = enchantment.StatModValue;
@@ -1413,33 +1587,79 @@ namespace ACE.Server.WorldObjects.Managers
 
                 tickAmount *= resistanceMod * damageResistRatingMod * dotResistRatingMod;
 
-                // make sure the target's current health is not exceeded
-                if (tickAmountTotal + tickAmount >= creature.Health.Current)
-                {
-                    tickAmount = creature.Health.Current - tickAmountTotal;
-                    isDead = true;
-                }
-
-                if (damagers.ContainsKey(damager))
-                    damagers[damager] += tickAmount;
-                else
-                    damagers.Add(damager, tickAmount);
-
-                creature.DamageHistory.Add(damager, damageType, (uint)Math.Round(tickAmount));
-
-                tickAmountTotal += tickAmount;
-
-                if (isDead) break;
+                contributions.Add(new KeyValuePair<WorldObject, float>(damager, tickAmount));
             }
 
-            creature.TakeDamageOverTime(tickAmountTotal, damageType);
+            // Group the contributions per damager, in LAST-CONTRIBUTION order, and freeze that order for
+            // everything below - the total, the split, the DamageHistory writes and the per-damager combat
+            // lines all walk this one list.
+            //
+            // THE ORDER IS DELIBERATE AND LOAD-BEARING. DamageHistory.Add is replayed over this list, and
+            // DamageHistory.LastDamager resolves to the attacker on the LAST negative-amount log entry, so
+            // this order decides who is recorded as landing the killing blow on a finishing tick. The
+            // original code called Add once per enchantment as it walked the list, which is
+            // last-contribution order by construction. Regrouping without preserving it silently reassigns
+            // the kill: a plain Dictionary enumerates in FIRST-insertion order, because updating a value
+            // does not move its key, so three top-layer DoTs in list order [A, B, A] - one caster holding
+            // two spell categories on the target - would replay as [A, B] and hand the kill to B where the
+            // original hands it to A. Consumers that would break: Player_KillFillVessel and
+            // Player_MuleFormToken (both credit ONLY the killing blow, deliberately, over a fellow who did
+            // more damage), the death and kill messages in Monster_Combat / Player_Combat, and the
+            // TargetingTactic.LastDamager aggro tactic.
+            //
+            // A List rather than a Dictionary for the second reason too: both passes below are guaranteed
+            // to see the same order, which is what makes DotTickCredits' running-cumulative split exact.
+            var entries = DotTickCredits.GroupByLastContribution(contributions);
+            var rawAmounts = entries.Select(entry => entry.Value).ToList();
+
+            var rawTotal = DotTickCredits.Total(rawAmounts);
+
+            var damageTotal = rawTotal;
+
+            // THE VICTIM'S PRE-WRITE ABSORBERS, HOISTED HERE out of Player.TakeDamageOverTime so each runs
+            // exactly once against the whole uncapped tick rather than against a figure already clamped to
+            // the victim's health. Ward first, then barrier - the same order the other four damage sites
+            // use. This is the only caller of TakeDamageOverTime, so nothing loses coverage by the move.
+            //
+            // Skipped for the two states in which TakeDamageOverTime discards the tick outright (Invincible,
+            // and lifestone protection, which diverts to HandleLifestoneProtection instead), so neither
+            // absorber is charged for damage that was never going to land. IsDead is already excluded by the
+            // guard at the top of this method.
+            if (targetPlayer != null && damageTotal > 0.0f && !targetPlayer.Invincible && !targetPlayer.UnderLifestoneProtection)
+            {
+                var beforeAbsorb = (uint)Math.Round(damageTotal);
+
+                var afterSanguineWard = targetPlayer.AbsorbWithSanguineWard(null, beforeAbsorb);
+                var afterManaBarrier = targetPlayer.AbsorbWithManaBarrierDot(afterSanguineWard);
+
+                damageTotal = afterManaBarrier;
+            }
+
+            // CREDIT ACCOUNTING IS CLAMPED, THE VITAL WRITE IS NOT. UpdateVitalDelta floors Health at zero
+            // by itself - which is exactly how the four non-DoT absorb sites already work - so the write
+            // needs no clamp and an overkill tick still kills. The credits do need one: damage history and
+            // the per-damager combat lines must never report damage that was never dealt, or an overkill
+            // tick would hand out kill credit sized off the nominal roll.
+            var appliedTotal = Math.Max(0.0f, Math.Min(damageTotal, creature.Health.Current));
+            var appliedRounded = (uint)Math.Round(appliedTotal);
+
+            // Proportional split by running cumulative total - see DotTickCredits for why that shape and
+            // not a per-damager rounding. The credits sum to appliedRounded exactly and none exceeds it.
+            var credits = DotTickCredits.Split(rawAmounts, appliedRounded);
+
+            // Before the tick is applied, as it was before: TakeDamageOverTime's death path resolves the
+            // killer through DamageHistory.LastDamager.
+            for (var i = 0; i < entries.Count; i++)
+                creature.DamageHistory.Add(entries[i].Key, damageType, credits[i]);
+
+            creature.TakeDamageOverTime(damageTotal, damageType);
 
             if (!creature.IsAlive) return;
 
-            foreach (var kvp in damagers)
+            for (var i = 0; i < entries.Count; i++)
             {
-                var damager = kvp.Key;
-                var amount = kvp.Value;
+                var damager = entries[i].Key;
+                float amount = credits[i];
 
                 if (creature.Invincible)
                     amount = 0;

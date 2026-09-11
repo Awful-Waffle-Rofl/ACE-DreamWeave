@@ -201,9 +201,18 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, WeaponModTinkerSet.AvailableSlots(WeaponModTinkerSet.ReadReservedSlots(tenOak)));
 
             Assert.AreEqual(WeaponModManager.WeaponModRefusal.NoAvailableSlots,
-                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, true, 10, 0,
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Reroll, WeaponClass.Melee, true, true,
                     WeaponModTinkerSet.ReadReservedSlots(tenOak)),
                 "a weapon whose whole budget is unreversible must be refused, not refilled");
+
+            // ... but only the REROLL is refused. Since 2026-08-07 the same ten-Oak weapon is Amethyst-able,
+            // because Amethyst neither reverses nor writes a tinker and so cannot be harmed by a budget it
+            // cannot touch. The trap this test guards is the reroll silently refilling on top of Oak; the swap
+            // was never capable of that.
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
+                WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, WeaponClass.Melee, true, true,
+                    WeaponModTinkerSet.ReadReservedSlots(tenOak)),
+                "ten Oak must NOT refuse a swap - the tinker budget has no bearing on Amethyst");
         }
 
         [TestMethod]
@@ -218,7 +227,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(5, WeaponModTinkerSet.ReadReservedSlots(mixed));
             Assert.AreEqual(5, WeaponModTinkerSet.ReadComposition(mixed).Count);
-            Assert.AreEqual(5, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReadReservedSlots(mixed), 0),
+            Assert.AreEqual(5, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReadReservedSlots(mixed)),
                 "five reversible slots get refilled, so the total effect stays at ten");
         }
 
@@ -245,7 +254,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1, WeaponModTinkerSet.ReadReservedImbueSlots(imbued));
             Assert.AreEqual(1, WeaponModTinkerSet.ReadReservedSlots(imbued),
                 "the imbue's ImbuedEffect bit and its log entry are the same slot");
-            Assert.AreEqual(9, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReadReservedSlots(imbued), 0));
+            Assert.AreEqual(9, WeaponModTinkerSet.ComputeTinkerCount(WeaponModTinkerSet.ReadReservedSlots(imbued)));
         }
 
         /// <summary>The pure arithmetic, over the whole table rather than the three worked examples.</summary>
@@ -266,7 +275,7 @@ namespace ACE.Server.Tests
                         Assert.IsTrue(reserved >= Math.Min(imbue, WeaponModRegistry.TotalSlots),
                             $"imbue {imbue}, log {logCount}, known {known}: reserved {reserved} lost an imbue slot");
 
-                        Assert.IsTrue(WeaponModTinkerSet.ComputeTinkerCount(reserved, 3) >= 0);
+                        Assert.IsTrue(WeaponModTinkerSet.ComputeTinkerCount(reserved) >= 0);
                     }
                 }
             }
@@ -303,70 +312,79 @@ namespace ACE.Server.Tests
             Assert.AreEqual(5, mixed.GetProperty(PropertyInt.WeaponModTinkerCount), "the marker counts only what this system can reverse");
         }
 
-        // ================= FIX 3 - Swift Flight must not delete MaximumVelocity at 20.0 =================
+        // ================= FIX 3 - a RemoveOnDefault == false row must not delete its native at the default =================
 
         /// <summary>
-        /// THE DEFECT: a reversal landing exactly on NativeDefault removed the row for every modifier. Swift
-        /// Flight's default is 20.0 (Creature_Missile.cs:517) and five weenies (518, 521, 531, 537, 23109) carry
-        /// MaximumVelocity at exactly 20.0, so a reversal deleted a real row - and the read sites disagree
-        /// (WeaponProfile.cs:57 falls back to 1.0), which leaves the appraisal panel reporting velocity 1.0.
+        /// THE DEFECT, AS ORIGINALLY FOUND: a reversal landing exactly on NativeDefault removed the row for
+        /// every modifier. Swift Flight's default was 20.0 (Creature_Missile.cs:517) and five weenies (518,
+        /// 521, 531, 537, 23109) carried MaximumVelocity at exactly 20.0, so a reversal deleted a real row -
+        /// and the read sites disagree (WeaponProfile.cs:57 falls back to 1.0), which left the appraisal panel
+        /// reporting velocity 1.0.
+        ///
+        /// RETARGETED TO A SYNTHETIC DEFINITION, 2026-08-17. Swift Flight was retired in the catalog v4 pass
+        /// and was the only row that ever set RemoveOnDefault = false, so this test would otherwise lose its
+        /// only live subject. THE TEST IS KEPT AND RETARGETED RATHER THAN DELETED WITH THE ROW, for the same
+        /// reason WeaponModTests.Machinery_ABinaryFlooredModifierAppliesFlatAndReversesBackToAbsent was
+        /// retargeted when Cleave went: the RemoveOnDefault machinery is still in WeaponModDefinition, still
+        /// reachable, and still the correct handling for the next native whose read sites disagree about what
+        /// absent means. Deleting the coverage along with its only current caller is how that machinery
+        /// silently rots into something that no longer works when a row finally needs it again.
         /// </summary>
         [TestMethod]
-        public void Fix3_SwiftFlightReversalRestoresTwentyRatherThanRemovingTheRow()
+        public void Fix3_ARemoveOnDefaultFalseRowRestoresTheDefaultRatherThanRemovingTheRow()
         {
-            var swiftFlight = WeaponModRegistry.Get(WeaponModId.SwiftFlight);
-
-            Assert.IsFalse(swiftFlight.RemoveOnDefault, "Swift Flight must never remove MaximumVelocity");
-            Assert.AreEqual(20.0, swiftFlight.NativeDefault, 1e-12);
+            // the shape Swift Flight had: a native whose disagreeing read sites make "absent" NOT equivalent to
+            // its own default
+            var definition = new WeaponModDefinition
+            {
+                Id = WeaponModId.PanicReload,          // any id; nothing here reads the registry
+                DisplayName = "Synthetic Disagreeing Default",
+                Record = PropertyFloat.WeaponModPanicReload,
+                NativeFloat = PropertyFloat.MaximumVelocity,
+                MaxRoll = 4.0,
+                NativeDefault = 20.0,
+                RemoveOnDefault = false,
+                Classes = WeaponClass.Missile,
+                DisplayFormat = "+{0:0.##} missile velocity",
+            };
 
             var launcher = MakeWeapon(ItemType.MissileWeapon, CombatUse.Missile,
                 floats: new Dictionary<PropertyFloat, double> { { PropertyFloat.MaximumVelocity, 20.0 } });
 
-            WeaponModTinkerSet.ApplySpecial(launcher, swiftFlight, 4.0);
+            WeaponModTinkerSet.ApplySpecial(launcher, definition, 4.0);
             Assert.AreEqual(24.0, launcher.GetProperty(PropertyFloat.MaximumVelocity).Value, 1e-9);
 
-            WeaponModTinkerSet.ReverseSpecial(launcher, swiftFlight);
+            WeaponModTinkerSet.ReverseSpecial(launcher, definition);
 
             var restored = launcher.GetProperty(PropertyFloat.MaximumVelocity);
 
             Assert.IsNotNull(restored, "removing the row makes WeaponProfile.cs:57 read velocity 1.0 on an unchanged bow");
             Assert.AreEqual(20.0, restored.Value, 1e-9);
-            Assert.IsNull(launcher.GetProperty(swiftFlight.Record), "the record row is still cleared, never zeroed");
+            Assert.IsNull(launcher.GetProperty(definition.Record), "the record row is still cleared, never zeroed");
         }
 
-        /// <summary>
-        /// Cleave MUST keep removal-on-default. Cleaving is consumed as a null test
-        /// (WorldObject_Weapon.cs:47-62), so writing its restored default of 1 explicitly would leave the weapon
-        /// permanently flagged as cleaving.
-        /// </summary>
-        [TestMethod]
-        public void Fix3_CleaveStillRemovesItsRowOnReversal()
-        {
-            var cleave = WeaponModRegistry.Get(WeaponModId.Cleave);
-
-            Assert.IsTrue(cleave.RemoveOnDefault, "Cleaving is a null test - writing its default back would flag the weapon forever");
-
-            var sword = MakeWeapon();
-
-            WeaponModTinkerSet.ApplySpecial(sword, cleave, 1.0);
-            Assert.AreEqual(2, sword.GetProperty(PropertyInt.Cleaving));
-
-            WeaponModTinkerSet.ReverseSpecial(sword, cleave);
-
-            Assert.IsNull(sword.GetProperty(PropertyInt.Cleaving), "Cleaving must be REMOVED, restoring IsCleaving == false");
-        }
+        // Fix3_CleaveStillRemovesItsRowOnReversal sat here until 2026-08-07. It pinned the OTHER direction of
+        // the removal-on-default rule - a native consumed as a null TEST (Cleaving, WorldObject_Weapon.cs:47-62)
+        // must have its row removed rather than have its default written back, or the weapon stays flagged
+        // forever. Cleave was removed from the catalog that day and was the only row of that shape, so the rule
+        // has no live subject here any more. It is NOT untested: the same arithmetic is driven over a synthetic
+        // definition in WeaponModTests.Machinery_ABinaryFlooredModifierAppliesFlatAndReversesBackToAbsent,
+        // which was retargeted rather than deleted for exactly this reason.
 
         /// <summary>
-        /// Every rating special keeps removal-on-default: absent unambiguously reads 0 at their read sites, so
-        /// removing the row is the correct restore and leaves no junk behind.
+        /// Every LIVE registry row currently keeps removal-on-default: absent unambiguously reads 0 (or, for
+        /// Mana Well, is simply not consulted) at their read sites, so removing the row is the correct restore
+        /// and leaves no junk behind. Swift Flight was the only row that ever opted out, and it was retired
+        /// 2026-08-17 in the catalog v4 pass, so the live registry currently has NO opt-outs - the opt-out
+        /// machinery itself survives, exercised synthetically above.
         /// </summary>
         [TestMethod]
-        public void Fix3_OnlySwiftFlightOptsOutOfRemovalOnDefault()
+        public void Fix3_NoLiveRowCurrentlyOptsOutOfRemovalOnDefault()
         {
             var optedOut = WeaponModRegistry.AllMods.Where(m => !m.RemoveOnDefault).Select(m => m.Id).ToList();
 
-            CollectionAssert.AreEquivalent(new[] { WeaponModId.SwiftFlight }, optedOut,
-                "only MaximumVelocity has read sites that disagree about what absent means");
+            CollectionAssert.AreEquivalent(Array.Empty<WeaponModId>(), optedOut,
+                "no live registry row should opt out of RemoveOnDefault right now - Swift Flight was the only one and it is retired");
         }
 
         // ================= FIX 4 - Granite must not write a junk zero row =================
@@ -454,14 +472,24 @@ namespace ACE.Server.Tests
                 Assert.IsNotNull(WeaponModManager.ApplyReroll(fresh, weaponClass, 10.0),
                     $"{weaponClass}: CanApply said yes but the reroll refused - the bag would already be gone");
 
-                // after the reroll the weapon carries a set, so the swap has something to remove - unless that
-                // reroll happened to land a full trio, in which case BOTH must refuse together
-                var atCap = WeaponModTinkerSet.SpecialCount(fresh) >= WeaponModRegistry.MaxSpecials;
+                // After the reroll the weapon carries a set, so the swap has something to reroll.
+                //
+                // CHANGED TWICE, and the history is the point. It first read Assert.AreEqual(!atCap, canSwap)
+                // - being AT the cap was a refusal, because the swap's job was ADDING a special. The
+                // 2026-08-06 rework made it a special-only REROLL, so the cap stopped being a refusal and the
+                // rule became "holding at least one special". The 2026-08-07 directive removed that too:
+                // Amethyst ADDS a first special when none are held, so EVERY special count is workable and
+                // CanApply is now unconditionally true for a valid weapon.
+                //
+                // The middle version failed INTERMITTENTLY rather than always, which is why it survived its
+                // rework unnoticed: the assertion only bit on a run where the reroll happened to land a full
+                // set, roughly one run in ten. The unconditional form below cannot hide that way.
+                var specialsHeld = WeaponModTinkerSet.SpecialCount(fresh);
 
                 var canSwap = WeaponModManager.CanApply(fresh, weaponClass, WeaponModManager.WeaponModAction.Swap);
 
-                Assert.AreEqual(!atCap, canSwap,
-                    $"{weaponClass}: CanApply says {canSwap} on a weapon holding {WeaponModTinkerSet.SpecialCount(fresh)} specials");
+                Assert.IsTrue(canSwap,
+                    $"{weaponClass}: CanApply refused a swap on a weapon holding {specialsHeld} specials - no special count may refuse Amethyst, zero included");
 
                 Assert.AreEqual(canSwap, WeaponModManager.ApplySwap(fresh, weaponClass, 10.0) != null,
                     $"{weaponClass}: CanApply and ApplySwap disagree - the bag is consumed on CanApply's word alone, so a disagreement is either a free swap or a bag eaten for nothing");
@@ -477,9 +505,20 @@ namespace ACE.Server.Tests
             Assert.IsFalse(WeaponModManager.CanApply(weapon, WeaponClass.None, WeaponModManager.WeaponModAction.Reroll));
             Assert.IsFalse(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.None));
 
-            // an empty weapon has nothing for the swap to remove, and ApplySwap returns null for exactly that
-            Assert.IsFalse(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap));
-            Assert.IsNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0));
+            // INVERTED 2026-08-07. An empty weapon used to be the swap's one refusal; Amethyst now ADDS a
+            // first special instead, so this is a working case and both sides must say so. It is kept here,
+            // inverted, rather than deleted - this test's subject is CanApply agreeing with the apply path,
+            // and the empty weapon is still the state most likely to make them disagree.
+            Assert.IsTrue(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap),
+                "a weapon holding no specials must be swappable - Amethyst adds a first one");
+
+            var onEmpty = WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0);
+
+            Assert.IsNotNull(onEmpty, "ApplySwap must not refuse a weapon holding no specials");
+            Assert.AreEqual(1, WeaponModTinkerSet.SpecialCount(weapon),
+                "a swap onto an empty weapon must leave exactly one special - it adds, it does not remove first");
+            Assert.IsFalse(onEmpty.Any(l => l.StartsWith("Lost:", StringComparison.Ordinal)),
+                "nothing was held, so nothing may be reported as lost");
         }
 
         // ================= drift stone: an explicit refusal, not a gate coincidence =================
@@ -544,6 +583,59 @@ namespace ACE.Server.Tests
             }
         }
 
+        /// <summary>
+        /// A life caster stoned BEFORE GetRend grew its Health branch was stamped with the old mapping's
+        /// CriticalStrike fallback (BlackOpal closing the log). The signature must keep matching that legacy
+        /// stamp: recomputing only the new HealthRending shape would silently unseal every pre-fix life wand,
+        /// and the Swap path has no integrity-gate backstop (PassesIntegrityGate is reroll-only by the
+        /// 2026-08-07 policy), so an unsealed wand would open to Amethyst on a weapon the game promised
+        /// "can never be tinkered again".
+        /// </summary>
+        [TestMethod]
+        public void DriftStone_StillRefusesALifeWandStonedUnderTheOldCriticalStrikeMapping()
+        {
+            foreach (var (imbue, rendMaterial, label) in new[]
+            {
+                (ImbuedEffectType.CriticalStrike, PrismaticDriftStone.GetRendMaterial(ImbuedEffectType.CriticalStrike), "legacy pre-Health stamp"),
+                (ImbuedEffectType.HealthRending,  PrismaticDriftStone.GetRendMaterial(ImbuedEffectType.HealthRending),  "current Health stamp"),
+            })
+            {
+                var materials = Enumerable.Repeat(MaterialType.GreenGarnet, PrismaticDriftStone.MinBoosts).ToList();
+                materials.Add(rendMaterial);
+
+                var lifeWand = MakeWeapon(ItemType.Caster, null,
+                    new Dictionary<PropertyInt, int>
+                    {
+                        { PropertyInt.NumTimesTinkered, PrismaticDriftStone.LockedTinkerCount },
+                        { PropertyInt.DamageType, (int)DamageType.Health },
+                        { PropertyInt.ImbuedEffect, (int)imbue },
+                    },
+                    strings: new Dictionary<PropertyString, string> { { PropertyString.TinkerLog, Log(materials.ToArray()) } });
+
+                Assert.IsTrue(PrismaticDriftStone.MatchesAppliedSignature(lifeWand), label);
+                Assert.AreEqual(WeaponModManager.WeaponModRefusal.DriftStoneLocked,
+                    WeaponModManager.ResolveDriftStoneRefusal(lifeWand), label);
+            }
+
+            // the legacy fallback must not over-accept: a Health wand carrying a rend NEITHER mapping
+            // could have produced is not a drift-stone signature
+            var mismatched = MakeWeapon(ItemType.Caster, null,
+                new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.NumTimesTinkered, PrismaticDriftStone.LockedTinkerCount },
+                    { PropertyInt.DamageType, (int)DamageType.Health },
+                    { PropertyInt.ImbuedEffect, (int)ImbuedEffectType.FireRending },
+                },
+                strings: new Dictionary<PropertyString, string>
+                {
+                    { PropertyString.TinkerLog, Log(MaterialType.GreenGarnet, MaterialType.GreenGarnet,
+                        PrismaticDriftStone.GetRendMaterial(ImbuedEffectType.FireRending)) },
+                });
+
+            Assert.IsFalse(PrismaticDriftStone.MatchesAppliedSignature(mismatched),
+                "a Health wand with a rend neither the old nor the new mapping produces must not match");
+        }
+
         /// <summary>An ordinary tinkered weapon is not caught by the drift-stone refusal.</summary>
         [TestMethod]
         public void DriftStone_DoesNotRefuseAnOrdinaryTinkeredWeapon()
@@ -563,15 +655,30 @@ namespace ACE.Server.Tests
         // ================= FIX 6 - a zero-magnitude special is not applied at all =================
 
         /// <summary>
-        /// How many rows the two LIVE record bands hold between them - 8130-8135 for Tier A and 8141-8147 for
-        /// Tier B. One per held special, never more. Both, because both are written and cleared by the same
-        /// ApplySpecial / ReverseSpecial pair, so counting only Tier A's would miss a zeroed Tier B row.
+        /// How many rows the four LIVE record bands hold between them - 8130-8134 for Tier A, 8141-8147 for
+        /// Tier B v2, 8021-8026 for the Tier B v3 expansion, and 8027-8035 for the Tier B v4 expansion. One per
+        /// held special, never more. All four, because all four are written and cleared by the same
+        /// ApplySpecial / ReverseSpecial pair, so counting only the original Tier A band would miss a zeroed
+        /// v2, v3 or v4 Tier B row. Omitting the v4 band here would leave a stuck record at 8027-8035 invisible
+        /// to this harness.
         /// </summary>
         private static int BandRows(WorldObject weapon)
         {
             var rows = 0;
 
             for (var id = WeaponModRegistry.PropertyBandStart; id <= WeaponModRegistry.PropertyBandEnd; id++)
+            {
+                if (weapon.GetProperty((PropertyFloat)id) != null)
+                    rows++;
+            }
+
+            for (var id = WeaponModRegistry.TierBExpansionBandStart; id <= WeaponModRegistry.TierBExpansionBandEnd; id++)
+            {
+                if (weapon.GetProperty((PropertyFloat)id) != null)
+                    rows++;
+            }
+
+            for (var id = WeaponModRegistry.TierBV4BandStart; id <= WeaponModRegistry.TierBV4BandEnd; id++)
             {
                 if (weapon.GetProperty((PropertyFloat)id) != null)
                     rows++;
@@ -592,15 +699,23 @@ namespace ACE.Server.Tests
         /// is precisely the dead row the design forbids ("clear with RemoveProperty, never SetProperty(0)"),
         /// reached from the other direction, and it silently taxed three of the ten slots for nothing.
         ///
-        /// A scale of 0 means MUTE THE LAYER, which means all ten slots go to tinkers. The special chances are
-        /// forced to certainty here so the drop path runs on every single iteration rather than 35% of them.
+        /// RENAMED AND REWRITTEN 2026-08-07 (was
+        /// Fix6_AMutedMagnitudeScaleSpendsEverySlotOnTinkersRatherThanOnDeadRecords). Two changes landed on the
+        /// same day and between them removed both halves of the old name:
         ///
-        /// Cleave is deliberately unaffected and is why the melee arm asserts a different thing: it is Binary, so
-        /// it ignores the scale by design and always applies its full +1. Its slot is not dead, so there is
-        /// nothing to convert. Only a ZERO magnitude is dropped, never a small one.
+        ///   - THE SPECIAL-ONLY REROLL means a dropped special's slot no longer "converts to a tinker". There
+        ///     is no conversion target: the reroll lays down no tinkers at all, so a muted scale simply yields
+        ///     a weapon holding nothing, with its layer 1 exactly as the player left it.
+        ///   - THE CLEAVE REMOVAL means there is no longer a binary modifier to survive the mute. Cleave was
+        ///     the reason the melee arm asserted something different from the other two classes; with it gone,
+        ///     all three classes assert the same thing and the arms are merged.
+        ///
+        /// The rule the test is actually about is UNCHANGED and is the one thing both arms always agreed on: a
+        /// zero magnitude is never applied and never written. Only a ZERO magnitude is dropped, never a small
+        /// one. The special chances are forced to certainty so the drop path runs on every single iteration.
         /// </summary>
         [TestMethod]
-        public void Fix6_AMutedMagnitudeScaleSpendsEverySlotOnTinkersRatherThanOnDeadRecords()
+        public void Fix6_AMutedMagnitudeScaleHoldsNoSpecialAndLeavesLayerOneAlone()
         {
             var priorScale = PropertyManager.GetDouble("weapon_mod_magnitude_scale").Item;
             var priorOne = PropertyManager.GetDouble("weapon_mod_special_chance_1").Item;
@@ -614,15 +729,23 @@ namespace ACE.Server.Tests
                 PropertyManager.ModifyDouble("weapon_mod_special_chance_2", 1.0);
                 PropertyManager.ModifyDouble("weapon_mod_special_chance_3", 1.0);
 
-                // missile and caster carry no binary modifier, so at a muted scale NOTHING may be held
-                foreach (var weaponClass in new[] { WeaponClass.Missile, WeaponClass.Caster })
+                // no class carries a binary modifier since the 2026-08-07 Cleave removal, so at a muted scale
+                // NOTHING may be held on any of them
+                foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
                 {
-                    var itemType = weaponClass == WeaponClass.Missile ? ItemType.MissileWeapon : ItemType.Caster;
+                    var itemType = weaponClass == WeaponClass.Missile ? ItemType.MissileWeapon
+                        : weaponClass == WeaponClass.Caster ? ItemType.Caster : ItemType.MeleeWeapon;
+
                     var combatUse = weaponClass == WeaponClass.Missile ? CombatUse.Missile : CombatUse.Melee;
 
                     for (var i = 1; i <= 40; i++)
                     {
-                        var weapon = MakeWeapon(itemType, combatUse);
+                        // a HAND-TINKERED weapon, deliberately: an untinkered one would pass the layer 1
+                        // assertions below vacuously, and layer 1 surviving the mute is half of what is at stake
+                        var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
+
+                        var beforeLog = weapon.GetProperty(PropertyString.TinkerLog);
+                        var beforeCount = weapon.GetProperty(PropertyInt.NumTimesTinkered);
 
                         Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0), $"{weaponClass} reroll {i}");
 
@@ -630,37 +753,21 @@ namespace ACE.Server.Tests
                             $"{weaponClass} reroll {i}: a special resolving to zero magnitude must not be held");
 
                         Assert.AreEqual(0, BandRows(weapon),
-                            $"{weaponClass} reroll {i}: the reserved 8130-8135 band holds a record for a special that buys nothing");
+                            $"{weaponClass} reroll {i}: the reserved record bands hold a row for a special that buys nothing");
 
-                        Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
-                            $"{weaponClass} reroll {i}: a dropped special's slot must convert to a tinker, so all ten go to layer 1");
+                        // and the muted layer left the player's tinkering completely alone
+                        Assert.AreEqual(beforeLog, weapon.GetProperty(PropertyString.TinkerLog),
+                            $"{weaponClass} reroll {i}: the retail tinker log moved at a muted scale");
 
-                        Assert.IsTrue(WeaponModTinkerSet.TryParseLog(weapon.GetProperty(PropertyString.WeaponModTinkerLog), out var log));
-                        Assert.AreEqual(WeaponModRegistry.TotalSlots, log.Count, $"{weaponClass} reroll {i}: the log must account for all ten slots");
+                        Assert.AreEqual(beforeCount, weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                            $"{weaponClass} reroll {i}: NumTimesTinkered moved at a muted scale");
+
+                        Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                            $"{weaponClass} reroll {i}: a tinker count was written. A dropped special no longer converts to a tinker - since 2026-08-07 there is no tinker for it to convert INTO");
+
+                        Assert.IsNull(weapon.GetProperty(PropertyString.WeaponModTinkerLog),
+                            $"{weaponClass} reroll {i}: this system's own tinker log was written on a weapon whose tinkers it does not manage");
                     }
-                }
-
-                // melee: only the binary Cleave may survive a muted scale, and the budget still sums to ten
-                for (var i = 1; i <= 60; i++)
-                {
-                    var weapon = MakeWeapon();
-
-                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"melee reroll {i}");
-
-                    var specials = WeaponModTinkerSet.ReadSpecials(weapon);
-
-                    foreach (var (definition, magnitude) in specials)
-                    {
-                        Assert.IsTrue(definition.Binary,
-                            $"melee reroll {i}: {definition.Id} is held at a muted scale but is not binary, so its slot bought nothing");
-
-                        Assert.IsTrue(magnitude > 0.0, $"melee reroll {i}: {definition.Id} holds a magnitude of {magnitude}");
-                    }
-
-                    Assert.AreEqual(specials.Count, BandRows(weapon), $"melee reroll {i}: dead rows in the reserved band");
-
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots - specials.Count, weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
-                        $"melee reroll {i}: every slot not bought by a live special must convert to a tinker");
                 }
             }
             finally
@@ -673,43 +780,48 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The swap half of the same rule. A draw that would add a zero-magnitude special adds a TINKER instead;
-        /// it never refuses, because CanApply has already promised the bag by the time the apply runs. The swap
-        /// chance is forced to certainty so every one of these twenty uses takes the conversion path.
+        /// SUPERSEDED 2026-08-06 (Amethyst rework). Before the rework, a swap draw that resolved to a
+        /// zero-magnitude special converted to a TINKER instead of refusing. Amethyst no longer touches tinkers
+        /// at all, so there is no conversion target any more: a muted-scale replacement simply is not applied,
+        /// and the removed special is lost for that use - never refused, and never leaves a dead record in the
+        /// reserved band.
         /// </summary>
         [TestMethod]
-        public void Fix6_AMutedSwapDrawConvertsToATinkerRatherThanRefusing()
+        public void Fix6_AMutedSwapReplacementIsSimplyLostRatherThanRefusingOrLeavingADeadRecord()
         {
             var priorScale = PropertyManager.GetDouble("weapon_mod_magnitude_scale").Item;
-            var priorSwap = PropertyManager.GetDouble("weapon_mod_swap_special_chance").Item;
 
             try
             {
-                PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", 0.0);
-                PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", 1.0);
-
-                // missile carries no binary modifier, so every draw here resolves to zero
+                // a weapon holding one non-binary special to start from, so the swap has something to reroll
                 var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Missile);
+                WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.ShieldBypass), 0.3);
+
+                PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", 0.0);
 
                 for (var i = 1; i <= 20; i++)
                 {
+                    var before = WeaponModTinkerSet.SpecialCount(weapon);
+
                     Assert.IsTrue(WeaponModManager.CanApply(weapon, WeaponClass.Missile, WeaponModManager.WeaponModAction.Swap),
-                        $"swap {i}: CanApply must still say yes - a muted draw is a tinker, not a refusal");
+                        $"swap {i}: CanApply must say yes whenever a special is held, whatever the scale is set to");
 
                     Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Missile, 10.0),
-                        $"swap {i}: a zero-magnitude draw must convert to a tinker; refusing here would eat the bag for nothing");
+                        $"swap {i}: a zero-magnitude replacement must not refuse; refusing here would eat the bag for nothing");
 
-                    Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(weapon), $"swap {i}: a zero-magnitude special was held");
-                    Assert.AreEqual(0, BandRows(weapon), $"swap {i}: a dead record was written into the reserved band");
+                    // the removed special is lost and the muted replacement never lands, so the count can only
+                    // ever go down or stay put (a fresh special could theoretically be re-added by a later use,
+                    // but never at a muted scale) - and never leaves a dead record in the reserved band
+                    Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) <= before, $"swap {i}: special count rose at a muted scale");
+                    Assert.AreEqual(WeaponModTinkerSet.SpecialCount(weapon), BandRows(weapon), $"swap {i}: dead rows in the reserved band");
 
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots, weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
-                        $"swap {i}: the converted slot went missing instead of becoming a tinker");
+                    if (WeaponModTinkerSet.SpecialCount(weapon) == 0)
+                        break; // nothing left to reroll on the next use
                 }
             }
             finally
             {
                 PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", priorScale);
-                PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", priorSwap);
             }
         }
 
@@ -782,17 +894,15 @@ namespace ACE.Server.Tests
         // ================= FIX 7 - defence in depth on the three-special bound =================
 
         /// <summary>
-        /// THE GAP: the permanent three-special bound had exactly ONE enforcement point on the swap path -
-        /// ResolveRefusal returning SwapAtSpecialCap. ApplySwap itself would happily remove one of a trio and roll
-        /// a replacement, which is exactly the "reroll a single special" capability design section 5 says
-        /// invalidates its power assessment ("Remove either property and the pricing in this section stops
-        /// holding"). Any caller that reached ApplySwap without the refusal in front of it reopened that.
-        ///
-        /// This constructs the trio DIRECTLY rather than playing the swap for it, and calls ApplySwap with no
-        /// refusal anywhere in the picture, so the guard is what is under test and nothing else.
+        /// SUPERSEDED 2026-08-06. Before the Amethyst rework, ApplySwap refused a weapon already at the special
+        /// cap - the guard this test originally pinned. That guard is GONE ON PURPOSE: Amethyst is now a
+        /// special-only reroll, so a weapon AT the cap is exactly the state it exists to act on. This test now
+        /// pins the OPPOSITE claim - a full set is swappable, exactly one special changes, tinkers and the
+        /// tinker log are UNTOUCHED (the new path never reaches them at all), and the still-held specials'
+        /// records survive exactly.
         /// </summary>
         [TestMethod]
-        public void Fix7_ApplySwapRefusesAtThreeSpecialsIndependentlyOfTheRefusal()
+        public void Fix7_ApplySwapRerollsOneSpecialOfAFullSetAndLeavesTinkersUntouched()
         {
             var sevenIron = Log(MaterialType.Iron, MaterialType.Iron, MaterialType.Iron, MaterialType.Iron,
                                 MaterialType.Iron, MaterialType.Iron, MaterialType.Iron);
@@ -808,66 +918,80 @@ namespace ACE.Server.Tests
                     { PropertyString.WeaponModTinkerLog, sevenIron },
                 });
 
-            var trio = new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst };
-
-            foreach (var id in trio)
-                WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(id), 5.0);
-
-            Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(weapon), "precondition: a full trio");
-
-            // ---- the guard, with no refusal in front of it ----
-            Assert.IsNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0),
-                "ApplySwap ran on a weapon already holding three specials: a caller that skips ResolveRefusal can then reroll one special of a chosen trio, which invalidates the design's +101.1% ceiling");
-
-            Assert.IsFalse(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap),
-                "CanApply must mirror the guard: the bag is consumed on its word alone, so a yes here eats the bag for a refusal");
-
-            // ---- and the refused swap changed absolutely nothing ----
-            foreach (var id in trio)
+            // a full SET: the cap went from three to four on 2026-08-06, so a fourth row is needed. It was
+            // Cleave until 2026-08-07; Shield Bypass is what the melee Tier A pool has left.
+            var set = new[]
             {
-                Assert.AreEqual(5.0, weapon.GetProperty(WeaponModRegistry.Get(id).Record).Value, 1e-12,
-                    $"the refused swap altered {id}'s record");
-            }
+                (WeaponModId.Devastation,  5.0),
+                (WeaponModId.WeakPoint,    3.0),
+                (WeaponModId.Bloodthirst,  5.0),
+                (WeaponModId.ShieldBypass, 0.3),
+            };
 
-            Assert.AreEqual(sevenIron, weapon.GetProperty(PropertyString.WeaponModTinkerLog), "the refused swap rewrote the log");
-            Assert.AreEqual(7, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), "the refused swap moved the tinker count");
+            foreach (var (id, magnitude) in set)
+                WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(id), magnitude);
 
-            // ---- the two enforcement points agree rather than being alternatives ----
-            Assert.AreEqual(WeaponModManager.WeaponModRefusal.SwapAtSpecialCap,
+            Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(weapon), "precondition: a full set");
+
+            Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                 WeaponModManager.ResolveRefusal(WeaponModManager.WeaponModAction.Swap, weapon),
-                "the refusal must still be the one the player sees");
+                "a full set must be swappable now - rerolling AT the cap is the tool's purpose");
 
-            // ---- dropping back to two reopens the swap, so the guard is a bound and not a one-way lock ----
-            WeaponModTinkerSet.ReverseSpecial(weapon, WeaponModRegistry.Get(WeaponModId.Bloodthirst));
-
-            Assert.AreEqual(2, WeaponModTinkerSet.SpecialCount(weapon));
             Assert.IsTrue(WeaponModManager.CanApply(weapon, WeaponClass.Melee, WeaponModManager.WeaponModAction.Swap));
-            Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0), "a weapon below the bound must still accept a swap");
+
+            var lines = WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0);
+
+            Assert.IsNotNull(lines, "ApplySwap must succeed on a full set");
+            Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(weapon), "a reroll trades one special for one - the count never moves");
+
+            // tinkers and the tinker log are UNTOUCHED - the new path never reaches them
+            Assert.AreEqual(sevenIron, weapon.GetProperty(PropertyString.WeaponModTinkerLog), "the swap must not touch the tinker log");
+            Assert.AreEqual(7, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), "the swap must not touch the tinker count");
         }
 
         /// <summary>
-        /// CanApply exists to guarantee the bag is never consumed for a no-op, so it has to agree with the apply
-        /// path in BOTH directions on every state that reaches it - including the two states this change added:
-        /// a weapon at the three-special bound, and a muted magnitude scale (which is NOT a refusal, because the
-        /// draw converts to a tinker). Driven over a long random walk rather than the three worked cases, because
-        /// a disagreement is a free swap or a bag eaten for nothing and neither is visible in a single sample.
+        /// REWORKED TWICE. CanApply exists to guarantee the bag is never consumed for a no-op, so it has to
+        /// agree with the apply path in BOTH directions on every state that reaches it.
+        ///
+        /// As of the 2026-08-07 directive there is no swap refusal left at all, so "they agree" now means they
+        /// agree on YES, every time, at every special count. The muted-scale arm is what makes that
+        /// non-trivial: at scale 0 every replacement resolves to zero and is dropped, so repeated swaps drain
+        /// the weapon to zero specials - and it must STILL never refuse. That drain used to end in a refusal
+        /// (SwapNeedsASpecial), and this test is the one that would have caught the change silently.
+        ///
+        /// The bag is still consumed for a no-op in that muted case, which is correct and unchanged: the same
+        /// is true of Tourmaline at scale 0, and a muted layer is an operator decision rather than a state the
+        /// refusal table is meant to protect players from.
         /// </summary>
         [TestMethod]
         public void Fix7_CanApplyAgreesWithApplySwapOnEveryStateIncludingTheNewOnes()
         {
             var priorScale = PropertyManager.GetDouble("weapon_mod_magnitude_scale").Item;
+            var prior1 = PropertyManager.GetDouble("weapon_mod_special_chance_1").Item;
+            var prior2 = PropertyManager.GetDouble("weapon_mod_special_chance_2").Item;
+            var prior3 = PropertyManager.GetDouble("weapon_mod_special_chance_3").Item;
+            var prior4 = PropertyManager.GetDouble("weapon_mod_special_chance_4").Item;
 
             try
             {
                 foreach (var scale in new[] { 1.0, 0.0 })
                 {
-                    PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", scale);
-
                     foreach (var weaponClass in new[] { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster })
                     {
-                        var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
+                        // seed at least one special via a forced-odds reroll at scale 1, THEN switch to the
+                        // scale under test - a muted scale can never seed a non-binary special in the first
+                        // place (WeaponModValue.IsLiveMagnitude), so seeding has to happen before it is applied
+                        PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", 1.0);
+                        PropertyManager.ModifyDouble("weapon_mod_special_chance_1", 1.0);
+                        PropertyManager.ModifyDouble("weapon_mod_special_chance_2", 1.0);
+                        PropertyManager.ModifyDouble("weapon_mod_special_chance_3", 1.0);
+                        PropertyManager.ModifyDouble("weapon_mod_special_chance_4", 1.0);
 
-                        var refusals = 0;
+                        var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
+                        Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0));
+                        Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) > 0, $"scale {scale} {weaponClass}: seeding reroll produced no special");
+
+                        PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", scale);
 
                         for (var i = 1; i <= 60; i++)
                         {
@@ -877,32 +1001,31 @@ namespace ACE.Server.Tests
                             Assert.AreEqual(canSwap, swapped,
                                 $"scale {scale} {weaponClass} use {i}: CanApply said {canSwap} but ApplySwap {(swapped ? "ran" : "refused")}");
 
-                            if (!swapped)
-                            {
-                                refusals++;
-
-                                Assert.AreEqual(WeaponModRegistry.MaxSpecials, WeaponModTinkerSet.SpecialCount(weapon),
-                                    $"scale {scale} {weaponClass} use {i}: the swap refused for a reason other than the three-special bound");
-
-                                // a reroll is the way back out of a full trio
-                                Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0));
-                            }
-
-                            var canReroll = WeaponModManager.CanApply(weapon, weaponClass, WeaponModManager.WeaponModAction.Reroll);
-
-                            Assert.AreEqual(canReroll, WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0) != null,
-                                $"scale {scale} {weaponClass} use {i}: CanApply and ApplyReroll disagree");
+                            Assert.IsTrue(canSwap,
+                                $"scale {scale} {weaponClass} use {i}: a swap was refused at {WeaponModTinkerSet.SpecialCount(weapon)} specials - since 2026-08-07 no special count may refuse one");
                         }
 
-                        // a muted scale can never reach the bound, so the refusal is reachable only at scale 1
-                        if (scale == 0.0 && weaponClass != WeaponClass.Melee)
-                            Assert.AreEqual(0, refusals, $"{weaponClass} at a muted scale can hold no special, so no swap may refuse");
+                        // at scale 0 every replacement is dropped without being re-added, so sixty uses drain
+                        // the weapon completely. The point is that it keeps saying YES the whole way down and
+                        // at the bottom - the drain used to end in a refusal, and that refusal is gone.
+                        if (scale == 0.0)
+                        {
+                            Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(weapon),
+                                $"{weaponClass} at a muted scale must drain to zero specials over sixty swaps");
+
+                            Assert.IsTrue(WeaponModManager.CanApply(weapon, weaponClass, WeaponModManager.WeaponModAction.Swap),
+                                $"{weaponClass}: a fully drained weapon must still accept a swap");
+                        }
                     }
                 }
             }
             finally
             {
                 PropertyManager.ModifyDouble("weapon_mod_magnitude_scale", priorScale);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_1", prior1);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_2", prior2);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_3", prior3);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_4", prior4);
             }
         }
     }

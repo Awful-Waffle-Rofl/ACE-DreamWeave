@@ -1,6 +1,7 @@
 using System;
 
 using ACE.Entity;
+using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Network.GameMessages.Messages;
 
@@ -47,6 +48,14 @@ namespace ACE.Server.WorldObjects
             // Drift Network class-ability props (the Arcane Pedestal Luminance-exchange stone) opt in by data
             // and run their interaction here; any other Generic object falls through to normal use behavior.
             if (ClassAbilities.ClassAbilityTrainer.TryHandleUse(this, player))
+                return;
+
+            // World Events (WaffleACE): the Weave Cache reward giver opts in by PropertyBool.WorldEventCache and runs its claim here (TECH-DESIGN 2.8 option C).
+            if (GetProperty(PropertyBool.WorldEventCache) == true && WorldEvents.WorldEventCacheHandler.TryHandleUse(this, player))
+                return;
+
+            // Marketplace Tinkerer's Inspiration pedestal: opts in by PropertyBool.TinkerersInspiration and applies its free tinkering buffs here.
+            if (ACE.Server.Entity.TinkerersInspiration.TryHandleUse(this, player))
                 return;
 
             if (UseSound > 0)

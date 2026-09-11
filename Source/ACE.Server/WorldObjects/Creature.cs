@@ -32,6 +32,76 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public Player P_WaveOwner;
 
+        /// <summary>
+        /// World events (WaffleACE): the run that spawned this creature. Set by WorldEventSpawner on every
+        /// creature that makes it into the world, and read by Creature.Die() to report the death back to the
+        /// run. Purely in-memory and NEVER persisted - it is nulled by the spawner's DestroyAll, and a
+        /// creature that somehow outlives its run is filtered out by the reference check in
+        /// WorldEventManager.OnEventCreatureDied (mirrors P_WaveOwner above).
+        /// </summary>
+        public ACE.Server.WorldEvents.WorldEvent P_WorldEvent;
+
+        /// <summary>
+        /// Threads (WaffleACE): the run that spawned this creature. Set by ThreadDungeonSpawner before
+        /// EnterWorld, read by Creature.Die() to report the kill. Purely in-memory and NEVER persisted; the
+        /// persisted twin is PropertyInt.ThreadDungeonRunId, and the death hook requires both (mirrors P_WorldEvent).
+        /// </summary>
+        public ACE.Server.ThreadDungeons.ThreadDungeonRun P_DungeonRun;
+
+        /// <summary>Threads: the role this creature was placed as, for the kill ledger and XP rate.</summary>
+        public ACE.Server.ThreadDungeons.DungeonRole? DungeonRole;
+
+        /// <summary>
+        /// Threads: the run's salvage affinities, as (material, base wcid, per-kill probability).
+        /// Stamped by ThreadDungeonSpawner before EnterWorld and read once by Creature_Death.GenerateTreasure.
+        /// Purely in-memory, never persisted and never networked, exactly like P_DungeonRun and DungeonRole.
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyList<(int MaterialId, uint BaseWcid, double Chance)> P_DungeonSalvageAffinities;
+
+        /// <summary>
+        /// Threads: an in-memory TreasureDeath profile that replaces the weenie's DeathTreasureType for
+        /// this creature only (PLAN 7.2). Never persisted; built by DungeonRewardMath.BuildProfile.
+        /// </summary>
+        public ACE.Database.Models.World.TreasureDeath DeathTreasureOverride;
+
+        /// <summary>
+        /// World events sky-drop (WaffleACE, WP-17): true while this creature is falling in from a world-event
+        /// wave spawned above the terrain (a theme with spawnDz greater than 0 - today only sky_rift). Set by
+        /// WorldEventSpawner immediately after the creature is adopted, and cleared by OnSkyDropLanded (see
+        /// Creature_SkyDrop.cs) the moment the physics tick sees it standing on walkable ground or the
+        /// deadline below expires. Purely in-memory and NEVER persisted, exactly like P_WorldEvent above.
+        ///
+        /// While it is set, two rules change: WorldObject_Tick.UpdateObjectPhysics always runs the physics
+        /// update for this creature (so it actually falls), and Monster_Tick returns immediately (so it makes
+        /// no attack, move or target search until it lands).
+        /// </summary>
+        public bool WorldEventSkyDrop;
+
+        /// <summary>
+        /// The absolute ACE.Server.Physics.Common.PhysicsTimer.CurrentTime after which a sky drop is
+        /// force-settled onto the terrain, even if the creature never reported standing on walkable ground.
+        ///
+        /// That clock and only that clock. It is NOT Timers.RunningTime: PhysicsTimer.CurrentTime is
+        /// Timers.PortalYearTicks (Source/ACE.Server/Physics/Common/PhysicsTimer.cs:26), a different clock
+        /// with a different origin, so a deadline armed on RunningTime and compared here would fire at an
+        /// arbitrary offset. WorldEventSpawner.BeginSkyDrop arms it on PhysicsTimer.CurrentTime and
+        /// WorldObject_Tick.UpdateObjectPhysics compares it against PhysicsTimer.CurrentTime; those are the
+        /// only two places it is touched.
+        ///
+        /// Set with WorldEventSkyDrop, and meaningless while that flag is false. Runtime-only, never
+        /// persisted (WP-17).
+        /// </summary>
+        public double WorldEventSkyDropDeadline;
+
+        /// <summary>
+        /// World Events (WaffleACE, WP-23): true when this creature's weenie carries PropertyBool 9026
+        /// WorldEventObjective - a Rift or Element Portal pillar. These are Attackable HP sinks: an attack
+        /// wakes them (IsMonster is true), but they must never think - no target search, no movement, no
+        /// attack. Cached here at construction (SetEphemeralValues) rather than read from the property
+        /// dictionary on every tick; Monster_Tick checks it once per tick to return immediately.
+        /// </summary>
+        public bool WorldEventObjective;
+
         protected QuestManager _questManager;
 
         public QuestManager QuestManager
@@ -98,6 +168,10 @@ namespace ACE.Server.WorldObjects
         {
             CombatMode = CombatMode.NonCombat;
             DamageHistory = new DamageHistory(this);
+
+            WorldEventObjective = GetProperty(PropertyBool.WorldEventObjective) == true;
+
+            BuildMonsterEffects();
 
             if (!(this is Player))
                 GenerateNewFace();
@@ -347,6 +421,13 @@ namespace ACE.Server.WorldObjects
             // here (flagged by weenie data - see ClassAbilities.ClassAbilityTrainer). Their greeting emote has
             // already fired in base.OnActivate -> EmoteManager.OnUse(). Every other NPC is emote-only.
             if (worldObject is Player player && ClassAbilities.ClassAbilityTrainer.TryHandleUse(this, player))
+                return;
+
+            // The Threads Survey-Archivist (flagged by PropertyBool.DungeonSurveyArchivist) pays its
+            // daily-survey reward here. Unlike every other NPC it has NO Use emote set at all: the award has
+            // to be computed from the player's own survey history, and base.OnActivate runs
+            // EmoteManager.OnUse BEFORE this method, so an emote rig alongside this code would double-pay.
+            if (worldObject is Player surveyor && ThreadDungeons.SurveyArchivistStation.TryHandleUse(this, surveyor))
                 return;
 
             // handled in base.OnActivate -> EmoteManager.OnUse()

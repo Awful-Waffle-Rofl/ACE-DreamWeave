@@ -5,14 +5,15 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using ACE.Entity.Enum;
 using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
+using ACE.Server.Managers;
 
 namespace ACE.Server.Tests
 {
     /// <summary>
     /// Pins the eleven Blood Mage (7th class) entries to the design table in
     /// Docs/ClassAbilities/BLOOD-MAGE-DESIGN.md sec 3 (rev 6, 2026-08-03): which entries exist, their tier,
-    /// max rank and per-rank CAP costs, and the CAP totals those costs must reproduce (T1 15, T2 29, T3 23,
-    /// total 67, with a maxed T1 exactly meeting the Tier 3 "spent in class" gate of 15).
+    /// max rank and per-rank CAP costs, and the CAP totals those costs must reproduce (T1 15, T2 18, T3 15,
+    /// total 48, with a maxed T1 exactly meeting the Tier 3 "spent in class" gate of 15).
     ///
     /// The tier/cost half is the REGISTRATION layer only. As of the 2026-08-03 merge all eleven have a live
     /// mechanic and are Implemented = true; the test still asserts the exact set, so a future entry cannot be
@@ -28,6 +29,8 @@ namespace ACE.Server.Tests
             return def;
         }
 
+        private static long Tunable(string key) => PropertyManager.GetLong(key).Item;
+
         /// <summary>The design table: name, tier, max rank, per-rank cost.</summary>
         private static readonly (string Name, int Tier, int MaxRank, int[] Cost)[] DesignTable =
         {
@@ -37,13 +40,13 @@ namespace ACE.Server.Tests
             ("transfusion",        1, 3, new[] { 1, 1, 1 }),
             ("bloodmage_training", 1, 3, new[] { 1, 1, 1 }),
             // Tier 2 - 3 CAP earned, 5 spent in class
-            ("weakened_blood",     2, 3, new[] { 3, 3, 3 }),
+            ("weakened_blood",     2, 3, new[] { 1, 2, 3 }),
             ("malediction",        2, 3, new[] { 2, 2, 2 }),
-            ("crimson_harvest",    2, 1, new[] { 5 }),
-            ("heal_boost_rating",  2, 3, new[] { 2, 3, 4 }),
+            ("crimson_harvest",    2, 1, new[] { 3 }),
+            ("heal_boost_rating",  2, 3, new[] { 1, 1, 1 }),
             // Tier 3 - 8 CAP earned, 15 spent in class
-            ("exsanguinate",       3, 1, new[] { 5 }),
-            ("blood_price",        3, 3, new[] { 3, 3, 3 }),
+            ("exsanguinate",       3, 1, new[] { 3 }),
+            ("blood_price",        3, 3, new[] { 1, 1, 1 }),
             ("sanguine_ward",      3, 3, new[] { 3, 3, 3 }),
         };
 
@@ -96,9 +99,9 @@ namespace ACE.Server.Tests
             var defs = ClassAbilityRegistry.Abilities.Values;
 
             Assert.AreEqual(15, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 1), "T1 total");
-            Assert.AreEqual(29, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 2), "T2 total");
-            Assert.AreEqual(23, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 3), "T3 total");
-            Assert.AreEqual(67, ClassAbilityCostSummary.MaxCostForClass(defs, ClassAbilityClass.BloodMage), "class total");
+            Assert.AreEqual(18, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 2), "T2 total");
+            Assert.AreEqual(15, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 3), "T3 total");
+            Assert.AreEqual(48, ClassAbilityCostSummary.MaxCostForClass(defs, ClassAbilityClass.BloodMage), "class total");
         }
 
         /// <summary>
@@ -112,7 +115,7 @@ namespace ACE.Server.Tests
             var maxedTier1 = ClassAbilityCostSummary.MaxCostForClassTier(
                 ClassAbilityRegistry.Abilities.Values, ClassAbilityClass.BloodMage, 1);
 
-            Assert.AreEqual(ClassAbilityTierGate.Tier3PointsSpentInClass, maxedTier1,
+            Assert.AreEqual(Tunable("class_ability_tier3_spent_required"), maxedTier1,
                 "a fully maxed Blood Mage T1 must land exactly on the T3 spent-in-class gate");
         }
 
@@ -127,43 +130,38 @@ namespace ACE.Server.Tests
                 .Where(d => d.AbilityClass == ClassAbilityClass.BloodMage && d.Tier == 1)
                 .Min(d => d.CumulativeCost(d.MaxRank));
 
-            Assert.IsTrue(cheapestMaxedT1Entry < ClassAbilityTierGate.Tier2PointsSpentInClass,
+            Assert.IsTrue(cheapestMaxedT1Entry < Tunable("class_ability_tier2_spent_required"),
                 "one maxed T1 entry should not be enough to reach T2 on its own");
 
             Assert.IsTrue(ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 1)
-                >= ClassAbilityTierGate.Tier2PointsSpentInClass);
+                >= Tunable("class_ability_tier2_spent_required"));
         }
 
         // ---- tier gate is class-agnostic ---------------------------------------------------------
 
         /// <summary>
-        /// The tier unlock is keyed on the TIER NUMBER and a caller-supplied spent-in-class total; there is
-        /// no class parameter anywhere on this API, so it cannot carry a six-class list. The live gate
-        /// (Player.MeetsClassAbilityTierUnlock) is the same shape: it reads skill.Tier plus
+        /// The tier unlock (<see cref="ACE.Server.WorldObjects.Player.MeetsClassAbilityTierUnlock"/>) is keyed
+        /// on the TIER NUMBER plus a caller-supplied spent-in-class total; there is no class parameter anywhere
+        /// on that path, so it cannot carry a six-class list. It reads skill.Tier plus
         /// PointsSpentInClass(skill.AbilityClass), which sums CumulativeCost over every owned definition whose
         /// AbilityClass equals the one asked for. A 7th class therefore needs no gate change at all - only
-        /// definitions carrying AbilityClass.BloodMage, which is what this branch adds.
+        /// definitions carrying AbilityClass.BloodMage, which is what this branch adds. This test pins the
+        /// tunables the gate reads (<see cref="ACE.Server.Managers.PropertyManager"/>) to the design table's
+        /// thresholds rather than exercising a class-specific API, since there is none.
         /// </summary>
         [TestMethod]
         public void TierGate_TakesNoClassAndSoAppliesToASeventhClassUnchanged()
         {
-            Assert.AreEqual((0, 0), ClassAbilityTierGate.RequirementFor(1));
-            Assert.AreEqual((3, 5), ClassAbilityTierGate.RequirementFor(2));
-            Assert.AreEqual((8, 15), ClassAbilityTierGate.RequirementFor(3));
+            // T1 is unconditionally open (MeetsClassAbilityTierUnlock short-circuits on skill.Tier <= 1, no tunable involved)
 
-            // a Blood Mage who has maxed T1 (15 spent in class) and earned 8 CAP reaches T3
-            Assert.IsTrue(ClassAbilityTierGate.IsTierUnlocked(3, totalPointsEarned: 8, pointsSpentInClass: 15, out _));
+            Assert.AreEqual(3, Tunable("class_ability_tier2_cap_required"));
+            Assert.AreEqual(5, Tunable("class_ability_tier2_spent_required"));
+            Assert.AreEqual(8, Tunable("class_ability_tier3_cap_required"));
+            Assert.AreEqual(15, Tunable("class_ability_tier3_spent_required"));
 
-            // one point short on either axis still locks, with a reason
-            Assert.IsFalse(ClassAbilityTierGate.IsTierUnlocked(3, 7, 15, out var earnedReason));
-            StringAssert.Contains(earnedReason, "earned");
-
-            Assert.IsFalse(ClassAbilityTierGate.IsTierUnlocked(3, 8, 14, out var spentReason));
-            StringAssert.Contains(spentReason, "spent in this class");
-
-            // every Blood Mage tier value in the design table is one the gate already knows
+            // every Blood Mage tier value in the design table is one the live gate already knows how to key on
             foreach (var tier in DesignTable.Select(e => e.Tier).Distinct())
-                Assert.IsTrue(ClassAbilityTierGate.IsTierUnlocked(tier, 8, 15, out _), $"tier {tier} unreachable at the T3 thresholds");
+                Assert.IsTrue(tier >= 1 && tier <= 3, $"tier {tier} is outside the gate's known range");
         }
 
         // ---- which mechanics are actually live ---------------------------------------------------

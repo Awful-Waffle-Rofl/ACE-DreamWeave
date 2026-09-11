@@ -24,15 +24,6 @@ namespace ACE.Server.Command.Handlers
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
-        // enl
-        [CommandHandler("enl", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
-            "Attain Enlightenment: reset your level for a permanent stat floor and a higher level cap.",
-            "Requires your personal maximum level and enough luminance. A confirmation dialog lists exactly what resets and what is kept.")]
-        public static void HandleEnlightenment(Session session, params string[] parameters)
-        {
-            Enlightenment.HandleEnlightenmentRequest(session.Player, false);
-        }
-
         // pop
         [CommandHandler("pop", AccessLevel.Player, CommandHandlerFlag.None, 0,
             "Show current world population",
@@ -83,7 +74,8 @@ namespace ACE.Server.Command.Handlers
         }
 
         // quest stamp progress: this character's own count, the account-wide pool the Quest Stamp Registrar
-        // rewards against, and which reward tiers this character has already claimed
+        // rewards against (distinct quests across the account, so an alt repeating a quest adds nothing to it),
+        // and which reward tiers this character has already claimed
         [CommandHandler("quests", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
             "Shows your quest stamp progress",
             "")]
@@ -98,7 +90,7 @@ namespace ACE.Server.Command.Handlers
             var own = session.Player.QuestStampCount;
             var accountTotal = session.Player.AccountQuestStampCount;
 
-            session.Network.EnqueueSend(new GameMessageSystemChat($"Quest stamps: {own} (account total: {accountTotal})", ChatMessageType.Broadcast));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Quest stamps: {own} (account total: {accountTotal} unique quests)", ChatMessageType.Broadcast));
 
             var next = QuestStamps.NextThreshold(accountTotal);
 
@@ -115,7 +107,121 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat($"Reward tiers claimed: Tier1 {tier1}, Tier2 {tier2}, Tier3 {tier3}, Tier4 {tier4}", ChatMessageType.Broadcast));
         }
 
-        [CommandHandler("offlinebonus", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Shows your remaining offline experience bonus time")]
+        // xp progress: the client's own "XP for next level" chart ends at level 275 and shows a large
+        // negative number past it (see Player_Xp.cs GetPlayerMaxLevel doc comment for the chart's hard
+        // ceiling at 1445) - this command reports the server's own correct numbers over chat instead
+        [CommandHandler("xp", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Shows your experience progress",
+            "")]
+        public static void HandleXp(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+
+            var level = player.Level ?? 1;
+            var totalExperience = player.TotalExperience ?? 0;
+            var availableExperience = player.AvailableExperience ?? 0;
+
+            var maxLevel = player.GetPlayerMaxLevel();
+
+            if (level >= maxLevel)
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat($"Level {level} - the maximum level. There is nothing beyond this.", ChatMessageType.Broadcast));
+            }
+            else
+            {
+                var remainingXp = player.GetRemainingXP();
+
+                var floorXp = Player.GetTotalXP(level);
+                var ceilingXp = Player.GetTotalXP(level + 1);
+
+                var bandWidth = ceilingXp - floorXp;
+
+                // level numbers stay unformatted - the max-level line below reads "Level 1445", and a
+                // separator here would render the neighbouring level as "Level 1,444" against it
+                var line = $"Level {level} - {remainingXp:N0} experience to level {level + 1}";
+
+                if (bandWidth > 0)
+                {
+                    var progress = (double)(totalExperience - (long)floorXp) / bandWidth * 100.0;
+                    progress = Math.Clamp(progress, 0.0, 100.0);
+
+                    line += $" ({progress:N1}% of the way)";
+                }
+
+                line += ".";
+
+                session.Network.EnqueueSend(new GameMessageSystemChat(line, ChatMessageType.Broadcast));
+            }
+
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Total experience: {totalExperience:N0}.", ChatMessageType.Broadcast));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Unassigned experience: {availableExperience:N0}.", ChatMessageType.Broadcast));
+        }
+
+        // luminance per hour: the accumulator opens fresh at login and is purely in-memory/per-session
+        // (see Player_Luminance.cs ResetLumRateWindow / CalcLumPerHour)
+        [CommandHandler("lph", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Shows how much Luminance you have earned per hour since you logged in, or since your last /lph start",
+            "[start]")]
+        public static void HandleLph(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+
+            if (parameters.Length == 0)
+            {
+                var earned = player.LumRateWindowEarned;
+                var elapsed = Time.GetUnixTime() - player.LumRateWindowStart;
+
+                var rate = Player.CalcLumPerHour(earned, elapsed);
+
+                if (rate != null)
+                {
+                    var elapsedText = FormatLphElapsed(elapsed);
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"Luminance: {earned:N0} earned over {elapsedText} - {rate.Value:N0} per hour.", ChatMessageType.Broadcast));
+                }
+                else
+                {
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"Luminance: {earned:N0} earned. The timer has only been running a few seconds - too short to show a rate.", ChatMessageType.Broadcast));
+                }
+            }
+            else if (parameters.Length == 1 && parameters[0].Trim().Equals("start", StringComparison.OrdinalIgnoreCase))
+            {
+                player.ResetLumRateWindow();
+
+                session.Network.EnqueueSend(new GameMessageSystemChat("Luminance per hour timer reset.", ChatMessageType.Broadcast));
+            }
+            else
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat("Usage: /lph [start]", ChatMessageType.Broadcast));
+                session.Network.EnqueueSend(new GameMessageSystemChat("/lph reports your Luminance-per-hour rate; /lph start restarts the timer.", ChatMessageType.Broadcast));
+            }
+        }
+
+        /// <summary>
+        /// Renders an elapsed duration for /lph as "1h 23m" / "23m" / "45s". Hours are total hours - a
+        /// 30-hour session reads "30h 5m", never "1d 6h". A negative elapsed is clamped to zero first.
+        ///
+        /// Internal rather than private so ACE.Server.Tests can pin these boundaries (InternalsVisibleTo,
+        /// ACE.Server.csproj:15).
+        /// </summary>
+        internal static string FormatLphElapsed(double elapsedSeconds)
+        {
+            if (elapsedSeconds < 0)
+                elapsedSeconds = 0;
+
+            var span = TimeSpan.FromSeconds(elapsedSeconds);
+
+            var totalHours = (int)span.TotalHours;
+
+            if (totalHours >= 1)
+                return $"{totalHours}h {span.Minutes}m";
+
+            if (span.TotalMinutes >= 1)
+                return $"{(int)span.TotalMinutes}m";
+
+            return $"{(int)span.TotalSeconds}s";
+        }
+
+        [CommandHandler("offlinebonus", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Shows your offline experience bonus")]
         public static void HandleOfflineBonus(Session session, params string[] parameters)
         {
             session.Player.ShowOfflineExperienceBonusStatus();
@@ -131,6 +237,12 @@ namespace ACE.Server.Command.Handlers
         public static void HandleBonus(Session session, params string[] parameters)
         {
             session.Player.ShowExperienceBonusSummary();
+        }
+
+        [CommandHandler("pickupspeed", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Shows your current pick-up speed bonus, including any permanent bonuses earned from quests")]
+        public static void HandlePickupSpeed(Session session, params string[] parameters)
+        {
+            session.Player.ShowPickupSpeedStatus();
         }
 
         /// <summary>
@@ -429,6 +541,54 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
+        /// Per-character toggle for the outgoing damage-over-time combat message: the line you see
+        /// when your own DoT spell ticks on a target. With no argument, reports the current setting
+        /// and whether it is your own choice or inherited from the server default.
+        /// </summary>
+        [CommandHandler("dotdamage", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Toggle the outgoing damage-over-time combat message (the message you see when your DoT spell ticks on a target).", "on | off")]
+        public static void HandleDotDamage(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+            if (player == null)
+                return;
+
+            void Msg(string text) => session.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+
+            if (parameters.Length == 0)
+            {
+                if (player.ShowDotDamageOverride is bool own)
+                {
+                    Msg($"Damage-over-time damage messages are currently {(own ? "on" : "off")} (your own setting).");
+                }
+                else
+                {
+                    var inherited = player.ShowDotDamage;
+                    Msg($"Damage-over-time damage messages are currently {(inherited ? "on" : "off")} (server default). Use /dotdamage {(inherited ? "off" : "on")} to turn them {(inherited ? "off" : "on")}.");
+                }
+
+                return;
+            }
+
+            switch (parameters[0].ToLowerInvariant())
+            {
+                case "on":
+                    player.ShowDotDamage = true;
+                    Msg("Damage-over-time damage messages are now on.");
+                    break;
+
+                case "off":
+                    player.ShowDotDamage = false;
+                    Msg("Damage-over-time damage messages are now off.");
+                    break;
+
+                default:
+                    Msg("Usage: /dotdamage on | off");
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Force resend of all visible objects known to this player. Can fix rare cases of invisible object bugs.
         /// Can only be used once every 5 mins max.
         /// </summary>
@@ -459,6 +619,53 @@ namespace ACE.Server.Command.Handlers
                 session.Player.TrackObject(knownObj);
             }
             session.Player.PrevObjSend = DateTime.UtcNow;
+        }
+
+        /// <summary>
+        /// Resend every monster and NPC this player knows about, without deleting them first.
+        ///
+        /// Unlike /objsend this emits no GameMessageDeleteObject, so client plugins that hook object
+        /// destruction do not see the whole scene churn. It also means the command can only repair the
+        /// case where the client dropped an object the server still tracks - it cannot hand the client
+        /// knowledge the server never had.
+        ///
+        /// Players are excluded deliberately: this is aimed at the invisible-monster bug, and leaving
+        /// them out keeps the resend small in town. Use /objsend for anything wider.
+        /// </summary>
+        [CommandHandler("fi", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Resends nearby monsters and NPCs to your client, to fix invisible creature bugs. Can be used once per minute.")]
+        [CommandHandler("fixinvisible", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Resends nearby monsters and NPCs to your client, to fix invisible creature bugs. Can be used once per minute.")]
+        public static void HandleFixInvisible(Session session, params string[] parameters)
+        {
+            // RequiresWorld only checks CurrentLandblock, and Landblock.AddWorldObjectInternal sets
+            // that before PhysicsObj is (re)initialized, so ObjMaint can still be unreachable here.
+            // Player.OnTalk guards the same ObjMaint call the same way.
+            if (session.Player.PhysicsObj == null)
+                return;
+
+            if (DateTime.UtcNow - session.Player.PrevFixInvisible < TimeSpan.FromMinutes(1))
+            {
+                session.Player.SendTransientError("You have used this command too recently!");
+                return;
+            }
+
+            var resent = 0;
+
+            foreach (var creature in session.Player.ObjMaint.GetKnownObjectsValuesAsCreature())
+            {
+                if (creature is Player)
+                    continue;
+
+                // mirrors TrackObject's own guard, so the count below matches what was actually sent
+                if (creature.Visibility && !session.Player.Adminvision)
+                    continue;
+
+                session.Player.TrackObject(creature, resend: true);
+                resent++;
+            }
+
+            session.Player.PrevFixInvisible = DateTime.UtcNow;
+
+            session.Network.EnqueueSend(new GameMessageSystemChat($"Resent {resent} creature{(resent == 1 ? "" : "s")} to your client.", ChatMessageType.Broadcast));
         }
 
         // show player ace server versions
@@ -622,121 +829,356 @@ namespace ACE.Server.Command.Handlers
         // DPS-challenge duration all scores are reported against (the content portal uses 60s).
         private const double DpsLeaderboardDuration = 60.0;
 
-        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a Proving Grounds leaderboard (top 20).", "dps | defense | wave")]
+        // how many places every /top board lists before it cuts off
+        private const int LeaderboardSize = 20;
+
+        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp")]
         public static void HandleTop(Session session, params string[] parameters)
         {
             var player = session.Player;
             if (player == null)
                 return;
 
-            // Bare /top lists the boards instead of silently defaulting to one of them.
             var sub = parameters.Length > 0 ? parameters[0].ToLowerInvariant() : "";
-            if (sub != "dps" && sub != "defense" && sub != "wave")
+
+            switch (sub)
             {
-                var usage = "=== Proving Grounds Leaderboards ===\n"
-                    + "/top dps - Attack arena: highest damage dealt in the 60s trial\n"
-                    + "/top defense - Defense arena: longest survival against the Squall\n"
-                    + "/top wave - Wave gauntlet: highest wave cleared\n";
-                session.Network.EnqueueSend(new GameMessageSystemChat(usage, ChatMessageType.System));
-                return;
-            }
+                // Proving Grounds boards: one best-ever score per arena.
+                case "dps":
+                    SendLeaderboard(session, "DPS Challenge",
+                        p => p.GetProperty(PropertyInt64.BestDpsScore) ?? 0,
+                        score => $"{score:N0} damage ({score / DpsLeaderboardDuration:N0} DPS)");
+                    return;
 
-            // Wave leaderboard: highest wave fully cleared in the Proving Grounds (Wave) gauntlet.
-            if (sub == "wave")
-            {
-                var rankedWave = PlayerManager.GetAllPlayers()
-                    .Where(p => (p.GetProperty(PropertyInt64.BestWaveScore) ?? 0) > 0)
-                    .OrderByDescending(p => p.GetProperty(PropertyInt64.BestWaveScore) ?? 0)
-                    .ToList();
+                case "defense":
+                    SendLeaderboard(session, "Defense Challenge",
+                        p => p.GetProperty(PropertyInt64.BestSurvivalScore) ?? 0,
+                        score => $"{score:N0}s");
+                    return;
 
-                var waveMsg = "=== Wave Challenge Leaderboard (Top 20) ===\n";
+                case "wave":
+                    SendLeaderboard(session, "Wave Challenge",
+                        Player.GetBestWaveScoreCenti,
+                        Player.FormatWaveScore);
+                    return;
 
-                if (rankedWave.Count == 0)
+                // Speed does NOT go through SendLeaderboard: that method hardcodes OrderByDescending and a
+                // score > 0 filter over PlayerManager, so it can neither serve a lower-is-better board nor
+                // read the speed board cache at all (DESIGN section 6). Its own renderers below reuse every
+                // one of SendLeaderboard's player-visible conventions instead, so the boards look identical.
+                case "speed":
+                    if (parameters.Length > 1 && string.Equals(parameters[1], "winners", StringComparison.OrdinalIgnoreCase))
+                        SendSpeedWinners(session);
+                    else
+                        SendSpeedLeaderboard(session);
+                    return;
+
+                // Character-progress boards. Level ties break on lifetime xp, so characters that share a level
+                // are ordered by how far into it they are rather than arbitrarily.
+                case "level":
+                    SendLeaderboard(session, "Level",
+                        p => p.Level ?? 0,
+                        level => $"Level {level:N0}",
+                        p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0);
+                    return;
+
+                // The one board that is per ACCOUNT rather than per character: the bank is account-shared,
+                // so listing every character would let one account hold the same pile of money in several
+                // places on the board at once.
+                //
+                // The balance is ONE account-wide pool (account_bank, via AccountBankManager), not a
+                // per-character property, so every character on an account scores the IDENTICAL number.
+                // "The highest-level character's balance", "the account's sum" and "its richest
+                // character" are therefore all the same figure here and the collapse is not choosing
+                // between them - what it is doing is stopping one account occupying twenty rows with
+                // twenty copies of one balance.
+                case "bank":
                 {
-                    waveMsg += "No scores have been recorded yet.\n";
-                    session.Network.EnqueueSend(new GameMessageSystemChat(waveMsg, ChatMessageType.System));
+                    // Taken ONCE per render rather than per player inside the score lambda: one shared
+                    // snapshot, 30s TTL, so a burst of /top bank costs at most one query.
+                    var balances = AccountBankManager.GetAllBalances();
+
+                    // An empty board and a broken database must not look the same to a player.
+                    if (balances == null)
+                    {
+                        session.Network.EnqueueSend(new GameMessageSystemChat("Bank balances are unavailable right now, try again shortly.", ChatMessageType.System));
+                        return;
+                    }
+
+                    SendLeaderboard(session, "Banked Pyreals",
+                        p => balances.TryGetValue(AccountLeaderboard.AccountKeyFor(p), out var banked) ? banked : 0,
+                        pyreals => $"{pyreals:N0} pyreals",
+                        accountKey: AccountLeaderboard.AccountKeyFor);
                     return;
                 }
 
-                for (var i = 0; i < rankedWave.Count && i < 20; i++)
-                {
-                    var waveScore = rankedWave[i].GetProperty(PropertyInt64.BestWaveScore) ?? 0;
-                    waveMsg += $"{i + 1}. {rankedWave[i].Name} - Wave {waveScore:N0}\n";
-                }
+                case "cap":
+                    if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+                    {
+                        session.Network.EnqueueSend(new GameMessageSystemChat("Class abilities are not currently enabled on this server.", ChatMessageType.System));
+                        return;
+                    }
 
-                // if the requesting player has a score but sits outside the top 20, append their own standing
-                var myWaveRank = rankedWave.FindIndex(p => p.Guid == player.Guid);
-                if (myWaveRank >= 20)
-                {
-                    var myScore = rankedWave[myWaveRank].GetProperty(PropertyInt64.BestWaveScore) ?? 0;
-                    waveMsg += $"...\n{myWaveRank + 1}. {player.Name} (you) - Wave {myScore:N0}\n";
-                }
-
-                session.Network.EnqueueSend(new GameMessageSystemChat(waveMsg, ChatMessageType.System));
-                return;
-            }
-
-            // Defense (survival) leaderboard: best seconds survived in the Proving Grounds (Defense) arena.
-            if (sub == "defense")
-            {
-                var rankedDefense = PlayerManager.GetAllPlayers()
-                    .Where(p => (p.GetProperty(PropertyInt64.BestSurvivalScore) ?? 0) > 0)
-                    .OrderByDescending(p => p.GetProperty(PropertyInt64.BestSurvivalScore) ?? 0)
-                    .ToList();
-
-                var defenseMsg = "=== Defense Challenge Leaderboard (Top 20) ===\n";
-
-                if (rankedDefense.Count == 0)
-                {
-                    defenseMsg += "No scores have been recorded yet.\n";
-                    session.Network.EnqueueSend(new GameMessageSystemChat(defenseMsg, ChatMessageType.System));
+                    // lifetime earned, never the unspent pool - spending points must not cost a character its place
+                    SendLeaderboard(session, "Class Ability Points",
+                        p => p.GetProperty(PropertyInt.TotalClassAbilityPointsEarned) ?? 0,
+                        points => $"{points:N0} earned");
                     return;
-                }
 
-                for (var i = 0; i < rankedDefense.Count && i < 20; i++)
-                {
-                    var survivalScore = rankedDefense[i].GetProperty(PropertyInt64.BestSurvivalScore) ?? 0;
-                    defenseMsg += $"{i + 1}. {rankedDefense[i].Name} - {survivalScore:N0}s\n";
-                }
+                case "stamp":
+                case "stamps":
+                    if (!PropertyManager.GetBool("quest_stamps_enabled").Item)
+                    {
+                        session.Network.EnqueueSend(new GameMessageSystemChat("Quest stamps are not currently enabled on this server.", ChatMessageType.System));
+                        return;
+                    }
 
-                // if the requesting player has a score but sits outside the top 20, append their own standing
-                var myDefenseRank = rankedDefense.FindIndex(p => p.Guid == player.Guid);
-                if (myDefenseRank >= 20)
-                {
-                    var myScore = rankedDefense[myDefenseRank].GetProperty(PropertyInt64.BestSurvivalScore) ?? 0;
-                    defenseMsg += $"...\n{myDefenseRank + 1}. {player.Name} (you) - {myScore:N0}s\n";
-                }
-
-                session.Network.EnqueueSend(new GameMessageSystemChat(defenseMsg, ChatMessageType.System));
-                return;
+                    // per character, not per account: QuestStampCount is the persisted per-character count of
+                    // quests that character has been stamped for, while the account-wide total the Registrar
+                    // rewards against counts DISTINCT quests across the account and is ephemeral - it only
+                    // exists for a character that is logged in right now
+                    SendLeaderboard(session, "Quest Stamps",
+                        p => p.GetProperty(PropertyInt64.QuestStampCount) ?? 0,
+                        stamps => $"{stamps:N0} stamps");
+                    return;
             }
 
-            var ranked = PlayerManager.GetAllPlayers()
-                .Where(p => (p.GetProperty(PropertyInt64.BestDpsScore) ?? 0) > 0)
-                .OrderByDescending(p => p.GetProperty(PropertyInt64.BestDpsScore) ?? 0)
+            // Bare /top lists the boards instead of silently defaulting to one of them.
+            var usage = "=== Leaderboards ===\n"
+                + "/top dps - Attack arena: highest damage dealt in the 60s trial\n"
+                + "/top defense - Defense arena: longest survival against the Squall\n"
+                + "/top wave - Wave gauntlet: highest wave reached (cleared waves + % of the next wave's health destroyed)\n"
+                + "/top speed - Speed trial: fastest run of the current season's dungeon\n"
+                + "/top speed winners - Speed trial: the winner of each of the 20 most recent seasons\n"
+                + "/top level - Highest character level\n"
+                + "/top bank - Most pyreals banked (one entry per account, the highest-level character)\n"
+                + "/top cap - Most class ability points earned, lifetime\n"
+                + "/top stamp - Most quest stamps earned by a single character\n";
+            session.Network.EnqueueSend(new GameMessageSystemChat(usage, ChatMessageType.System));
+        }
+
+        /// <summary>
+        /// Renders one leaderboard: the top <see cref="LeaderboardSize"/> by <paramref name="score"/>, with the
+        /// requesting player's own standing appended when they rank below the cut. Only positive scores are
+        /// listed, so a character that has never scored on a board simply does not appear on it.
+        ///
+        /// Every board is served from PlayerManager's in-memory player list (online Player objects plus the
+        /// offlinePlayers dictionary loaded at boot), so none of this reads the shard database - which also means
+        /// a raw SQL edit to a scored property stays invisible until the next server restart.
+        ///
+        /// Staff characters/accounts are filtered out via LeaderboardExemptionManager.IsExempt before ranking, so
+        /// they never appear at the top of a board a player is looking at. An exempt requester still has their
+        /// own-standing append no-op (FindIndex returns -1 for a filtered-out player), so a line is appended below
+        /// telling them why their scores are not listed instead of leaving it looking broken.
+        ///
+        /// Passing <paramref name="accountKey"/> makes the board one-entry-per-account instead of per-character;
+        /// see the call site comment below for the ordering that implies. Leaving it null is the per-character
+        /// board every existing board uses, and takes exactly the path it always has.
+        /// </summary>
+        private static void SendLeaderboard(Session session, string title, Func<IPlayer, long> score, Func<long, string> format, Func<IPlayer, long> tieBreaker = null, Func<IPlayer, uint> accountKey = null)
+        {
+            tieBreaker ??= _ => 0;
+
+            var exemptNames = LeaderboardExemptionManager.GetExemptAccountNames();
+
+            var candidates = PlayerManager.GetAllPlayers()
+                .Where(p => !LeaderboardExemptionManager.IsExempt(p, exemptNames));
+
+            // Collapse to one row per account before ranking, so an account cannot take several places on
+            // the board with what is really one balance seen from several characters.
+            //
+            // The score filter runs after the collapse, so the representative is picked by level without
+            // reference to the score. On today's only account board that ordering has no observable
+            // effect - the balance is one shared pool, so every character on an account scores the same
+            // number - and it is kept because it is the ordering that generalises: a per-character score
+            // collapsed this way is represented by the account's main rather than by whichever alt
+            // happened to score, so the listed name does not shuffle as balances move.
+            //
+            // Exemption is applied first either way, so an exempt character can never become the
+            // representative of an account that would otherwise have been listed.
+            if (accountKey != null)
+            {
+                candidates = AccountLeaderboard.CollapseToAccountRepresentatives(candidates,
+                    accountKey,
+                    p => p.Level ?? 0,
+                    p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
+                    p => p.Guid.Full);
+            }
+
+            var ranked = candidates
+                .Where(p => score(p) > 0)
+                .OrderByDescending(score)
+                .ThenByDescending(tieBreaker)
                 .ToList();
 
-            var msg = "=== DPS Challenge Leaderboard (Top 20) ===\n";
+            var msg = $"=== {title} Leaderboard (Top {LeaderboardSize}) ===\n";
+
+            // resolved before the empty-board early return, so an exempt requester sees the notice
+            // even on a board nobody has scored on yet, not just once the board has other entries
+            var requesterExempt = LeaderboardExemptionManager.IsExempt(session.Player, exemptNames);
 
             if (ranked.Count == 0)
             {
                 msg += "No scores have been recorded yet.\n";
+                if (requesterExempt)
+                    msg += "You are exempt from the leaderboards, so your own scores are not listed.\n";
                 session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.System));
                 return;
             }
 
-            for (var i = 0; i < ranked.Count && i < 20; i++)
+            for (var i = 0; i < ranked.Count && i < LeaderboardSize; i++)
+                msg += $"{i + 1}. {ranked[i].Name} - {format(score(ranked[i]))}\n";
+
+            // if the requesting player has a score but sits outside the top 20, append their own standing.
+            // On an account-collapsed board the requester is often NOT their own account's representative,
+            // so the row to find is the one carrying their account key, not their own guid - otherwise a
+            // player looking at /top bank on an alt would be told they are unranked while their account
+            // sits at 40th. That row is labelled "(your account)" rather than "(you)" so the name shown
+            // next to the rank is never mistaken for the character who typed the command.
+            var myRank = accountKey != null
+                ? ranked.FindIndex(p => accountKey(p) == accountKey(session.Player))
+                : ranked.FindIndex(p => p.Guid == session.Player.Guid);
+
+            if (myRank >= LeaderboardSize)
             {
-                var score = ranked[i].GetProperty(PropertyInt64.BestDpsScore) ?? 0;
-                msg += $"{i + 1}. {ranked[i].Name} - {score:N0} damage ({score / DpsLeaderboardDuration:N0} DPS)\n";
+                var isSelf = ranked[myRank].Guid == session.Player.Guid;
+                var whose = isSelf ? "(you)" : "(your account)";
+                var name = isSelf ? session.Player.Name : ranked[myRank].Name;
+                msg += $"...\n{myRank + 1}. {name} {whose} - {format(score(ranked[myRank]))}\n";
             }
 
-            // if the requesting player has a score but sits outside the top 20, append their own standing
-            var myRank = ranked.FindIndex(p => p.Guid == player.Guid);
-            if (myRank >= 20)
+            if (requesterExempt)
+                msg += "You are exempt from the leaderboards, so your own scores are not listed.\n";
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.System));
+        }
+
+        /// <summary>
+        /// "Season Name - Dungeon Name" for a header or a winners line, degrading to just the season name
+        /// when a row carries no dungeon name (only Name is guarded by SpeedSeasonManager.IsWellFormed, so a
+        /// blank dungeon_name is a survivable content error rather than a reason to render a dangling dash).
+        /// </summary>
+        private static string SpeedSeasonTitle(ACE.Database.Models.World.SpeedSeason season)
+        {
+            if (season == null)
+                return "Speed Trial";
+
+            return string.IsNullOrWhiteSpace(season.DungeonName) ? season.Name : $"{season.Name} - {season.DungeonName}";
+        }
+
+        /// <summary>
+        /// Renders /top speed: one season's fastest runs, ASCENDING (lower is better).
+        ///
+        /// Deliberately not SendLeaderboard. That renderer ranks PlayerManager's in-memory players by a biota
+        /// property, descending; this board is the opposite on both counts - it is served from
+        /// SpeedBoardManager's cache, which is DERIVED FROM the authoritative `character_speed_run` shard
+        /// table (DESIGN section 3.5), and lower times rank higher. Every player-visible convention is copied
+        /// across so the two boards read identically: the "=== ... Leaderboard (Top N) ===" header, the
+        /// LeaderboardSize cut, "{rank}. {Name} - {value}" lines, the "..." own-standing append, the
+        /// "No scores have been recorded yet." empty case, and the exempt-requester notice resolved BEFORE
+        /// the empty-board early return so it shows even on an empty board.
+        ///
+        /// A board entry whose character cannot be resolved (deleted since the run) is NOT exempt and stays
+        /// on the board, and the SNAPSHOT name recorded at completion time is what renders - never a live
+        /// lookup. The table deliberately outlives the character, which is the entire reason it snapshots the
+        /// name (CharacterSpeedRunPartial.cs).
+        /// </summary>
+        private static void SendSpeedLeaderboard(Session session)
+        {
+            var season = SpeedSeasonManager.GetActiveSeason();
+
+            // A gap between rotations is an entirely normal state (DESIGN section 3.2), so rather than show
+            // nothing, fall back to the most recent season and mark the header as ended.
+            var seasonIsActive = season != null;
+
+            if (season == null)
+                season = SpeedSeasonManager.GetRecentSeasons(1).FirstOrDefault();
+
+            if (season == null)
             {
-                var myScore = ranked[myRank].GetProperty(PropertyInt64.BestDpsScore) ?? 0;
-                msg += $"...\n{myRank + 1}. {player.Name} (you) - {myScore:N0} damage ({myScore / DpsLeaderboardDuration:N0} DPS)\n";
+                session.Network.EnqueueSend(new GameMessageSystemChat("No speed trial season has been run yet.", ChatMessageType.System));
+                return;
+            }
+
+            var exemptNames = LeaderboardExemptionManager.GetExemptAccountNames();
+
+            var ranked = SpeedBoardManager.GetSeasonBoard(season.Id)
+                .Where(e => e.Centiseconds > 0)
+                .Where(e =>
+                {
+                    var player = PlayerManager.FindByGuid(e.CharacterId);
+                    return player == null || !LeaderboardExemptionManager.IsExempt(player, exemptNames);
+                })
+                .ToList();
+
+            var msg = $"=== {SpeedSeasonTitle(season)} Leaderboard (Top {LeaderboardSize}) ===\n";
+
+            if (!seasonIsActive)
+                msg += "That season has ended. No speed trial season is currently running.\n";
+
+            // resolved before the empty-board early return, so an exempt requester sees the notice
+            // even on a board nobody has scored on yet, not just once the board has other entries
+            var requesterExempt = LeaderboardExemptionManager.IsExempt(session.Player, exemptNames);
+
+            if (ranked.Count == 0)
+            {
+                msg += "No scores have been recorded yet.\n";
+                if (requesterExempt)
+                    msg += "You are exempt from the leaderboards, so your own scores are not listed.\n";
+                session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.System));
+                return;
+            }
+
+            for (var i = 0; i < ranked.Count && i < LeaderboardSize; i++)
+                msg += $"{i + 1}. {ranked[i].CharacterName} - {Player.FormatSpeedRunTime(ranked[i].Centiseconds)}\n";
+
+            // Character.Id is the player's Guid.Full (set in the Player constructor), so this matches the
+            // requester against their own board line without a name comparison.
+            var myRank = ranked.FindIndex(e => e.CharacterId == session.Player.Guid.Full);
+            if (myRank >= LeaderboardSize)
+                msg += $"...\n{myRank + 1}. {session.Player.Name} (you) - {Player.FormatSpeedRunTime(ranked[myRank].Centiseconds)}\n";
+
+            if (requesterExempt)
+                msg += "You are exempt from the leaderboards, so your own scores are not listed.\n";
+
+            session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.System));
+        }
+
+        /// <summary>
+        /// Renders /top speed winners: one line per season for the LeaderboardSize most recent seasons,
+        /// newest first, naming that season's winner and time.
+        ///
+        /// This is a history of SEASONS, not of winners, so a season nobody has completed still gets its
+        /// line with the winner shown as unclaimed rather than being skipped - otherwise the list would
+        /// silently misrepresent how many seasons have run.
+        ///
+        /// The winner comes from SpeedBoardManager.GetSeasonLeader, the same method the record-broadcast bar
+        /// reads, so the name listed here and the time treated as that season's record can never disagree.
+        /// </summary>
+        private static void SendSpeedWinners(Session session)
+        {
+            var seasons = SpeedSeasonManager.GetRecentSeasons(LeaderboardSize);
+
+            if (seasons.Count == 0)
+            {
+                session.Network.EnqueueSend(new GameMessageSystemChat("No speed trial season has been run yet.", ChatMessageType.System));
+                return;
+            }
+
+            var exemptNames = LeaderboardExemptionManager.GetExemptAccountNames();
+
+            var msg = $"=== Speed Trial Winners (Last {LeaderboardSize} Seasons) ===\n";
+
+            for (var i = 0; i < seasons.Count; i++)
+            {
+                var season = seasons[i];
+                var leader = SpeedBoardManager.GetSeasonLeader(season.Id, exemptNames);
+
+                var winner = leader == null
+                    ? "unclaimed"
+                    : $"{leader.CharacterName} - {Player.FormatSpeedRunTime(leader.Centiseconds)}";
+
+                msg += $"{i + 1}. {SpeedSeasonTitle(season)} - {winner}\n";
             }
 
             session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.System));
@@ -764,7 +1206,7 @@ namespace ACE.Server.Command.Handlers
             "Currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas\n" +
             "/b d                 - deposit everything\n" +
             "/b d p [amount]      - deposit pyreals (all, or an amount like 10k)\n" +
-            "/b d pea             - deposit silver/gold/pyreal peas as pyreals, at face value\n" +
+            "/b d pea             - deposit peas (lead through pyreal) as pyreals, at face value\n" +
             "/b w p <amount>      - withdraw pyreals (as 250k notes + coins)\n" +
             "/b w n [value] <cnt> - withdraw trade notes (value defaults to 250000)\n" +
             "/b w k|pn <amount>   - withdraw legendary keys / promissory notes\n" +
@@ -849,7 +1291,7 @@ namespace ACE.Server.Command.Handlers
         {
             var player = session.Player;
             session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Your balances:", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Pyreals: {player.BankedPyreals:N0}", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Pyreals (shared by every character on this account): {player.BankedPyreals:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Luminance: {player.BankedLuminance:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Legendary Keys: {player.BankedLegendaryKeys:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Promissory Notes: {player.BankedPromissoryNotes:N0}", ChatMessageType.System));
@@ -870,7 +1312,7 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat("/b                   - show balances", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d                 - deposit everything", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d p|l|k|pn|n|pea [amt] - deposit one currency (amount optional)", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat("/b d pea             - bank silver/gold/pyreal peas as pyreals at face value", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b d pea             - bank peas (lead through pyreal) as pyreals at face value", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w p <amount>      - withdraw pyreals (as 250k notes + coins)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w n [value] <cnt> - withdraw trade notes (value defaults to 250000)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w k|pn <amount>   - withdraw legendary keys / promissory notes", ChatMessageType.System));
@@ -1050,6 +1492,71 @@ namespace ACE.Server.Command.Handlers
         public static void HandleDriftNetworkRecall(Session session, params string[] parameters)
         {
             session.Player.HandleActionTeleToDriftNetwork();
+        }
+
+        /// <summary>
+        /// "/tn" - recall to the traditional Town Network, the retail hall of town portals.
+        /// The /dn counterpart, landing in the same hall in realm 0 instead of realm 1.
+        /// </summary>
+        [CommandHandler("tn", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Recall to the Town Network.",
+            "Begins a recall to the traditional Town Network. Like /mp, this takes a few seconds and is\n"
+            + "interrupted if you move too far.")]
+        public static void HandleTownNetworkRecall(Session session, params string[] parameters)
+        {
+            session.Player.HandleActionTeleToTownNetwork();
+        }
+
+        /// <summary>
+        /// "/summondamage on|off" - the per-character summon damage feed. When on, the player gets one chat
+        /// line for every hit their OWN summoned pets land. Other players' summons are never reported: the
+        /// message is only ever addressed to the pet's own owner (Pet.NotifyOwnerOfDamage).
+        ///
+        /// Off by default. Touches no items, so it sits outside any mutating-command gate. A change rushes
+        /// the next save, because a toggle that silently reverts in a crash window is worse than one that
+        /// never applied - the player has no way to tell the two apart.
+        /// </summary>
+        [CommandHandler("summondamage", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Show or hide a chat line for each hit your own summoned pets land.",
+            "[on | off]\n"
+            + "With no argument, reports the current setting. Off by default. Only your own summons are\n"
+            + "reported - you never see damage dealt by anyone else's pets.")]
+        public static void HandleSummonDamage(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+
+            void Msg(string text) => session.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+
+            var arg = parameters.Length > 0 ? parameters[0].ToLowerInvariant() : "";
+
+            switch (arg)
+            {
+                case "":
+                    Msg(player.SummonDamageMessages
+                        ? "Summon damage messages are ON. Use /summondamage off to hide them."
+                        : "Summon damage messages are OFF. Use /summondamage on to show them.");
+                    break;
+
+                case "on":
+                case "true":
+                case "1":
+                    player.SummonDamageMessages = true;
+                    player.RushNextPlayerSave(5);
+                    Msg("Summon damage messages are now ON. You will see each hit your own summons land.");
+                    break;
+
+                case "off":
+                case "false":
+                case "0":
+                    player.SummonDamageMessages = false;
+                    player.RushNextPlayerSave(5);
+                    Msg("Summon damage messages are now OFF.");
+                    break;
+
+                default:
+                    Msg("Usage: /summondamage [on|off]");
+                    break;
+            }
         }
     }
 }

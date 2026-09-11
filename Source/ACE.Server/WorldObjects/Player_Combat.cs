@@ -7,11 +7,13 @@ using ACE.DatLoader.Entity;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Network.Enum;
 using ACE.Server.Network.GameEvent.Events;
+using ACE.Server.WeaponMods;
 using ACE.Server.Network.GameMessages.Messages;
 
 namespace ACE.Server.WorldObjects
@@ -327,6 +329,20 @@ namespace ACE.Server.WorldObjects
             if (UnderLifestoneProtection)
                 return;
 
+            // Class-ability reactions to a successful evade. Placed AFTER the lifestone guard on purpose:
+            // a player who cannot be hurt must not be farming stacks or procs off attacks that were never
+            // going to land. Monsters only - a PvP dodge feeds neither.
+            if (creatureAttacker != null && creatureAttacker is not Player)
+            {
+                // Surefooted (Rogue T2): melee evades only - the ability is about footwork against a
+                // melee press, and an archer at range would otherwise hold the pool up for free.
+                if (attackType == CombatType.Melee && TryGetClassAbility(ClassAbilityId.Surefooted, out var surefootedRank))
+                    OnSurefootedEvade(surefootedRank);
+
+                // Pocket Sand (Rogue T3): fires on ANY avoidance kind, so no CombatType gate here.
+                TryPocketSand(creatureAttacker);
+            }
+
             // http://asheron.wikia.com/wiki/Attributes
 
             // Endurance will also make it less likely that you use a point of stamina to successfully evade a missile or melee attack.
@@ -447,11 +463,26 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // SANGUINE WARD AND MANA BARRIER BOTH RUN BEFORE THIS METHOD IS CALLED, in
+            // EnchantmentManager.ApplyDamageTick, and must NOT be called again here. Both used to sit in
+            // this method, and both were defeated by ApplyDamageTick's own pre-clamp of the accumulated
+            // tick to the victim's current Health: an absorber handed a health-clamped figure always leaves
+            // Health strictly positive, so the `Health.Current <= 0` check below could never fire for a
+            // warded or barriered player. That clamp is gone and the absorbers were hoisted to the tick
+            // total itself, so `_amount` arrives here already reduced and genuinely uncapped - it can and
+            // should exceed current Health on a killing tick.
+            //
+            // What is left here is the vital write, the report and the death check, on whatever it is
+            // handed. Adding an absorb call back into this method would double-charge the ward pool and the
+            // Mana pool for one tick.
             var amount = (uint)Math.Round(_amount);
             var percent = (float)amount / Health.MaxValue;
 
-            // update health
-            var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
+            // update health. UpdateVitalDelta floors at zero on its own, so an overkill tick is written in
+            // full and falls through to the death check below. The applied figure is not captured -
+            // ApplyDamageTick owns the damage-history and per-damager credit accounting, and clamps THOSE
+            // to the health actually removed.
+            UpdateVitalDelta(Health, (int)-amount);
 
             // update stamina
             //UpdateVitalDelta(Stamina, -1);
@@ -489,9 +520,24 @@ namespace ACE.Server.WorldObjects
                 EnqueueBroadcast(new GameMessageSound(Guid, Sound.Wound1, 1.0f));
         }
 
+        /// <summary>
+        /// THE ONLY player-damage entry point that still carries the attack's CombatType - the overload it
+        /// forwards to takes a DamageType and has already lost it. That is why Surefooted's melee-only reset
+        /// lives here rather than in the general path: monster melee (Monster_Melee) and monster missile
+        /// (ProjectileCollisionHelper) both arrive through this overload with CombatType intact, so "a melee
+        /// hit landed on you" is decidable here and nowhere downstream.
+        /// </summary>
         public int TakeDamage(WorldObject source, DamageEvent damageEvent)
         {
-            return TakeDamage(source, damageEvent.DamageType, damageEvent.Damage, damageEvent.BodyPart, damageEvent.IsCritical, damageEvent.AttackConditions);
+            var damageTaken = TakeDamage(source, damageEvent.DamageType, damageEvent.Damage, damageEvent.BodyPart, damageEvent.IsCritical, damageEvent.AttackConditions);
+
+            // Surefooted (Rogue T2): a landed MELEE hit knocks the whole pool off. Gated on damage actually
+            // taken, so an Invincible or lifestone-protected player - whose damage the overload above
+            // discarded entirely - keeps their stacks.
+            if (damageTaken > 0 && damageEvent.CombatType == CombatType.Melee)
+                ClearSurefootedStacks("You are knocked off balance!");
+
+            return damageTaken;
         }
 
         /// <summary>
@@ -533,11 +579,10 @@ namespace ACE.Server.WorldObjects
             }
 
             // Sanguine Ward (Blood Mage T3): a transient absorb pool eats the hit BEFORE it reaches Health,
-            // the same place the cloak proc above reduces it. Deliberately NOT the Mana Barrier shape (a
-            // refund after the deduction): the ward must never put health back, only stop it leaving, so a
-            // caster who just spent 40% of their pool on Hecatomb is still at 60% with a ward up. Inert -
-            // and free, on an early-out - for every player with no ward running, which is everyone who is
-            // not mid-Hecatomb.
+            // the same place the cloak proc above reduces it. The ward must never put health back, only
+            // stop it leaving, so a caster who just spent 40% of their pool on Hecatomb is still at 60%
+            // with a ward up. Inert - and free, on an early-out - for every player with no ward running,
+            // which is everyone who is not mid-Hecatomb.
             var afterSanguineWard = AbsorbWithSanguineWard(source, amount);
 
             if (afterSanguineWard != amount)
@@ -546,9 +591,38 @@ namespace ACE.Server.WorldObjects
                 percent = (float)amount / Health.MaxValue;
             }
 
+            // Mana Barrier (Archmage T2): the barrier's share of the hit is paid out of Mana BEFORE the
+            // health write, in the ward's slot and to the ward's convention - `amount` is genuinely
+            // replaced, `percent` recomputed, and the vital write, the reported number and the death check
+            // all see the reduced hit. The defender notification below therefore reports the POST-barrier
+            // number, which is intended: the "absorbs N points" line plus that number add up to the hit
+            // that was thrown.
+            //
+            // IT USED TO RIDE ApplyIncomingDamageClassAbilities BELOW, AFTER THE WRITE, AND THAT WAS A BUG.
+            // UpdateVitalDelta clamps at zero, so on an overkill hit `damageTaken` is the victim's current
+            // health, not the damage thrown - the barrier refunded a share of the clamped figure and put
+            // the player back above zero before the death check. A 942-damage critical on 477 health was
+            // survived. The barrier no longer rides that hook at all; the dispatch below still runs, for
+            // Thorns, which is unaffected by this and still fires on a zero-damage landed hit.
+            var afterManaBarrier = AbsorbWithManaBarrier(source, amount);
+
+            if (afterManaBarrier != amount)
+            {
+                amount = afterManaBarrier;
+                percent = (float)amount / Health.MaxValue;
+            }
+
             // update health
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
             DamageHistory.Add(source, damageType, damageTaken);
+
+            // World Events measured boss damage scaling (TECH-DESIGN 2.16). This is the melee and missile
+            // site: monster melee (Monster_Melee) and monster missile (ProjectileCollisionHelper) both
+            // arrive here through the DamageEvent overload above. Placed on the FINAL damage taken, after
+            // every mitigation and after the cloak/ward reductions, because that is the number the
+            // controller has to steer. Inert - two field reads - for every hit not dealt by a world-event
+            // boss, which is all of them outside a run.
+            ACE.Server.WorldEvents.WorldEventBossDamageHook.NoteHit(source, this, (int)damageTaken, crit);
 
             // class abilities that react to a landed incoming hit (e.g. Thorns) - placed before the
             // death check so they still fire on a killing blow
@@ -695,6 +769,12 @@ namespace ACE.Server.WorldObjects
             var staminaMod = GetStaminaMod();
 
             var staminaCost = Math.Max(baseCost * staminaMod, 1);
+
+            // Efficiency (WeaponModId.Efficiency): reduces the final attack stamina cost. Read off the
+            // equipped melee/missile weapon only - see Player_WeaponMods.cs for why GetWeaponOnlyModValue
+            // and not the caster accessor.
+            staminaCost *= (float)WeaponModCombat.CostMultiplier(GetWeaponOnlyModValue(WeaponModId.Efficiency));
+            staminaCost = Math.Max(staminaCost, 1);
 
             //Console.WriteLine($"GetAttackStamina({powerAccuracy}) - burden: {burden}, baseCost: {baseCost}, staminaMod: {staminaMod}, staminaCost: {staminaCost}");
 

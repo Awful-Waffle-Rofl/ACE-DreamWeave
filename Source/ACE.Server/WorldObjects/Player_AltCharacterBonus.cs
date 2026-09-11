@@ -13,8 +13,9 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// The "alt character bonus" gives a catch-up boost to a character whose account already has a
         /// further-along character. While THIS character's progression (see <see cref="GetAltCharacterProgression"/>,
-        /// which folds enlightenment and level together) is below the highest progression among all characters on
-        /// the same account, the leveling XP this character earns is scaled up by alt_character_bonus_multiplier.
+        /// which folds enlightenment and level together) trails the highest progression among all characters on
+        /// the same account by at least alt_character_bonus_gap points, the leveling XP this character earns is
+        /// scaled up by alt_character_bonus_multiplier.
         ///
         /// The boost is multiplicative with every other XP bonus - most notably it stacks on top of the offline
         /// bonus (a fresh alt with banked offline time earns 2x from the offline bonus and 2x again from this,
@@ -70,8 +71,8 @@ namespace ACE.Server.WorldObjects
 
                 // A mule's level 180 is granted by ApplyMuleConversion, not earned, so it is not a real
                 // progression target - counting it would hand every other character on the account a
-                // permanent catch-up bonus the moment one character is muled. Same accessor idiom as
-                // Player_Mule.CountAccountMules, which reads this flag off the same account snapshot.
+                // permanent catch-up bonus the moment one character is muled. Nothing caps how many of an
+                // account's characters may be mules, so this skip has no upper bound to rely on.
                 if (character.GetProperty(PropertyBool.IsMule) ?? false)
                     continue;
 
@@ -105,8 +106,10 @@ namespace ACE.Server.WorldObjects
         public int AltCharacterBonusTargetLevel => altCharacterBonusTargetLevel;
 
         /// <summary>
-        /// TRUE if the feature is enabled and this character is below its account's login-time high-water mark
-        /// (i.e. it is an under-leveled alt of a further-along character and should receive the catch-up boost).
+        /// TRUE if the feature is enabled and this character trails its account's login-time high-water mark by
+        /// at least alt_character_bonus_gap progression points (i.e. it is far enough behind a further-along
+        /// character to receive the catch-up boost). A character within that gap - or at/ahead of the mark -
+        /// does not qualify.
         /// </summary>
         public bool IsAltCharacterBonusActive
         {
@@ -115,7 +118,9 @@ namespace ACE.Server.WorldObjects
                 if (!PropertyManager.GetBool("alt_character_bonus_enabled").Item)
                     return false;
 
-                return AltCharacterBonus.IsBelow(GetAltCharacterProgression(), altCharacterBonusThreshold);
+                var gap = PropertyManager.GetLong("alt_character_bonus_gap").Item;
+
+                return AltCharacterBonus.IsBelow(GetAltCharacterProgression(), altCharacterBonusThreshold, gap);
             }
         }
 
@@ -156,7 +161,7 @@ namespace ACE.Server.WorldObjects
 
             if (!IsAltCharacterBonusActive)
             {
-                Session.Network.EnqueueSend(new GameMessageSystemChat("You have no alt character bonus - this is (or is tied with) the furthest-along character on your account.", ChatMessageType.Broadcast));
+                Session.Network.EnqueueSend(new GameMessageSystemChat("You have no alt character bonus - you are not far enough behind the furthest-along character on your account.", ChatMessageType.Broadcast));
                 return;
             }
 

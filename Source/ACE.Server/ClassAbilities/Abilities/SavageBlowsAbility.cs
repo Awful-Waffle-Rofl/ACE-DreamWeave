@@ -24,8 +24,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your melee attacks hit for 6% more per rank but each swing costs extra stamina. " +
                           "Higher Weapon Tinkering increases the bonus; with insufficient stamina the swing lands normally.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },   // Berserker T2 GC: 3 flat, on par with the other T2 damage GCs (Deadeye)
+            CostPerRank = new[] { 1, 1, 1 },   // Berserker T2 GC: 1 flat, on par with the other T2 damage GCs (Deadeye)
             Implemented = true,
+            AffinitySkill = Skill.WeaponTinkering,
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)

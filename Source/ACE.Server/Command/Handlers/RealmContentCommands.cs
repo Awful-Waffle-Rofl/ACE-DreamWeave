@@ -194,12 +194,16 @@ namespace ACE.Server.Command.Handlers
             DatabaseManager.World.ClearCachedInstancesByLandblock(landblock);
         }
 
-        [CommandHandler("reload-realms", AccessLevel.Developer, CommandHandlerFlag.None, "Reloads the realm registry from the world database without a restart. Additive: new realms appear, existing realms pick up name/parent changes; removing a realm still requires a restart.")]
+        [CommandHandler("reload-realms", AccessLevel.Developer, CommandHandlerFlag.None, "Reloads the realm registry and the realm landblock rules from the world database without a restart. Additive: new realms appear, existing realms pick up name/parent changes; removing a realm still requires a restart.")]
         public static void HandleReloadRealms(Session session, params string[] parameters)
         {
             var (added, updated, missing) = RealmManager.Reload();
 
-            var msg = $"Realm registry reloaded: {added} added, {updated} updated, {RealmManager.GetAllRealms().Count - 1} realm(s) total.";
+            // reloads the strip manifest and drops the per-realm instance cache, whose
+            // entries were resolved against the rules being replaced
+            var rules = DatabaseManager.World.CacheAllRealmLandblockRules();
+
+            var msg = $"Realm registry reloaded: {added} added, {updated} updated, {RealmManager.GetAllRealms().Count - 1} realm(s) total, {rules} landblock rule(s) cached.";
 
             if (missing.Count > 0)
                 msg += $"\nWarning: realm id(s) {string.Join(", ", missing)} are no longer in the database but stay loaded - removing a realm requires a restart.";

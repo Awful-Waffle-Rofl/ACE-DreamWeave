@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Linq;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Server.Entity;
@@ -147,6 +150,181 @@ namespace ACE.Server.Tests
                 Assert.AreEqual(Retail[size - 1], Fellowship.GetMemberSharePercent(size, raised), 1e-9, $"size {size} moved");
 
             Assert.AreEqual(raised, 15 * Fellowship.GetMemberSharePercent(15, raised), 1e-9);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Fellowship.GetPresentShareTotal"/> - the fellowship-size multiplier is driven by how many
+    /// members would actually receive a share from THIS earner (a positive GetDistanceScalar), not by the
+    /// whole roster. An absent fellow (scalar 0.0) neither receives nor dilutes. Distance rules themselves
+    /// are out of scope here - this is pure denominator behavior.
+    /// </summary>
+    [TestClass]
+    public class FellowshipPresentShareTests
+    {
+        private const double DefaultPlateau = 2.7;
+        private const ulong Amount = 1000;
+
+        [TestMethod]
+        public void SoloEarner_ReturnsFullAmount()
+        {
+            Assert.AreEqual(1000ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void TwoPresent_ReturnsRetailTwoShare()
+        {
+            Assert.AreEqual(750ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0, 1.0 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void OneAbsentFellow_EarnerKeepsSoloAmount()
+        {
+            // the behaviour change: an absent fellow (scalar 0.0) does not dilute the earner's share
+            Assert.AreEqual(1000ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0, 0.0 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void ThreeAbsentFellows_EarnerKeepsSoloAmount()
+        {
+            Assert.AreEqual(1000ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0, 0.0, 0.0, 0.0 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void TwoPresentOneAbsent_AbsentIgnoredFromDenominator()
+        {
+            Assert.AreEqual(750ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0, 1.0, 0.0 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void FellowInTaperRange_CountsAsPresent()
+        {
+            // a fellow scaled to 0.5 by distance (the 600-1200 taper) is still present, not absent
+            Assert.AreEqual(750ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 1.0, 0.5 }, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void NinePresent_MatchesRetailPlateau()
+        {
+            var scalars = new List<double>();
+            for (var i = 0; i < 9; i++)
+                scalars.Add(1.0);
+
+            Assert.AreEqual(300ul, Fellowship.GetPresentShareTotal(Amount, scalars, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void NinePresentPlusElevenAbsent_AbsentMembersDoNotPushOntoThePlateauCurve()
+        {
+            var scalars = new List<double>();
+            for (var i = 0; i < 9; i++)
+                scalars.Add(1.0);
+            for (var i = 0; i < 11; i++)
+                scalars.Add(0.0);
+
+            Assert.AreEqual(300ul, Fellowship.GetPresentShareTotal(Amount, scalars, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void TwentyPresent_MatchesTodaysCapBehaviour()
+        {
+            var scalars = new List<double>();
+            for (var i = 0; i < 20; i++)
+                scalars.Add(1.0);
+
+            Assert.AreEqual(135ul, Fellowship.GetPresentShareTotal(Amount, scalars, DefaultPlateau));
+        }
+
+        [TestMethod]
+        public void EmptyOrAllAbsent_TreatedAsOnePresent()
+        {
+            // guard: the earner is always present, so an empty collection or an all-zero collection (which
+            // should not happen in practice - the earner's own scalar is always 1.0) falls back to solo.
+            Assert.AreEqual(1000ul, Fellowship.GetPresentShareTotal(Amount, new List<double>(), DefaultPlateau));
+            Assert.AreEqual(1000ul, Fellowship.GetPresentShareTotal(Amount, new List<double> { 0.0 }, DefaultPlateau));
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Fellowship.GetLevelWeight"/> - the per-member multiplier for the level-weighted
+    /// (non-EvenShare) branch of SplitXp/SplitLuminance. Normalised so weights sum to the present count,
+    /// which is what makes the weighted branch pay out the same group total as the EvenShare branch.
+    /// </summary>
+    [TestClass]
+    public class FellowshipLevelWeightTests
+    {
+        private const double DefaultPlateau = 2.7;
+        private const ulong Amount = 1000;
+
+        [TestMethod]
+        public void EqualXpToNext_EveryWeightIsExactlyOne()
+        {
+            foreach (var n in new[] { 2, 5, 9, 20 })
+            {
+                const ulong perMember = 1000;
+                var sum = perMember * (ulong)n;
+
+                for (var i = 0; i < n; i++)
+                    Assert.AreEqual(1.0, Fellowship.GetLevelWeight(perMember, sum, n), 1e-9, $"n={n}");
+            }
+        }
+
+        [TestMethod]
+        public void MixedSet_WeightsSumToPresentCount()
+        {
+            ulong[] xpToNext = { 100, 300, 600 };
+            var sum = xpToNext.Aggregate(0ul, (a, b) => a + b);
+            var count = xpToNext.Length;
+
+            var totalWeight = xpToNext.Sum(x => Fellowship.GetLevelWeight(x, sum, count));
+
+            Assert.AreEqual((double)count, totalWeight, 1e-9);
+        }
+
+        [TestMethod]
+        public void LowLevelMember_GetsSmallButNonZeroWeightAgainstHighLevel()
+        {
+            ulong low = 3_000;
+            ulong high = 400_000;
+            var sum = low + high;
+
+            var lowWeight = Fellowship.GetLevelWeight(low, sum, 2);
+            var highWeight = Fellowship.GetLevelWeight(high, sum, 2);
+
+            Assert.IsTrue(lowWeight > 0.0, "low-level weight must be non-zero");
+            Assert.IsTrue(lowWeight < highWeight, "low-level weight must be smaller than the high-level weight");
+            Assert.AreEqual(2.0, lowWeight + highWeight, 1e-9);
+        }
+
+        [TestMethod]
+        public void ZeroXpToNextLevelSum_ReturnsOne()
+        {
+            Assert.AreEqual(1.0, Fellowship.GetLevelWeight(0, 0, 3), 1e-9);
+        }
+
+        [TestMethod]
+        public void NonPositivePresentCount_ReturnsOne()
+        {
+            Assert.AreEqual(1.0, Fellowship.GetLevelWeight(500, 1000, 0), 1e-9);
+            Assert.AreEqual(1.0, Fellowship.GetLevelWeight(500, 1000, -1), 1e-9);
+        }
+
+        [TestMethod]
+        public void GroupTotalParity_WeightedBranchPaysTheSameGroupTotalAsEvenShare()
+        {
+            // build totalAmount the same way SplitXp does (present-scalar-aware), then confirm that
+            // sum(totalAmount * weight_i) == presentCount * totalAmount within rounding - i.e. the
+            // weighted branch and the EvenShare branch distribute the same group total.
+            ulong[] xpToNext = { 100, 300, 600 };
+            var count = xpToNext.Length;
+            var sum = xpToNext.Aggregate(0ul, (a, b) => a + b);
+
+            var scalars = new List<double> { 1.0, 1.0, 1.0 };
+            var totalAmount = Fellowship.GetPresentShareTotal(Amount, scalars, DefaultPlateau);
+
+            var distributed = xpToNext.Sum(x => totalAmount * Fellowship.GetLevelWeight(x, sum, count));
+
+            Assert.AreEqual(count * (double)totalAmount, distributed, 1e-6);
         }
     }
 }

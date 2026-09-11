@@ -46,6 +46,27 @@ namespace ACE.Server.Managers
         public static DateTime ShutdownTime { get; private set; } = DateTime.MinValue;
 
         /// <summary>
+        /// Guards the transition into final shutdown so only one thread ever runs it. Two callers can
+        /// reach ShutdownServer at nearly the same time: a repeat container stop signal (SIGTERM/SIGINT)
+        /// arriving during an already-pending countdown routes through DoShutdownNow, which runs
+        /// ShutdownServer synchronously on the signal thread while the original countdown thread started
+        /// by BeginShutdown is still waiting on its own captured shutdownTime; or /shutdown racing a
+        /// SIGTERM the same way. Without this guard, the loser's wait loop would eventually expire and
+        /// re-run the entire final shutdown body (logoff, landblock unload, DatabaseManager.Stop,
+        /// Environment.Exit) concurrently with the winner.
+        /// </summary>
+        private static int finalShutdownStarted;
+
+        /// <summary>
+        /// Generation counter for the hard shutdown deadline (see ArmShutdownDeadline). Each arming
+        /// captures the current value; a deadline thread that wakes to find the counter has moved on
+        /// belongs to a superseded shutdown and returns without doing anything. CancelShutdown bumps it,
+        /// which is what stops a cancelled shutdown's deadline from force-exiting a server that is
+        /// happily still running minutes later.
+        /// </summary>
+        private static int shutdownDeadlineGeneration;
+
+        /// <summary>
         /// Sets the Shutdown Interval in Seconds
         /// </summary>
         /// <param name="interval">postive value representing seconds</param>
@@ -68,6 +89,8 @@ namespace ACE.Server.Managers
         {
             ShutdownInitiated = true;
 
+            ArmShutdownDeadline();
+
             var shutdownThread = new Thread(ShutdownServer);
             shutdownThread.Name = "Shutdown Server";
             shutdownThread.Start();
@@ -77,18 +100,248 @@ namespace ACE.Server.Managers
         /// Calling this function will always cancel an in-progress shutdown (application unload). This will also
         /// stop the shutdown wait thread and alert users that the server will stay in operation.
         /// </summary>
+        /// <remarks>
+        /// If this countdown was started by a container stop signal (SIGTERM/SIGINT), cancelling it here does
+        /// NOT stop the container: Docker will still send SIGKILL once stop_grace_period elapses (600s in both
+        /// deploy/stage and deploy/prod docker-compose.yml). Cancelling only buys time within that window - it
+        /// does not cancel the container stop itself.
+        /// </remarks>
         public static void CancelShutdown()
         {
             ShutdownInitiated = false;
             ShutdownTime = DateTime.MinValue;
+
+            // Retire any armed hard deadline along with the shutdown it belonged to. Without this, a
+            // shutdown that was started and then cancelled would still force-exit the process once its
+            // deadline elapsed - turning a cancel into a delayed, unexplained outage.
+            Interlocked.Increment(ref shutdownDeadlineGeneration);
         }
 
         public static void DoShutdownNow()
         {
             SetShutdownInterval(0);
             ShutdownInitiated = true;
+
+            // Armed after SetShutdownInterval(0) on purpose, so the force-now path gets the short
+            // deadline (0 + ShutdownHardDeadlineSeconds) rather than inheriting a long countdown's.
+            ArmShutdownDeadline();
+
             PlayerManager.BroadcastToAll(new GameMessageSystemChat("Broadcast from System> ATTENTION - This Asheron's Call Server is shutting down NOW!!!!", ChatMessageType.WorldBroadcast));
             ShutdownServer();
+        }
+
+        /// <summary>
+        /// Fast, world-independent shutdown. This is the path taken when the world thread is dead or
+        /// hung, where the normal ShutdownServer body cannot complete: three of its waits (players to
+        /// log off, landblocks to unload, WorldActive to clear) are unbounded and every one of them is
+        /// serviced by the world thread. On 2026-09-01 a container stop hit exactly that and had to be
+        /// force-killed after the 300s warned countdown ran on a thread that was already dead.
+        ///
+        /// It deliberately does very little. The ONE thing worth doing with a dead world is draining the
+        /// shard database queue: SerializedShardDatabase runs on its own thread and is still alive and
+        /// still processing when the world is not, and its Stop() abandons whatever is left queued
+        /// rather than flushing it. Everything else here is teardown.
+        ///
+        /// NOTHING in this path may touch the world thread: no PlayerManager.GetAllOnline, no
+        /// LandblockManager, no WorldManager.EnqueueAction, no wait on WorldManager.WorldActive, no
+        /// ForceLogoff. If a future change adds one, this method stops working in precisely the
+        /// situation it exists for, and it will look fine in every test where the world is healthy.
+        /// </summary>
+        /// <param name="reason">Logged verbatim. Say which caller decided this and why.</param>
+        /// <param name="exitCode">70 for a watchdog self-exit, 0 for a requested stop on a dead world.</param>
+        public static void DoFastShutdown(string reason, int exitCode)
+        {
+            // ORDER IS LOAD-BEARING: these two flags go first, before anything that could exit.
+            // Environment.Exit at the bottom re-enters Program.OnProcessExit, which routes container
+            // exits back into InitiateContainerShutdown("Process exit"), whose repeat-signal branch
+            // calls the slow, world-dependent DoShutdownNow() unless ShutdownInProgress is already
+            // true. Setting these later - or not at all - reintroduces the exact hang this method
+            // exists to remove.
+            ShutdownInitiated = true;
+            ShutdownInProgress = true;
+
+            // Same reasoning one level down: claim the final-shutdown latch so a countdown thread that
+            // is mid-wait can never enter the normal final shutdown body behind us.
+            Interlocked.Exchange(ref finalShutdownStarted, 1);
+
+            log.Warn($"FAST SHUTDOWN ({reason}) - skipping player logoff, landblock unload and the world stop, " +
+                     $"because those all depend on the world thread. Draining the shard database queue, then exiting with code {exitCode}.");
+
+            // Every teardown step is best-effort, and Environment.Exit below must be reached whatever
+            // any of them does. This is not defensive habit, it is the difference between this method
+            // working and this method making things worse: the only caller that can reach here without
+            // an operator behind it is WorldWatchdog, whose exit is a ONE-SHOT latch and whose poll loop
+            // swallows exceptions. A throw escaping here would therefore be logged once, never retried,
+            // and would leave the process wedged with ShutdownInProgress already true - at which point a
+            // later "docker stop" hits InitiateContainerShutdown's repeat-signal branch, sees that flag,
+            // logs "shutdown already in progress, ignoring repeat signal" and does nothing at all. Only
+            // SIGKILL would recover it, and SIGKILL loses the shard drain. Being stuck is the exact
+            // thing this path exists to end, so it may never be the thing this path causes.
+            try
+            {
+                PropertyManager.StopUpdating();
+
+                // Note: no ResyncVariables() here, unlike the normal path. That writes property state
+                // back through the world, and this path exists precisely for when the world cannot
+                // service it.
+
+                DrainShardQueue(TimeSpan.FromSeconds(GetShutdownDrainSeconds()));
+
+                DatabaseManager.Stop();
+            }
+            catch (Exception ex)
+            {
+                log.Error("Fast shutdown teardown failed. Exiting anyway - some shard state may be unsaved.", ex);
+            }
+
+            log.Warn($"Fast shutdown complete. Exiting at {DateTime.UtcNow.ToCommonString()} with code {exitCode}.");
+
+            Environment.Exit(exitCode);
+        }
+
+        /// <summary>
+        /// Arms a one-shot background deadline that force-exits the process with code 71 if a shutdown
+        /// that has already begun never finishes.
+        ///
+        /// This covers the case the container-stop triage cannot: a world thread that is healthy when
+        /// the shutdown starts and hangs partway through it. By then the fast path has not been chosen,
+        /// and ShutdownServer is sitting in one of its three unbounded waits with nothing to time it
+        /// out. Docker's stop_grace_period would eventually SIGKILL, but a SIGKILL loses the shard queue
+        /// drain, so exiting ourselves - after one more drain attempt - is strictly better.
+        ///
+        /// The deadline is derived from ShutdownInterval rather than hardcoded, so an admin
+        /// "/shutdown 600" gets 600 + ShutdownHardDeadlineSeconds and is not cut off mid-countdown.
+        ///
+        /// It is a no-op on a normal shutdown for free: the thread is a background thread, so a normal
+        /// Environment.Exit at the end of ShutdownServer tears it down before it can ever wake.
+        /// </summary>
+        private static void ArmShutdownDeadline()
+        {
+            var hardDeadlineSeconds = ConfigManager.Config.Server.ShutdownHardDeadlineSeconds;
+
+            if (hardDeadlineSeconds <= 0)
+            {
+                log.Warn("ShutdownHardDeadlineSeconds is 0 - no hard shutdown deadline is armed. A world thread that hangs during shutdown will block the stop indefinitely.");
+                return;
+            }
+
+            var generation = Interlocked.Increment(ref shutdownDeadlineGeneration);
+            var waitSeconds = ShutdownInterval + (uint)hardDeadlineSeconds;
+
+            var deadlineThread = new Thread(() =>
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(waitSeconds));
+
+                // Superseded by a later arming, or by a cancel. Either way this deadline is not ours to
+                // fire - see shutdownDeadlineGeneration.
+                if (Volatile.Read(ref shutdownDeadlineGeneration) != generation)
+                    return;
+
+                // Cancelled outright and never re-armed.
+                if (!ShutdownInitiated && !ShutdownInProgress)
+                    return;
+
+                log.Fatal($"HARD SHUTDOWN DEADLINE reached: {waitSeconds}s elapsed since shutdown began " +
+                          $"(ShutdownInterval {ShutdownInterval}s + ShutdownHardDeadlineSeconds {hardDeadlineSeconds}s) and the shutdown never completed. " +
+                          $"Stuck phase: {DescribeStuckShutdownPhase()}. Draining the shard database queue and force-exiting with code 71.");
+
+                try
+                {
+                    DrainShardQueue(TimeSpan.FromSeconds(GetShutdownDrainSeconds()));
+                    DatabaseManager.Stop();
+                }
+                catch (Exception ex)
+                {
+                    // Never let teardown trouble stop the force-exit: being stuck is the thing we are
+                    // here to end.
+                    log.Error("Hard shutdown deadline: shard drain / database stop failed, exiting anyway.", ex);
+                }
+
+                Environment.Exit(71);
+            });
+
+            deadlineThread.Name = "Shutdown Deadline";
+            deadlineThread.IsBackground = true;
+            deadlineThread.Start();
+        }
+
+        /// <summary>
+        /// Best guess at which shutdown phase never completed, for the FATAL line above. Reads only
+        /// counts, all of which are safe to read from another thread (the metrics scrape thread already
+        /// reads two of them once a scrape).
+        /// </summary>
+        private static string DescribeStuckShutdownPhase()
+        {
+            try
+            {
+                if (!ShutdownInProgress)
+                    return "the warned countdown never expired (ShutdownServer had not reached final shutdown)";
+
+                var playerCount = PlayerManager.GetOnlineCount();
+                if (playerCount > 0)
+                    return $"waiting for {playerCount} player(s) to log off";
+
+                var sessionCount = NetworkManager.GetAuthenticatedSessionCount();
+                if (sessionCount > 0)
+                    return $"waiting for {sessionCount} authenticated session(s) to disconnect";
+
+                var landblockCount = LandblockManager.GetLoadedLandblocks().Count;
+                if (landblockCount > 0)
+                    return $"waiting for {landblockCount} landblock(s) to unload";
+
+                if (WorldManager.WorldActive)
+                    return "waiting for the world thread to stop";
+
+                return $"draining the shard database queue ({DatabaseManager.Shard?.QueueCount ?? 0} pending)";
+            }
+            catch (Exception ex)
+            {
+                return $"undetermined ({ex.GetType().Name})";
+            }
+        }
+
+        /// <summary>
+        /// Waits for the shard database queue to drain, up to <paramref name="cap"/>.
+        ///
+        /// The cap is the point of this method. SerializedShardDatabase.Stop() calls CompleteAdding()
+        /// and joins the worker, and the worker loop runs "while (!_queue.IsAddingCompleted)" - so Stop
+        /// ABANDONS everything still queued rather than flushing it. This wait is therefore the only
+        /// thing that actually saves outstanding shard work, on both the normal and the fast path, and
+        /// it has to be bounded so that a queue that is not draining (a database that is down, say)
+        /// cannot hold a container stop open until SIGKILL.
+        /// </summary>
+        private static void DrainShardQueue(TimeSpan cap)
+        {
+            var shard = DatabaseManager.Shard;
+
+            if (shard == null)
+                return;
+
+            var deadline = DateTime.UtcNow + cap;
+            var logUpdateTS = DateTime.MinValue;
+            int shardQueueCount;
+
+            while ((shardQueueCount = shard.QueueCount) > 0)
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    log.Error($"Shard database queue did not drain within {cap.TotalSeconds:0}s - abandoning {shardQueueCount} pending operation(s). " +
+                              $"Stopping the shard database does not flush them, so this is unsaved shard state.");
+                    return;
+                }
+
+                logUpdateTS = LogStatusUpdate(logUpdateTS, $"Waiting for database queue ({shardQueueCount}) to empty...");
+                Thread.Sleep(10);
+            }
+        }
+
+        /// <summary>
+        /// ShutdownDrainSeconds, floored at 1. A configured 0 would make the drain a no-op and silently
+        /// throw away queued shard writes on every shutdown, which is never what an operator means.
+        /// </summary>
+        private static int GetShutdownDrainSeconds()
+        {
+            return Math.Max(1, ConfigManager.Config.Server.ShutdownDrainSeconds);
         }
 
         /// <summary>
@@ -120,10 +373,25 @@ namespace ACE.Server.Managers
                     return;
                 }
 
+                // Another runner (a repeat container stop signal that called DoShutdownNow, or /shutdown
+                // racing a SIGTERM) may already be inside the final shutdown body below. If so, this
+                // thread is stale: stop broadcasting notices and exit quietly instead of continuing to
+                // wait on our own captured shutdownTime, which would otherwise eventually re-enter and
+                // re-run the entire final shutdown a second time.
+                if (ShutdownInProgress)
+                    return;
+
                 lastNoticeTime = NotifyPlayersOfPendingShutdown(lastNoticeTime, shutdownTime.AddSeconds(1));
 
                 Thread.Sleep(10);
             }
+
+            // Only one thread may ever proceed past this point into final shutdown. Two callers can
+            // arrive here at nearly the same time (see finalShutdownStarted's doc comment above), so
+            // guard the transition with a CAS: the loser returns immediately instead of duplicating
+            // logoff / landblock unload / DatabaseManager.Stop / Environment.Exit.
+            if (Interlocked.CompareExchange(ref finalShutdownStarted, 1, 0) != 0)
+                return;
 
             ShutdownInProgress = true;
 
@@ -211,14 +479,9 @@ namespace ACE.Server.Managers
             log.Info("Saving OfflinePlayers that have unsaved changes...");
             PlayerManager.SaveOfflinePlayersWithChanges();
 
-            // Wait for the database queue to empty
-            logUpdateTS = DateTime.MinValue;
-            int shardQueueCount;
-            while ((shardQueueCount = DatabaseManager.Shard.QueueCount) > 0)
-            {
-                logUpdateTS = LogStatusUpdate(logUpdateTS, $"Waiting for database queue ({shardQueueCount}) to empty...");
-                Thread.Sleep(10);
-            }
+            // Wait for the database queue to empty, bounded by ShutdownDrainSeconds. Shared with the
+            // fast path so both shutdowns save the same work in the same way.
+            DrainShardQueue(TimeSpan.FromSeconds(GetShutdownDrainSeconds()));
 
             // Write exit to console/log
             log.Info($"Exiting at {DateTime.UtcNow.ToCommonString()}");

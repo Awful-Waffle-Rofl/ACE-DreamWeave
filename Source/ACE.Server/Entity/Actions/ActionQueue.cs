@@ -10,8 +10,9 @@ namespace ACE.Server.Entity.Actions
     {
         protected ConcurrentQueue<IAction> Queue { get; } = new ConcurrentQueue<IAction>();
 
-        #if WRAP_AND_MEASURE_ACT_WITH_STOPWATCH
         private static readonly log4net.ILog log = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
+        #if WRAP_AND_MEASURE_ACT_WITH_STOPWATCH
         private readonly System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
         #endif
 
@@ -30,7 +31,34 @@ namespace ACE.Server.Entity.Actions
                     sw.Restart();
                     #endif
 
-                    Tuple<IActor, IAction> enqueue = result.Act();
+                    // Deferred/queued work runs on the world-simulation thread, far from the handler that
+                    // scheduled it. An unhandled exception here escapes to WorldManager's fatal handler, which
+                    // does NOT crash the process - it STOPS the world (process up, sessions connected, nothing
+                    // ticking). This one loop drains all four action queues (inbound messages, WorldManager's,
+                    // every landblock's, every player's), so one bad action must fail alone and be logged with
+                    // the actor's identity, never take the world down. See the reference pattern in
+                    // Landblock.CreateWorldObjects.
+                    Tuple<IActor, IAction> enqueue = null;
+
+                    try
+                    {
+                        enqueue = result.Act();
+                    }
+                    catch (Exception ex)
+                    {
+                        if (result is ActionEventDelegate failedActionEventDelegate)
+                        {
+                            if (failedActionEventDelegate.Action.Target is WorldObjects.WorldObject failedWorldObject)
+                                log.Error($"ActionQueue.RunActions(): Act() threw. Method.Name: {failedActionEventDelegate.Action.Method.Name}, Target: {failedActionEventDelegate.Action.Target} 0x{failedWorldObject.Guid}:{failedWorldObject.Name} [{failedWorldObject.WeenieClassId} - {failedWorldObject.WeenieType}]", ex);
+                            else
+                                log.Error($"ActionQueue.RunActions(): Act() threw. Method.Name: {failedActionEventDelegate.Action.Method.Name}, Target: {failedActionEventDelegate.Action.Target}", ex);
+                        }
+                        else
+                            log.Error($"ActionQueue.RunActions(): Act() threw. Action type: {result?.GetType().FullName}", ex);
+
+                        // no enqueue result to propagate on failure; the remaining queued actions must still drain this tick
+                        continue;
+                    }
 
                     #if WRAP_AND_MEASURE_ACT_WITH_STOPWATCH
                     sw.Stop();

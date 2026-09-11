@@ -1,5 +1,7 @@
 using System;
+using System.Threading;
 
+using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
@@ -11,6 +13,56 @@ namespace ACE.Server.WorldObjects
 {
     partial class Player
     {
+        /// <summary>
+        /// /lph window start (unix seconds). Purely in-memory and per-session by construction - a Player is
+        /// built at login and discarded at logout, so nothing here is persisted. Opened by PlayerEnterWorld
+        /// and reset by /lph start.
+        /// </summary>
+        private double lumRateWindowStart;
+
+        /// <summary>
+        /// Luminance earned since lumRateWindowStart, for the /lph command. AddLuminance runs on landblock
+        /// threads, so this is only ever touched through Interlocked.
+        /// </summary>
+        private long lumRateWindowEarned;
+
+        /// <summary>
+        /// Luminance earned in the current /lph window.
+        /// </summary>
+        public long LumRateWindowEarned => Interlocked.Read(ref lumRateWindowEarned);
+
+        /// <summary>
+        /// Unix-seconds start time of the current /lph window.
+        /// </summary>
+        public double LumRateWindowStart => lumRateWindowStart;
+
+        /// <summary>
+        /// Opens a fresh /lph window: clears the accumulator and re-anchors the start time to now.
+        /// </summary>
+        public void ResetLumRateWindow()
+        {
+            lumRateWindowStart = Time.GetUnixTime();
+            Interlocked.Exchange(ref lumRateWindowEarned, 0);
+        }
+
+        /// <summary>
+        /// Minimum window length, in seconds, before <see cref="CalcLumPerHour"/> will report a rate.
+        /// </summary>
+        public const double MinLumRateWindowSeconds = 5.0;
+
+        /// <summary>
+        /// Luminance-per-hour rate for a window. Returns null when the window is too short to
+        /// produce a meaningful rate (see <see cref="MinLumRateWindowSeconds"/>), so callers can
+        /// report the raw total instead of a number divided by ~0.
+        /// </summary>
+        public static double? CalcLumPerHour(long earned, double elapsedSeconds)
+        {
+            if (!double.IsFinite(elapsedSeconds) || elapsedSeconds < MinLumRateWindowSeconds)
+                return null;
+
+            return earned / elapsedSeconds * 3600.0;
+        }
+
         /// <summary>
         /// Applies luminance modifiers before adding luminance
         /// </summary>
@@ -64,7 +116,7 @@ namespace ACE.Server.WorldObjects
         /// <param name="combatShare">
         /// TRUE when this grant is a fellowship member's share of a fellow's *kill* (set by Fellowship.SplitLuminance).
         /// Together with xpType == Kill this identifies combat-sourced Luminance eligible for the receiving
-        /// player's offline bonus, distinguishing it from a fellowship share of quest Luminance.
+        /// player's offline bonus. Quest luminance never enters the fellowship split, so it never needs this flag.
         /// </param>
         public void GrantLuminance(long amount, XpType xpType, ShareType shareType, bool combatShare)
         {
@@ -75,7 +127,7 @@ namespace ACE.Server.WorldObjects
             if (IsOlthoiPlayer)
                 return;
 
-            if (Fellowship != null && Fellowship.ShareXP && shareType.HasFlag(ShareType.Fellowship))
+            if (Fellowship != null && Fellowship.ShareXP && shareType.HasFlag(ShareType.Fellowship) && xpType != XpType.Quest)
             {
                 // this will divy up the luminance, and re-call this function
                 // with ShareType.Fellowship removed
@@ -105,6 +157,9 @@ namespace ACE.Server.WorldObjects
 
             // Analytics: per-character luminance rate (Tier-1). Lock-free Interlocked.Add, flushed off-thread.
             AnalyticsManager.RecordLuminance(this, amount);
+
+            // /lph per-session window accumulator (see ResetLumRateWindow / CalcLumPerHour).
+            Interlocked.Add(ref lumRateWindowEarned, amount);
 
             // WaffleACE: all earned Luminance goes straight to the persistent, uncapped bank
             // (see Player_Bank.cs) instead of the retail available/maximum pool. There is no

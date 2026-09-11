@@ -52,7 +52,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "instead of one. Each secondary drain resolves on its own and all of the healing " +
                           "returns to you. Grants at most one Blood Charge per cast. Against monsters only.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 

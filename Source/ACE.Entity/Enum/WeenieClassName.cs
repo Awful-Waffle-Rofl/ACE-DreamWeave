@@ -31033,6 +31033,18 @@ namespace ACE.Entity.Enum
         W_MATERIALACE36635FOOLPROOFYELLOWTOPAZ = 36635,
         W_MATERIALACE36636FOOLPROOFZIRCON = 36636,
 
+        // WaffleACE additions (Content/wcid-registry.tsv)
+        //
+        // NOTE: Foolproof White Quartz (wcid 1002700, Life Rending imbue) is deliberately NOT listed
+        // here. This enum is backed by `ushort` (max 65535, confirmed by the compiler: a member
+        // initializer of 1002700 fails with CS0031 "Constant value '1002700' cannot be converted to a
+        // 'ushort'") and every fork wcid range starts at 1000000, so no wcid allocated under
+        // Content/wcid-registry.tsv's fork convention can ever be a WeenieClassName member. Code that
+        // needs to recognize 1002700 compares the raw uint wcid directly instead (see
+        // RecipeManager.foolproofTinkers and RecipeManager_New.GetNewRecipe's pre-switch guard) -
+        // do not add high wcids here, and do not cast a uint > 65535 to WeenieClassName, which
+        // silently truncates rather than erroring.
+
         W_MATERIALSANDSTONE100_CLASS = 43946,
 
         W_CELESTIALHANDSHIELDCOVER_CLASS            = 44466,

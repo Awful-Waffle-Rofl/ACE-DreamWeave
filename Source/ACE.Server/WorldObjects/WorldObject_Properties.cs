@@ -910,6 +910,16 @@ namespace ACE.Server.WorldObjects
             set => SetProperty(PropertyDataId.Setup, value);
         }
 
+        /// <summary>
+        /// Raw PhysicsScript DataID (0x33xxxxxx) replayed at this object whenever a client builds it.
+        /// Additive - it does not disturb the object's own baked effect. See VisualEffectManager.
+        /// </summary>
+        public uint? VisualEffectScript
+        {
+            get => GetProperty(PropertyDataId.VisualEffectScript);
+            set { if (!value.HasValue) RemoveProperty(PropertyDataId.VisualEffectScript); else SetProperty(PropertyDataId.VisualEffectScript, value.Value); }
+        }
+
         // PhysicsDescriptionFlag.Parent is pulled from WielderId
 
         public List<HeldItem> Children { get; } = new List<HeldItem>();
@@ -944,7 +954,11 @@ namespace ACE.Server.WorldObjects
 
         public Vector3 Omega => PhysicsObj?.Omega ?? Vector3.Zero;
 
-        public SetupModel CSetup => DatManager.PortalDat.ReadFromDat<SetupModel>(SetupTableId);
+        /// <summary>
+        /// Never null, never throws: an unusable Setup DID yields a neutral empty SetupModel.
+        /// See WorldObject_Setup.cs for why this must not fault.
+        /// </summary>
+        public SetupModel CSetup => GetSetupModel(SetupTableId);
 
         public uint? DefaultScriptId
         {
@@ -1222,6 +1236,49 @@ namespace ACE.Server.WorldObjects
         {
             get => GetProperty(PropertyInt.Value);
             set { if (!value.HasValue) RemoveProperty(PropertyInt.Value); else SetProperty(PropertyInt.Value, value.Value); }
+        }
+
+        /// <summary>
+        /// The Value the CLIENT is told about, as opposed to the real <see cref="Value"/> the server
+        /// prices and gates on. Identical to Value for anything worth at least 1 pyreal and for every
+        /// object that can never sit in a pack (creatures, corpses, and anything Stuck: doors, portals,
+        /// lifestones, hooks, chests). For a pickable item whose real Value is null, zero or negative
+        /// it is 1 - see <see cref="IsClientValueSpoofed"/>.
+        ///
+        /// Why: the AC client refuses to drag an item into ANY vendor's sell pane when the item's
+        /// Value it holds locally is 0, and it learns that Value from three server messages - the
+        /// create-object weenie header (only written when Value is greater than 0, so a Value-0 item has
+        /// no Value at all client-side), the identify response, and property-update messages. Several
+        /// rares (e.g. Lugian's Pearl, wcid 30240) ship with Value 0 and are meant to be storable in a
+        /// mule (PersonalVendor). The first fix nudged Value=1 by property update only when a mule
+        /// opened; an item created after the open, or appraised after it, was back at 0 and refused
+        /// again (live test 2026-09-02). Feeding 1 through every channel the client reads makes the
+        /// spoof independent of ordering.
+        ///
+        /// Server-side nothing changes: Player_Commerce.IsAcceptableToSell reads the real Value and
+        /// still refuses a Value-0 item at every non-mule vendor with "has no value and cannot be
+        /// sold", so the only visible effect at a town vendor is a drag that is then refused. No
+        /// SetProperty, no biota write.
+        /// </summary>
+        public int ClientValue => GetClientValue(this);
+
+        /// <summary>
+        /// Static core of <see cref="ClientValue"/>, so the rule is testable on a bare WorldObject.
+        /// </summary>
+        internal static int GetClientValue(WorldObject wo)
+        {
+            return IsClientValueSpoofed(wo) ? 1 : (wo.Value ?? 0);
+        }
+
+        /// <summary>
+        /// True when the client is told 1 in place of this object's real Value: the real Value is null,
+        /// zero or negative AND the object is something a player could hold. Creatures, corpses and
+        /// Stuck world fixtures keep their real Value so the header change stays off doors, portals,
+        /// lifestones, hooks and chests (code review on 60471c991, blast-radius finding).
+        /// </summary>
+        internal static bool IsClientValueSpoofed(WorldObject wo)
+        {
+            return (wo.Value ?? 0) <= 0 && wo is not Creature && wo is not Corpse && !wo.Stuck;
         }
 
         /// <summary>
@@ -3119,6 +3176,21 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// In addition to setting StackSize, this will also set the EncumbranceVal and Value appropriately.
+        ///
+        /// StackUnitValue / StackUnitEncumbrance are the per-unit figures, but a stackable weenie is NOT
+        /// guaranteed to carry them: retail defines MaxStackSize with no INT 15 (StackUnitValue) row on
+        /// items including 41507/41508/41509 (the Item Tinkering Armatures, Value up to 10,000), 38794 and
+        /// 38795 (the Black Market elixirs, Value 100,000) and 29159 Yeast Liquid. Treating a missing
+        /// per-unit property as 0 wrote the item's own Value away to nothing on the very first
+        /// SetStackSize - including the SetStackSize(1) a vendor performs on every single purchase - so
+        /// those items priced, appraised and resold at 0. On a vendor that meant the Math.Max(1, ...)
+        /// floor in Vendor.GetSellCost sold ANY quantity of them for one unit of currency.
+        ///
+        /// So when a per-unit property is absent, derive it from what this object is worth right now,
+        /// BEFORE StackSize is overwritten. On a fresh single item that is simply the weenie's own Value;
+        /// on an existing stack it divides the aggregate back out. Nothing changes for the great majority
+        /// of stackables, which do define both per-unit properties, and an existing Value-0 stack stays
+        /// at 0 rather than having value invented for it.
         /// </summary>
         /// <param name="value"></param>
         public void SetStackSize(int? value)
@@ -3127,10 +3199,15 @@ namespace ACE.Server.WorldObjects
             if (!isStackable)
                 return;
 
+            var currentStackSize = Math.Max(1, StackSize ?? 1);
+
+            var unitEncumbrance = StackUnitEncumbrance ?? (EncumbranceVal ?? 0) / currentStackSize;
+            var unitValue = StackUnitValue ?? (Value ?? 0) / currentStackSize;
+
             StackSize = value;
 
-            EncumbranceVal = (StackUnitEncumbrance ?? 0) * (StackSize ?? 1);
-            Value = (StackUnitValue ?? 0) * (StackSize ?? 1);
+            EncumbranceVal = unitEncumbrance * (StackSize ?? 1);
+            Value = unitValue * (StackSize ?? 1);
         }
 
         /// <summary>
@@ -3310,6 +3387,37 @@ namespace ACE.Server.WorldObjects
         {
             get => GetProperty(PropertyBool.DontTurnOrMoveWhenGiving) ?? false;
             set { if (!value) RemoveProperty(PropertyBool.DontTurnOrMoveWhenGiving); else SetProperty(PropertyBool.DontTurnOrMoveWhenGiving, value); }
+        }
+
+        /// <summary>
+        /// WaffleACE fork (PropertyBool 9038). On a creature, every create_list Wield item it spawns is
+        /// scaled to the creature's own body scale, so a scaled-up boss holds a proportionate weapon.
+        /// See Creature_Equipment.GenerateWieldList / ResolveWieldScale.
+        /// </summary>
+        public bool ScaleWieldedToBody
+        {
+            get => GetProperty(PropertyBool.ScaleWieldedToBody) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.ScaleWieldedToBody); else SetProperty(PropertyBool.ScaleWieldedToBody, value); }
+        }
+
+        /// <summary>
+        /// WaffleACE fork (PropertyBool 9039): this object is announced to players as soon as its landblock is in
+        /// their 3x3, skipping ObjectMaint's 112.5 m initial-visibility clamp. Read once in InitPhysicsObj.
+        /// </summary>
+        public bool IgnoreInitialClamp
+        {
+            get => GetProperty(PropertyBool.IgnoreInitialClamp) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.IgnoreInitialClamp); else SetProperty(PropertyBool.IgnoreInitialClamp, value); }
+        }
+
+        /// <summary>
+        /// WaffleACE fork (PropertyBool 9052): on a creature, omit MovementParamFlags.Sticky from the flags
+        /// a melee monster moves with. Only Sticky is dropped - see Creature.GetMonsterMoveToFlags.
+        /// </summary>
+        public bool DisableSticky
+        {
+            get => GetProperty(PropertyBool.DisableSticky) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.DisableSticky); else SetProperty(PropertyBool.DisableSticky, value); }
         }
 
         /// <summary>

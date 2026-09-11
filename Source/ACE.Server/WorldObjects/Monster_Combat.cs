@@ -11,7 +11,6 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
-using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 
@@ -330,7 +329,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void TakeDamageOverTime_NotifySource(Player source, DamageType damageType, float amount, bool aetheria = false)
         {
-            if (!PropertyManager.GetBool("show_dot_messages").Item)
+            if (!source.ShowDotDamage)
                 return;
 
             var iAmount = (uint)Math.Round(amount);
@@ -375,6 +374,14 @@ namespace ACE.Server.WorldObjects
         public virtual uint TakeDamage(WorldObject source, DamageType damageType, float amount, bool crit = false)
         {
             var tryDamage = (int)Math.Round(amount);
+
+            // monster combat effects: incoming-damage filters (a ward subtracting, a reflect answering) get
+            // the hit BEFORE it reaches the vital, so the vital write, DamageHistory, the returned amount
+            // and the death check below all see the filtered number. Harmful direction only - a negative
+            // amount here is a heal, and a filter must never eat one. No-op for a Player and for any
+            // monster that authored nothing; the reflect latch is held inside, see Creature_MonsterEffects.
+            tryDamage = tryDamage > 0 ? (int)AbsorbMonsterEffectDamage(source, damageType, (uint)tryDamage) : tryDamage;
+
             var damage = -UpdateVitalDelta(Health, -tryDamage);
 
             // TODO: update monster stamina?
@@ -386,6 +393,13 @@ namespace ACE.Server.WorldObjects
                     DamageHistory.Add(source, damageType, (uint)damage);
                 else
                     DamageHistory.OnHeal((uint)-damage);
+
+                // summon damage feed ("/summondamage"): hooked at this shared sink rather than at each attack
+                // site, so pet melee (Monster_Melee) and pet missile (ProjectileCollisionHelper) are both
+                // covered. Pet SPELL damage never reaches here - SpellProjectile.DamageTarget writes the
+                // vital directly - and is reported from that method instead.
+                if (source is Pet damagingPet)
+                    damagingPet.NotifyOwnerOfDamage(this, damage);
             }
 
             if (Health.Current <= 0)

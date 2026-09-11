@@ -276,6 +276,46 @@ namespace ACE.Entity.Models
             }
         }
 
+        /// <summary>
+        /// Appends an entry after assigning it the lowest layer id, starting at 1, that no other entry for the
+        /// SAME spell id is already using. Returns the layer that was assigned.
+        ///
+        /// The shard table has a unique index over (object_Id, spell_Id, layer_Id) on top of its wider primary
+        /// key, so two entries for one spell at one layer with different casters are a runtime state the
+        /// database cannot store: the save fails with a duplicate-entry error, and a failed biota save
+        /// disconnects a player. Any caller that appends an entry with a hand-picked layer instead of one
+        /// derived from the entries already present can produce that state.
+        ///
+        /// Only same-spell layers are skipped, deliberately. Layer numbers are compared per spell by the
+        /// unique index and per category by top-layer selection, and widening the search to the whole category
+        /// would renumber unrelated entries - all cooldowns share one synthetic category and every one of them
+        /// legitimately sits at layer 1, since their spell ids differ.
+        ///
+        /// The read and the append happen under ONE write lock, so two concurrent callers cannot both pick the
+        /// same layer.
+        /// </summary>
+        public static ushort AddEnchantmentAtFreeLayer(this ICollection<PropertiesEnchantmentRegistry> value, PropertiesEnchantmentRegistry entity, ReaderWriterLockSlim rwLock)
+        {
+            rwLock.EnterWriteLock();
+            try
+            {
+                ushort layer = 1;
+
+                while (value.Any(e => e.SpellId == entity.SpellId && e.LayerId == layer))
+                    layer++;
+
+                entity.LayerId = layer;
+
+                value.Add(entity);
+
+                return layer;
+            }
+            finally
+            {
+                rwLock.ExitWriteLock();
+            }
+        }
+
         public static bool TryRemoveEnchantment(this ICollection<PropertiesEnchantmentRegistry> value, int spellId, uint casterObjectId, ReaderWriterLockSlim rwLock)
         {
             if (value == null)

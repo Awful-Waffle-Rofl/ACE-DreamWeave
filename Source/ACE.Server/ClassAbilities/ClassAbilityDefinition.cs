@@ -72,7 +72,10 @@ namespace ACE.Server.ClassAbilities
 
         // Berserker combat
         SavageBlows         = 34,
-        BloodFury           = 35,
+        BloodFury           = 35,   // RETIRED 2026-08-17 (Berserker/Rogue balance pass) - id reserved, never
+                                    // re-use; unregistered + inert. The Berserker T2 slot it held is taken by
+                                    // Break Armor (71); its equipment mod (id 18 / PropertyFloat 8117) was
+                                    // repurposed in place as Break Armor's proc-chance machinery mod.
         Executioner         = 36,
         Whirlwind           = 37,
         Bloodlust           = 38,
@@ -129,6 +132,13 @@ namespace ACE.Server.ClassAbilities
         Spellstorm          = 68,   // T3 game-changer: Ring proc
         Cascade             = 69,   // T3
         DispellingEdge      = 70,   // T3
+
+        // Berserker / Rogue balance pass 2026-08-17. Ids RESERVED here in Phase 0 so the parallel Phase 1
+        // worktrees agree on them; the handlers, token catalog slots and CAP totals land in Phases 1-2.
+        // Append only, never renumber.
+        BreakArmor          = 71,   // Berserker T2 (replaces Blood Fury)
+        Surefooted          = 72,   // Rogue T2
+        PocketSand          = 73,   // Rogue T3
     }
 
     /// <summary>
@@ -200,6 +210,26 @@ namespace ACE.Server.ClassAbilities
         /// "Coming soon" and not learnable
         /// </summary>
         public bool Implemented;
+
+        /// <summary>
+        /// The legacy trained Skill whose effective value rides this ability's magnitude (its "affinity"),
+        /// or NULL when the ability carries no affinity rider at all. Declared here purely as DATA so
+        /// tooling - the /abilities readout, the planner catalog under tools/ca-planner - can read an
+        /// ability's affinity without parsing C#. It is NOT the mechanic: the rider is still computed by the
+        /// handler's own <c>Player.GetClassAbilityScaling(Skill.X, ...)</c> call, and this field must name
+        /// the SAME skill that call passes.
+        ///
+        /// The two are kept in step by ClassAbilityAffinityDeclarationTests, which scans every handler under
+        /// ClassAbilities/Abilities for the scaling call and fails when a declaration disagrees with it. Two
+        /// kinds of exception are carried explicitly in that test rather than inferred: handlers whose file
+        /// contains a scaling call belonging to a DIFFERENT ability (Parry / Shield Block read each other's
+        /// half of their pooled avoidance roll, and Poison Weapon computes Acid Proc's rider), and abilities
+        /// whose scaling call lives outside their handler file (Acid Proc, Frenzy).
+        ///
+        /// The generated Enhanced-stat, Training-bundle and Rating families have no affinity - they read a
+        /// skill to BOOST it, which is not a rider on a separate mechanic - so they leave this null.
+        /// </summary>
+        public ACE.Entity.Enum.Skill? AffinitySkill;
 
         /// <summary>
         /// Total points invested to be at the given rank

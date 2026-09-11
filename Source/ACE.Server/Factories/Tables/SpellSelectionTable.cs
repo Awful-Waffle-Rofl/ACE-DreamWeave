@@ -403,7 +403,7 @@ namespace ACE.Server.Factories.Tables
         /// <summary>
         /// Key is (PropertyInt.TsysMutationData >> 24) - 1
         /// </summary>
-        private static readonly List<ChanceTable<SpellId>> spellSelectionGroup = new List<ChanceTable<SpellId>>()
+        internal static readonly List<ChanceTable<SpellId>> spellSelectionGroup = new List<ChanceTable<SpellId>>()
         {
             spellSelectionGroup1,
             spellSelectionGroup2,
@@ -434,6 +434,39 @@ namespace ACE.Server.Factories.Tables
         public static SpellId Roll(int spellCode)
         {
             return spellSelectionGroup[spellCode - 1].Roll();
+        }
+
+        /// <summary>
+        /// The number of enchantment groups. A spell code outside 1..<see cref="NumGroups"/> has no group.
+        /// </summary>
+        public static int NumGroups => spellSelectionGroup.Count;
+
+        /// <summary>
+        /// Every spell a given enchantment group can produce, ignoring the per-entry chances.
+        ///
+        /// ADDED FOR THE SERPENTINE REROLL (ACE.Server.SpellReroll), which needs to know an item's whole
+        /// legal enchantment SET rather than draw one weighted sample from it. <see cref="Roll"/> cannot
+        /// answer that: it returns a single spell, so recovering the set from it would mean sampling until
+        /// the caller believed it had seen everything. This is the smallest widening that answers the
+        /// question - the group list itself is only internal, and the chances stay private.
+        ///
+        /// Returns NULL, never throws, for a spell code outside 1..<see cref="NumGroups"/>, because the code
+        /// is derived from an item's authored TsysMutationData and content can carry anything there.
+        /// </summary>
+        /// <param name="spellCode">the SpellCode from WorldObject, i.e. (TsysMutationData >> 24)</param>
+        internal static IReadOnlyList<SpellId> GetGroupSpells(int spellCode)
+        {
+            if (spellCode < 1 || spellCode > spellSelectionGroup.Count)
+                return null;
+
+            var group = spellSelectionGroup[spellCode - 1];
+
+            var spells = new List<SpellId>(group.Count);
+
+            foreach (var entry in group)
+                spells.Add(entry.result);
+
+            return spells;
         }
     }
 }

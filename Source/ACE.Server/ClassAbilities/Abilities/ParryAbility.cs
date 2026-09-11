@@ -28,8 +28,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "A 5% chance per rank to fully negate an incoming melee hit (pooled with Shield Block, " +
                           "50% combined cap). Higher Deception increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
+            AffinitySkill = Skill.Deception, // the Armor Tinkering read in GetReadout is Shield Block's half of the pooled roll, not this ability's rider
         };
 
         /// <summary>Parry chance at a given rank: rank*perRank plus the Deception rider fraction. Pure.</summary>
@@ -59,11 +60,20 @@ namespace ACE.Server.ClassAbilities.Abilities
         {
             var percentPerRank = PropertyManager.GetDouble("class_ability_parry_percent_per_rank").Item;
 
-            var deception = player.GetClassAbilityScaling(Skill.Deception,
+            var deception = player?.GetClassAbilityScaling(Skill.Deception,
                 PropertyManager.GetDouble("class_ability_parry_deception_per_trained").Item,
-                PropertyManager.GetDouble("class_ability_parry_deception_per_spec").Item) * 0.01;
+                PropertyManager.GetDouble("class_ability_parry_deception_per_spec").Item) * 0.01 ?? 0.0;
 
-            var parryChance = ParryChance(rank, percentPerRank, deception);
+            // Surefooted (Rogue T2) adds into the SAME parryChance term combat builds, so it has to be part
+            // of the input to Pooled() below - the pooled cap scales the two shares against each other, and
+            // an understated parry share silently understates this whole line. It is reported as Skill
+            // rather than Affinity because it is another class ability's rank contribution, not a
+            // legacy-skill rider; Surefooted's own /abilities line reports it separately, which is a
+            // deliberate double-count across two lines for readability, exactly as Shield Block's line
+            // already restates Parry's chance.
+            var surefooted = player?.GetSurefootedParryBonus() ?? 0.0;
+
+            var parryChance = ParryChance(rank, percentPerRank, deception) + surefooted;
 
             player.TryGetClassAbility(ClassAbilityId.ShieldBlock, out var blockRank);
             var armorTink = player.GetClassAbilityScaling(Skill.ArmorTinkering,
@@ -86,7 +96,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             var cap = PropertyManager.GetDouble("class_ability_avoidance_cap").Item;
             var (_, effectiveParry, capBites) = ClassAbilityAvoidance.Pooled(blockChance, parryChance, cap);
 
-            var skill = rank <= 0 ? 0.0 : rank * percentPerRank * 100.0;
+            var skill = (rank <= 0 ? 0.0 : rank * percentPerRank) * 100.0 + surefooted * 100.0;
             var affinity = deception * 100.0;
 
             return new ClassAbilityReadout
@@ -96,7 +106,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = 0.0,
                 Effective = effectiveParry * 100.0,
-                Unit = "pp",
+                Unit = "%",
                 Label = "parry",
                 Per = null,
                 CapNote = capBites ? "avoidance cap" : null,

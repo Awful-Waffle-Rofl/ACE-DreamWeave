@@ -15,18 +15,28 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.EquipmentMods
 {
     /// <summary>
-    /// The application flow: using a salvage bag of a designated material on a piece of eligible gear to add,
-    /// convert into, or reroll equipment mods. Entered from RecipeManager.UseObjectOnTarget before the cookbook
-    /// lookup, because there is no cookbook row that could express this (it would need one row per target wcid,
-    /// and the RNG needs C# regardless).
+    /// The application flow: using a salvage bag of the designated material on a piece of eligible gear to
+    /// convert into, or reroll, equipment mods. Entered from RecipeManager.UseObjectOnTarget before the
+    /// cookbook lookup, because there is no cookbook row that could express this (it would need one row per
+    /// target wcid, and the RNG needs C# regardless).
     ///
-    /// Three actions, decided entirely by the material and the target's current state:
-    ///   LOW TIER  (TigerEye) - an unrated, unmodded item gains ONE random mod at the guaranteed
-    ///                          equipment_mod_lowtier_potency floor. Capacity is set to 1.
+    /// Two actions, decided entirely by the target's current state:
     ///   CONVERT   (Obsidian) - a rated item's gear rating points are destroyed and become that many random
     ///                          mods at uniform random potency. Irreversible.
     ///   REROLL    (Obsidian) - an already-converted item's mods are all replaced by freshly rolled types and
     ///                          potencies, keeping the mod count. Also irreversible.
+    ///
+    /// GEAR RATINGS ARE OBSIDIAN'S ONLY WAY IN, THROUGH THIS MANAGER'S OWN ENTRY POINT. This class's
+    /// UseObjectOnTarget still answers to nothing but Obsidian (IsModMaterial), and Convert/Reroll still
+    /// refuse an unrated, unmodded item outright - that half of the old low-tier removal is unchanged.
+    ///
+    /// TIGER EYE IS BACK IN, BUT THROUGH ITS OWN DOOR (repo-owner ruling, 2026-08-08). A full bag of
+    /// TigerEye, applied through TigerEyeArmorTinker.ApplyToArmor rather than through UseObjectOnTarget
+    /// above, now ALSO mints one mod on an eligible target - additively alongside the steel tinkers it
+    /// already applies, gated on the equipment_mods_enabled tunable, and excluding shields the same way
+    /// IsEligibleSlot always has. The potency is rolled through the shared MintMods below, which uses the
+    /// exact same EquipmentModRoller.RollPotency draw Obsidian uses - never the old removed deterministic
+    /// floor. See TigerEyeArmorTinker's own remarks for why that floor is not coming back.
     ///
     /// THE CONFIRMATION GATE IS THE CLIENT'S OWN, NOT OURS. Both Obsidian paths destroy something the player
     /// cannot get back, and that still deserves a confirmation - it is simply satisfied one layer up. The
@@ -54,17 +64,13 @@ namespace ACE.Server.EquipmentMods
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>
-        /// Low-tier material: consumes a full bag to add one mod at the minimum potency floor.
-        /// TigerEye (0x2A) is front-loaded - abundant in tiers 1-3 and collapsing roughly 40x above tier 4 -
-        /// so endgame players trade down-tier for it rather than farming it. See the Phase 0 material scarcity
-        /// analysis; MaterialType 42 is the salvage bag weenie 21081 "materialtigereye".
-        /// </summary>
-        public const MaterialType LowTierMaterial = MaterialType.TigerEye;
-
-        /// <summary>
-        /// High-tier material: converts gear ratings into mods, and rerolls already-converted items.
-        /// Obsidian (0x45) has a flat supply curve, stockpilable at every tier. MaterialType 69 is the salvage
-        /// bag weenie 21063 "materialobsidian".
+        /// The ONE material this system answers to: it converts gear ratings into mods, and rerolls
+        /// already-converted items. Obsidian (0x45) has a flat supply curve, stockpilable at every tier.
+        /// MaterialType 69 is the salvage bag weenie 21063 "materialobsidian".
+        ///
+        /// The name still says "high tier" because that is what it was designated as against the removed
+        /// TigerEye low tier; there is no second tier any more, and adding one would need a design decision
+        /// rather than another constant.
         /// </summary>
         public const MaterialType HighTierMaterial = MaterialType.Obsidian;
 
@@ -76,31 +82,13 @@ namespace ACE.Server.EquipmentMods
         /// </summary>
         public const int DefaultMaxStructure = 100;
 
-        /// <summary>
-        /// Slots where gear ratings can be applied: armor, clothing, cloaks, classic jewelry (neck, wrist,
-        /// finger) and the trinket slot. Mirrors the item-class branches of
-        /// LootGenerationFactory_Clothing.TryMutateGearRating, which reaches exactly these through
-        /// roll.HasArmorLevel / IsClothing / IsCloak / IsJewelry.
-        ///
-        /// Trinkets ARE rating carriers, despite occupying a ready slot rather than a jewelry one. The six
-        /// loot trinkets - wcids 41483 compass, 41484 goggles, 41485 pocketwatch, 41486 puzzlebox,
-        /// 41487 mechanicalscarab, 41488 top - are entries in Factories/Tables/Wcids/JewelryWcids.cs, in all
-        /// three tier tables. A jewelry roll therefore stamps TreasureItemType.Jewelry on the TreasureRoll
-        /// (LootGenerationFactory_Jewelry.cs), TryMutateGearRating takes its roll.IsJewelry branch, and the
-        /// item gets GearHealingBoost or GearMaxHealth at tier 8 (1 to 3 points, per
-        /// GearRatingChance.ClothingJewelryRating). Their ValidLocations (PropertyInt 9) is 0x04000000 =
-        /// EquipMask.TrinketOne, so this mask has to name TrinketOne explicitly - otherwise Obsidian refuses
-        /// the one non-armor, non-jewelry item class whose ratings it exists to convert.
-        ///
-        /// Still deliberately NOT EquipMask.Jewelry wholesale: that constant also covers the three sigil
-        /// slots, and sigils stay out. Aetheria is produced by its own mundane add-on path
-        /// (LootGenerationFactory.TryRollAetheria -> CreateAetheria -> MutateAetheria), which never builds a
-        /// TreasureRoll and so never reaches TryMutateGearRating; MutateAetheria writes only ItemMaxLevel and
-        /// IconOverlayId, and ACE.Server/Entity/Aetheria.cs contains no Gear* property at all. Not a rating
-        /// carrier, so not a mod carrier.
-        /// </summary>
-        public const EquipMask EligibleSlots = EquipMask.Clothing | EquipMask.Armor | EquipMask.Cloak
-            | EquipMask.NeckWear | EquipMask.WristWear | EquipMask.FingerWear | EquipMask.TrinketOne;
+        // ELIGIBILITY WAS PREVIOUSLY AN EquipMask OVERLAP MASK (EligibleSlots = Clothing | Armor) HERE. Repo-owner
+        // ruling 2026-08-30 (second pass, same day): eligibility is armor ONLY, not general clothing - shirts,
+        // pants, robes, cloaks, jewelry and trinkets are all excluded, and helms/gauntlets/boots stay eligible
+        // only because they happen to be clothing that covers exclusively one extremity. That is exactly the
+        // rule TigerEyeArmorTinker.IsEligibleItemClass already implements for the steel-tinker gate, so Obsidian
+        // now calls that same predicate instead of keeping a second, independently-drifting one. See
+        // IsEligibleSlot below for the shared rule and its doc comment.
 
         /// <summary>
         /// The ten live gear rating properties, in the same order as the equipped-items rating cache in
@@ -121,20 +109,55 @@ namespace ACE.Server.EquipmentMods
         };
 
         /// <summary>
+        /// The BORN-WITH value of each rating in <see cref="GearRatingProperties"/>, INDEX FOR INDEX - the
+        /// two arrays are read together by ordinal, so they must stay the same length and the same order.
+        ///
+        /// This is conversion's source of truth. It exists because a gear rating on a live item is not
+        /// necessarily one the item earned: the retail Luminous Amber and Empowered Amber gems ADD rating
+        /// points to a finished piece through ordinary recipes (20 of them, ids 8904-8923, each writing
+        /// PropertyInt 370-383 straight onto the target via RecipeManager.ModifyInt). Obsidian pays one mod
+        /// per rating point, so summing the LIVE ratings would pay out for crafted points as well as rolled
+        /// ones - and, because each gem's own "already imbued" gate reads the very rating property a
+        /// conversion clears, that overpayment would be repeatable rather than one-off.
+        ///
+        /// Summing the stamps instead closes both halves at once and leaves the gems alone to police
+        /// themselves exactly as they do today: a gem re-applied after a conversion still lands, still adds
+        /// its rating, and still cannot be converted, because nothing a player does ever writes a stamp.
+        /// </summary>
+        public static readonly PropertyInt[] OriginalGearRatingProperties =
+        {
+            PropertyInt.GearDamageOriginal,
+            PropertyInt.GearDamageResistOriginal,
+            PropertyInt.GearCritOriginal,
+            PropertyInt.GearCritResistOriginal,
+            PropertyInt.GearCritDamageOriginal,
+            PropertyInt.GearCritDamageResistOriginal,
+            PropertyInt.GearHealingBoostOriginal,
+            PropertyInt.GearMaxHealthOriginal,
+            PropertyInt.GearPKDamageRatingOriginal,
+            PropertyInt.GearPKDamageResistRatingOriginal,
+        };
+
+        /// <summary>
         /// Which of the three application paths a source/target pair resolves to.
         /// </summary>
         public enum ModAction
         {
             None,
 
-            /// <summary>Low-tier: add one mod at the guaranteed potency floor to an unmodded, unrated item.</summary>
-            LowTierApply,
-
-            /// <summary>High-tier: destroy N gear rating points and roll N random mods in their place.</summary>
+            /// <summary>Destroy N gear rating points and roll N random mods in their place.</summary>
             Convert,
 
-            /// <summary>High-tier: replace every mod on an already-converted item with fresh rolls.</summary>
+            /// <summary>Replace every mod on an already-converted item with fresh rolls.</summary>
             Reroll,
+
+            /// <summary>
+            /// ALPHA-TEST-ONLY: set every mod already on the target to potency 1.0 (the maximum roll).
+            /// Never adds or removes a mod. Triggered by PropertyInt.EquipmentModMaximizer on the source
+            /// rather than by MaterialType, so it does not go through <see cref="ResolveAction"/>'s rule
+            /// table at all - see <see cref="ResolveMaximizeAction"/>.
+            /// </summary>
+            Maximize,
         }
 
         /// <summary>
@@ -145,21 +168,24 @@ namespace ACE.Server.EquipmentMods
         {
             None,
 
-            /// <summary>Low tier cannot touch a rated item - that is what the high-tier conversion is for.</summary>
-            LowTierOnRatedItem,
-
-            /// <summary>Low tier only ever grants the FIRST mod; an already-modified item is out of reach.</summary>
-            LowTierOnModifiedItem,
-
-            /// <summary>High tier found neither ratings to convert nor mods to reroll.</summary>
+            /// <summary>Found neither ratings to convert nor mods to reroll.</summary>
             NothingToConvertOrReroll,
+
+            /// <summary>ALPHA-TEST-ONLY: the maximizer found no mods on the target to maximize.</summary>
+            NothingToMaximize,
+
+            /// <summary>
+            /// The target matches TigerEyeArmorTinker.MatchesAppliedSignature - it was finished with tiger eye,
+            /// which is a one-way commitment (repo-owner ruling, 2026-08-08). Both Convert and Reroll refuse it.
+            /// </summary>
+            SealedByTigerEye,
         }
 
         // ---------------- classification (pure, no WorldObject needed) ----------------
 
         /// <summary>
-        /// TRUE if this item type / material pair is one of the designated equipment-mod salvage bags. Both
-        /// halves matter: a raw TigerEye gem carries the same MaterialType but is ItemType.Gem, not
+        /// TRUE if this item type / material pair is the designated equipment-mod salvage bag. Both halves
+        /// matter: a raw Obsidian gem carries the same MaterialType but is ItemType.Gem, not
         /// TinkeringMaterial, so it must not be mistaken for a bag.
         /// </summary>
         public static bool IsModMaterial(ItemType itemType, MaterialType? materialType)
@@ -171,10 +197,18 @@ namespace ACE.Server.EquipmentMods
             if (itemType != ItemType.TinkeringMaterial)
                 return false;
 
-            return materialType == LowTierMaterial || materialType == HighTierMaterial;
+            return materialType == HighTierMaterial;
         }
 
         public static bool IsModMaterial(WorldObject source) => source != null && IsModMaterial(source.ItemType, source.MaterialType);
+
+        /// <summary>
+        /// ALPHA-TEST-ONLY: TRUE if this source is the maximizer tool - identified purely by
+        /// PropertyInt.EquipmentModMaximizer's presence, not by MaterialType, since the maximizer has no
+        /// designated material of its own. Kept out of production solely by the item's wcid being absent
+        /// from Content/prod-manifest.txt.
+        /// </summary>
+        public static bool IsMaximizerSource(WorldObject source) => source != null && source.GetProperty(PropertyInt.EquipmentModMaximizer) != null;
 
         /// <summary>
         /// TRUE if a salvage bag holds a FULL unit of material. A whole bag is the price of one application
@@ -190,15 +224,32 @@ namespace ACE.Server.EquipmentMods
         public static bool IsFullBag(WorldObject source) => source != null && IsFullBag(source.Structure, source.MaxStructure);
 
         /// <summary>
-        /// TRUE if an item's equip slots make it a legal mod carrier. Shields are excluded even though they
-        /// have an armor level, matching lootgen (shields never roll gear ratings).
+        /// TRUE if an item's item class makes it a legal mod carrier: armor outright, or clothing that covers
+        /// ONLY the head, hands or feet. Shirts, pants, robes, cloaks, jewelry (neck/wrist/finger) and the
+        /// trinket slot are all excluded, even though several of them still roll gear ratings in lootgen
+        /// (LootGenerationFactory_Clothing.TryMutateGearRating is unchanged) - ratings on those item classes
+        /// remain as ratings rather than becoming mods. Shields are excluded outright even though they carry
+        /// ItemType.Armor, matching lootgen (shields never roll gear ratings).
+        ///
+        /// Repo-owner ruling 2026-08-30 (second pass, same day, narrowing an earlier "armor and clothing"
+        /// pass): this is deliberately the SAME rule TigerEyeArmorTinker.IsEligibleItemClass already applies
+        /// to the steel-tinker gate, called directly rather than re-derived, so the two salvage systems can
+        /// never drift apart on which items qualify. TigerEyeArmorTinker.IsExtremityClothing is an EQUALITY
+        /// test against EquipMask.HeadWear / HandWear / FootWear on purpose - that is what excludes a hooded
+        /// robe or a clothing boot that covers an extremity plus a non-extremity slot, since either carries
+        /// more than one bit in ValidLocations. A plate helm is ItemType.Armor and passes on that alone; a
+        /// cloth or leather helm is ItemType.Clothing and passes only through the extremity equality test.
+        ///
+        /// Consequence for existing items: an item already converted to mods on a now-excluded item class
+        /// (shirt, pants, robe, cloak, jewelry, trinket) keeps its mods working, but can no longer be
+        /// rerolled or maximized through Obsidian - IsEligibleTarget below now refuses it as a target.
         /// </summary>
-        public static bool IsEligibleSlot(EquipMask validLocations, bool isShield)
+        public static bool IsEligibleSlot(ItemType itemType, EquipMask validLocations, bool isShield)
         {
             if (isShield)
                 return false;
 
-            return (validLocations & EligibleSlots) != 0;
+            return TigerEyeArmorTinker.IsEligibleItemClass(itemType, validLocations);
         }
 
         public static bool IsEligibleTarget(WorldObject target)
@@ -206,20 +257,107 @@ namespace ACE.Server.EquipmentMods
             if (target == null)
                 return false;
 
-            return IsEligibleSlot(target.ValidLocations ?? EquipMask.None, target.IsShield);
+            return IsEligibleSlot(target.ItemType, target.ValidLocations ?? EquipMask.None, target.IsShield);
         }
 
         // ---------------- state reads ----------------
 
         /// <summary>
-        /// Total gear rating points on an item - the number of mods a conversion will produce.
+        /// Total NATURAL gear rating points on an item - the number of mods a conversion will produce.
+        ///
+        /// Reads <see cref="OriginalGearRatingProperties"/>, NOT the live ratings, and that distinction is
+        /// the whole point: see that array's remarks for why a live rating is not proof the item earned it.
+        /// An item whose only ratings are crafted sums to zero and is refused as having nothing to convert.
+        ///
+        /// Every stamp is written at item creation and never afterwards, so this is stable for an item's
+        /// whole life right up until <see cref="ModAction.Convert"/> spends it.
         /// </summary>
         public static int SumGearRatings(WorldObject target)
         {
             if (target == null)
                 return 0;
 
-            return GearRatingProperties.Sum(p => target.GetProperty(p) ?? 0);
+            return OriginalGearRatingProperties.Sum(p => target.GetProperty(p) ?? 0);
+        }
+
+        /// <summary>
+        /// Records what an item was born with, by copying each live gear rating into its stamp. Call this
+        /// ONLY at creation, before any player can reach the item - from the weenie template in
+        /// WorldObjectFactory.CreateNewWorldObject, and again from the rolled value in
+        /// LootGenerationFactory.TryMutateGearRating, which mutates the object after it is constructed.
+        ///
+        /// SAFE TO CALL TWICE at creation (the loot path does exactly that) because it OVERWRITES rather
+        /// than accumulates: the second call simply re-reads a strictly-later view of the same natural
+        /// values. It is NOT safe to call once a player has had the item, because by then a live rating may
+        /// be a crafted amber-gem point, and stamping it would hand that point to Obsidian - which is the
+        /// exact hole the stamps exist to close.
+        ///
+        /// Writes with SetProperty, never player.UpdateProperty: the stamps are fork ids in a band no
+        /// client knows, and there is no session to push them to at creation time anyway. A zero or absent
+        /// rating writes NO row rather than a 0 - the same "clear it, never SetProperty(0)" rule the mod
+        /// systems follow everywhere else.
+        /// </summary>
+        public static void StampOriginalGearRatings(WorldObject wo)
+        {
+            if (wo == null)
+                return;
+
+            for (var i = 0; i < GearRatingProperties.Length; i++)
+            {
+                var live = wo.GetProperty(GearRatingProperties[i]) ?? 0;
+                var stamp = OriginalGearRatingProperties[i];
+
+                if (live > 0)
+                    wo.SetProperty(stamp, live);
+                else if (wo.GetProperty(stamp) != null)
+                    wo.RemoveProperty(stamp);
+            }
+        }
+
+        /// <summary>
+        /// Spends the natural gear ratings on a target: reduces each live rating by exactly what the item
+        /// was born with, and clears every born-with stamp. Returns the rating writes the CALLER still owes
+        /// the client, as property -> new value (null meaning remove), so the whole calculation stays
+        /// testable without a live player - the caller performs them via player.UpdateProperty, which both
+        /// writes and pushes.
+        ///
+        /// A CRAFTED POINT SURVIVES. Subtracting the stamp rather than clearing the property outright is
+        /// what leaves an amber gem's contribution on the item after a conversion: it was never part of
+        /// what Obsidian bought, so destroying it would be taking something the player was not paid for.
+        ///
+        /// CLEARING THE STAMPS IS WHAT MAKES A CONVERSION TERMINAL. With them gone
+        /// <see cref="SumGearRatings"/> reads zero, so a later application resolves to
+        /// <see cref="ModAction.Reroll"/> rather than paying out again - including on an item whose live
+        /// rating property has since been re-armed by a gem, which is exactly the case the gems' own
+        /// "already imbued" gates cannot see, because that gate reads the live rating a conversion clears.
+        /// </summary>
+        public static Dictionary<PropertyInt, int?> SpendNaturalRatings(WorldObject target)
+        {
+            var writes = new Dictionary<PropertyInt, int?>();
+
+            if (target == null)
+                return writes;
+
+            for (var i = 0; i < GearRatingProperties.Length; i++)
+            {
+                var rating = GearRatingProperties[i];
+                var stamp = OriginalGearRatingProperties[i];
+
+                var live = target.GetProperty(rating) ?? 0;
+                var born = target.GetProperty(stamp) ?? 0;
+
+                // Max, not a bare subtraction: an admin edit or a content change could leave a stamp above
+                // the live value, and a negative rating is worse than no rating.
+                var remaining = Math.Max(0, live - born);
+
+                if (live != remaining)
+                    writes[rating] = remaining > 0 ? remaining : (int?)null;
+
+                if (target.GetProperty(stamp) != null)
+                    target.RemoveProperty(stamp);
+            }
+
+            return writes;
         }
 
         /// <summary>
@@ -239,26 +377,15 @@ namespace ACE.Server.EquipmentMods
         /// <summary>
         /// The whole path-selection rule set, expressed over plain numbers so it can be exercised without a
         /// live player, item or session. <paramref name="count"/> is the number of mods the action produces.
+        ///
+        /// TAKES NO MATERIAL any more. It used to, to pick between the TigerEye and Obsidian arms; with the
+        /// low tier gone there is exactly one material and the only caller has already required it via
+        /// <see cref="IsModMaterial"/>, so a material parameter here could only ever hold one value.
         /// </summary>
-        public static ModActionRefusal ResolveAction(MaterialType material, int ratingPoints, int modCount, int capacity, out ModAction action, out int count)
+        public static ModActionRefusal ResolveAction(int ratingPoints, int modCount, int capacity, out ModAction action, out int count)
         {
             action = ModAction.None;
             count = 0;
-
-            if (material == LowTierMaterial)
-            {
-                if (ratingPoints > 0)
-                    return ModActionRefusal.LowTierOnRatedItem;
-
-                if (capacity > 0 || modCount > 0)
-                    return ModActionRefusal.LowTierOnModifiedItem;
-
-                // an unrated item's capacity is 1 (design decision 4)
-                action = ModAction.LowTierApply;
-                count = 1;
-
-                return ModActionRefusal.None;
-            }
 
             if (ratingPoints > 0)
             {
@@ -278,6 +405,36 @@ namespace ACE.Server.EquipmentMods
 
             return ModActionRefusal.NothingToConvertOrReroll;
         }
+
+        /// <summary>
+        /// ALPHA-TEST-ONLY resolution for the maximizer tool, expressed over a plain mod count so it can be
+        /// exercised without a live player, item or session - mirrors <see cref="ResolveAction"/>'s shape.
+        /// A target with no mods yet refuses; there is nothing to raise to maximum, and Obsidian salvage is
+        /// what mints mods in the first place. <paramref name="count"/> is the number of mods that will be
+        /// re-written (the item's current mod count - the set is never changed).
+        /// </summary>
+        public static ModActionRefusal ResolveMaximizeAction(int modCount, out ModAction action, out int count)
+        {
+            action = ModAction.None;
+            count = 0;
+
+            if (modCount == 0)
+                return ModActionRefusal.NothingToMaximize;
+
+            action = ModAction.Maximize;
+            count = modCount;
+
+            return ModActionRefusal.None;
+        }
+
+        /// <summary>
+        /// The tiger-eye seal check. An EXPLICIT check, deliberately kept out of <see cref="ResolveAction"/>'s
+        /// value-only rule table because it has to read the item's tinker log, mirroring the weapon side's
+        /// ResolveDriftStoneRefusal / PrismaticDriftStone.MatchesAppliedSignature - see that pair's remarks for
+        /// why an explicit check earns its keep over folding into the rule table.
+        /// </summary>
+        public static ModActionRefusal ResolveTigerEyeRefusal(WorldObject target) =>
+            TigerEyeArmorTinker.MatchesAppliedSignature(target) ? ModActionRefusal.SealedByTigerEye : ModActionRefusal.None;
 
         // ---------------- entry point ----------------
 
@@ -380,7 +537,9 @@ namespace ACE.Server.EquipmentMods
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
-            if (!IsModMaterial(source))
+            var isMaximizer = IsMaximizerSource(source);
+
+            if (!isMaximizer && !IsModMaterial(source))
                 return WeenieError.YouDoNotPassCraftingRequirements;
 
             // inventory only, never equipped: mutating a worn item's gear ratings would desync the
@@ -417,23 +576,63 @@ namespace ACE.Server.EquipmentMods
 
             if (!IsEligibleTarget(target))
             {
-                SendCraftMessage(player, $"The {target.Name} cannot carry equipment mods. Only armor, clothing, cloaks and jewelry can.");
+                // Legacy case: an item modded on a now-excluded slot (cloak, jewelry, trinket) before the
+                // 2026-08-30 armor-only ruling still carries working mods, so telling its owner the item
+                // "cannot carry equipment mods" is false on its face - it visibly does. Give that item a
+                // different refusal that says the mods are locked in rather than denying they exist. This
+                // branch runs before the isMaximizer split below, so it covers Reroll and the alpha Maximize
+                // path identically.
+                if (GetModCount(target) > 0)
+                    SendCraftMessage(player, $"The {target.Name}'s modifications are locked in. Only armor and clothing, excluding underclothes, can be converted or rerolled now.");
+                else
+                    SendCraftMessage(player, $"The {target.Name} cannot carry equipment mods. Only armor and clothing, excluding underclothes, can.");
+
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 
-            var refusal = ResolveAction(source.MaterialType ?? MaterialType.Unknown, SumGearRatings(target), GetModCount(target), GetModCapacity(target), out action, out count);
+            // ADDED 2026-08-07 with the workmanship term. A mod's stored value is now potency x
+            // workmanship/10, so an item with NO workmanship would take a mod worth exactly nothing - the
+            // "silently mint worthless mods" failure the weapon side refuses for the same reason. NOT
+            // hypothetical: 4 of the 963 modded items on stage carry no workmanship row.
+            //
+            // Checked here rather than inside ResolveAction because that rule table is pure over plain values
+            // and has no item to read, and because this must refuse the maximizer path too - it stamps a
+            // fraction of its own.
+            if (target.Workmanship == null)
+            {
+                SendCraftMessage(player, $"The {target.Name} has no workmanship, so it cannot hold an equipment mod.");
+                return WeenieError.YouDoNotPassCraftingRequirements;
+            }
+
+            ModActionRefusal refusal;
+
+            if (isMaximizer)
+            {
+                // the alpha-only Maximize path is deliberately NOT sealed - it never mints or destroys
+                // ratings/mods, so the tiger-eye lockdown does not apply to it
+                refusal = ResolveMaximizeAction(GetModCount(target), out action, out count);
+            }
+            else
+            {
+                // one wiring, shared with every non-maximizer caller - checked BEFORE ResolveAction so it
+                // refuses Convert (ratingPoints > 0) and Reroll (capacity > 0 and modCount > 0) together
+                refusal = ResolveTigerEyeRefusal(target);
+
+                if (refusal == ModActionRefusal.None)
+                    refusal = ResolveAction(SumGearRatings(target), GetModCount(target), GetModCapacity(target), out action, out count);
+            }
 
             switch (refusal)
             {
                 case ModActionRefusal.None:
                     return WeenieError.None;
 
-                case ModActionRefusal.LowTierOnRatedItem:
-                    SendCraftMessage(player, $"The {target.Name} carries gear ratings. Use obsidian to convert those ratings into mods instead.");
+                case ModActionRefusal.NothingToMaximize:
+                    SendCraftMessage(player, $"The {target.Name} has no mods to maximize. Use obsidian salvage on it first to mint mods.");
                     break;
 
-                case ModActionRefusal.LowTierOnModifiedItem:
-                    SendCraftMessage(player, $"The {target.Name} has already been modified and cannot take another mod this way.");
+                case ModActionRefusal.SealedByTigerEye:
+                    SendCraftMessage(player, $"The {target.Name} was finished with tiger eye. Its tinkering is sealed and no salvage will rework it.");
                     break;
 
                 default:
@@ -446,60 +645,28 @@ namespace ACE.Server.EquipmentMods
 
         // ---------------- application ----------------
 
-        private static void HandleApply(Player player, WorldObject source, WorldObject target, ModAction action, int count)
+        /// <summary>
+        /// Rolls <paramref name="count"/> distinct mods onto <paramref name="target"/>, writes their
+        /// potencies (workmanship folded in), and returns the applied lines in
+        /// <see cref="EquipmentModDisplay.Describe"/>'s shared format. Shared by every minting path - Convert
+        /// and Reroll below, and Tiger Eye's additive grant
+        /// (<see cref="ACE.Server.Entity.TigerEyeArmorTinker.ApplyToArmor"/>) - so a roll, a write and a
+        /// report line are formed in exactly one place.
+        ///
+        /// DOES NOT TOUCH <see cref="PropertyInt.GearModCapacity"/>. Each caller sets its own capacity:
+        /// Convert grows it by the rating points just destroyed, Reroll leaves the item's existing born bound
+        /// alone, and Tiger Eye stamps a flat 1. Folding capacity in here would have to pick one of those
+        /// three rules and get it wrong for the other two.
+        /// </summary>
+        public static List<string> MintMods(WorldObject target, int count, ICollection<EquipmentModId> exclude = null)
         {
-            List<EquipmentModId> rolled;
-
-            // the low tier grants a fixed potency per mod rather than a roll; the high tier gambles
-            var lowTier = action == ModAction.LowTierApply;
-
-            switch (action)
-            {
-                case ModAction.LowTierApply:
-
-                    rolled = EquipmentModRoller.RollDistinctModTypes(count);
-
-                    target.SetProperty(PropertyInt.GearModCapacity, count);
-                    break;
-
-                case ModAction.Convert:
-
-                    // the ratings are the price: clear all ten, then mint that many mods.
-                    // These are client-known properties, so push the zeroed values rather than only
-                    // relying on the object resend.
-                    foreach (var rating in GearRatingProperties)
-                    {
-                        if (target.GetProperty(rating) != null)
-                            player.UpdateProperty(target, rating, null);
-                    }
-
-                    // defensive: a rated item should never already carry mods, but if content or an admin
-                    // edit produced one, keep it and grow capacity rather than silently dropping it
-                    var existing = EquipmentModDisplay.GetMods(target).Select(m => m.Definition.Id).ToList();
-
-                    rolled = EquipmentModRoller.RollDistinctModTypes(count, existing);
-
-                    target.SetProperty(PropertyInt.GearModCapacity, ComputeConvertedCapacity(existing.Count, count));
-                    break;
-
-                case ModAction.Reroll:
-
-                    ClearMods(target);
-
-                    rolled = EquipmentModRoller.RollDistinctModTypes(count);
-                    break;
-
-                default:
-
-                    player.SendUseDoneEvent(WeenieError.CraftGeneralErrorNoUiMsg);
-                    return;
-            }
+            var rolled = EquipmentModRoller.RollDistinctModTypes(count, exclude);
 
             if (rolled.Count != count)
             {
-                // unreachable with 27 catalog types and a maximum capacity of 3; a short list would mean the
-                // registry shrank below the capacities already stamped on live items
-                log.Error($"EquipmentModManager.HandleApply({player.Name}, {source.Name}, {target.Name}): asked for {count} distinct mods, rolled {rolled.Count}");
+                // unreachable with 30 catalog types and a maximum capacity of 3; a short list would mean
+                // the registry shrank below the capacities already stamped on live items
+                log.Error($"EquipmentModManager.MintMods({target?.Name}): asked for {count} distinct mods, rolled {rolled.Count}");
             }
 
             var applied = new List<string>();
@@ -508,19 +675,73 @@ namespace ACE.Server.EquipmentMods
             {
                 var definition = EquipmentModRegistry.Get(modId);
 
-                // both branches honor the mod's effective MinPotency floor (its own, or the catalog default),
-                // so no mod can be written at a potency whose effect rounds away to nothing
-                var potency = EquipmentModRoller.Clamp01(lowTier
-                    ? EquipmentModRoller.LowTierPotency(definition)
-                    : EquipmentModRoller.RollPotency(definition));
+                var potency = EquipmentModRoller.Clamp01(EquipmentModRoller.RollPotency(definition));
 
-                // written with SetProperty rather than player.UpdateProperty on purpose: UpdateProperty would
-                // push a GameMessagePublicUpdatePropertyFloat carrying the raw potency scalar, and the whole
+                // WORKMANSHIP IS FOLDED IN HERE, ONCE (2026-08-07), so the item stores a roll fraction
+                // rather than a bare potency - the same shape a weapon mod stores. Every read site takes
+                // the stored number at face value and needed no change. A target with no workmanship is
+                // refused upstream by every caller (VerifyUseRequirements for Convert/Reroll,
+                // HasTinkerableArmor for Tiger Eye), so this never silently stamps zero.
+                var fraction = EquipmentModValue.RollFraction(potency, target.Workmanship ?? 0.0f);
+
+                // written with SetProperty rather than player.UpdateProperty on purpose: UpdateProperty
+                // would push a GameMessagePublicUpdatePropertyFloat carrying the raw scalar, and the whole
                 // point of the 8100-8199 band is that the client never sees it. The object resend below
                 // carries only weenie-header fields, so the scalar stays server side.
-                target.SetProperty(definition.Property, potency);
+                target.SetProperty(definition.Property, fraction);
 
-                applied.Add(EquipmentModDisplay.Describe(definition, potency));
+                // reports the FRACTION, not the potency, so the line the player is shown matches what the
+                // item now carries and what a later appraisal will render
+                applied.Add(EquipmentModDisplay.Describe(definition, fraction));
+            }
+
+            return applied;
+        }
+
+        private static void HandleApply(Player player, WorldObject source, WorldObject target, ModAction action, int count)
+        {
+            List<string> applied;
+
+            if (action == ModAction.Maximize)
+            {
+                // ALPHA-TEST-ONLY: pure property-bag rewrite, no roll and no shared MintMods call below -
+                // see MaximizeMods for the whole rule.
+                applied = MaximizeMods(target);
+            }
+            else
+            {
+                switch (action)
+                {
+                    case ModAction.Convert:
+
+                        // The NATURAL ratings are the price - see SpendNaturalRatings, which clears the
+                        // stamps itself and hands back only the client-known rating writes. They are pushed
+                        // rather than left to the object resend because the client already knows them, and
+                        // UpdateProperty is what performs the write as well as the push.
+                        foreach (var write in SpendNaturalRatings(target))
+                            player.UpdateProperty(target, write.Key, write.Value);
+
+                        // defensive: a rated item should never already carry mods, but if content or an
+                        // admin edit produced one, keep it and grow capacity rather than silently dropping it
+                        var existing = EquipmentModDisplay.GetMods(target).Select(m => m.Definition.Id).ToList();
+
+                        applied = MintMods(target, count, existing);
+
+                        target.SetProperty(PropertyInt.GearModCapacity, ComputeConvertedCapacity(existing.Count, count));
+                        break;
+
+                    case ModAction.Reroll:
+
+                        ClearMods(target);
+
+                        applied = MintMods(target, count);
+                        break;
+
+                    default:
+
+                        player.SendUseDoneEvent(WeenieError.CraftGeneralErrorNoUiMsg);
+                        return;
+                }
             }
 
             target.ChangesDetected = true;
@@ -539,9 +760,18 @@ namespace ACE.Server.EquipmentMods
 
             UpdateObj(player, target);
 
-            var verb = action == ModAction.Convert ? "converts the gear ratings on" : action == ModAction.Reroll ? "reforges the mods on" : "settles into";
+            if (action == ModAction.Maximize)
+            {
+                SendCraftMessage(player, $"Every mod on your {target.Name} is maximized.");
+            }
+            else
+            {
+                // only Convert and Reroll reach here - Maximize took the branch above, and every other action
+                // was refused before HandleApply was called
+                var verb = action == ModAction.Convert ? "converts the gear ratings on" : "reforges the mods on";
 
-            SendCraftMessage(player, $"The salvage {verb} your {target.Name}.");
+                SendCraftMessage(player, $"The salvage {verb} your {target.Name}.");
+            }
 
             foreach (var line in applied)
                 SendCraftMessage(player, $"- {line}");
@@ -570,6 +800,39 @@ namespace ACE.Server.EquipmentMods
             }
         }
 
+        /// <summary>
+        /// ALPHA-TEST-ONLY: sets every equipment mod already present on <paramref name="target"/> to
+        /// potency 1.0, the maximum possible roll. Never adds a mod (a type absent before stays absent
+        /// after) and never removes one - only the set of properties already present is touched, read once
+        /// up front so the write pass cannot see its own edits. Pure over the WorldObject's property bag:
+        /// no player, no networking, no persistence, so it is unit testable without a live Player - see
+        /// EquipmentModManager.HandleApply for the caller that adds those.
+        ///
+        /// Returns the applied lines in <see cref="EquipmentModDisplay.Describe"/>'s shared format, the
+        /// same rendering HandleApply reports to the player for every other action.
+        /// </summary>
+        public static List<string> MaximizeMods(WorldObject target)
+        {
+            var applied = new List<string>();
+
+            if (target == null)
+                return applied;
+
+            // "Maximum" means the best THIS item can hold, not a flat 1.0 (2026-08-07). Stamping 1.0 on a
+            // workmanship 7 piece would put it above anything a real roll on that item could produce, and the
+            // appraisal bracket would have to clamp to hide it. On a workmanship 10 item - which is what the
+            // maximizer is used on in practice - this is still exactly 1.0.
+            var fraction = EquipmentModValue.RollFraction(1.0, target.Workmanship ?? 0.0f);
+
+            foreach (var (definition, _) in EquipmentModDisplay.GetMods(target))
+            {
+                target.SetProperty(definition.Property, fraction);
+                applied.Add(EquipmentModDisplay.Describe(definition, fraction));
+            }
+
+            return applied;
+        }
+
         private static void SendCraftMessage(Player player, string message)
         {
             player.Session.Network.EnqueueSend(new GameMessageSystemChat(message, ChatMessageType.Craft));
@@ -587,6 +850,12 @@ namespace ACE.Server.EquipmentMods
             // so mirror that server side for persistence
             if (player.FindObject(target.Guid.Full, Player.SearchLocations.MyInventory) != null)
                 player.MoveItemToFirstContainerSlot(target);
+
+            // the UpdateObject above just rebuilt this object client-side, which drops any persistent
+            // particle aura (VisualEffectManager). target is inventory-only by construction here, so
+            // reopen the once-only send guard rather than resending: sending to a packed item would
+            // attach the script to nothing and spend the guard that equipping it later depends on.
+            VisualEffectManager.Forget(player.Session, target);
         }
     }
 }

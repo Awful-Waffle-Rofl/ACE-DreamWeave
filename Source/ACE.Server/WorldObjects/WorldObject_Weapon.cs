@@ -5,10 +5,16 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects.Entity;
 
 namespace ACE.Server.WorldObjects
 {
+    /// <summary>
+    /// DIVERGES FROM UPSTREAM 08471633e (2026-08-06) further than its pre-existing multi-shot prototype
+    /// divergence - the weapon mods v3 Tier B expansion added three more hooks here (Attunement, Focus x2).
+    /// See PR #493 for the flagged maintenance cost at the next upstream merge.
+    /// </summary>
     partial class WorldObject
     {
         public Skill WeaponSkill
@@ -358,6 +364,11 @@ namespace ACE.Server.WorldObjects
             if (wielder != null)
                 critRate += wielder.GetCritRating() * 0.01f;
 
+            // Weapon mods v3 Tier B (2026-08-06): Focus adds to crit CHANCE after the Math.Max against the
+            // Critical Strike imbue above, alongside the rating term - never writes CriticalFrequency itself,
+            // so the crit-routes-through-ratings invariant (see WeaponModRegistry.cs) is untouched.
+            critRate += (float)WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Focus);
+
             // mitigation
             var critResistRatingMod = Creature.GetNegativeRatingMod(target.GetCritResistRating());
             critRate *= critResistRatingMod;
@@ -397,6 +408,10 @@ namespace ACE.Server.WorldObjects
 
             critRate += wielder.GetCritRating() * 0.01f;
 
+            // Weapon mods v3 Tier B (2026-08-06): Focus's magic half - see GetWeaponCriticalChance above for
+            // why this is wired at both crit-chance functions rather than just the physical one.
+            critRate += (float)WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Focus);
+
             // mitigation
             var critResistRatingMod = Creature.GetNegativeRatingMod(target.GetCritResistRating());
             critRate *= critResistRatingMod;
@@ -417,7 +432,7 @@ namespace ACE.Server.WorldObjects
             {
                 var cripplingBlowMod = GetCripplingBlowMod(skill);
 
-                critDamageMod = Math.Max(critDamageMod, cripplingBlowMod); 
+                critDamageMod = Math.Max(critDamageMod, cripplingBlowMod);
             }
             return critDamageMod;
         }
@@ -441,7 +456,11 @@ namespace ACE.Server.WorldObjects
             var wielderEnchantments = wielder.EnchantmentManager.GetElementalDamageMod();
             var weaponEnchantments = weapon.EnchantmentManager.GetElementalDamageMod();
 
-            var enchantments = wielderEnchantments + weaponEnchantments;
+            // Weapon mods v3 Tier B (2026-08-06): Attunement adds into the enchantment sum, read directly off
+            // the weapon (this function already requires it to be a Caster).
+            var weaponModEnchantment = WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Attunement);
+
+            var enchantments = wielderEnchantments + weaponEnchantments + weaponModEnchantment;
 
             var modifier = (float)(elementalDamageMod + enchantments);
 

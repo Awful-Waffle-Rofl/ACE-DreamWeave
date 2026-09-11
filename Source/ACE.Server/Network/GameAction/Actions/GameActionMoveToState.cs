@@ -29,6 +29,11 @@ namespace ACE.Server.Network.GameAction.Actions
             session.Player.OnMoveToState(moveToState);
             session.Player.LastMoveToState = moveToState;
 
+            // the client's own view of whether it is on the ground, kept current from both position sources
+            // (AutonomousPosition already does this), so Player_Tick.UpdateObjectPhysics can tell a grounded
+            // position from an airborne one at the moment it broadcasts it
+            session.Player.LastContact = moveToState.Contact;
+
             if (!session.Player.Teleporting)
                 session.Player.SetRequestedLocation(moveToState.Position, false);
 

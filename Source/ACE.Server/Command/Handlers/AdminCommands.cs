@@ -270,33 +270,80 @@ namespace ACE.Server.Command.Handlers
             // TODO: output
         }
 
-        // gag < char name >
+        // gag < char name > [duration]
         [CommandHandler("gag", AccessLevel.Sentinel, CommandHandlerFlag.RequiresWorld, 1,
             "Prevents a character from talking.",
-            "< char name >\nThe character will not be able to @tell or use chat normally.")]
+            "< char name > [duration]\nThe character will not be able to @tell or use chat normally.\n" +
+            "Duration is in minutes by default, or a number followed by m/h/d (e.g. 30m, 12h, 7d). Omit it for five minutes; 0 or perm gags until @ungag.")]
         public static void HandleGag(Session session, params string[] parameters)
         {
-            // usage: @gag < char name >
-            // This command gags the specified character for five minutes.  The character will not be able to @tell or use chat normally.
+            // usage: @gag < char name > [duration]
+            // This command gags the specified character for the given duration (default five minutes).  The character will not be able to @tell or use chat normally.
             // @gag - Prevents a character from talking.
             // @ungag -Allows a gagged character to talk again.
 
-            if (parameters.Length > 0)
+            if (parameters.Length == 0)
+                return;
+
+            var nameTokens = parameters;
+            var durationSeconds = PlayerManager.DefaultGagDurationSeconds;
+
+            // a trailing duration token is optional, and the name may contain spaces, so only the last token is a candidate
+            if (parameters.Length > 1 && TryParseGagDuration(parameters[parameters.Length - 1], out var parsedSeconds))
             {
-                var playerName = string.Join(" ", parameters);
-
-                var msg = "";
-                if (PlayerManager.GagPlayer(session.Player, playerName))
-                {
-                    msg = $"{playerName} has been gagged for five minutes.";
-                }
-                else
-                {
-                    msg = $"Unable to gag a character named {playerName}, check the name and re-try the command.";
-                }
-
-                CommandHandlerHelper.WriteOutputInfo(session, msg, ChatMessageType.WorldBroadcast);
+                durationSeconds = parsedSeconds;
+                nameTokens = parameters.Take(parameters.Length - 1).ToArray();
             }
+
+            var playerName = string.Join(" ", nameTokens);
+
+            string msg;
+            if (PlayerManager.GagPlayer(session.Player, playerName, durationSeconds))
+                msg = $"{playerName} has been gagged {PlayerManager.DescribeGagDuration(durationSeconds)}.";
+            else
+                msg = $"Unable to gag a character named {playerName}, check the name and re-try the command.";
+
+            CommandHandlerHelper.WriteOutputInfo(session, msg, ChatMessageType.WorldBroadcast);
+        }
+
+        private static readonly Regex GagDurationRegex = new Regex(@"^(\d+(?:\.\d+)?)([mhd])?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Parses a @gag duration token: a bare number is minutes, an m/h/d suffix selects minutes/hours/days,
+        /// and 0 / perm / permanent means a gag that only @ungag ends. Internal for the test assembly.
+        /// </summary>
+        internal static bool TryParseGagDuration(string token, out double durationSeconds)
+        {
+            durationSeconds = 0;
+
+            if (string.Equals(token, "perm", StringComparison.OrdinalIgnoreCase) || string.Equals(token, "permanent", StringComparison.OrdinalIgnoreCase))
+            {
+                durationSeconds = PlayerManager.PermanentGagDurationSeconds;
+                return true;
+            }
+
+            var match = GagDurationRegex.Match(token);
+            if (!match.Success)
+                return false;
+
+            if (!double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount))
+                return false;
+
+            if (amount == 0)
+            {
+                durationSeconds = PlayerManager.PermanentGagDurationSeconds;
+                return true;
+            }
+
+            var unitSeconds = match.Groups[2].Value.ToLowerInvariant() switch
+            {
+                "h" => 3600,
+                "d" => 86400,
+                _ => 60,
+            };
+
+            durationSeconds = Math.Min(amount * unitSeconds, PlayerManager.PermanentGagDurationSeconds);
+            return true;
         }
 
         // ungag < char name >
@@ -1902,7 +1949,17 @@ namespace ACE.Server.Command.Handlers
             DoCopyChar(session, existingCharName, existingPlayer.Guid.Full, false, newCharName);
         }
 
-        private static void DoCopyChar(Session session, string existingCharName, uint existingCharId, bool isDeletedChar, string newCharacterName = null, uint newAccountId = 0)
+        /// <summary>
+        /// Deep-copies an existing character - its character row, biota, wielded items and inventory -
+        /// onto a new guid, rewriting every instance-id reference to point at the copies.
+        ///
+        /// targetGuid, when non-zero, makes the copy land on that exact player guid instead of
+        /// allocating a fresh one. The caller is responsible for having purged whatever occupied it,
+        /// including the name: IsCharacterNameAvailable runs below and will refuse the copy if the
+        /// previous occupant's row is still present. Used by tester roster seeding, where reusing a
+        /// fixed guid is what keeps the player guid allocator's floor from ratcheting on every refresh.
+        /// </summary>
+        internal static void DoCopyChar(Session session, string existingCharName, uint existingCharId, bool isDeletedChar, string newCharacterName = null, uint newAccountId = 0, uint targetGuid = 0)
         {
             DatabaseManager.Shard.GetCharacter(existingCharId, existingCharacter =>
             {
@@ -1922,7 +1979,7 @@ namespace ACE.Server.Command.Handlers
                                 return;
                             }
 
-                            var newPlayerGuid = GuidManager.NewPlayerGuid();
+                            var newPlayerGuid = targetGuid != 0 ? new ObjectGuid(targetGuid) : GuidManager.NewPlayerGuid();
 
                             var newCharacter = new Database.Models.Shard.Character
                             {
@@ -2173,28 +2230,52 @@ namespace ACE.Server.Command.Handlers
 
                                 PlayerManager.AddOfflinePlayer(newPlayer);
 
+                                // AddCharacterToSession, not a bare Add. When targetGuid reuses a guid the
+                                // session already has a Character for - a tester sitting at character select
+                                // while the roster is refreshed underneath them - a bare Add leaves both the
+                                // stale entry and the new one in the list, and the character shows up twice.
+                                // The online check upstream only looks for an in-world player, so a
+                                // char-select session slips past it.
                                 if (newAccountId == 0)
-                                    session.Characters.Add(newPlayer.Character);
+                                    AddCharacterToSession(session, newPlayer.Character);
                                 else
                                 {
                                     var foundActiveSession = Network.Managers.NetworkManager.Find(newAccountId);
 
                                     if (foundActiveSession != null)
-                                        foundActiveSession.Characters.Add(newPlayer.Character);
+                                        AddCharacterToSession(foundActiveSession, newPlayer.Character);
                                 }
 
                                 var msg = $"Successfully {(isDeletedChar ? "restored" : "copied")} the character \"{(existingCharacter.IsPlussed ? "+" : "")}{existingCharacter.Name}\" to a new character \"{newPlayer.Name}\" for the account \"{newPlayer.Account.AccountName}\".";
                                 CommandHandlerHelper.WriteOutputInfo(session, msg, ChatMessageType.Broadcast);
-                                PlayerManager.BroadcastToAuditChannel(session.Player, msg);
+                                PlayerManager.BroadcastToAuditChannel(session?.Player, msg);
                             });
                         });
                     });
                 }
                 else
                 {
-                    CommandHandlerHelper.WriteOutputInfo(session, $"Failed to {(isDeletedChar ? "restore" : "copy")} the character \"{existingCharName}\" to a new character \"{newCharacterName}\" for the account \"{session.Account}\"! Does the character exist? Is the new character name already taken, or is the account out of free character slots?", ChatMessageType.Broadcast);
+                    CommandHandlerHelper.WriteOutputInfo(session, $"Failed to {(isDeletedChar ? "restore" : "copy")} the character \"{existingCharName}\" to a new character \"{newCharacterName}\" for the account \"{session?.Account}\"! Does the character exist? Is the new character name already taken, or is the account out of free character slots?", ChatMessageType.Broadcast);
                 }
             });
+        }
+
+        /// <summary>
+        /// Adds a freshly copied character to a session's character-select list, replacing any entry
+        /// already held for the same guid.
+        ///
+        /// Only DoCopyChar's targetGuid path can produce a duplicate: a normal copy allocates a guid the
+        /// session has never seen. With a reused slot guid the session may still be holding the previous
+        /// occupant's Character row, and the client renders one entry per list item, so a bare Add shows
+        /// the slot twice.
+        /// </summary>
+        private static void AddCharacterToSession(Session session, Database.Models.Shard.Character character)
+        {
+            if (session == null || character == null)
+                return;
+
+            session.Characters.RemoveAll(c => c.Id == character.Id);
+            session.Characters.Add(character);
         }
 
         /// <summary>

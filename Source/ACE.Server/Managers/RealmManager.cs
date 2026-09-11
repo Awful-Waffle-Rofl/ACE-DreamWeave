@@ -132,5 +132,22 @@ namespace ACE.Server.Managers
 
             return landblock;
         }
+
+        /// <summary>
+        /// Threads (WaffleACE): a private realm-0 copy of a curated dungeon for one owner. The run is
+        /// attached to the EphemeralRealm BEFORE the landblock is constructed, because Landblock.CreateWorldObjects
+        /// reads InnerRealmInfo.Run to filter the copy's content and there is no later moment that is early
+        /// enough. Single-player MVP: OpenToFellowship is false. Realm 0 always (PLAN section 11, Q5).
+        ///
+        /// The instance id is allocated by the caller (ThreadDungeonManager.TryStart, via
+        /// LandblockManager.RequestNewEphemeralInstanceIDv1(0)) before the run is constructed, because
+        /// run.RunId IS the instance id and the run object has to exist to be attached here.
+        /// </summary>
+        public static Entity.Landblock GetNewThreadDungeonLandblock(ACE.Entity.LandblockId landblockId, WorldObjects.Player owner, ACE.Server.ThreadDungeons.ThreadDungeonRun run, uint instance)
+        {
+            var ephemeralRealm = new EphemeralRealm(owner) { OpenToFellowship = false, Run = run };
+
+            return LandblockManager.GetLandblock(landblockId, instance, loadAdjacents: false, permaload: false, ephemeralRealm: ephemeralRealm);
+        }
     }
 }

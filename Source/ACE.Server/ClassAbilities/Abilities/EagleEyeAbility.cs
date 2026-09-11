@@ -24,7 +24,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Increases your missile accuracy by 4/8/12% (by rank) - a bonus to your effective " +
                           "missile attack skill at the to-hit roll.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

@@ -181,6 +181,16 @@ namespace ACE.Server.WorldObjects
                 TryConsumeFromInventoryWithNetworking(item);
             }
 
+            // round every bag this operation FILLED to a whole workmanship, so players get uniform bags.
+            // GetSalvageBag never hands back an already-full bag, so a bag at max structure here is final
+            // for this operation. Partial bags are deliberately left fractional - they can still be poured
+            // into, and rounding one here would shift the average SplitSalvage later divides up.
+            foreach (var salvageBag in salvageBags)
+            {
+                if (SalvageForge.IsFullBag(salvageBag) && salvageBag.ItemWorkmanship != null)
+                    salvageBag.ItemWorkmanship = RoundBagWorkmanship(salvageBag.ItemWorkmanship.Value, salvageBag.NumItemsInMaterial ?? 1);
+            }
+
             // add salvage bags
             foreach (var salvageBag in salvageBags)
                 TryCreateInInventoryWithNetworking(salvageBag);
@@ -202,6 +212,10 @@ namespace ACE.Server.WorldObjects
             var amountProduced = GetStructure(item, salvageResults, ref message);
 
             var remaining = amountProduced;
+
+            // WaffleACE: per-bag value cap, retail 75000 - tunable live via salvage_bag_value_cap.
+            // Clamped because a negative or > int.MaxValue admin value would force bag Value negative
+            var valueCap = (int)Math.Clamp(PropertyManager.GetLong("salvage_bag_value_cap").Item, 0L, int.MaxValue);
 
             while (remaining > 0)
             {
@@ -226,7 +240,7 @@ namespace ACE.Server.WorldObjects
 
                 var addedValue = (int)Math.Round((item.Value ?? 0) * valueFactor);
 
-                salvageBag.Value = Math.Min((salvageBag.Value ?? 0) + addedValue, 75000);
+                salvageBag.Value = Math.Min((salvageBag.Value ?? 0) + addedValue, valueCap);
 
                 // a bit different here, since ACE handles overages
                 if (message != null)
@@ -237,63 +251,124 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>
+        /// Returns the ItemWorkmanship sum that makes a bag's displayed workmanship (W / N) an exact
+        /// whole number. Applied when a bag reaches full structure, so players get uniform bags instead
+        /// of fractional values like 6.72.
+        /// </summary>
+        public static int RoundBagWorkmanship(int workmanship, int numItems)
+        {
+            var n = Math.Max(1, numItems);
+
+            var avg = (double)workmanship / n;
+
+            // MidpointRounding.AwayFromZero is required: .NET's default for Math.Round is banker's
+            // rounding (to even), which would send an average of 6.5 down to 6 instead of up to 7.
+            var rounded = (int)Math.Round(avg, MidpointRounding.AwayFromZero);
+
+            // clamp into the legal workmanship range - an average outside [1, 10] trips the legacy
+            // recovery branch in the Workmanship getter (WorldObject_Properties.cs).
+            rounded = Math.Clamp(rounded, 1, 10);
+
+            return rounded * n;
+        }
+
+        /// <summary>
+        /// Splits a source salvage bag between the destination bag it is being poured into and the
+        /// remainder that spills to the next bag. What is preserved is the source's AVERAGE
+        /// workmanship, because that average is what the Workmanship getter shows the player.
+        ///
+        /// It is preserved to within integer rounding, NOT exactly: the two fragments round
+        /// independently, so each side's workmanship sum is off by at most half a unit and the two
+        /// sums therefore need not add back up to the source's. Do not assert exact conservation of
+        /// the workmanship total - assert each side's average against a half-unit-per-fragment budget,
+        /// the way SalvageCombineTests.AssertAverageWithinRounding does. Structure, which is what the
+        /// player actually loses when combining goes wrong, IS conserved exactly, by TryAddSalvage.
+        ///
+        /// Edge case: when srcNum is 1 and the transfer is partial, the single source item is counted
+        /// once on BOTH sides. NumItemsInMaterial is the divisor in the Workmanship getter, so driving
+        /// either side to 0 would divide by zero. Both bags then read the correct average, but the item
+        /// count and the workmanship sum are each duplicated outright - the one case where the split
+        /// cannot do better.
+        /// </summary>
+        public static void SplitSalvage(int srcNum, int srcWorkmanship, int added, int tryAmount,
+                                        out int moveNum, out int moveWorkmanship,
+                                        out int remNum, out int remWorkmanship)
+        {
+            srcNum = Math.Max(1, srcNum);
+
+            // full transfer - the whole source goes into this bag and nothing spills
+            if (added >= tryAmount || tryAmount <= 0)
+            {
+                moveNum = srcNum;
+                moveWorkmanship = srcWorkmanship;
+                remNum = 0;
+                remWorkmanship = 0;
+                return;
+            }
+
+            // partial transfer - ratio is strictly between 0 and 1
+            var ratio = (double)added / tryAmount;
+
+            moveNum = (int)Math.Round(srcNum * ratio, MidpointRounding.AwayFromZero);
+            moveNum = Math.Clamp(moveNum, 1, Math.Max(1, srcNum - 1));
+
+            remNum = Math.Max(1, srcNum - moveNum);
+
+            var avg = (double)srcWorkmanship / srcNum;
+
+            moveWorkmanship = (int)Math.Round(avg * moveNum, MidpointRounding.AwayFromZero);
+            remWorkmanship = (int)Math.Round(avg * remNum, MidpointRounding.AwayFromZero);
+        }
+
         public int TryAddSalvage(WorldObject salvageBag, WorldObject item, int tryAmount)
         {
-            var maxStructure = salvageBag.MaxStructure ?? 100;
+            var maxStructure = salvageBag.MaxStructure ?? SalvageForge.DefaultMaxStructure;
             var structure = salvageBag.Structure ?? 0;
 
             var space = maxStructure - structure;
-
             var amount = Math.Min(tryAmount, space);
 
             salvageBag.Structure = (ushort)(structure + amount);
 
-            // add workmanship
-            var item_numItems = item.StackSize ?? 1;
-            var workmanship_bag = salvageBag.ItemWorkmanship ?? 0;
-            var workmanship_item = item.ItemWorkmanship ?? 0;
+            int addNum, addWorkmanship;
 
-            salvageBag.ItemWorkmanship = workmanship_bag + workmanship_item * item_numItems;
-
-            // increment # of items that went into this salvage bag
             if (item.ItemType == ItemType.TinkeringMaterial)
             {
-                item_numItems = item.NumItemsInMaterial ?? 1;
+                // combining bags - split the source so both this bag and whatever the caller's loop
+                // pours into the next one keep the source's average workmanship, to within the
+                // half-unit-per-fragment rounding SplitSalvage's remarks describe
+                var srcNum = item.NumItemsInMaterial ?? 1;
+                var srcWorkmanship = item.ItemWorkmanship ?? 0;
 
-                // handle overflows when combining bags
-                if (tryAmount > space)
+                SplitSalvage(srcNum, srcWorkmanship, amount, tryAmount,
+                             out addNum, out addWorkmanship, out var remNum, out var remWorkmanship);
+
+                // the source bag is scratch state - HandleSalvaging consumes it once AddSalvage's loop
+                // has drained it, so rewrite it down to the untransferred remainder for the next pass.
+                // Only on a partial transfer: a full transfer leaves remNum 0, and a bag with
+                // NumItemsInMaterial 0 would divide by zero in the Workmanship getter.
+                if (amount < tryAmount)
                 {
-                    var scalar = (float)space / tryAmount;
-                    var newItems = (int)Math.Ceiling(item_numItems * scalar);
-                    scalar = (float)newItems / item_numItems;
-                    var prevNumItems = item_numItems;
-                    item_numItems = newItems;
-
-                    salvageBag.ItemWorkmanship -= (int)Math.Round(workmanship_item * (1.0 - scalar));
-
-                    // and for the next bag...
-                    if (prevNumItems == newItems)
-                        newItems--;
-
-                    var itemWorkmanship = item.Workmanship;
-                    item.NumItemsInMaterial -= newItems;
-                    //item.ItemWorkmanship -= (int)Math.Round(workmanship_item * scalar);
-                    item.ItemWorkmanship = (int)Math.Round(item.NumItemsInMaterial.Value * (float)itemWorkmanship);
+                    item.NumItemsInMaterial = remNum;
+                    item.ItemWorkmanship = remWorkmanship;
                 }
             }
-            salvageBag.NumItemsInMaterial = (salvageBag.NumItemsInMaterial ?? 0) + item_numItems;
+            else
+            {
+                // fresh salvaging - a stack of N identical items contributes N items' worth.
+                // Deliberately unchanged from the previous behaviour: this path already preserves the
+                // correct average on every bag it spills into, and reworking it is out of scope.
+                addNum = item.StackSize ?? 1;
+                addWorkmanship = (item.ItemWorkmanship ?? 0) * addNum;
+            }
+
+            salvageBag.ItemWorkmanship = (salvageBag.ItemWorkmanship ?? 0) + addWorkmanship;
+            salvageBag.NumItemsInMaterial = (salvageBag.NumItemsInMaterial ?? 0) + addNum;
 
             salvageBag.Name = $"Salvage ({salvageBag.Structure})";
 
-            if (item.ItemType == ItemType.TinkeringMaterial)
-            {
-                if (!PropertyManager.GetBool("salvage_handle_overages").Item)
-                    return tryAmount;
-                else
-                    return amount;
-            }
-            else
-                return amount;
+            return amount;
         }
 
         public int GetStructure(WorldObject salvageItem, SalvageResults salvageResults, ref SalvageMessage message)

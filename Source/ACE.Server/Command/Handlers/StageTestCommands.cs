@@ -6,6 +6,8 @@ using ACE.Common;
 using ACE.DatLoader;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
+using ACE.Server.Entity;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
 using ACE.Server.Network;
@@ -29,12 +31,50 @@ namespace ACE.Server.Command.Handlers
     public static class StageTestCommands
     {
         /// <summary>
-        /// A single grant is clamped to this much XP - the amount that takes a fresh character to the
-        /// level cap (275), per @grantxp's own usage text. Repeat the command if you somehow want more.
+        /// A single grant is clamped to this much XP - the cumulative total that takes a fresh character
+        /// all the way to the level ceiling (<see cref="EnlightenmentXpCurve.HardCeilingLevel"/>, level
+        /// 1445 / 4,590,249,062,099,211,814 XP, per Docs/ClassAbilities/XP-LANE-SPEC.md sec 2.2). It used
+        /// to stop at 191,226,310,247 - the RETAIL cap of level 275 - which left a tester ~1170 levels
+        /// short of the max this fork actually supports.
+        ///
+        /// Read off the synthesized chart rather than hard-coded, so it tracks the ceiling if the curve
+        /// changes; the chart's own overflow guard keeps every total under long.MaxValue / 2, so this
+        /// always fits a long. Not a const for that reason - it needs the loaded portal.dat.
+        ///
+        /// Player.UpdateXpAndLevel clamps the grant to the XP actually remaining below the ceiling, so
+        /// asking for the full amount at any level simply tops the character out rather than banking
+        /// a surplus.
         /// </summary>
-        private const long MaxXpPerGrant = 191_226_310_247;
+        private static long MaxXpPerGrant =>
+            (long)EnlightenmentXpCurve.GetTotalXPRequiredForLevel(EnlightenmentXpCurve.HardCeilingLevel);
 
-        private const long MaxLuminancePerGrant = 1_000_000_000;
+        /// <summary>
+        /// How many class ability points one /mylum grant is sized to buy from scratch. Luminance's only
+        /// real sink is the CAP purchase curve, which is geometric with no cap of its own ("the only limit
+        /// is the price", ClassAbilityLumCurve), so a flat round number stops meaning anything a few points
+        /// up the curve. 40 is chosen to sit two full decades past the second breakpoint (20), deep in the
+        /// steep r3 tail, which is exactly the region that was previously untestable.
+        /// </summary>
+        private const int LuminanceGrantCoversPoints = 40;
+
+        /// <summary>
+        /// A single /mylum grant is clamped to the cumulative Luminance cost of the first
+        /// <see cref="LuminanceGrantCoversPoints"/> class ability points, read off the LIVE curve tunables,
+        /// so it re-sizes itself when the curve is retuned rather than going stale.
+        ///
+        /// At the design defaults that is 72,751,548,490,990. The old cap was a flat 1,000,000,000, which
+        /// did not even cover the first TWENTY points (1,299,815,225 cumulative) - the 41st point alone
+        /// costs 54,563,438,373,361 - so testing anything on the steep part of the curve meant grinding
+        /// the command dozens of times.
+        ///
+        /// Still four orders of magnitude clear of long.MaxValue, and the bank saturates rather than
+        /// wrapping (Player_Bank.SaturatingAdd), so repeated grants cannot invert a balance.
+        ///
+        /// Floored at the old value so a server that tunes the curve DOWN never ends up with a smaller cap
+        /// than it had before.
+        /// </summary>
+        private static long MaxLuminancePerGrant =>
+            Math.Max(1_000_000_000, Player.LumCostForClassAbilityPoints(0, LuminanceGrantCoversPoints));
 
         private const int MaxAbilityPointsPerGrant = 1_000;
 
@@ -102,7 +142,8 @@ namespace ACE.Server.Command.Handlers
 
         [CommandHandler("myxp", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 1,
             "Grants yourself experience. Stage test shard only.",
-            "<amount>")]
+            "<amount | max>\n" +
+            "\"max\" grants enough to reach the level ceiling in one command; the grant is clamped to the XP you actually still need.")]
         public static void HandleMyXp(Session session, params string[] parameters)
         {
             if (!Available(session))
@@ -159,8 +200,11 @@ namespace ACE.Server.Command.Handlers
             if (!TryParseAmount(session, parameters[0], MaxAbilityPointsPerGrant, out var amount))
                 return;
 
-            // Messages the player and saves their biota itself.
-            session.Player.GrantClassAbilityPoints((int)amount, "a stage test grant");
+            // Messages the player and saves their biota itself. GrantAdmin rather than GrantItem: this
+            // is a self-grant from a developer command on the stage test shard, which is the same kind
+            // of event as /grantabilitypoints, and the sourceText lands in the ledger row's `detail` so
+            // the two are still distinguishable at a MySQL prompt.
+            session.Player.GrantClassAbilityPoints((int)amount, "a stage test grant", CapLedgerReason.GrantAdmin);
 
             PlayerManager.BroadcastToAuditChannel(session.Player, $"[STAGE] {session.Player.Name} self-granted {amount:N0} class ability points.");
         }
@@ -342,31 +386,75 @@ namespace ACE.Server.Command.Handlers
         {
             var specializedCount = 0;
             var trainedCount = 0;
+            var xpOnlyCount = 0;
             var estimatedCredits = 0;
 
+            // This must predict exactly what RespecConfirm below will do, so every branch here mirrors one
+            // there. Two of them refund NO credits at all, and counting those would overstate the estimate:
+            // an AlwaysTrained skill keeps its rank (only its xp comes back), and an augmentation
+            // specialization was never paid for with the specialization upgrade cost in the first place.
             foreach (var kvp in player.Skills)
             {
                 if (!DatManager.PortalDat.SkillTable.SkillBaseHash.TryGetValue((uint)kvp.Key, out var skillBase))
                     continue;
 
+                var untrainable = Player.IsSkillUntrainable(kvp.Key);
+
                 if (kvp.Value.AdvancementClass == SkillAdvancementClass.Specialized)
                 {
-                    specializedCount++;
+                    var specializedViaAugmentation = player.IsSkillSpecializedViaAugmentation(kvp.Key, out var hasAugmentation) && hasAugmentation;
 
-                    // A specialized skill is taken all the way down in two steps, so it gives back BOTH the
-                    // specialization upgrade cost and the original trained cost. Counting only the former
-                    // understates the refund by roughly half.
-                    estimatedCredits += skillBase.UpgradeCostFromTrainedToSpecialized + skillBase.TrainedCost;
+                    if (!specializedViaAugmentation)
+                    {
+                        // A specialized skill is taken all the way down in TWO steps, and RespecConfirm counts
+                        // it in both of its buckets, so this does too. The upgrade cost always comes back;
+                        // the trained cost only does if the second step can actually untrain the skill, which
+                        // an AlwaysTrained skill specialized with credits (Arcane Lore) cannot - it stops at
+                        // Trained and recovers its xp only.
+                        specializedCount++;
+                        estimatedCredits += skillBase.UpgradeCostFromTrainedToSpecialized;
+
+                        if (untrainable)
+                        {
+                            trainedCount++;
+                            estimatedCredits += skillBase.TrainedCost;
+                        }
+                        else
+                        {
+                            xpOnlyCount++;
+                        }
+                    }
+                    else if (untrainable)
+                    {
+                        // untrained outright, refunding only what was actually spent: the trained cost
+                        trainedCount++;
+                        estimatedCredits += skillBase.TrainedCost;
+                    }
+                    else
+                    {
+                        xpOnlyCount++;      // Salvaging: augmentation-specialized AND AlwaysTrained
+                    }
                 }
                 else if (kvp.Value.AdvancementClass == SkillAdvancementClass.Trained)
                 {
-                    trainedCount++;
-                    estimatedCredits += skillBase.TrainedCost;
+                    if (untrainable)
+                    {
+                        trainedCount++;
+                        estimatedCredits += skillBase.TrainedCost;
+                    }
+                    else
+                    {
+                        xpOnlyCount++;
+                    }
                 }
             }
 
+            var xpOnlyClause = xpOnlyCount > 0
+                ? $", and recover the spent xp from {xpOnlyCount} skill(s) that cannot be lowered"
+                : "";
+
             session.Network.EnqueueSend(new GameMessageSystemChat(
-                $"This is a dry run - nothing has changed. Confirming would: unspecialize {specializedCount} skill(s) and untrain {trainedCount} skill(s), " +
+                $"This is a dry run - nothing has changed. Confirming would: unspecialize {specializedCount} skill(s), untrain {trainedCount} skill(s){xpOnlyClause}, " +
                 $"refunding an estimated {estimatedCredits:N0} skill credits; refund all spent skill XP as unassigned experience; and move your " +
                 $"{player.EquippedObjects.Count} currently-equipped item(s) to your pack. Type /myrespec confirm to proceed.", ChatMessageType.Broadcast));
         }
@@ -420,19 +508,25 @@ namespace ACE.Server.Command.Handlers
                 {
                     var specializedViaAugmentation = player.IsSkillSpecializedViaAugmentation(skill, out var playerHasAugmentation) && playerHasAugmentation;
 
-                    if (player.UnspecializeSkill(skill, skillBase.UpgradeCostFromTrainedToSpecialized))
+                    if (specializedViaAugmentation)
+                    {
+                        // mirrors the gem: an augmentation specialization has no Trained rung to step down to,
+                        // so untrain outright and refund the trained cost - the only credits ever spent on it.
+                        if (player.UntrainSkill(skill, skillBase.TrainedCost, true))
+                        {
+                            session.Network.EnqueueSend(new GameMessagePrivateUpdateSkill(player, creatureSkill));
+
+                            if (Player.IsSkillUntrainable(skill))
+                                untrainedCount++;
+                            else if (!augSpecNames.Contains(skill.ToSentence()))
+                                augSpecNames.Add(skill.ToSentence());   // Salvaging: aug-specialized AND AlwaysTrained
+                        }
+                    }
+                    else if (player.UnspecializeSkill(skill, skillBase.UpgradeCostFromTrainedToSpecialized))
                     {
                         session.Network.EnqueueSend(new GameMessagePrivateUpdateSkill(player, creatureSkill));
 
-                        if (specializedViaAugmentation)
-                        {
-                            if (!augSpecNames.Contains(skill.ToSentence()))
-                                augSpecNames.Add(skill.ToSentence());
-                        }
-                        else
-                        {
-                            unspecializedCount++;
-                        }
+                        unspecializedCount++;
                     }
                 }
 
@@ -471,7 +565,7 @@ namespace ACE.Server.Command.Handlers
                 summary += $" Always-trained skills stay Trained (spent XP refunded only): {string.Join(", ", alwaysTrainedNames)}.";
 
             if (augSpecNames.Count > 0)
-                summary += $" Tinkering/salvaging skills specialized via augmentation stay Specialized (spent XP refunded only): {string.Join(", ", augSpecNames)}.";
+                summary += $" Always-trained skills specialized via augmentation stay Specialized (spent XP refunded only): {string.Join(", ", augSpecNames)}.";
 
 
             session.Network.EnqueueSend(new GameMessageSystemChat(summary, ChatMessageType.Advancement));
@@ -489,7 +583,7 @@ namespace ACE.Server.Command.Handlers
                 return null;
 
             return "This is the DreamWeave TEST shard. You can grant yourself progression here:\n" +
-                   "  /myxp <amount>             - experience\n" +
+                   "  /myxp <amount|max>         - experience; \"max\" takes you to the level ceiling\n" +
                    "  /mylum <amount>            - banked Luminance, spendable at Class Trainers\n" +
                    "  /myabilitypoints <amount>  - class ability points, spend with /abilities\n" +
                    "  /mymmd <count>             - Trade Notes (MMDs), up to a full stack per grant\n" +
@@ -509,11 +603,22 @@ namespace ACE.Server.Command.Handlers
             return false;
         }
 
+        /// <summary>
+        /// "max" is accepted in place of a number and means the whole per-grant cap. It exists for
+        /// /myxp, whose cap is the cumulative total to the level ceiling - a 19-digit number nobody is
+        /// going to type correctly - but it costs nothing to honour on the other grants too.
+        /// </summary>
         private static bool TryParseAmount(Session session, string input, long max, out long amount)
         {
+            if (input.Equals("max", StringComparison.OrdinalIgnoreCase))
+            {
+                amount = max;
+                return true;
+            }
+
             if (!long.TryParse(input, out amount) || amount < 1)
             {
-                session.Network.EnqueueSend(new GameMessageSystemChat($"Amount must be a positive number, up to {max:N0}.", ChatMessageType.Broadcast));
+                session.Network.EnqueueSend(new GameMessageSystemChat($"Amount must be a positive number (or \"max\"), up to {max:N0}.", ChatMessageType.Broadcast));
                 return false;
             }
 

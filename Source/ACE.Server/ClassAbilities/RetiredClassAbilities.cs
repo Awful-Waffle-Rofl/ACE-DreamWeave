@@ -60,7 +60,55 @@ namespace ACE.Server.ClassAbilities
                 CostPerRank = new[] { 3 },
                 MaxRank = 1,
             },
+
+            // Retired 2026-08-17 (Berserker/Rogue balance pass): the low-health melee ramp is replaced in the
+            // Berserker T2 slot by Break Armor. Verified against BloodFuryAbility.cs as it stood immediately
+            // before deletion: Name = "bloodfury" (no underscore), MaxRank = 3, CostPerRank = { 3, 3, 3 }.
+            ["bloodfury"] = new RetiredEntry
+            {
+                DisplayName = "Blood Fury",
+                CostPerRank = new[] { 3, 3, 3 },
+                MaxRank = 3,
+            },
         };
+
+        /// <summary>
+        /// The retired abilities' NUMERIC ids, mapped to the quest-key suffix that keys <see cref="Retired"/>.
+        ///
+        /// Ownership persists by NAME, so the table above is the authority and this is only a second way in.
+        /// It exists because one thing does key off the numeric id: a class ability TOKEN carries
+        /// <see cref="ACE.Entity.Enum.Properties.PropertyInt.ClassAbilityTokenId"/>, and an unused token for a
+        /// since-retired ability is still sitting in someone's pack. Without this map,
+        /// Player.RefundUnusedVoucher can't resolve it (the id is deliberately no longer in
+        /// <see cref="ClassAbilityRegistry.Abilities"/>) and the prepaid points are stranded.
+        ///
+        /// Every id here MUST also stay reserved in <see cref="ClassAbilityId"/> and keep its
+        /// <see cref="ClassAbilityTokenCatalog.TokenAbilities"/> slot, or the wcid a live token was minted
+        /// from stops meaning what it meant.
+        /// </summary>
+        private static readonly Dictionary<ClassAbilityId, string> RetiredIds = new()
+        {
+            [ClassAbilityId.AdvancedWeaponry] = "advanced_weaponry",
+            [ClassAbilityId.QuestionableTactics] = "questionable_tactics",
+            [ClassAbilityId.StreakToArc] = "streaktoarc",
+            [ClassAbilityId.BloodFury] = "bloodfury",
+        };
+
+        /// <summary>
+        /// Every retired ability as a flat read-only row - numeric id, quest-key suffix, display name, max
+        /// rank and historical cost. Exists for tooling that must SHOW a retired entry rather than silently
+        /// drop it: the planner catalog under tools/ca-planner emits these with "retired": true so a saved
+        /// build referencing one can be explained instead of appearing corrupt. Ordered by numeric id, so
+        /// the enumeration is stable across runs.
+        /// </summary>
+        public static IEnumerable<(ClassAbilityId Id, string Name, string DisplayName, int MaxRank, IReadOnlyList<int> CostPerRank)> All()
+        {
+            foreach (var kvp in RetiredIds.OrderBy(kvp => (int)kvp.Key))
+            {
+                var entry = Retired[kvp.Value];
+                yield return (kvp.Key, kvp.Value, entry.DisplayName, entry.MaxRank, entry.CostPerRank);
+            }
+        }
 
         /// <summary>
         /// Computes the class ability point refund owed for an orphaned rank in a retired ability. Clamps
@@ -79,6 +127,32 @@ namespace ACE.Server.ClassAbilities
 
             displayName = entry.DisplayName;
             points = entry.CostPerRank.Take(Math.Clamp(rank, 0, entry.MaxRank)).Sum();
+            return true;
+        }
+
+        /// <summary>
+        /// The id-keyed form, for the one caller that only has a numeric id: an unused prepaid TOKEN whose
+        /// <see cref="ACE.Entity.Enum.Properties.PropertyInt.ClassAbilityTokenId"/> names a retired ability.
+        ///
+        /// <paramref name="tier"/> is the token's rank (1-based), and the refund is that ONE rank's historical
+        /// cost - NOT the cumulative cost the string overload returns. That is the difference between the two:
+        /// the string overload prices ranks a character actually holds and has paid for cumulatively, while a
+        /// token is a single prepaid rank. Returns FALSE for an id this table doesn't recognize, or a tier
+        /// outside the ability's historical CostPerRank.
+        /// </summary>
+        public static bool TryGetRefund(ClassAbilityId id, int tier, out int points, out string displayName)
+        {
+            points = 0;
+            displayName = null;
+
+            if (!RetiredIds.TryGetValue(id, out var suffix) || !Retired.TryGetValue(suffix, out var entry))
+                return false;
+
+            if (tier < 1 || tier > entry.CostPerRank.Length)
+                return false;
+
+            displayName = entry.DisplayName;
+            points = entry.CostPerRank[tier - 1];
             return true;
         }
     }

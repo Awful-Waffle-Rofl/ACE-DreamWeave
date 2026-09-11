@@ -44,7 +44,15 @@ namespace ACE.Server.WorldObjects
 
                 if (wo == null) continue;
 
-                wo.Location = new Position(link.ObjCellId, link.OriginX, link.OriginY, link.OriginZ, link.AnglesX, link.AnglesY, link.AnglesZ, link.AnglesW, 0);
+                // Link children live in the same instance copy as their parent. World-db rows are
+                // instance-agnostic, and Landblock.CreateWorldObjects stamps the instance only on the
+                // top-level objects it creates - never on the children ActivateLinks builds here - so
+                // a literal 0 put every lever and pressure plate of a private (ephemeral) dungeon copy
+                // into the BASE world's physics landblock while its door stayed in the copy. Verified
+                // live 2026-09-02 (Threads WP-1 spike, Filos' Doom 0x0150): retail wires the
+                // door as the link parent and the lever/plate as the child, so the levers were missing
+                // from the copy; with the parent's instance they load and operate inside it.
+                wo.Location = new Position(link.ObjCellId, link.OriginX, link.OriginY, link.OriginZ, link.AnglesX, link.AnglesY, link.AnglesZ, link.AnglesW, CurrentLandblock?.Instance ?? 0);
                 parent.SetLinkProperties(wo);
                 CurrentLandblock?.AddWorldObject(wo);
                 if (wo.PhysicsObj != null)

@@ -46,7 +46,22 @@ namespace ACE.Server.Entity.Actions
 
                 foreach (var action in toAct)
                 {
-                    Tuple<IActor, IAction> next = action.Act();
+                    // Deferred work runs on the world-simulation thread, far from the handler that scheduled it
+                    // (every AddDelaySeconds continuation transits here). An unhandled exception escapes to
+                    // WorldManager's fatal handler, which does NOT crash the process - it STOPS the world. The
+                    // batch in toAct was already removed from delayHeap above, so an escaping throw would also
+                    // drop every remaining action in this batch. One bad action must fail alone and be logged.
+                    Tuple<IActor, IAction> next;
+
+                    try
+                    {
+                        next = action.Act();
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"DelayManager.RunActions(): Act() threw and was contained. Action type: {action?.GetType().FullName}, WaitTime: {action?.WaitTime}, EndTime: {action?.EndTime}", ex);
+                        continue;
+                    }
 
                     if (next != null)
                         next.Item1.EnqueueAction(next.Item2);

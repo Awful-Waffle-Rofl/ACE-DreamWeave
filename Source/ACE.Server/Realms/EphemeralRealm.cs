@@ -14,13 +14,48 @@ namespace ACE.Server.Realms
     public class EphemeralRealm
     {
         public Player Owner { get; }
-        public List<Player> AllowedPlayers { get; } = new List<Player>();
+
+        /// <summary>
+        /// Guards <see cref="allowedPlayers"/>. Admit() runs on whatever thread reached the caller (a gem
+        /// used from the ground arrives on a landblock action chain, not the world thread) while Accepts()
+        /// is read from the teleport path, so the add and the read have to agree on one lock.
+        /// </summary>
+        private readonly object allowedLock = new object();
+        private readonly List<Player> allowedPlayers = new List<Player>();
+
+        /// <summary>Snapshot of the players admitted on top of <see cref="Owner"/>. Add through <see cref="Admit"/>.</summary>
+        public IReadOnlyList<Player> AllowedPlayers
+        {
+            get { lock (allowedLock) return allowedPlayers.ToArray(); }
+        }
+
         public bool OpenToFellowship { get; set; } = true;
         public DateTime ExpiresAt { get; } = DateTime.UtcNow.AddDays(1);
+
+        /// <summary>Threads: the run this instance hosts, or null for every other ephemeral instance.</summary>
+        public ACE.Server.ThreadDungeons.ThreadDungeonRun Run { get; set; }
 
         public EphemeralRealm(Player owner)
         {
             Owner = owner;
+        }
+
+        /// <summary>
+        /// Admits a player who is not (or is no longer) the <see cref="Owner"/> reference. Owner is compared
+        /// by REFERENCE in Accepts, and every login builds a NEW Player object (WorldManager.cs:266), so the
+        /// original owner stops matching the moment they relog; the caller that still knows they are the
+        /// rightful owner (by guid) re-admits them here. Idempotent.
+        /// </summary>
+        public void Admit(Player player)
+        {
+            if (player == null)
+                return;
+
+            lock (allowedLock)
+            {
+                if (!allowedPlayers.Contains(player))
+                    allowedPlayers.Add(player);
+            }
         }
 
         /// <summary>
@@ -31,8 +66,14 @@ namespace ACE.Server.Realms
             if (DateTime.UtcNow > ExpiresAt)
                 return false;
 
-            if (player == Owner || AllowedPlayers.Contains(player))
+            if (player == Owner)
                 return true;
+
+            lock (allowedLock)
+            {
+                if (allowedPlayers.Contains(player))
+                    return true;
+            }
 
             if (OpenToFellowship && Owner?.Fellowship != null && player.Fellowship == Owner.Fellowship)
                 return true;

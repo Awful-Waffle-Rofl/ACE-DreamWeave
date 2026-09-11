@@ -81,6 +81,25 @@ item-flow board (one-way flows flagged), and recent bank transfers.
 
 ## Updating
 
-Push a change under `Source/ACE.Dashboard/**` → the workflow publishes a new `:latest` (and a
-`:sha-…`). On the host: `docker compose pull && docker compose up -d`. Pin `DASHBOARD_IMAGE` to a
-`:sha-…` tag if you want deploys to be explicit rather than tracking `:latest`.
+Push a change under `Source/ACE.Dashboard/**` and `publish-dashboard.yml` publishes a new
+`:latest` (and a `:sha-…`). **Publishing is not deploying** - nothing pulls on its own.
+
+**Run the `deploy dashboard` workflow** (Actions ▸ deploy dashboard ▸ Run workflow). It runs on
+the self-hosted runner, pulls, recreates the container, and then checks that the running container
+is the image it just pulled and that the app answers on `127.0.0.1:5080`. Leave the `image` input
+blank for `:latest`, or pass a `:sha-…` ref to deploy or roll back to an explicit build.
+
+**Do not reach for `docker compose pull` on the host.** It fails: the host holds no GHCR
+credentials, the package is private, and an anonymous pull is refused (verified 2026-08-23 -
+`docker login` there would need a classic PAT minted and rotated by hand, and a fine-grained token
+is not accepted by the container registry). The workflow needs none of that, because the runner
+authenticates with its own `GITHUB_TOKEN` exactly as the server deploy does. `docker/login-action`
+logs out at the end of each job, which is why `/root/.docker/config.json` reads `{"auths":{}}`
+between runs - that is expected, not a broken login.
+
+This gap was real and cost five weeks: the container ran a 2026-07-17 image until 2026-08-23 while
+three successful publishes sat unused in GHCR, because the documented route was a host command that
+could not work.
+
+Pin `DASHBOARD_IMAGE` in `.env` to a `:sha-…` tag if you want the deployed build to be explicit
+rather than tracking `:latest`.

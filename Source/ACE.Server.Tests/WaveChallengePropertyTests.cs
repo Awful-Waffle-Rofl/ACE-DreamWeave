@@ -32,6 +32,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(9006, (int)PropertyFloat.WaveChallengeWaveTimeLimit);
 
             Assert.AreEqual(9021, (int)PropertyInt64.BestWaveScore);
+            Assert.AreEqual(9022, (int)PropertyInt64.BestWaveScoreCenti);
         }
 
         /// <summary>
@@ -71,20 +72,37 @@ namespace ACE.Server.Tests
         /// WeaponModResolute, WeaponModVigor and WeaponModMending until 2026-07-30, when the Tier A pool was cut
         /// to damage-oriented modifiers and those five rows were removed outright.
         ///
+        /// 8133 JOINED THEM ON 2026-08-07, when the Cleave modifier was removed from the catalog on the same
+        /// terms.
+        ///
+        /// 8135, 8141, 8142, 8143 AND 8146 JOINED ON 2026-08-17 (catalog v4 pass): WeaponModSwiftFlight,
+        /// WeaponModLifeLeech, WeaponModManaLeech, WeaponModStaminaLeech and WeaponModOverload, retired on the
+        /// same repo-owner directive that brought utility rows back into the pool in a new form. All of these
+        /// are in this ONE test rather than each getting its own, precisely because it is not a special case:
+        /// the rule is one rule, and a second test would be a second place to forget to extend.
+        ///
         /// The members are gone rather than renamed, but weapons on dev shards are carrying records at those ids
         /// right now. Handing one of them to a new property would make an existing stale record read as that
-        /// property's value, silently, on every weapon that still holds one.
+        /// property's value, silently, on every weapon that still holds one. Cleave's case is the starkest: such
+        /// a weapon also keeps an orphaned PropertyInt.Cleaving native, because the row that knew how much of it
+        /// to subtract back off is gone.
         /// </summary>
         [TestMethod]
-        public void PropertyFloat_8136_To_8140_StayUnallocated()
+        public void PropertyFloat_8133_8135_8136To8140_8141To8143_8146_StayUnallocated()
         {
             var wasCalled = new Dictionary<int, string>
             {
+                { 8133, "WeaponModCleave" },
+                { 8135, "WeaponModSwiftFlight" },
                 { 8136, "WeaponModWarding" },
                 { 8137, "WeaponModCritWard" },
                 { 8138, "WeaponModResolute" },
                 { 8139, "WeaponModVigor" },
                 { 8140, "WeaponModMending" },
+                { 8141, "WeaponModLifeLeech" },
+                { 8142, "WeaponModManaLeech" },
+                { 8143, "WeaponModStaminaLeech" },
+                { 8146, "WeaponModOverload" },
             };
 
             foreach (var kvp in wasCalled)

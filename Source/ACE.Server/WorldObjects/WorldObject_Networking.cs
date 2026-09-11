@@ -97,7 +97,7 @@ namespace ACE.Server.WorldObjects
                 writer.Write((ushort?)AmmoType ?? 0);
 
             if ((weenieFlags & WeenieHeaderFlag.Value) != 0)
-                writer.Write(Value ?? 0);
+                writer.Write(ClientValue);
 
             if ((weenieFlags & WeenieHeaderFlag.Usable) != 0)
                 writer.Write((uint?)ItemUseable ?? 0u);
@@ -303,13 +303,14 @@ namespace ACE.Server.WorldObjects
                 // ethereal is applied to the serialized copy only - the server's own PhysicsObj.State stays
                 // non-ethereal, so server-side collision, wall blocking and damage are unchanged.
 
-                // 360-degree spread spells always put one projectile on a vector straight through the
-                // third-person camera. The client's viewer transition (ObjectInfoState.IsViewer) exempts
-                // creatures from obstructing the camera but not missiles, so a non-ethereal ring projectile
-                // pulls the camera in on every cast. Ethereal objects never obstruct anything, viewer included.
-                var ethereal360 = spellProjectile.Spell?.SpreadAngle == 360 && PropertyManager.GetBool("spell_projectile_ethereal_360").Item;
+                // a ring spreads its projectiles around the caster, so one of them always travels on a vector
+                // straight through the third-person camera. The client's viewer transition
+                // (ObjectInfoState.IsViewer) exempts creatures from obstructing the camera but not missiles,
+                // so a non-ethereal ring projectile pulls the camera in on every cast. Ethereal objects never
+                // obstruct anything, viewer included. SpellType is assigned in Setup(), before world entry.
+                var etherealRing = spellProjectile.SpellType == ProjectileSpellType.Ring && PropertyManager.GetBool("spell_projectile_ethereal_360").Item;
 
-                if (ethereal360 || PropertyManager.GetBool("spell_projectile_ethereal").Item)
+                if (etherealRing || PropertyManager.GetBool("spell_projectile_ethereal").Item)
                     physicsState |= PhysicsState.Ethereal;
             }
 
@@ -443,7 +444,15 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.SendUpdatePosition({Location.ToLOCString()})");
 
-            EnqueueBroadcast(new GameMessageUpdatePosition(this, adminMove));
+            if (this is Player player && !adminMove)
+            {
+                // a Player's position goes out once per audience: its own client must keep seeing the teleport
+                // sequence it last accepted, observers must keep seeing the live one (see PositionPack)
+                player.Session.Network.EnqueueSend(new GameMessageUpdatePosition(this, false, PositionAudience.Self));
+                EnqueueBroadcast(false, new GameMessageUpdatePosition(this, false, PositionAudience.Observers));
+            }
+            else
+                EnqueueBroadcast(new GameMessageUpdatePosition(this, adminMove));
 
             LastUpdatePosition = DateTime.UtcNow;
         }
@@ -739,7 +748,9 @@ namespace ACE.Server.WorldObjects
             if (AmmoType != null)
                 weenieHeaderFlag |= WeenieHeaderFlag.AmmoType;
 
-            if (Value != null && (Value > 0))
+            // ClientValue, not Value: a zero-value item is told it is worth 1 so the client's sell-pane
+            // drag check passes at a mule - see WorldObject_Properties.ClientValue for the full why.
+            if (ClientValue > 0)
                 weenieHeaderFlag |= WeenieHeaderFlag.Value;
 
             if (ItemUseable != null)
@@ -1500,9 +1511,27 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void NotifyPlayers()
         {
-            // send create object network message to visible players
+            // send create object network message to visible players.
+            //
+            // the CreateObject payload is identical for every recipient whose Adminvision is false,
+            // so serialize it once for the whole fan-out instead of once per player - in a crowd this
+            // was N full SerializeCreateObject passes over the same object on every arrival / spawn.
+            // Adminvision recipients still get their own message, because the adminvision /
+            // adminnodraw flags change the payload (see Player.TrackObject).
+            //
+            // built lazily so an object with no non-admin recipients never serializes one. This loop
+            // is synchronous on the caller's thread, so the lazy init needs no synchronization. It can
+            // build one message that no recipient ends up using (TrackObject / AddTrackedObject apply
+            // further per-recipient gates); that is one wasted serialization where there were N.
+            GameMessageCreateObject sharedCreate = null;
+
             foreach (var player in PhysicsObj.ObjMaint.GetKnownPlayersValuesAsPlayer())
-                player.AddTrackedObject(this);
+            {
+                if (sharedCreate == null && !player.Adminvision)
+                    sharedCreate = new GameMessageCreateObject(this);
+
+                player.AddTrackedObject(this, sharedCreate);
+            }
 
             if (this is Creature creature && !(this is Player))
                 creature.CheckTargets();

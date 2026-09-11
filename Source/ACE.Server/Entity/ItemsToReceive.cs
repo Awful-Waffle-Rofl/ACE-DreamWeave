@@ -53,6 +53,52 @@ namespace ACE.Server.Entity
             return Process(weenieClassId, amount, true);
         }
 
+        /// <summary>
+        /// Credits back the burden/slot capacity that consuming a turn-in item frees up, so a reward
+        /// pre-flight check can account for the space the outgoing item itself vacates - not just the
+        /// space the incoming reward needs. Uses the item's own live values (never GetCachedWeenie, since
+        /// this is a mutated instance - e.g. a partial stack), so callers must pass the actual WorldObject
+        /// being consumed.
+        ///
+        /// A partial stack consumption (amountConsumed less than the item's current StackSize) leaves the
+        /// stack itself in place - only its per-unit burden is freed, no slot. Consuming the whole item
+        /// (or more) frees its full EncumbranceVal and one slot, charged to whichever counter
+        /// (RequiredContainerSlots/RequiredInventorySlots) the item itself is charged against.
+        /// </summary>
+        public void CreditOutgoing(WorldObject item, int amountConsumed)
+        {
+            if (item == null)
+                return;
+
+            var currentStackSize = item.StackSize ?? 1;
+
+            if (amountConsumed < currentStackSize)
+            {
+                RequiredBurden -= amountConsumed * (item.StackUnitEncumbrance ?? 0);
+                return;
+            }
+
+            RequiredBurden -= item.EncumbranceVal ?? 0;
+
+            if (item.UseBackpackSlot)
+                RequiredContainerSlots -= 1;
+            else
+                RequiredInventorySlots -= 1;
+        }
+
+        /// <summary>
+        /// Reserves raw inventory slots for rewards whose weenie is not knowable ahead of time - a
+        /// CreateTreasure emote row rolls its item at execution time, so there is no wcid to look a burden
+        /// or a container requirement up from. One slot per row, zero burden: deliberately the cheapest
+        /// honest reservation, since over-charging burden here would refuse gives that would have fit.
+        /// </summary>
+        public bool AddUnknownItemSlots(int count)
+        {
+            RequiredInventorySlots += count;
+
+            return !PlayerExceedsLimits;
+        }
+
         private bool Process(uint weenieClassId, int amount, bool negate = false)
         {
             var requiredSlots = GetItemSlotAndBurdenRequirements(weenieClassId, amount, out var requiredEncumbrance, out var itemRequiresBackpackSlot);

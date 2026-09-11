@@ -66,6 +66,36 @@ namespace ACE.Server.Factories.Tables
             ( 10, 0.05f ),
         };
 
+        // T7 and T8 continue the existing curve rather than extending it linearly. The lower tiers step
+        // their mean up by a full point each (T1 3.45 -> T2 4.45 -> T3 5.45), then decelerate as they
+        // approach the hard ceiling of 10 (T4 6.41 -> T5 6.77 -> T6 7.34). These carry that deceleration
+        // on: T7 7.94, T8 8.44.
+        //
+        // The number that actually matters for balance is not the mean, it is P(workmanship 10) - the
+        // Equipment/WeaponMod systems scale magnitude linearly by workmanship / 10, so players only ever
+        // mod a 10. Under T6 that stayed pinned at 5% across every tier from 6 up, which made the search
+        // cost for a moddable endgame item flat over the whole top half of the game. 8% at T7 and 15% at
+        // T8 is a deliberate ~3x easing at the top, chosen over a larger step so it can be raised later
+        // without recalling drops players already hold.
+        private static ChanceTable<int> T7_Chances = new ChanceTable<int>()
+        {
+            ( 5, 0.01f ),
+            ( 6, 0.05f ),
+            ( 7, 0.3f ),
+            ( 8, 0.35f ),
+            ( 9, 0.21f ),
+            ( 10, 0.08f ),
+        };
+
+        private static ChanceTable<int> T8_Chances = new ChanceTable<int>()
+        {
+            ( 6, 0.02f ),
+            ( 7, 0.15f ),
+            ( 8, 0.35f ),
+            ( 9, 0.33f ),
+            ( 10, 0.15f ),
+        };
+
         private static readonly List<ChanceTable<int>> workmanshipChances = new List<ChanceTable<int>>()
         {
             T1_Chances,
@@ -74,6 +104,8 @@ namespace ACE.Server.Factories.Tables
             T4_Chances,
             T5_Chances,
             T6_Chances,
+            T7_Chances,
+            T8_Chances,
         };
 
         /// <summary>
@@ -81,8 +113,8 @@ namespace ACE.Server.Factories.Tables
         /// </summary>
         public static int Roll(int tier)
         {
-            // todo: add t7 / t8
-            tier = Math.Clamp(tier, 1, 6);
+            // tiers only run 1-8; clamped rather than indexed blind, to match MutateValue_Generic
+            tier = Math.Clamp(tier, 1, 8);
 
             var workmanshipChance = workmanshipChances[tier - 1];
 

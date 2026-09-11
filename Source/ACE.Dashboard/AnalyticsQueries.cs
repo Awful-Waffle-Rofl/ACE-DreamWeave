@@ -91,13 +91,23 @@ public sealed class AnalyticsQueries
         using var c = Open();
         // Directed from->to edges by value moved, with the reverse-edge value so we can flag
         // one-directional flow (the mule/RMT signature).
+        //
+        // kind IN ('trade','give') is load-bearing, not tidiness. item_flow_event also carries
+        // vendor rows, and a vendor BUY is (vendor -> player) with to_is_player=1, so it passes the
+        // to_is_player filter unchanged. Worse, its reverse leg is a player -> vendor SELL, which
+        // has to_is_player=0 and so can never appear in the `rev` subquery - meaning every vendor a
+        // player shops at would score as a perfectly one-directional edge and trip the mule flag.
+        // Ordinary shopping is not mule activity, so both the edge and its reverse are restricted
+        // to player-to-player transfers.
         using var cmd = new MySqlCommand(
             "SELECT a.from_id,a.from_name,a.to_id,a.to_name,SUM(a.value) v,SUM(a.stack_size) items,COUNT(*) n," +
             " COALESCE((SELECT SUM(b.value) FROM item_flow_event b" +
             "   WHERE b.from_id=a.to_id AND b.to_id=a.from_id AND b.to_is_player=1" +
+            "     AND b.kind IN ('trade','give')" +
             "     AND b.ts_utc > UTC_TIMESTAMP() - INTERVAL @h HOUR),0) rev" +
             " FROM item_flow_event a" +
-            " WHERE a.to_is_player=1 AND a.ts_utc > UTC_TIMESTAMP() - INTERVAL @h HOUR" +
+            " WHERE a.to_is_player=1 AND a.kind IN ('trade','give')" +
+            "   AND a.ts_utc > UTC_TIMESTAMP() - INTERVAL @h HOUR" +
             " GROUP BY a.from_id,a.from_name,a.to_id,a.to_name ORDER BY v DESC LIMIT @l", c);
         cmd.Parameters.AddWithValue("@h", hours);
         cmd.Parameters.AddWithValue("@l", limit);
@@ -118,7 +128,10 @@ public sealed class AnalyticsQueries
     public List<BankTransfer> GetBankTransfers(int limit)
     {
         using var c = Open();
-        using var cmd = new MySqlCommand("SELECT ts_utc,from_name,to_name,currency,amount FROM currency_flow_event ORDER BY ts_utc DESC LIMIT @l", c);
+        // currency_flow_event also carries the money leg of vendor buys and sells. This view is
+        // labelled bank transfers and means character-to-character movement, so it filters to that
+        // kind rather than quietly widening to mean "any currency movement".
+        using var cmd = new MySqlCommand("SELECT ts_utc,from_name,to_name,currency,amount FROM currency_flow_event WHERE kind='bank_transfer' ORDER BY ts_utc DESC LIMIT @l", c);
         cmd.Parameters.AddWithValue("@l", limit);
         using var r = cmd.ExecuteReader();
         var list = new List<BankTransfer>();

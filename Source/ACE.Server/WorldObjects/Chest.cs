@@ -59,6 +59,24 @@ namespace ACE.Server.WorldObjects
         public virtual double Default_ChestResetInterval => 120;
 
         /// <summary>
+        /// Threads (WaffleACE): the guid of the one player allowed to open this chest, or null for every
+        /// chest in the game that is not a Thread boss cache - which is all of them except the ones
+        /// ThreadDungeonRewardSpawner spawns. Purely in-memory and NEVER persisted, exactly like
+        /// Creature.P_DungeonRun: a boss cache lives and dies inside one ephemeral instance, which is what
+        /// keeps it out of the shard entirely. Landblock.SaveDB returns on `if (IsEphemeral)`
+        /// (Landblock.cs:1863-1868) BEFORE it iterates worldObjects, so no object inside a Thread copy is
+        /// ever offered to IsDynamicThatShouldPersistToShard in the first place. The
+        /// PropertyInt.ThreadDungeonRunId stamp the spawner also writes is defense in depth for the one case
+        /// that early return does not cover - an object that somehow ends up on a NON-ephemeral landblock -
+        /// and is not the primary guarantee.
+        ///
+        /// Read by <see cref="CheckUseRequirements"/>, which is the gate every use path goes through
+        /// (WorldObject.OnActivate calls it before dispatching to ActOnUse). NULL is the whole-game default
+        /// and short-circuits to today's behaviour on the first comparison, so no existing chest changes.
+        /// </summary>
+        public uint? P_DungeonCacheOwnerGuid;
+
+        /// <summary>
         /// A new biota be created taking all of its values from weenie.
         /// </summary>
         public Chest(Weenie weenie, ObjectGuid guid) : base(weenie, guid)
@@ -101,6 +119,21 @@ namespace ACE.Server.WorldObjects
 
             if (!(activator is Player player))
                 return new ActivationResult(false);
+
+            // Threads (WaffleACE): a boss cache belongs to the run owner and to nobody else. Guarded on the
+            // stamp being present, so a chest that carries no owner - every other chest in the game - takes
+            // the identical path it took before this check existed.
+            //
+            // This seam rather than an early return in ActOnUse: CheckUseRequirements is the single gate
+            // ActOnUse is reached through (WorldObject_Use.cs:85-93 checks it and returns on failure),
+            // Chest already overrides it, and it is the only one of the two that can refuse with a message
+            // rather than silently doing nothing. Refusing in ActOnUse would still have run the walk-to
+            // chain and the open motion first.
+            if (P_DungeonCacheOwnerGuid != null && player.Guid.Full != P_DungeonCacheOwnerGuid.Value)
+            {
+                player.SendTransientError($"The {Name} answers only to the adventurer whose thread opened it.");
+                return new ActivationResult(false);
+            }
 
             if (IsLocked)
             {

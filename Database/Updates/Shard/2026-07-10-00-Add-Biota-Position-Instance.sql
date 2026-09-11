@@ -4,10 +4,17 @@
    Idempotent: guards the ADD COLUMN behind an information_schema check so re-running
    the script (a deploy that resets applied_updates.txt, a container without a persisted
    Config volume, or a manual re-apply) is a no-op instead of failing with
-   "Duplicate column name 'instance'". MySQL 8.0 has no ADD COLUMN IF NOT EXISTS, and the
-   boot patcher's connection (Program_DbUpdates.PatchDatabase) sets neither DELIMITER
-   support nor AllowUserVariables, so this uses a static-body stored procedure (no client
-   DELIMITER, no @-user-variables) that the server's multi-statement parser runs as one batch.
+   "Duplicate column name 'instance'". MySQL 8.0 has no ADD COLUMN IF NOT EXISTS, so the
+   guard has to be written by hand, and this file uses a static-body stored procedure (no
+   client DELIMITER, no @-user-variables) that the server's multi-statement parser runs as
+   one batch.
+
+   That shape is what forces the CI exclusion below, and it is no longer the only option:
+   PatchDatabase's connection string now sets AllowUserVariables=true, so a SET / PREPARE /
+   EXECUTE guard works there too and needs no CI exclusion. DELIMITER is still unsupported
+   either way. Prefer the SET / PREPARE / EXECUTE shape for NEW files - see
+   Database/Updates/World/2026-08-27-00-Add-Speed-Season-Start-Wcid.sql. This file keeps the
+   stored procedure because rewriting an already-applied migration buys nothing.
 
    Apply via the server boot patcher (AutoApplyDatabaseUpdates) - the only path that runs
    Database/Updates/*. Do NOT pipe this file through the `mysql` CLI (`mysql < file.sql`):

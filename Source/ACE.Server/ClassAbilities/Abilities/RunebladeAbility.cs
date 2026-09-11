@@ -44,8 +44,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "(III / V / the Incantation), not the chance; the level you actually throw is also " +
                           "limited by your War Magic. Higher Magic Item Tinkering increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 1, 2, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.MagicItemTinkering,
         };
 
         /// <summary>
@@ -169,7 +170,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = effective,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,

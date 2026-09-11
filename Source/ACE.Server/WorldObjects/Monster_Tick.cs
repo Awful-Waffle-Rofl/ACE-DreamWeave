@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 
 using ACE.Entity.Enum;
+using ACE.Server.WorldEvents;
 
 namespace ACE.Server.WorldObjects
 {
@@ -45,6 +46,30 @@ namespace ACE.Server.WorldObjects
             }
 
             if (IsDead) return;
+
+            // WaffleACE World Events: an objective creature (Rift, Element Portal pillar - PropertyBool 9026
+            // WorldEventObjective) is a stationary HP sink. It is Attackable so players can hit it, which makes
+            // IsMonster true and lets an attack wake it, but it must never think: no target search, no movement,
+            // no attack, no emote-driven turn. TargetingTactic None does NOT achieve that (Monster_Awareness
+            // substitutes Random|TopDamager for None), so this is the single place the rule is enforced.
+            if (WorldEventObjectiveRules.SkipsMonsterTick(WorldEventObjective)) return;
+
+            // World events sky-drop (WaffleACE, WP-17): a creature still falling in from a world-event sky
+            // spawn does nothing at all - no target search, no movement, no attack. Returning HERE rather
+            // than later is deliberate: the Sleep() below would clear IsAwake and, without
+            // WorldObject_Tick's matching rule, park the creature in mid-air. Creature.OnSkyDropLanded
+            // clears the flag once it is down, and the next tick proceeds normally.
+            //
+            // A dropping creature is normally still ASLEEP and has already returned at the !IsAwake block
+            // above; this covers the case where a player woke it by attacking it in the air.
+            if (WorldEventSkyDrop) return;
+
+            // WP-17: the first tick after a landing. The physics tick that landed it woke it and raised
+            // this flag but deliberately did NOT acquire a target there - see Creature.CompleteSkyDropAcquire
+            // for why that call cannot be made from inside UpdateObjectPhysics. From here on this creature
+            // is an ordinary monster.
+            if (WorldEventSkyDropPendingAcquire)
+                CompleteSkyDropAcquire();
 
             if (EmoteManager.IsBusy) return;
 

@@ -32,6 +32,13 @@ namespace ACE.Database
             public DateTime LastSeen;
             public ShardDbContext Context;
             public T CachedObject;
+
+            /// <summary>
+            /// Set by DiscardCachedBiota when a save on this entry failed. Read and written only while holding
+            /// lock (Context), so a thread that was already waiting on that lock with a reference to this
+            /// entry can see that the entry is gone and must not touch the context.
+            /// </summary>
+            public bool Discarded;
         }
 
         private readonly object biotaCacheMutex = new object();
@@ -72,18 +79,44 @@ namespace ACE.Database
             lastMaintenanceInterval = DateTime.UtcNow;
         }
 
-        private void TryAddToCache(ShardDbContext context, Biota biota)
+        /// <summary>
+        /// Returns whether the cache actually TOOK the context, which is not the same question as whether it
+        /// was asked to: a zero retention time for this biota's kind stores nothing. Callers that own the
+        /// context have to know which happened, because the cache is the only thing that would otherwise keep
+        /// it alive - a context neither cached nor disposed is a leaked MySQL connection.
+        /// </summary>
+        private bool TryAddToCache(ShardDbContext context, Biota biota)
         {
             lock (biotaCacheMutex)
             {
                 if (ObjectGuid.IsPlayer(biota.Id))
                 {
                     if (PlayerBiotaRetentionTime > TimeSpan.Zero)
+                    {
                         biotaCache[biota.Id] = new CacheObject<Biota> {LastSeen = DateTime.UtcNow, Context = context, CachedObject = biota};
+
+                        return true;
+                    }
                 }
                 else if (NonPlayerBiotaRetentionTime > TimeSpan.Zero)
+                {
                     biotaCache[biota.Id] = new CacheObject<Biota> {LastSeen = DateTime.UtcNow, Context = context, CachedObject = biota};
+
+                    return true;
+                }
             }
+
+            return false;
+        }
+
+        /// <summary>
+        /// The context SaveBiota's cache-miss path stages into. Exists as an overridable seam so a test can
+        /// hand in a context it is able to inspect afterwards, which is the only way to assert the disposal
+        /// contract below without a live MySQL instance. Production behaviour is a plain new ShardDbContext().
+        /// </summary>
+        protected virtual ShardDbContext CreateShardDbContext()
+        {
+            return new ShardDbContext();
         }
 
         public List<uint> GetBiotaCacheKeys()
@@ -125,6 +158,15 @@ namespace ACE.Database
 
                     var biota = GetBiota(context, id, doNotAddToCache); // This will add the result into the caches
 
+                    // ownership of the context transfers to the cache ONLY via TryAddToCache,
+                    // which doNotAddToCache suppresses. With the flag set nothing retains it, on
+                    // a cache hit or a miss, so this method still owns it and must dispose it.
+                    // Safe for the returned biota: no lazy-loading proxies are configured on any
+                    // context, and GetBiotaCore has already materialized every child collection
+                    // through PopulateBiotaCollections before this returns.
+                    if (doNotAddToCache)
+                        context.Dispose();
+
                     return biota;
                 }
             }
@@ -134,10 +176,61 @@ namespace ACE.Database
 
                 var biota = GetBiota(context, id, doNotAddToCache); // This will add the result into the caches
 
+                // same ownership rule as the player branch above
+                if (doNotAddToCache)
+                    context.Dispose();
+
                 return biota;
             }
 
             return base.GetBiota(id, doNotAddToCache);
+        }
+
+        /// <summary>
+        /// Drops a cache entry whose save did not commit, and disposes its context once nothing else in the
+        /// cache is pointing at it. Must be called while holding lock(cachedBiota.Context).
+        ///
+        /// A failed SaveChanges() does NOT undo anything in the change tracker: every row UpdateDatabaseBiota
+        /// staged stays Added / Modified / Deleted on that context. A cache entry keeps its context for the
+        /// whole retention window, so leaving a failed entry in the cache means the NEXT save of the same biota
+        /// runs UpdateDatabaseBiota against a graph that still contains rows in the Added state - and removing
+        /// an Added dependent detaches it, which EF Core's navigation fixup immediately reflects by taking it
+        /// out of the principal's navigation collection. That is what turned one duplicate-entry failure into
+        /// a run of "Collection was modified; enumeration operation may not execute." on 2026-09-07/08 in prod,
+        /// each one another disconnected player. BiotaUpdater no longer enumerates a collection it removes from,
+        /// so the crash is gone either way, but a dirty retained context is independently wrong: it would
+        /// replay the failed writes on top of some later, unrelated save of the same biota.
+        ///
+        /// Dropping the entry costs one biota read - the next save takes the miss path and re-stages against a
+        /// context built from the current database row.
+        ///
+        /// The entry is only removed if it is STILL the one that failed; GetBiota or the miss path may have
+        /// replaced it in the meantime, and a replacement is clean. The Discarded flag is what makes disposal
+        /// safe: a thread that read this same entry out of the cache before we removed it is blocked on
+        /// lock(Context) and will see the flag rather than a disposed context.
+        ///
+        /// Lock order: this is the only place that takes biotaCacheMutex while holding a cached context's
+        /// monitor. Nothing takes them in the other order - SaveBiota releases biotaCacheMutex before locking
+        /// the context - so there is no inversion.
+        /// </summary>
+        private void DiscardCachedBiota(uint id, CacheObject<Biota> cachedBiota)
+        {
+            cachedBiota.Discarded = true;
+
+            bool contextStillCached;
+
+            lock (biotaCacheMutex)
+            {
+                if (biotaCache.TryGetValue(id, out var current) && ReferenceEquals(current, cachedBiota))
+                    biotaCache.Remove(id);
+
+                contextStillCached = biotaCache.Values.Any(v => ReferenceEquals(v.Context, cachedBiota.Context));
+            }
+
+            log.Warn($"[DATABASE] Dropping the cached biota entry for 0x{id:X8} because its save did not commit; its ShardDbContext still holds the failed changes and must not be reused.");
+
+            if (!contextStillCached)
+                cachedBiota.Context.Dispose();
         }
 
         public override bool SaveBiota(ACE.Entity.Models.Biota biota, ReaderWriterLockSlim rwLock, bool doNotAddToCache = false)
@@ -161,42 +254,83 @@ namespace ACE.Database
                 // single-threaded callers pay one uncontended lock and nothing else.
                 lock (cachedBiota.Context)
                 {
-                    rwLock.EnterReadLock();
-                    try
+                    // Another thread saving this same id may have discarded the entry while we waited on the
+                    // lock; its context can already be disposed, so fall through to the miss path.
+                    if (!cachedBiota.Discarded)
                     {
-                        ACE.Database.Adapter.BiotaUpdater.UpdateDatabaseBiota(cachedBiota.Context, biota, cachedBiota.CachedObject);
-                    }
-                    finally
-                    {
-                        rwLock.ExitReadLock();
-                    }
+                        var saved = false;
 
-                    return DoSaveBiota(cachedBiota.Context, cachedBiota.CachedObject);
+                        try
+                        {
+                            rwLock.EnterReadLock();
+                            try
+                            {
+                                ACE.Database.Adapter.BiotaUpdater.UpdateDatabaseBiota(cachedBiota.Context, biota, cachedBiota.CachedObject);
+                            }
+                            finally
+                            {
+                                rwLock.ExitReadLock();
+                            }
+
+                            saved = DoSaveBiota(cachedBiota.Context, cachedBiota.CachedObject);
+
+                            return saved;
+                        }
+                        finally
+                        {
+                            // Covers a false return AND a throw out of either call above.
+                            if (!saved)
+                                DiscardCachedBiota(biota.Id, cachedBiota);
+                        }
+                    }
                 }
             }
 
-            // Biota does not exist in the cache
+            // Biota does not exist in the cache, or the entry we found was just discarded by a failed save
 
-            var context = new ShardDbContext();
+            // This context is disposed on EVERY exit except the one where the cache took ownership of it, and
+            // that exception is why there is no using statement here: a retained context has to outlive this
+            // method by the whole retention window. Every other exit - a false return, a throw out of
+            // StageBiota or DoSaveBiota, doNotAddToCache, or a zero retention time for this kind of biota -
+            // leaves nothing holding the context, so failing to dispose it leaks one pooled MySQL connection.
+            //
+            // That leak used to be nearly unreachable for a warm biota, because a failed cache-hit save left
+            // its dirty entry in the cache and the next attempt reused that same context. DiscardCachedBiota
+            // now drops the entry instead, so every retry of a persistently-failing biota arrives HERE. A
+            // player is at least bounded by BiotaSaveFailed disconnecting them (Player_Tick), but a creature,
+            // corpse or container has no such circuit breaker and would leak one connection per autosave
+            // heartbeat until the pool ran dry.
+            var context = CreateShardDbContext();
+            var contextRetainedByCache = false;
 
-            var existingBiota = StageBiota(context, biota, rwLock);
-
-            if (DoSaveBiota(context, existingBiota))
+            try
             {
-                if (!doNotAddToCache)
-                    TryAddToCache(context, existingBiota);
+                var existingBiota = StageBiota(context, biota, rwLock);
 
-                return true;
+                if (DoSaveBiota(context, existingBiota))
+                {
+                    if (!doNotAddToCache)
+                        contextRetainedByCache = TryAddToCache(context, existingBiota);
+
+                    return true;
+                }
+
+                return false;
             }
-
-            return false;
+            finally
+            {
+                if (!contextRetainedByCache)
+                    context.Dispose();
+            }
         }
 
         /// <summary>
-        /// Cache hits keep their own live, retained per-object context and go through the unchanged single-item
-        /// SaveBiota - they're not folded into the shared batch context below, because that would leave a second
-        /// tracked copy of the same row on a different context. Only cache misses are staged together and
-        /// committed once.
+        /// Cache hits keep their own live, retained per-object context and go through the single-item SaveBiota -
+        /// they're not folded into the shared batch context below, because that would leave a second tracked copy
+        /// of the same row on a different context. Only cache misses are staged together and committed once.
+        /// Note that the fanned-out branch therefore inherits SaveBiota's failure handling too: a cache-hit save
+        /// that does not commit discards its cache entry (DiscardCachedBiota), so the next attempt for that id
+        /// re-stages on a clean context rather than reusing the dirty one.
         ///
         /// The cache-hit subset is committed CONCURRENTLY over the database thread pool. That fan-out used to
         /// exist in SaveBiotasInParallel; routing that method through here turned it into a serial loop, so an

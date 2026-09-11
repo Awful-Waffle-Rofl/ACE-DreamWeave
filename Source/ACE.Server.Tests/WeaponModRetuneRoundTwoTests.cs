@@ -57,9 +57,10 @@ namespace ACE.Server.Tests
         /// </summary>
         private static readonly (WeaponModId Id, double MaxRoll)[] Untouched =
         {
-            (WeaponModId.Cleave,       1.0),
+            // Cleave was the third entry here at MaxRoll 1.0 until 2026-08-07, and Swift Flight was a fourth
+            // at MaxRoll 6.0 until 2026-08-17, when both were removed from the catalog outright. A removal is
+            // not a magnitude change, so it leaves this scope guard alone.
             (WeaponModId.ShieldBypass, 0.50),
-            (WeaponModId.SwiftFlight,  6.0),
         };
 
         [ClassInitialize]
@@ -126,6 +127,9 @@ namespace ACE.Server.Tests
                     $"{id}: the retunes moved the three RATING rows only; the non-rating {id} must still be {maxRoll}");
             }
 
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // rows to the catalog, but ALL SIX ARE TIER B - see WeaponModRegistry.TierBExpansionBandStart - so
+            // Tier A stays at exactly the rows this table already accounts for. No adjustment needed.
             Assert.AreEqual(Retuned.Length + Untouched.Length, WeaponModRegistry.TierAMods.Count,
                 "a TIER A modifier was added or removed without this table being updated, so the scope guard above is no longer covering the whole tier. Tier B magnitudes are pinned in WeaponModTierBTests, which is where a Tier B addition belongs");
         }
@@ -166,51 +170,51 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// The three reported workmanship points, as exact outcome sets rather than bounds. Computed from
-        /// applied = MaxRoll x potency x (workmanship / 10), rounded away from zero, floored at 1 above zero,
-        /// over the potency band [0.25, 1]. RECOMPUTED 2026-07-30, fourth pass, after Weak Point moved 2 -> 3
-        /// and Devastation/Bloodthirst moved 5 -> 6:
+        /// applied = MaxRoll x potency x (workmanship / 10), rounded away from zero, floored at 1 above zero.
+        /// RECOMPUTED 2026-08-06 over the NEW potency band [0.60, 1] (DefaultMinPotency moved from 0.25 with
+        /// the v3 magnitude pass - see WeaponModDefinition.DefaultMinPotency). The set shapes below replace the
+        /// 2026-07-30 fourth-pass sets, which were computed over [0.25, 1] and are stale:
         ///
         ///   Weak Point (MaxRoll 3)
-        ///     workmanship 1  - raw 0.075 .. 0.30, always rounds to 0 and is floored. {1}
-        ///     workmanship 5  - raw 0.375 .. 1.50; 2 only at raw exactly 1.5, i.e. potency exactly 1.0. {1, 2}
-        ///     workmanship 10 - raw 0.75 .. 3.00; 2 from raw 1.5 (potency 0.5) up, 3 from raw 2.5
-        ///                      (potency 0.8333...) up. {1, 2, 3}
+        ///     workmanship 1  - raw 0.18 .. 0.30, always rounds to 0 and is floored. {1}
+        ///     workmanship 5  - raw 0.90 .. 1.50; below 1.5 rounds to 1, exactly 1.5 (potency 1.0) rounds to 2. {1, 2}
+        ///     workmanship 10 - raw 1.80 .. 3.00; the MINIMUM raw is 1.8, already past the 1.5 rounding
+        ///                      threshold, so 1 is NOT reachable at workmanship 10 any more. {2, 3}
         ///
         ///   Devastation / Bloodthirst (MaxRoll 6)
-        ///     workmanship 1  - raw 0.15 .. 0.60; 0.5 and above rounds away from zero to 1, everything below
-        ///                      floors to 1. {1}
-        ///     workmanship 5  - raw 0.75 .. 3.00. {1, 2, 3}
-        ///     workmanship 10 - raw 1.50 .. 6.00; the MINIMUM raw is exactly 1.5 (at potency exactly 0.25,
-        ///                      the MinPotency floor), which rounds AWAY FROM ZERO to 2, not 1 - so 1 is NOT
-        ///                      reachable at workmanship 10 even though it is the normal outcome at every lower
-        ///                      workmanship. {2, 3, 4, 5, 6}
+        ///     workmanship 1  - raw 0.36 .. 0.60; still spans the 0.5 rounding threshold, so both the
+        ///                      floored-at-1 outcome and the rounds-to-1 outcome collapse onto the same value. {1}
+        ///     workmanship 5  - raw 1.80 .. 3.00; same shape as Weak Point at workmanship 10 above - the 1.5
+        ///                      threshold is cleared, so 1 is NOT reachable here either any more. {2, 3}
+        ///     workmanship 10 - raw 3.60 .. 6.00; the MINIMUM raw (3.60, at the new 0.60 floor) rounds away
+        ///                      from zero to 4, so 2 and 3 are NOT reachable at workmanship 10 any more. {4, 5, 6}
         /// </summary>
         [TestMethod]
         public void Change3_ReportedWorkmanshipPointsGiveExactlyTheseMagnitudes()
         {
             AssertOutcomes(WeaponModId.WeakPoint, 1, new[] { 1.0 });
             AssertOutcomes(WeaponModId.WeakPoint, 5, new[] { 1.0, 2.0 });
-            AssertOutcomes(WeaponModId.WeakPoint, 10, new[] { 1.0, 2.0, 3.0 });
+            AssertOutcomes(WeaponModId.WeakPoint, 10, new[] { 2.0, 3.0 });
 
             AssertOutcomes(WeaponModId.Devastation, 1, new[] { 1.0 });
-            AssertOutcomes(WeaponModId.Devastation, 5, new[] { 1.0, 2.0, 3.0 });
-            AssertOutcomes(WeaponModId.Devastation, 10, new[] { 2.0, 3.0, 4.0, 5.0, 6.0 });
+            AssertOutcomes(WeaponModId.Devastation, 5, new[] { 2.0, 3.0 });
+            AssertOutcomes(WeaponModId.Devastation, 10, new[] { 4.0, 5.0, 6.0 });
 
             AssertOutcomes(WeaponModId.Bloodthirst, 1, new[] { 1.0 });
-            AssertOutcomes(WeaponModId.Bloodthirst, 5, new[] { 1.0, 2.0, 3.0 });
-            AssertOutcomes(WeaponModId.Bloodthirst, 10, new[] { 2.0, 3.0, 4.0, 5.0, 6.0 });
+            AssertOutcomes(WeaponModId.Bloodthirst, 5, new[] { 2.0, 3.0 });
+            AssertOutcomes(WeaponModId.Bloodthirst, 10, new[] { 4.0, 5.0, 6.0 });
         }
 
         /// <summary>
         /// THE BOUNDARY EFFECT, called out explicitly rather than left implicit inside the set-equality check
-        /// above: at MaxRoll 6, workmanship 10, the MINIMUM potency (the MinPotency floor of 0.25) produces a
-        /// raw value of exactly 1.5, which Math.Round(..., AwayFromZero) sends to 2, not 1. A broader "stays
-        /// within 1..6" range assertion would not catch a regression that let 1 back in - or one that pushed the
-        /// floor to 3 - so this pins the exact minimum outcome by itself, for both retuned integer-native rows
-        /// that share MaxRoll 6.
+        /// above. RECOMPUTED 2026-08-06 for the new MinPotency floor of 0.60 (was 0.25): at MaxRoll 6,
+        /// workmanship 10, the MINIMUM potency now produces a raw value of 6 x 0.60 x 1.0 = 3.6, which
+        /// Math.Round(..., AwayFromZero) sends to 4 - not 2, and not 1. A broader "stays within 1..6" range
+        /// assertion would not catch a regression that let a smaller value back in, so this pins the exact
+        /// minimum outcome by itself, for both retuned integer-native rows that share MaxRoll 6.
         /// </summary>
         [TestMethod]
-        public void Change3_MaxRollSixNeverResolvesToOneAtWorkmanshipTen()
+        public void Change3_MaxRollSixNeverResolvesBelowFourAtWorkmanshipTen()
         {
             foreach (var id in new[] { WeaponModId.Devastation, WeaponModId.Bloodthirst })
             {
@@ -218,14 +222,14 @@ namespace ACE.Server.Tests
 
                 var atMinPotency = WeaponModValue.Resolve(definition, definition.MinPotency, 10.0, 1.0);
 
-                Assert.AreEqual(2.0, atMinPotency, 1e-12,
-                    $"{id}: workmanship 10 at the MinPotency floor ({definition.MinPotency}) must resolve to exactly 2 (raw 1.5 rounds away from zero), not 1");
+                Assert.AreEqual(4.0, atMinPotency, 1e-12,
+                    $"{id}: workmanship 10 at the MinPotency floor ({definition.MinPotency}) must resolve to exactly 4 (raw 3.6 rounds away from zero), not lower");
 
                 for (var roll = 0; roll < 2000; roll++)
                 {
                     var rolled = WeaponModValue.Roll(definition, 10.0);
 
-                    Assert.AreNotEqual(1.0, rolled, $"{id}: a live roll at workmanship 10 produced 1, which is unreachable at MaxRoll {definition.MaxRoll}");
+                    Assert.IsTrue(rolled >= 4.0, $"{id}: a live roll at workmanship 10 produced {rolled}, below 4 which is unreachable at MaxRoll {definition.MaxRoll} and MinPotency {definition.MinPotency}");
                 }
             }
         }

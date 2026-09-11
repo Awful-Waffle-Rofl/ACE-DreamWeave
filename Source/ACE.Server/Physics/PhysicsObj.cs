@@ -85,6 +85,14 @@ namespace ACE.Server.Physics
         public PhysicsObj ProjectileTarget;
         public double PhysicsTimer_CurrentTime;
         public bool DatObject = false;
+
+        /// <summary>
+        /// WaffleACE fork: set from PropertyBool.IgnoreInitialClamp at InitPhysicsObj. When true this object
+        /// bypasses ObjectMaint's 112.5 m initial-visibility clamp in both directions: players see it as soon
+        /// as its landblock is in their 3x3, and when it spawns it announces itself to every player in its
+        /// own 3x3 instead of only those within the clamp radius.
+        /// </summary>
+        public bool IgnoreInitialClamp = false;
         public int Order = 1;
 
         /// <summary>
@@ -2799,7 +2807,7 @@ namespace ACE.Server.Physics
             {
                 // everything except monsters
                 // usually these are server objects whose position never changes
-                var knownPlayers = ObjectMaint.InitialClamp ? ObjMaint.GetVisibleObjectsDist(CurCell, ObjectMaint.VisibleObjectType.Players)
+                var knownPlayers = ObjectMaint.InitialClamp && !IgnoreInitialClamp ? ObjMaint.GetVisibleObjectsDist(CurCell, ObjectMaint.VisibleObjectType.Players)
                     : ObjMaint.GetVisibleObjects(CurCell, ObjectMaint.VisibleObjectType.Players);
 
                 ObjMaint.AddKnownPlayers(knownPlayers);

@@ -5,6 +5,7 @@ using System.Text;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Managers.Analytics;
 using ACE.Server.Network.Enum;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages;
@@ -108,6 +109,21 @@ namespace ACE.Server.Network.Handlers
 
                 if (chatType != adjustedchatType)
                     log.DebugFormat("[CHAT] ChatType ({0}) was adjusted to {1} | ChatNetworkBlobDispatchType: {2}", chatType, adjustedchatType, chatBlobDispatchType);
+
+                // Analytics is keyed off adjustedchatType, NEVER the raw client-supplied chatType.
+                // The handler re-derives the channel above precisely because the client value is not
+                // trusted; logging the raw one would let a client file a message under any channel
+                // it liked. Allegiance maps to null and is dropped by the allowlist in RecordChat.
+                AnalyticsManager.RecordChat(session.Player, adjustedchatType switch
+                {
+                    ChatType.General => "general",
+                    ChatType.Trade => "trade",
+                    ChatType.LFG => "lfg",
+                    ChatType.Roleplay => "roleplay",
+                    ChatType.Society or ChatType.SocietyCelHan or ChatType.SocietyEldWeb or ChatType.SocietyRadBlo => "society",
+                    ChatType.Olthoi => "olthoi",
+                    _ => null
+                }, message);
 
                 var gameMessageTurbineChat = new GameMessageTurbineChat(ChatNetworkBlobType.NETBLOB_EVENT_BINARY, ChatNetworkBlobDispatchType.ASYNCMETHOD_SENDTOROOMBYNAME, adjustedChannelID, session.Player.Name, message, senderID, adjustedchatType);
 

@@ -29,6 +29,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 1,
             CostPerRank = new[] { 3 },
             Implemented = true,
+            AffinitySkill = Skill.Loyalty,
         };
 
         public void OnItemProc(Player wielder, int rank, WorldObject procSource)

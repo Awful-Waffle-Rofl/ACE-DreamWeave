@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
+using System.Threading;
 
 using log4net;
 
@@ -17,6 +20,7 @@ using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
+using ACE.Server.Managers.Analytics;
 using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -46,6 +50,19 @@ namespace ACE.Server.WorldObjects
 
         public bool LastContact = true;
 
+        /// <summary>
+        /// The ObjectTeleport sequence this player's OWN client last accepted: written by GameMessagePlayerTeleport
+        /// and by an admin-move position packet, both of which the client is meant to act on as a teleport.
+        /// NULL until one of those happens, meaning "use the live sequence".
+        ///
+        /// Why it exists: PositionPack can advance ObjectTeleport for OBSERVERS only (see
+        /// PositionPack observerTeleport and Player_Tick.UpdateObjectPhysics). The live sequence then runs ahead
+        /// of what this client has seen, and every position packet built for THIS client must keep carrying the
+        /// value it has already accepted - a newer teleport sequence on the client's own object is a full portal
+        /// transition (character stopped, portal view), tested live 2026-08-17.
+        /// </summary>
+        public byte[] SelfTeleportSequence;
+
         public bool IsJumping
         {
             get
@@ -74,6 +91,47 @@ namespace ACE.Server.WorldObjects
         public const float MaxRadarRange_Outdoors = 75.0f;
 
         public DateTime PrevObjSend;
+
+        /// <summary>
+        /// Last /fi (fixinvisible) invocation, for that command's one-minute per-player cooldown.
+        /// In memory only, never persisted, mirroring <see cref="PrevObjSend"/>.
+        ///
+        /// Its own field rather than sharing PrevObjSend: /fi resends creatures without the
+        /// delete-then-create cycle /objsend uses, so it is cheap enough for a much shorter window,
+        /// and a shared timer would let either command lock the other out.
+        /// </summary>
+        public DateTime PrevFixInvisible;
+
+        /// <summary>
+        /// Last /marketadmin invocation, for that command's five-second per-player cooldown. In memory
+        /// only, never persisted, mirroring <see cref="PrevObjSend"/> and PrevMuleVaultCommand.
+        ///
+        /// Its own field rather than sharing LastBankCommandTime: this is a Sentinel investigation
+        /// command whose subcommands each open a ShardDbContext and block on a world thread, so it is
+        /// bounded on the /mule vault reads' five seconds rather than the bank's one, and sharing a
+        /// window with a player-facing command would make either the bank hostile or this one loose.
+        /// </summary>
+        public DateTime LastMarketAdminCommandTime { get; set; } = DateTime.MinValue;
+
+        /// <summary>
+        /// Last /vaultrestore invocation, for that command's per-player cooldown. In memory only,
+        /// never persisted, exactly like <see cref="LastMarketAdminCommandTime"/>.
+        ///
+        /// Its own field rather than sharing that one: /vaultrestore is an Admin command that WRITES,
+        /// and sharing a window with the read-only investigation command would mean an admin looking
+        /// something up could not then act on it for five seconds.
+        /// </summary>
+        public DateTime LastVaultRestoreCommandTime { get; set; } = DateTime.MinValue;
+
+        /// <summary>
+        /// Last /marketbackfill invocation, for that command's per-player cooldown. In memory only,
+        /// never persisted, exactly like <see cref="LastMarketAdminCommandTime"/>.
+        ///
+        /// Its own field for the same reason /vaultrestore has one: this is an Admin command that
+        /// WRITES, and it is normal to preview a backfill and then immediately run it, which sharing
+        /// a window with either neighbour would make impossible.
+        /// </summary>
+        public DateTime LastMarketBackfillCommandTime { get; set; } = DateTime.MinValue;
 
         public float CurrentRadarRange => Location.Indoors ? MaxRadarRange_Indoors : MaxRadarRange_Outdoors;
 
@@ -580,6 +638,10 @@ namespace ACE.Server.WorldObjects
             if (SecondaryActivePet != null)   // Summon 2x second slot
                 SecondaryActivePet.Destroy();
 
+            // Mule Vendor (DESIGN 11.4): destroyed on logout, as pets are above.
+            if (CurrentSummonedVendor != null)
+                CurrentSummonedVendor.Destroy();
+
             // If we're in the dying animation process, we cannot logout until that animation completes..
             if (IsInDeathProcess)
                 return;
@@ -642,6 +704,18 @@ namespace ACE.Server.WorldObjects
 
         public double LogOffFinalizedTime;
 
+        /// <summary>
+        /// WaffleACE: IP active-player limit. Unix seconds at which this character's warning grace expires,
+        /// or null while it is not flagged as a violator. Set by IpLimitManager.Tick when the sweep first
+        /// finds this character in violation, and cleared as soon as it stops being one (it walked back into
+        /// a mule landblock, or a higher level character from the same address logged off).
+        ///
+        /// Deliberately a plain non-persisted field, NOT a PropertyFloat, exactly like LogOffFinalizedTime
+        /// above: the grace only means anything for the duration of this login, and persisting it would make
+        /// a character resume its old countdown on a later login.
+        /// </summary>
+        public double? IpLimitGraceExpiry;
+
         public bool ForcedLogOffRequested;
 
         /// <summary>
@@ -666,6 +740,11 @@ namespace ACE.Server.WorldObjects
             SetPropertiesAtLogOut();
             SavePlayerToDatabase();
             PlayerManager.SwitchPlayerFromOnlineToOffline(this);
+
+            // AFTER the switch, never before: it is what stops this character counting as online in the
+            // account snapshot ReleaseAccountBank consults, and the cache must survive a logout that
+            // overlaps another character on the same account entering the world.
+            ReleaseAccountBank();
 
             log.DebugFormat("[LOGOUT] Account {0} exited the world with character {1} (0x{2}) at {3}.", Account.AccountName, Name, Guid, DateTime.Now.ToCommonString());
         }
@@ -699,17 +778,72 @@ namespace ACE.Server.WorldObjects
 
         
 
+        // ==== ForceObjDesc probe ====
+        // Diagnostic counters for client ForceObjectDescSend (0xF7DE control) requests.
+        // The client re-requests a guid every ~20 s forever when it has a stranded
+        // placeholder for an object it never received a CreateObject for (a known
+        // client memory leak - see Docs/Perf/CLIENT-MEMORY-LEAK.md). A guid repeating
+        // here at ~20 s intervals is that leak, observed server-side.
+        // Per-Player instance: resets on relog. Read via the forceobjdescprobe dev command.
+
+        public class ForceObjDescProbeEntry
+        {
+            public int Hits;
+            public bool LastFound;
+            public DateTime FirstSeen;
+            public DateTime LastSeen;
+        }
+
+        private readonly ConcurrentDictionary<uint, ForceObjDescProbeEntry> forceObjDescProbe = new ConcurrentDictionary<uint, ForceObjDescProbeEntry>();
+
+        private const int ForceObjDescProbeMaxEntries = 10000;
+
+        private int forceObjDescProbeOverflow;
+
+        public int ForceObjDescProbeOverflow => forceObjDescProbeOverflow;
+
+        public List<KeyValuePair<uint, ForceObjDescProbeEntry>> GetForceObjDescProbeSnapshot()
+        {
+            return forceObjDescProbe.ToList();
+        }
+
+        public void ClearForceObjDescProbe()
+        {
+            forceObjDescProbe.Clear();
+            Interlocked.Exchange(ref forceObjDescProbeOverflow, 0);
+        }
+
+        private void RecordForceObjDescProbe(uint itemGuid, bool found)
+        {
+            if (forceObjDescProbe.TryGetValue(itemGuid, out var entry))
+            {
+                Interlocked.Increment(ref entry.Hits);
+                entry.LastFound = found;
+                entry.LastSeen = DateTime.UtcNow;
+                return;
+            }
+            if (forceObjDescProbe.Count >= ForceObjDescProbeMaxEntries)
+            {
+                Interlocked.Increment(ref forceObjDescProbeOverflow);
+                return;
+            }
+            var now = DateTime.UtcNow;
+            forceObjDescProbe.TryAdd(itemGuid, new ForceObjDescProbeEntry { Hits = 1, LastFound = found, FirstSeen = now, LastSeen = now });
+        }
+        // ==== end ForceObjDesc probe ====
+
         /// <summary>
         ///  Sends object description if the client requests it
         /// </summary>
         public void HandleActionForceObjDescSend(uint itemGuid)
         {
             var wo = FindObject(itemGuid, SearchLocations.Everywhere);
+
+            RecordForceObjDescProbe(itemGuid, wo != null);
+
             if (wo == null)
-            {
-                //log.DebugFormat("HandleActionForceObjDescSend() - couldn't find object {0:X8}", itemGuid);
                 return;
-            }
+
             Session.Network.EnqueueSend(new GameMessageObjDescEvent(wo));
         }
 
@@ -806,6 +940,11 @@ namespace ACE.Server.WorldObjects
             if (!IsGagged)
             {
                 EnqueueBroadcast(new GameMessageHearSpeech(message, GetNameWithSuffix(), Guid.Full, ChatMessageType.Speech), LocalBroadcastRange, ChatMessageType.Speech);
+
+                // Hooked here rather than in GameActionTalk so it sits INSIDE the gag check, matching
+                // TurbineChatHandler, which returns before its own hook when gagged. Only delivered
+                // speech is recorded, and the two chat hooks agree about that by construction.
+                AnalyticsManager.RecordChat(this, "say", message);
 
                 OnTalk(message);
             }

@@ -148,17 +148,10 @@ namespace ACE.Server.WorldObjects
                 if (savageBlows > 0.0)
                     damageEvent.Damage *= (float)(1.0 + savageBlows);
 
-                // Blood Fury: the ability's own low-health ramp, with the mod value as the peak
-                var bloodFury = GetStandaloneEquipmentModValue(EquipmentModId.BloodFury);
-                if (bloodFury > 0.0 && Health.MaxValue > 0)
-                {
-                    var bonus = BloodFuryAbility.LowHealthBonus(Health.Current / (double)Health.MaxValue, bloodFury,
-                        PropertyManager.GetDouble("class_ability_bloodfury_start_hp_fraction").Item,
-                        PropertyManager.GetDouble("class_ability_bloodfury_peak_hp_fraction").Item);
-
-                    if (bonus > 0.0)
-                        damageEvent.Damage *= (float)(1.0 + bonus);
-                }
+                // Blood Fury's rank-0 mirror lived here until 2026-08-17. The ability was retired and mod 18 /
+                // PropertyFloat 8117 was repurposed as Break Armor's proc-chance MACHINERY mod, which has no
+                // rank-0 half by definition - it is read inside the Break Armor handler, so there is nothing
+                // to mirror here. See EquipmentModRegistry's Break Armor row.
 
                 // Executioner: the ability's own execute-range condition
                 var executioner = GetStandaloneEquipmentModValue(EquipmentModId.Executioner);

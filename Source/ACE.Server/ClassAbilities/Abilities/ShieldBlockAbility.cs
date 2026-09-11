@@ -28,8 +28,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "While a shield is equipped, 8/14/20% of incoming hits are reduced to 0 (pooled with " +
                           "Parry, 50% combined cap). Higher Armor Tinkering increases the chance. Blocked hits still trigger Thorns.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
+            AffinitySkill = Skill.ArmorTinkering, // the Deception read in GetReadout is Parry's half of the pooled roll, not this ability's rider
         };
 
         /// <summary>
@@ -114,9 +115,14 @@ namespace ACE.Server.ClassAbilities.Abilities
             var deception = player.GetClassAbilityScaling(Skill.Deception,
                 PropertyManager.GetDouble("class_ability_parry_deception_per_trained").Item,
                 PropertyManager.GetDouble("class_ability_parry_deception_per_spec").Item) * 0.01;
+            // Surefooted feeds the same parry term combat builds (Player.RollClassAbilityAvoidance), so the
+            // OTHER half of the pool has to include it here too - Pooled() scales the two shares against
+            // each other, and an understated parry share silently OVERSTATES the block number this line
+            // reports. Nothing about Shield Block changes; only the pooling input does.
             var parryChance = ParryAbility.ParryChance(parryRank,
                 PropertyManager.GetDouble("class_ability_parry_percent_per_rank").Item,
-                deception);
+                deception)
+                + (player?.GetSurefootedParryBonus() ?? 0.0);
 
             // Shield Block and Parry share ONE pooled cap, so neither can compute its own effective chance
             // alone. Call the real pooling helper rather than mirroring its scale-down here - a hand-copied
@@ -134,7 +140,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gearChance * 100.0,
                 Effective = effectiveBlock * 100.0,
-                Unit = "pp",
+                Unit = "%",
                 Label = "block",
                 Per = null,
                 CapNote = capBites ? "avoidance cap" : (affinityCapBites ? "affinity cap" : null),

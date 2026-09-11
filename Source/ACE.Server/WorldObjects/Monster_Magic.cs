@@ -8,6 +8,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics.Animation;
 
@@ -56,6 +57,15 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private Spell CurrentSpell { get; set; }
 
+        /// <summary>
+        /// Cached delegates for MonsterSpellSelector.TrySelect. Held statically because TryRollSpell can
+        /// run up to ten times in one tick for one monster (Monster_Combat's line-of-sight reroll loop),
+        /// and a method group or lambda written at the call site would allocate a fresh delegate each time.
+        /// </summary>
+        private static readonly Func<int, MonsterSpellShape> spellShapeLookup = MonsterSpellShapeCache.Get;
+
+        private static readonly Func<double> spellRoll = () => ThreadSafeRandom.Next(0.0f, 1.0f);
+
         private bool TryRollSpell()
         {
             CurrentSpell = null;
@@ -72,6 +82,74 @@ namespace ACE.Server.WorldObjects
             if (Biota.PropertiesSpellBook == null)
                 return false;
 
+            if (!PropertyManager.GetBool("monster_conditional_spell_selection", MonsterSpellSelector.DefaultConditionalSelectionEnabled).Item)
+                return TryRollSpell_Unconditional();
+
+            // no live target to reason about, so there is nothing to be conditional on
+            if (!(AttackTarget is Creature target) || !target.IsAlive)
+                return TryRollSpell_Unconditional();
+
+            // The target's enchantment registry is about to be read, and this guard is what makes that
+            // safe - it is NOT defensive boilerplate. EnchantmentManagerWithCaching memoizes into plain
+            // UNSYNCHRONISED Dictionary fields and clears them wholesale in ClearCache(), so reading one
+            // from another landblock group's thread can throw or spin. CastSpell already carries this
+            // exact guard, for this exact reason. Falling back keeps the roll working either way.
+            if (CurrentLandblock == null || target.CurrentLandblock == null ||
+                CurrentLandblock.CurrentLandblockGroup != target.CurrentLandblock.CurrentLandblockGroup)
+            {
+                return TryRollSpell_Unconditional();
+            }
+
+            // ONCE per roll, before any pass. Re-reading this between passes would let one spell classify
+            // into two tiers (rolled twice) or none (never rolled), and either breaks frequency neutrality.
+            var profile = BuildVulnerabilityProfile(target);
+
+            if (!MonsterSpellSelector.TrySelect(Biota.PropertiesSpellBook, spellShapeLookup, profile, spellRoll, out var spellId))
+                return false;
+
+            CurrentSpell = new Spell(spellId);
+            return true;
+        }
+
+        /// <summary>
+        /// Snapshots the debuffs already standing on the target: the seven elemental Vulnerability
+        /// multipliers plus the net body-armor modifier.
+        ///
+        /// A target with no enchantments at all short-circuits to the all-identity profile, so the common
+        /// case does no registry work whatsoever.
+        ///
+        /// GetBodyArmorMod() with no argument is used deliberately. The bool overload is not overridden in
+        /// EnchantmentManagerWithCaching, so it re-scans every enchantment on every call; the no-arg one is
+        /// memoized. Its NET value means a target carrying both Armor Self and Imperil can read as
+        /// non-negative and be treated as un-imperiled, which under-detects. That is the safe direction:
+        /// the monster then casts the debuff, exactly as it did before this code existed.
+        /// </summary>
+        private static VulnerabilityProfile BuildVulnerabilityProfile(Creature target)
+        {
+            var enchantments = target.EnchantmentManager;
+
+            if (enchantments == null || !enchantments.HasEnchantments)
+                return VulnerabilityProfile.None;
+
+            return new VulnerabilityProfile(
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Slash),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Pierce),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Bludgeon),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Cold),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Fire),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Acid),
+                enchantments.GetVulnerabilityResistanceMod(DamageType.Electric),
+                enchantments.GetBodyArmorMod());
+        }
+
+        /// <summary>
+        /// The original roll, kept verbatim: one flat pass over the book in its own order, first
+        /// successful Bernoulli trial wins. This is what runs when monster_conditional_spell_selection is
+        /// off, and whenever there is no usable target to be conditional about, so turning the tunable off
+        /// reproduces the previous behaviour exactly.
+        /// </summary>
+        private bool TryRollSpell_Unconditional()
+        {
             // We don't use thread safety here. Monster spell books aren't mutated cross-threads.
             // This reduces memory consumption by not cloning the spell book every single TryRollSpell()
             //foreach (var spell in Biota.CloneSpells(BiotaDatabaseLock)) // Thread-safe
@@ -157,7 +235,9 @@ namespace ACE.Server.WorldObjects
                     EnqueueBroadcast(new GameMessageHearSpeech(spellWords, Name, Guid.Full, ChatMessageType.Spellcasting), LocalBroadcastRange);
             }
 
-            var preCastTime = PreCastMotion(AttackTarget);
+            // monster combat effects: both halves of the cadence are scaled on the cast axis, so a speed
+            // effect shortens the windup and the recovery together rather than only the gap between casts
+            var preCastTime = ScaleMonsterEffectCastTime(PreCastMotion(AttackTarget));
 
             var actionChain = new ActionChain();
             actionChain.AddDelaySeconds(preCastTime);
@@ -168,11 +248,15 @@ namespace ACE.Server.WorldObjects
 
                 CastSpell(spell);
 
+                // monster combat effects: the cast completed - the hook a recast rides. Bounded by
+                // monster_effect_recast_cap, see the recast guard in Creature_MonsterEffects.
+                OnMonsterEffectCastComplete(spell);
+
                 PostCastMotion();
             });
             actionChain.EnqueueChain();
 
-            var postCastTime = GetPostCastTime(spell);
+            var postCastTime = ScaleMonsterEffectCastTime(GetPostCastTime(spell));
             var animTime = preCastTime + postCastTime;
 
             //Console.WriteLine($"{Name}.MagicAttack(): preCastTime({preCastTime}), postCastTime({postCastTime})");

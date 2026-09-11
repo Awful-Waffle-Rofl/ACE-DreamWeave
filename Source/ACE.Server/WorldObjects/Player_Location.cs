@@ -277,10 +277,46 @@ namespace ACE.Server.WorldObjects
         private const ushort DriftNetworkRealmId = 1;
 
         /// <summary>
+        /// The traditional (retail) Town Network arrival point: the same hall, in the same landblock as
+        /// the Drift Network, but in realm 0. (70,-80) facing north is where retail's own
+        /// "portal to town network" weenies drop players, so it is known-clear of the centre fountain.
+        /// The instance is left at 0 for the same reason as DriftNetworkDrop - it is re-bound to the
+        /// base realm's default instance at teleport time.
+        /// </summary>
+        private static readonly Position TownNetworkDrop = new Position(0x00070145, 70f, -80f, 0.005f, 0, 0, 0, 1f, 0);
+
+        /// <summary>
         /// "/dn" - recall to the Drift Network, modelled on HandleActionTeleToMarketPlace: same guards,
         /// same MarketplaceRecall animation and 14s cast, same move-too-far abort.
         /// </summary>
         public void HandleActionTeleToDriftNetwork()
+        {
+            // resolved (and possibly null) here, but reported from inside the helper, so that an Olthoi /
+            // PK-locked / academy / busy player still gets their own error rather than a realm message
+            HandleActionTeleToNetworkHub("the Drift Network", DriftNetworkDrop,
+                RealmManager.GetRealm(DriftNetworkRealmId), "The Drift Network is not available on this world.");
+        }
+
+        /// <summary>
+        /// "/tn" - recall to the traditional Town Network. Identical to /dn apart from the arrival point
+        /// and the realm it binds to: realm 0, the base world, which always exists, so there is no
+        /// "not available on this world" case to guard.
+        /// </summary>
+        public void HandleActionTeleToTownNetwork()
+        {
+            HandleActionTeleToNetworkHub("the Town Network", TownNetworkDrop, RealmManager.BaseRealm, null);
+        }
+
+        /// <summary>
+        /// The shared body of /dn and /tn: the marketplace recall's guards, its MarketplaceRecall
+        /// animation and 14s cast, and its move-too-far abort - landing the player at <paramref name="drop"/>
+        /// re-bound to <paramref name="realm"/>'s default instance.
+        /// A null <paramref name="realm"/> means that network is not registered on this world; it is
+        /// reported with <paramref name="unavailableMessage"/>, and deliberately AFTER the player-state
+        /// guards, so an unavailable network never masks the more specific "you are busy / in PK / an
+        /// Olthoi" refusal the player actually needs to see.
+        /// </summary>
+        private void HandleActionTeleToNetworkHub(string networkName, Position drop, WorldRealm realm, string unavailableMessage)
         {
             if (IsOlthoiPlayer)
             {
@@ -306,10 +342,9 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            var realm = RealmManager.GetRealm(DriftNetworkRealmId);
             if (realm == null)
             {
-                Session.Network.EnqueueSend(new GameMessageSystemChat("The Drift Network is not available on this world.", ChatMessageType.Broadcast));
+                Session.Network.EnqueueSend(new GameMessageSystemChat(unavailableMessage, ChatMessageType.Broadcast));
                 return;
             }
 
@@ -318,25 +353,25 @@ namespace ACE.Server.WorldObjects
             // has no concept of Instance). Recalling from anywhere else is an ordinary cross-landblock
             // teleport and is fine. Same reason the entry portal lives in the Marketplace, not the hub.
             // NB the guard is on the LANDBLOCK, which is shared by the retail Town Network (realm 0) and
-            // the Drift Network (realm 1) - so this fires in either hall and the wording must not assume
-            // the player is already in the Meridian's.
-            if (Location.LandblockId.Landblock == (DriftNetworkDrop.LandblockId.Landblock))
+            // the Drift Network (realm 1) - so this fires in either hall, for either command, and the
+            // wording must not assume which one the player is standing in.
+            if (Location.LandblockId.Landblock == drop.LandblockId.Landblock)
             {
                 Session.Network.EnqueueSend(new GameMessageSystemChat("You must leave the network you are standing in before you can call for a way into another.", ChatMessageType.Broadcast));
                 return;
             }
 
-            EnqueueBroadcast(new GameMessageSystemChat($"{Name} is recalling to the Drift Network.", ChatMessageType.Recall), LocalBroadcastRange, ChatMessageType.Recall);
+            EnqueueBroadcast(new GameMessageSystemChat($"{Name} is recalling to {networkName}.", ChatMessageType.Recall), LocalBroadcastRange, ChatMessageType.Recall);
 
             SendMotionAsCommands(MotionCommand.MarketplaceRecall, MotionStance.NonCombat);
 
             var startPos = new Position(Location);
 
-            var dnChain = new ActionChain();
-            dnChain.AddDelaySeconds(14);
+            var hubChain = new ActionChain();
+            hubChain.AddDelaySeconds(14);
 
             IsBusy = true;
-            dnChain.AddAction(this, () =>
+            hubChain.AddAction(this, () =>
             {
                 IsBusy = false;
                 var endPos = new Position(Location);
@@ -346,12 +381,12 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
-                // bind the drop point to realm 1's default instance - same mechanism the realm portal
-                // uses via PropertyInt.PortalRealm, and what @telerealm does by hand
-                Teleport(new Position(DriftNetworkDrop, realm.DefaultInstanceID));
+                // bind the drop point to the target realm's default instance - same mechanism the realm
+                // portal uses via PropertyInt.PortalRealm, and what @telerealm does by hand
+                Teleport(new Position(drop, realm.DefaultInstanceID));
             });
 
-            dnChain.EnqueueChain();
+            hubChain.EnqueueChain();
         }
 
         private static readonly Motion motionAllegianceHometownRecall = new Motion(MotionStance.NonCombat, MotionCommand.AllegianceHometownRecall);
@@ -749,7 +784,50 @@ namespace ACE.Server.WorldObjects
             // single choke point for instance safety: every teleport destination must
             // land in a registered realm, and ephemeral instances must be live and
             // accept this player - otherwise reroute to the home realm's default
-            var newPosition = new Position(_newPosition.ValidateInstanceDestination(this));
+            var validated = _newPosition.ValidateInstanceDestination(this, out var rejection);
+
+            // ...except for an EPHEMERAL destination, where the reroute is worse than not moving at all.
+            // The reroute keeps the coordinates and swaps the instance, so a refused private instance
+            // becomes the shared-world copy of that landblock - and for every landblock that is only ever
+            // entered privately (the Proving Grounds arenas, the Loom, a Thread) that copy holds no
+            // content: no monsters, no NPCs, no exit portal. A player put there has to /die to get out,
+            // which is exactly the prod report this guard exists for.
+            //
+            // Refusing is safe here in a way it is NOT on the login path (WorldManager.DoPlayerEnterWorld,
+            // which must keep accepting the reroute): a refused teleport simply leaves the player standing
+            // where they already are, which is by definition a valid, loaded location.
+            if (rejection != InstanceRejection.None && _newPosition.IsEphemeralRealm)
+            {
+                log.Error($"Player.Teleport: refusing to teleport {Name} (0x{Guid.Full:X8}) to landblock 0x{(_newPosition.Cell >> 16):X4} " +
+                          $"in ephemeral instance 0x{_newPosition.Instance:X8} - {rejection}. Rerouting would have dropped them into " +
+                          $"instance 0x{validated.Instance:X8}, a different copy of that landblock which may hold no content.");
+
+                Session?.Network?.EnqueueSend(new GameMessageSystemChat(
+                    "That private instance is no longer available, so you have not been moved. Please try again.",
+                    ChatMessageType.System));
+
+                // A caller may already have armed a challenge run ahead of this teleport (Portal.ActOnUse
+                // persists DpsChallengeActive / SurvivalChallengeActive / WaveChallengeActive /
+                // SpeedChallengeActive BEFORE issuing it, so a mid-run logout is caught at next login). For
+                // a completed teleport OnTeleportComplete reconciles that arming, but it will never run now,
+                // so the reconcilers are invoked here instead. Each is a no-op when nothing is armed, and
+                // each clears an active-but-unbound run silently - precisely the state a refused entry
+                // leaves behind.
+                //
+                // All FOUR are called here, unlike OnTeleportComplete, which wires only the last three.
+                // CheckDpsChallengeInstanceExit was added for this path: nothing else would ever clear a DPS
+                // flag armed by a portal whose teleport was then refused, and it would sit persisted until
+                // the player's next login (WorldManager.DoPlayerEnterWorld's login clear). That
+                // OnTeleportComplete does not call it is a separate, pre-existing gap and is left alone.
+                CheckDpsChallengeInstanceExit();
+                CheckSurvivalChallengeInstanceExit();
+                CheckWaveChallengeInstanceExit();
+                CheckSpeedChallengeInstanceExit();
+
+                return;
+            }
+
+            var newPosition = new Position(validated);
             //newPosition.PositionZ += 0.005f;
             newPosition.PositionZ += 0.005f * (ObjScale ?? 1.0f);
 
@@ -804,6 +882,8 @@ namespace ACE.Server.WorldObjects
             // for command teleports (InUpdate == false) that call relocates CurrentLandblock to
             // the destination, so it can no longer tell us where we came from
             var originInstancedLandblock = Location.InstancedLandblock;
+            var originCell = Location.Cell;
+            var originInstance = Location.Instance;
 
             // Tell the client to delete the origin landblock's objects on any teleport that leaves it,
             // and do it BEFORE the relocate below. Required because a landblock's per-realm instance
@@ -836,6 +916,22 @@ namespace ACE.Server.WorldObjects
             // CurrentLandblock == destination here and this is a no-op for them.)
             if (landblockUpdate && CurrentLandblock != null && CurrentLandblock.Instance != Location.Instance)
                 LandblockManager.RelocateObjectForPhysics(this, true);
+
+            // Permanent forensic record for the "empty world after a teleport" class of report, which is
+            // intermittent and never reproducible on demand. Everything needed to tell the three failure
+            // shapes apart is on one line: a destination whose instance was rerouted (requested vs
+            // validated differ), an arrival that did not transfer landblock membership (landed instance
+            // does not match the validated one), and a landblock that was pulled out from under the player
+            // afterwards (landed reads none). One INFO line per completed teleport, built only from values
+            // already in hand - no lookups, no allocation beyond the string itself.
+            var landed = CurrentLandblock == null
+                ? "(none)"
+                : $"0x{CurrentLandblock.Id.Landblock:X4} instance 0x{CurrentLandblock.Instance:X8}";
+
+            log.Info($"[TELEPORT] {Name} (0x{Guid.Full:X8}) from 0x{originCell:X8} instance 0x{originInstance:X8} " +
+                     $"- requested 0x{_newPosition.Cell:X8} instance 0x{_newPosition.Instance:X8}, " +
+                     $"validated 0x{newPosition.Cell:X8} instance 0x{newPosition.Instance:X8}, " +
+                     $"landed {landed} (landblockUpdate {landblockUpdate})");
         }
 
         public void DoPreTeleportHide()
@@ -868,18 +964,106 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public double? LastPortalTeleportTimestampError;
 
+        /// <summary>
+        /// How long <see cref="OnTeleportComplete"/> will hold a player in the pre-materialize
+        /// "pink bubble" state waiting on Landblock.CreateWorldObjectsCompleted before giving up and
+        /// materializing them anyway.
+        ///
+        /// The wait exists so a player cannot walk through a door that has not spawned yet, so the bound
+        /// has to sit far above any healthy load: a landblock's population is a cached world-db read, a
+        /// shard static read and object construction, all of which complete in well under a second even
+        /// on a loaded server. 30s leaves that untouched while still resolving inside the 5 minute
+        /// MaximumTeleportTime backstop in Player_Tick, which does not rescue the player - it logs them
+        /// off, and a relog into the same broken landblock simply repeats the wait. Materializing into a
+        /// landblock that never populated is strictly better than that loop: the player can move, recall
+        /// and use commands, and the ERROR line below says why the world around them is empty.
+        /// </summary>
+        private static readonly TimeSpan MaxPreMaterializeWait = TimeSpan.FromSeconds(30);
+
+        // Retry state for the wait above. Keyed on the teleport (its start timestamp) and the landblock
+        // being waited on, not on the player, so a later teleport - or a login, which stamps
+        // LastTeleportStartTimestamp too - always starts a fresh clock instead of inheriting the elapsed
+        // wait of an earlier arrival. preMaterializeWaitStart == DateTime.MinValue means "no wait in
+        // progress"; it is what makes the seeding independent of the stamp, see OnTeleportComplete.
+        private double? preMaterializeWaitStamp;
+        private ulong preMaterializeWaitLongId;
+        private DateTime preMaterializeWaitStart;
+
+        // Not persisted: a fresh login always re-announces, which is what we want, since the
+        // client never carries the realm line across a reconnect either.
+        private uint? lastAnnouncedRealmInstance;
+
+        /// <summary>
+        /// Pushes the [REALM] chat line (see RealmLine) to this player, if realm_announce_enabled
+        /// is on and the player's instance actually changed since the last push. Called from
+        /// OnTeleportComplete, which also covers login (GameActionLoginComplete calls it directly).
+        /// </summary>
+        public void SendRealmLine()
+        {
+            if (Location == null)
+                return;
+
+            // Checked before the dedupe latch below, not after: re-enabling the tunable mid-session
+            // must not leave a player permanently un-announced because they were skipped while it
+            // was off.
+            if (!PropertyManager.GetBool("realm_announce_enabled").Item)
+                return;
+
+            if (lastAnnouncedRealmInstance == Location.Instance)
+                return;
+
+            lastAnnouncedRealmInstance = Location.Instance;
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat(RealmLine.ForPosition(Location), ChatMessageType.Broadcast));
+        }
+
         public void OnTeleportComplete()
         {
             if (CurrentLandblock != null && !CurrentLandblock.CreateWorldObjectsCompleted)
             {
-                // If the critical landblock resources haven't been loaded yet, we keep the player in the pink bubble state
-                // We'll check periodically to see when it's safe to let them materialize in
-                var actionChain = new ActionChain();
-                actionChain.AddDelaySeconds(0.1);
-                actionChain.AddAction(this, OnTeleportComplete);
-                actionChain.EnqueueChain();
-                return;
+                var waitStamp = LastTeleportStartTimestamp;
+                var waitLongId = CurrentLandblock.LongId;
+
+                // The MinValue clause is the one that must not be dropped. LastTeleportStartTimestamp is
+                // stamped by every teleport (Player_Location.cs, Teleport) and every login
+                // (Player_Networking.cs), and nothing nulls it, so today waitStamp always has a value -
+                // but the stamp comparison ALONE would silently fail if that ever stopped holding:
+                // null != null is false, the start would never be seeded, and the very first check would
+                // read an enormous elapsed time and take the expired branch immediately, materializing
+                // with a zero-length wait and defeating the bound entirely. Seeding on "no wait in
+                // progress" does not depend on the stamp at all.
+                if (preMaterializeWaitStart == DateTime.MinValue || preMaterializeWaitStamp != waitStamp || preMaterializeWaitLongId != waitLongId)
+                {
+                    preMaterializeWaitStamp = waitStamp;
+                    preMaterializeWaitLongId = waitLongId;
+                    preMaterializeWaitStart = DateTime.UtcNow;
+                }
+
+                var waited = DateTime.UtcNow - preMaterializeWaitStart;
+
+                if (waited < MaxPreMaterializeWait)
+                {
+                    // If the critical landblock resources haven't been loaded yet, we keep the player in the pink bubble state
+                    // We'll check periodically to see when it's safe to let them materialize in
+                    var actionChain = new ActionChain();
+                    actionChain.AddDelaySeconds(0.1);
+                    actionChain.AddAction(this, OnTeleportComplete);
+                    actionChain.EnqueueChain();
+                    return;
+                }
+
+                // Past the bound: the landblock's population task has almost certainly faulted (see the
+                // faulted-only continuation on the Task.Run in Landblock.Init, which logs the exception).
+                // Fall through and materialize rather than retrying forever - a player stuck here cannot
+                // act at all, and cannot even /die, because Player_Death refuses while Teleporting is set.
+                log.Error($"{Name} (0x{Guid}): landblock 0x{CurrentLandblock.Id.Landblock:X4} instance 0x{CurrentLandblock.Instance:X8} has not set CreateWorldObjectsCompleted after {waited.TotalSeconds:0.#}s - materializing anyway instead of holding the player pre-materialize. This landblock is very likely empty; check for a preceding population task error on it.");
             }
+
+            // Whatever wait there was is over - either the landblock finished loading, or the bound
+            // expired above. Clearing the start is what lets the NEXT arrival seed a fresh clock even in
+            // the degenerate case where the stamp cannot tell two arrivals apart; leaving it set would
+            // hand that arrival an already-expired clock and a zero-length wait.
+            preMaterializeWaitStart = DateTime.MinValue;
 
             // set materialize physics state
             // this takes the player from pink bubbles -> fully materialized
@@ -898,6 +1082,14 @@ namespace ACE.Server.WorldObjects
             // arena instance other than death / exit portal / login-clear abandons the run
             CheckWaveChallengeInstanceExit();
 
+            // speed challenge (WaffleACE): same reconciliation for the timed run - ANY teleport out of the
+            // season instance other than death or a completion (recall, portal, the exit portal) forfeits it
+            CheckSpeedChallengeInstanceExit();
+
+            // Threads (WaffleACE): we are past the pink-bubble retry above, so the player is really
+            // in this instance now. Latch that on the run, if this instance is one.
+            NoteThreadDungeonArrival();
+
             CheckMonsters();
             CheckHouse();
 
@@ -906,6 +1098,35 @@ namespace ACE.Server.WorldObjects
             // hijacking this for both start/end on portal teleport
             if (LastTeleportStartTimestamp == LastPortalTeleportTimestamp)
                 LastPortalTeleportTimestamp = Time.GetUnixTime();
+
+            // Decal plugin support: publish the realm/instance the client itself never sees
+            // (only Cell goes over the wire). Covers login too, since GameActionLoginComplete
+            // calls OnTeleportComplete directly.
+            SendRealmLine();
+        }
+
+        /// <summary>
+        /// Records that a player has actually materialised inside a Thread run's private copy
+        /// (WaffleACE). ThreadDungeonManager's cleared-and-empty reap refuses to fire until this has
+        /// happened at least once, so that a run whose owner is still in transit is never torn down as
+        /// "empty" - see ThreadDungeonRun.PlayerEverObserved for why the reap's own probe cannot tell
+        /// "nobody came" from "nobody has arrived yet".
+        ///
+        /// This is the right place for it rather than the gem handler's teleport call: the follow-up action
+        /// WorldManager.ThreadSafeTeleport takes runs as soon as Player.Teleport RETURNS, which can be
+        /// before the player has materialised, while OnTeleportComplete only reaches this line after the
+        /// CreateWorldObjectsCompleted retry chain above has let go.
+        ///
+        /// One O(1) dictionary probe per completed teleport, and no scan: GetRun is a ConcurrentDictionary
+        /// lookup keyed by the instance id, and an ordinary landblock's instance (0) simply misses.
+        /// </summary>
+        private void NoteThreadDungeonArrival()
+        {
+            var instance = Location?.Instance ?? 0;
+            if (instance == 0)
+                return;
+
+            ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(instance)?.MarkPlayerObserved();
         }
 
         public void SendTeleportedViaMagicMessage(WorldObject itemCaster, Spell spell)
@@ -943,87 +1164,11 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// A list of landblocks the player cannot relog directly into
-        /// 
-        /// If a regular player logs out in one of these landblocks,
-        /// they will be transported back to the lifestone when they log back in.
-        /// </summary>
-        public static HashSet<ushort> NoLog_Landblocks = new HashSet<ushort>()
-        {
-            // https://asheron.fandom.com/wiki/Special:Search?query=Lifestone+on+Relog%3A+Yes+
-            // https://docs.google.com/spreadsheets/d/122xOw3IKCezaTDjC_hggWSVzYJ_9M_zUUtGEXkwNXfs/edit#gid=846612575
-
-            0x0002,     // Viamontian Garrison
-            0x0007,     // Town Network
-            0x0056,     // Augmentation Realm Main Level
-            0x005F,     // Tanada House of Pancakes (Seasonal)
-            0x0067,     // PKL Arena
-            0x006D,     // Augmentation Realm Upper Level
-            0x007D,     // Augmentation Realm Lower Level
-            0x00AB,     // Derethian Combat Arena
-            0x00AC,     // Derethian Combat Arena
-            0x00C3,     // Blighted Putrid Moarsman Tunnels
-            0x00D7,     // Jester's Prison
-            0x00EA,     // Mhoire Armory
-            0x015D,     // Mountain Cavern
-            0x027F,     // East Fork Dam Hive
-            0x03A7,     // Mount Elyrii Hive
-            0x5764,     // Oubliette of Mhoire Castle
-            0x634C,     // Tainted Grotto
-            0x6544,     // Greater Battle Dungeon
-            0x6651,     // Hoshino Tower
-            0x7E04,     // Thug Hideout
-            0x8A04,     // Night Club (Seasonal Anniversary)
-            0x8B04,     // Frozen Wight Lair
-            0x9EE5,     // Northwatch Castle Black Market
-            0xB5F0,     // Aerfalle's Sanctum
-            0xF92F,     // Freebooter Keep Black Market
-            0x00B0,     // Colosseum Arena One
-            0x00B1,     // Colosseum Arena Two
-            0x00B2,     // Colosseum Arena Three
-            0x00B3,     // Colosseum Arena Four
-            0x00B4,     // Colosseum Arena Five
-            0x00B6,     // Colosseum Arena Mini-Bosses
-            0x5960,     // Gauntlet Arena One (Celestial Hand)
-            0x5961,     // Gauntlet Arena Two (Celestial Hand)
-            0x5962,     // Gauntlet Arena One (Eldritch Web)
-            0x5963,     // Gauntlet Arena Two (Eldritch Web)
-            0x5964,     // Gauntlet Arena One (Radiant Blood)
-            0x5965,     // Gauntlet Arena Two (Radiant Blood)
-        };
-
-        /// <summary>
-        /// Called when a player first logs in
+        /// Called when a player first logs in - see <see cref="NoLogLandblock"/>.
         /// </summary>
         public static void HandleNoLogLandblock(Biota biota, out bool playerWasMovedFromNoLogLandblock)
         {
-            playerWasMovedFromNoLogLandblock = false;
-
-            if (biota.WeenieType == WeenieType.Sentinel || biota.WeenieType == WeenieType.Admin) return;
-
-            if (!biota.PropertiesPosition.TryGetValue(PositionType.Location, out var location))
-                return;
-
-            var landblock = (ushort)(location.ObjCellId >> 16);
-
-            if (!NoLog_Landblocks.Contains(landblock))
-                return;
-
-            if (!biota.PropertiesPosition.TryGetValue(PositionType.Sanctuary, out var lifestone))
-                return;
-
-            location.ObjCellId = lifestone.ObjCellId;
-            location.PositionX = lifestone.PositionX;
-            location.PositionY = lifestone.PositionY;
-            location.PositionZ = lifestone.PositionZ;
-            location.RotationX = lifestone.RotationX;
-            location.RotationY = lifestone.RotationY;
-            location.RotationZ = lifestone.RotationZ;
-            location.RotationW = lifestone.RotationW;
-
-            playerWasMovedFromNoLogLandblock = true;
-
-            return;
+            NoLogLandblock.Apply(biota, out playerWasMovedFromNoLogLandblock);
         }
     }
 }

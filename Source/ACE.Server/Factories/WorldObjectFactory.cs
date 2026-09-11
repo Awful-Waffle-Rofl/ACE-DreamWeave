@@ -8,7 +8,9 @@ using ACE.Common.Extensions;
 using ACE.Database;
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
 
@@ -22,12 +24,39 @@ namespace ACE.Server.Factories
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>
+        /// Reports (once per wcid) a Setup DID that will not read back as a SetupModel.
+        ///
+        /// This is diagnostic only - it deliberately does not fail the construction. The object still has to
+        /// exist for inventory, equipment and container loads, which do not run it through physics at all;
+        /// what it must never do is reach a landblock, and Landblock.AddWorldObjectInternal refuses it there
+        /// off the same check. Returning null here instead would push the failure into callers that do not
+        /// tolerate it (House.LoadLinkedHouses/GetHouse, Hook.GetHookReference, Creature_Equipment and
+        /// Container's inventory loads all dereference the result immediately), trading a contained fault
+        /// for an uncontained one.
+        /// </summary>
+        private static void ReportBadSetupId(uint wcid, uint guid, string name, uint setupId)
+        {
+            // ERROR once per wcid, Debug thereafter - the memo is shared with Landblock.AddWorldObjectInternal
+            // (WorldObject.ShouldReportBadSetupId), which dedupes per site so each still reports once.
+            var message = $"CreateWorldObject: {name} (0x{guid:X8}:{wcid}) - PropertyDataId.Setup 0x{setupId:X8} is not a valid setup model. This object will not be spawned into a landblock.";
+
+            if (WorldObject.ShouldReportBadSetupId("CreateWorldObject", wcid))
+                log.Error(message);
+            else if (log.IsDebugEnabled)
+                log.Debug(message);
+        }
+
+        /// <summary>
         /// A new biota be created taking all of its values from weenie.
         /// </summary>
         public static WorldObject CreateWorldObject(Weenie weenie, ObjectGuid guid)
         {
             if (weenie == null)
                 return null;
+
+            var weenieSetupId = weenie.GetProperty(PropertyDataId.Setup) ?? 0;
+            if (!WorldObject.IsValidSetupId(weenieSetupId))
+                ReportBadSetupId(weenie.WeenieClassId, guid.Full, weenie.GetName(), weenieSetupId);
 
             var objWeenieType = weenie.WeenieType;
 
@@ -55,6 +84,11 @@ namespace ACE.Server.Factories
                 case WeenieType.Scroll:
                     return new Scroll(weenie, guid);
                 case WeenieType.Vendor:
+                    // Mule Vendor: a PropertyBool opt-in rather than a new WeenieType, matching the
+                    // fork's static-handler extension pattern and avoiding an enum allocation
+                    // (DESIGN section 9). Read at construction only.
+                    if (weenie.GetProperty(PropertyBool.PersonalVendor) == true)
+                        return new PersonalVendor(weenie, guid);
                     return new Vendor(weenie, guid);
                 case WeenieType.Coin:
                     return new Coin(weenie, guid);
@@ -149,6 +183,17 @@ namespace ACE.Server.Factories
         /// </summary>
         public static WorldObject CreateWorldObject(ACE.Entity.Models.Biota biota)
         {
+            uint biotaSetupId = 0;
+            biota.PropertiesDID?.TryGetValue(PropertyDataId.Setup, out biotaSetupId);
+
+            if (!WorldObject.IsValidSetupId(biotaSetupId))
+            {
+                string biotaName = null;
+                biota.PropertiesString?.TryGetValue(PropertyString.Name, out biotaName);
+
+                ReportBadSetupId(biota.WeenieClassId, biota.Id, biotaName ?? "", biotaSetupId);
+            }
+
             switch (biota.WeenieType)
             {
                 case WeenieType.Undef:
@@ -172,6 +217,12 @@ namespace ACE.Server.Factories
                 case WeenieType.Scroll:
                     return new Scroll(biota);
                 case WeenieType.Vendor:
+                    // The biota arm should be unreachable in practice (a summoned mule is excluded
+                    // from shard persistence - DESIGN 11.5, R9), but is handled anyway: silently
+                    // downgrading a persisted mule to a plain Vendor here would hand a store's
+                    // contents to the retail rot-and-destroy path.
+                    if (biota.PropertiesBool != null && biota.PropertiesBool.TryGetValue(PropertyBool.PersonalVendor, out var isPersonal) && isPersonal)
+                        return new PersonalVendor(biota);
                     return new Vendor(biota);
                 case WeenieType.Coin:
                     return new Coin(biota);
@@ -357,7 +408,24 @@ namespace ACE.Server.Factories
             var worldObject = CreateWorldObject(weenie, guid);
 
             if (worldObject == null)
+            {
                 GuidManager.RecycleDynamicGuid(guid);
+                return null;
+            }
+
+            // Equipment mods: record the gear ratings this item is BORN with, while it still has no owner
+            // and no history. Everything a player can be handed passes through here - vendor stock and NPC
+            // emote grants (CreateNewWorldObject(PropertiesCreateList) and the wcid/name overloads all
+            // delegate to this one), quest rewards, admin /create, and loot, whose rolled ratings are
+            // stamped a second time by LootGenerationFactory.TryMutateGearRating after it mutates the
+            // object. See EquipmentModManager.StampOriginalGearRatings for why the timing is the whole
+            // point, and OriginalGearRatingProperties for what the stamps are for.
+            //
+            // NOT covered: an object built straight from CreateWorldObject(weenie, staticGuid), which is how
+            // landblock statics are made. Verified empty rather than assumed - no landblock_instance row in
+            // ace_world names any of the 14 weenies that carry an authored gear rating (checked 2026-08-26).
+            // If that ever changes, this call moves down into CreateWorldObject rather than being duplicated.
+            EquipmentModManager.StampOriginalGearRatings(worldObject);
 
             return worldObject;
         }

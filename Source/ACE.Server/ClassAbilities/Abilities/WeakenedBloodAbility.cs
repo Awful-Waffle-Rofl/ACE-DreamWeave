@@ -63,7 +63,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "from it. It shares one axis with weapon resistance cleaving: the stronger " +
                           "applies, never both.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
         };
 

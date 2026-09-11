@@ -29,8 +29,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your combat pets are stronger - more health, damage, and defenses per rank. " +
                           "Higher Leadership increases the bonus.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.Leadership,
         };
 
         /// <summary>

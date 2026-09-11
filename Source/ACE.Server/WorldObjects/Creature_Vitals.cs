@@ -4,10 +4,16 @@ using System.Runtime.CompilerServices;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects.Entity;
 
 namespace ACE.Server.WorldObjects
 {
+    /// <summary>
+    /// DIVERGES FROM UPSTREAM 08471633e (2026-08-17), for the first time: the weapon mods v4 catalog wired
+    /// Recovery into <see cref="VitalHeartBeat(CreatureVital)"/>'s regeneration tick. See PR #493 for the
+    /// flagged maintenance cost at the next upstream merge.
+    /// </summary>
     partial class Creature
     {
         public readonly Dictionary<PropertyAttribute2nd, CreatureVital> Vitals = new Dictionary<PropertyAttribute2nd, CreatureVital>();
@@ -130,8 +136,28 @@ namespace ACE.Server.WorldObjects
             if (this is Player player && player.AugmentationFasterRegen > 0 && ForwardCommand == MotionCommand.Sleeping)
                 augMod += player.AugmentationFasterRegen;
 
+            // weapon mods v4: Recovery, a flat percentage on top of natural regeneration.
+            //
+            // THE TYPE TEST IS THE WHOLE PERFORMANCE STORY, so it comes FIRST, before any registry or
+            // PropertyManager read. VitalHeartBeat runs three times per creature per heartbeat for every
+            // creature in the world (see VitalHeartBeat() above), and weapon mods are a player crafting
+            // system - a monster wielding a modded weapon gains nothing and must not pay a lookup to learn it.
+            //
+            // COMBAT SUPPRESSION IS PRESERVED BY CONSTRUCTION: this multiplies into the same product as
+            // stanceMod, which GetStanceMod returns as 0.5 in combat mode or while running, so Recovery
+            // scales that halved rate rather than escaping it.
+            var recoveryMod = 1.0f;
+
+            if (this is Player recoveryPlayer)
+            {
+                // the two carriers are a CHOICE, not a sum - see WeaponModCombat.RegenerationMultiplier
+                recoveryMod = (float)WeaponModCombat.RegenerationMultiplier(
+                    recoveryPlayer.GetWeaponOnlyModValue(WeaponModId.Recovery),
+                    recoveryPlayer.GetCasterOnlyModValue(WeaponModId.Recovery));
+            }
+
             // cap rate?
-            var currentTick = vital.RegenRate * attributeMod * stanceMod * enchantmentMod * augMod;
+            var currentTick = vital.RegenRate * attributeMod * stanceMod * enchantmentMod * augMod * recoveryMod;
 
             // add in partially accumulated / rounded vitals from previous tick(s)
             var totalTick = currentTick + vital.PartialRegen;

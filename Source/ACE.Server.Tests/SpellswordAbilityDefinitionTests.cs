@@ -30,16 +30,16 @@ namespace ACE.Server.Tests
         {
             // Tier 1 - open
             ("spellblade",          1, 3, new[] { 1, 2, 3 }),
-            ("resonance",           1, 3, new[] { 3, 3, 3 }),
+            ("resonance",           1, 3, new[] { 1, 1, 1 }),
             ("spellsword_training", 1, 3, new[] { 1, 1, 1 }),
             // Tier 2 - unlock: 3 CAPs, 5 spent in class
-            ("runeblade",           2, 3, new[] { 1, 2, 3 }),
-            ("sundermark",          2, 3, new[] { 3, 3, 3 }),
-            ("spellsurge",          2, 1, new[] { 5 }),
+            ("runeblade",           2, 3, new[] { 1, 1, 1 }),
+            ("sundermark",          2, 3, new[] { 2, 2, 2 }),
+            ("spellsurge",          2, 1, new[] { 3 }),
             // Tier 3 - unlock: 8 CAPs, 15 spent in class
-            ("spellstorm",          3, 1, new[] { 5 }),
-            ("cascade",             3, 1, new[] { 5 }),
-            ("dispellingedge",      3, 3, new[] { 3, 3, 3 }),
+            ("spellstorm",          3, 1, new[] { 3 }),
+            ("cascade",             3, 1, new[] { 3 }),
+            ("dispellingedge",      3, 3, new[] { 1, 1, 1 }),
         };
 
         // ---- registration ------------------------------------------------------------------------

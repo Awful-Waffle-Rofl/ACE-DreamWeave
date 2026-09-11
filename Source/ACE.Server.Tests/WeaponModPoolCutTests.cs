@@ -27,7 +27,26 @@ namespace ACE.Server.Tests
     ///              distributions are pinned in WeaponModRetuneRoundTwoTests, which was repointed onto these
     ///              three rows when its own subjects were removed.
     ///
-    /// The resulting pool is six entries at melee 5, missile 5, caster 3.
+    /// The resulting pool was six entries at melee 5, missile 5, caster 3. The 2026-08-06 v3 expansion (Heft,
+    /// Tension, Leverage, Attunement, Focus, Execution, see WeaponModRegistry.TierBExpansionBandStart) added
+    /// six rows to the catalog, but all six are Tier B, so the Tier A pool this file's scope is about was
+    /// unchanged by it. The live gate-on depths (which DO include the v3 rows) are asserted in
+    /// WeaponModTests.Registry_PoolDepthMatchesTheDesign instead.
+    ///
+    ///   CHANGE 8 - A SEVENTH REMOVAL, 2026-08-07. Cleave is gone, on the same terms and for the same reason
+    ///              as Change 6's five: its WeaponModId 4 and its PropertyFloat 8133 are both RETIRED and must
+    ///              never be reused, because weapons on dev shards carry a stale 8133 record AND the orphaned
+    ///              PropertyInt.Cleaving native it was the bookkeeping for. Tier A is now five entries at
+    ///              melee 4, missile 5, caster 3 - only the melee column moved, because Cleave was the one
+    ///              Tier A row restricted to melee.
+    ///   CHANGE 9 - AN EIGHTH REMOVAL, 2026-08-17 (catalog v4). Swift Flight is gone, on the same terms as
+    ///              Changes 6 and 8: its WeaponModId 6 and its PropertyFloat 8135 are both RETIRED and must
+    ///              never be reused. Tier A is now four entries at melee 4, missile 4, caster 3 - only the
+    ///              missile column moved, because Swift Flight was the one Tier A row restricted to missile.
+    ///
+    /// Changes 8 and 9 are folded into this file rather than given their own because each is the same change
+    /// made again. The tables below carry a per-row retirement date so the rounds stay separable in the
+    /// evidence even though the rule is one rule.
     /// </summary>
     [TestClass]
     public class WeaponModPoolCutTests
@@ -35,16 +54,24 @@ namespace ACE.Server.Tests
         private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
 
         /// <summary>
-        /// The five PropertyFloat ids the removed modifiers held, with the name each carried. Read as raw ints
-        /// on purpose: the enum members are gone, so there is nothing left to name them by.
+        /// Every PropertyFloat id a removed modifier held, with the name it carried and the date it went. Read
+        /// as raw ints on purpose: the enum members are gone, so there is nothing left to name them by.
+        ///
+        /// 8133 IS OUT OF NUMERIC ORDER WITH THE REST AND THAT IS THE POINT. Change 6's five sit in a
+        /// contiguous retired band ABOVE the live one; Cleave's 8133 is a HOLE INSIDE the live Tier A band
+        /// 8130-8135, because it was removed from the middle of a shipped range rather than off the end of
+        /// one. Nothing writes it, so the invariant harness's band scan still balances - but it is the reason
+        /// the live band's bounds cannot be read as "every id in here is allocated".
         /// </summary>
-        private static readonly (int Id, string WasCalled)[] RetiredRecordIds =
+        private static readonly (int Id, string WasCalled, string RetiredOn)[] RetiredRecordIds =
         {
-            (8136, "WeaponModWarding"),
-            (8137, "WeaponModCritWard"),
-            (8138, "WeaponModResolute"),
-            (8139, "WeaponModVigor"),
-            (8140, "WeaponModMending"),
+            (8136, "WeaponModWarding",     "2026-07-30"),
+            (8137, "WeaponModCritWard",    "2026-07-30"),
+            (8138, "WeaponModResolute",    "2026-07-30"),
+            (8139, "WeaponModVigor",       "2026-07-30"),
+            (8140, "WeaponModMending",     "2026-07-30"),
+            (8133, "WeaponModCleave",      "2026-08-07"),
+            (8135, "WeaponModSwiftFlight", "2026-08-17"),
         };
 
         [ClassInitialize]
@@ -56,28 +83,34 @@ namespace ACE.Server.Tests
         // ================= CHANGE 5 - the six surviving names =================
 
         /// <summary>
-        /// THE SIX NAMES, PINNED. A rename is a player-facing change - it reaches the appraisal panel and the
-        /// craft chat lines - so it must be deliberate rather than a side effect of an editor refactor. This is
-        /// the test a future rename has to walk past on purpose.
+        /// THE SURVIVING NAMES, PINNED. A rename is a player-facing change - it reaches the appraisal panel and
+        /// the craft chat lines - so it must be deliberate rather than a side effect of an editor refactor.
+        /// This is the test a future rename has to walk past on purpose.
         ///
         /// Devastation and Weak Point are the two that moved, and the reason they moved is asserted alongside
         /// them: the names they replaced belong to the retail crit properties this system routes AROUND.
+        ///
+        /// It was six names until 2026-08-07, when Cleave was removed (Change 8) and the table came down to
+        /// five with it, then to four on 2026-08-17 when Swift Flight was removed (Change 9).
         /// </summary>
         [TestMethod]
-        public void Change5_TheSixSurvivingModifiersCarryExactlyTheseNames()
+        public void Change5_TheSurvivingModifiersCarryExactlyTheseNames()
         {
             var expected = new Dictionary<WeaponModId, string>
             {
                 { WeaponModId.Devastation,  "Devastation" },
                 { WeaponModId.WeakPoint,    "Weak Point" },
                 { WeaponModId.Bloodthirst,  "Bloodthirst" },
-                { WeaponModId.Cleave,       "Cleave" },
                 { WeaponModId.ShieldBypass, "Shield Bypass" },
-                { WeaponModId.SwiftFlight,  "Swift Flight" },
             };
 
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // more rows to the catalog, but ALL SIX ARE TIER B (see WeaponModRegistry.TierBExpansionBandStart),
+            // so Tier A was untouched by it. The only things that have moved Tier A's count since the pool cut
+            // are the 2026-08-07 Cleave removal and the 2026-08-17 Swift Flight removal, which took it from six
+            // to the four named here.
             Assert.AreEqual(expected.Count, WeaponModRegistry.TierAMods.Count,
-                "the TIER A half of the registry no longer holds exactly the six modifiers this test names. Tier B rows are counted separately on purpose - this file is the record of the Tier A pool cut and its scope is Tier A");
+                "the TIER A half of the registry no longer holds exactly the modifiers this test names. Tier B rows are counted separately on purpose - this file is the record of the Tier A pool cut and its scope is Tier A");
 
             foreach (var kvp in expected)
             {
@@ -128,33 +161,41 @@ namespace ACE.Server.Tests
         ///
         /// The companion rule - that the five ids stay UNALLOCATED so no future property inherits a dev-shard
         /// weapon's stale record - is guarded beside the same rule for PropertyFloat 9003, in
-        /// WaveChallengePropertyTests.PropertyFloat_8136_To_8140_StayUnallocated.
+        /// WaveChallengePropertyTests.PropertyFloat_8133_8135_8136To8140_8141To8143_8146_StayUnallocated.
         /// </summary>
         [TestMethod]
         public void Change6_NoRemovedModifierIsReachableFromAnyPoolOrLookup()
         {
-            foreach (var (id, wasCalled) in RetiredRecordIds)
+            foreach (var (id, wasCalled, retiredOn) in RetiredRecordIds)
             {
                 Assert.IsFalse(WeaponModRegistry.TryGet((PropertyFloat)id, out _),
-                    $"PropertyFloat {id} ({wasCalled}) still resolves to a registry row; it was removed on 2026-07-30 and the id is retired");
+                    $"PropertyFloat {id} ({wasCalled}) still resolves to a registry row; it was removed on {retiredOn} and the id is retired");
 
                 Assert.IsFalse(WeaponModRegistry.AllMods.Any(m => (int)m.Record == id),
-                    $"a registry row still holds the retired record id {id} ({wasCalled})");
+                    $"a registry row still holds the retired record id {id} ({wasCalled}, retired {retiredOn})");
 
                 foreach (var weaponClass in Classes)
                 {
                     Assert.IsFalse(WeaponModRegistry.Pool(weaponClass).Any(m => (int)m.Record == id),
-                        $"the {weaponClass} pool can still roll the retired record id {id} ({wasCalled})");
+                        $"the {weaponClass} pool can still roll the retired record id {id} ({wasCalled}, retired {retiredOn})");
                 }
             }
 
-            // and nothing is reachable by an id outside the six, either - the removed WeaponModId values were
-            // 7 through 11
+            // and nothing is reachable by a retired WeaponModId either - 7 through 11 went on 2026-07-30, and
+            // 4 (Cleave) on 2026-08-07, and 6 (Swift Flight) on 2026-08-17. 4 and 6 are checked separately
+            // rather than folded into the range because they sit INSIDE the original Tier A run 1-6, so a loop
+            // over a contiguous range cannot reach either.
             for (var raw = 7; raw <= 11; raw++)
             {
                 Assert.IsFalse(WeaponModRegistry.TryGet((WeaponModId)raw, out _),
                     $"WeaponModId {raw} still resolves to a registry row; ids 7-11 were Warding, Crit Ward, Resolute, Vigor and Mending and are retired");
             }
+
+            Assert.IsFalse(WeaponModRegistry.TryGet((WeaponModId)4, out _),
+                "WeaponModId 4 still resolves to a registry row; it was Cleave, removed 2026-08-07, and the id is retired");
+
+            Assert.IsFalse(WeaponModRegistry.TryGet((WeaponModId)6, out _),
+                "WeaponModId 6 still resolves to a registry row; it was Swift Flight, removed 2026-08-17, and the id is retired");
         }
 
         /// <summary>
@@ -165,9 +206,9 @@ namespace ACE.Server.Tests
         public void Change6_TheLiveRecordBandStopsAtTheLastSurvivingModifier()
         {
             Assert.AreEqual(8130, WeaponModRegistry.PropertyBandStart);
-            Assert.AreEqual(8135, WeaponModRegistry.PropertyBandEnd, "the live band came down from 8140 with the pool cut");
+            Assert.AreEqual(8134, WeaponModRegistry.PropertyBandEnd, "the live band came down from 8140 with the pool cut, then from 8135 to 8134 when Swift Flight retired");
 
-            Assert.AreEqual(8136, WeaponModRegistry.RetiredPropertyBandStart);
+            Assert.AreEqual(8135, WeaponModRegistry.RetiredPropertyBandStart);
             Assert.AreEqual(8140, WeaponModRegistry.RetiredPropertyBandEnd);
 
             Assert.AreEqual(WeaponModRegistry.PropertyBandEnd + 1, WeaponModRegistry.RetiredPropertyBandStart,
@@ -176,6 +217,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WeaponModRegistry.RetiredPropertyBandEnd + 1, WeaponModRegistry.TierBPropertyBandStart,
                 "the Tier B band must start immediately after the retired band, or an id belongs to neither");
 
+            // WeaponModRegistry.TierAMods is exactly the surviving Tier A rows, no filter needed: the
+            // 2026-08-06 v3 expansion is entirely Tier B, and the 2026-08-07 Cleave removal took a row OUT
+            // rather than adding one outside the band.
             foreach (var mod in WeaponModRegistry.TierAMods)
             {
                 var record = (int)mod.Record;
@@ -185,13 +229,20 @@ namespace ACE.Server.Tests
             }
 
             // and no Tier B row may reach back into the Tier A band or the retired one - the retired ids are
-            // still carried by weapons on dev shards, so a reused id would resolve a stale record to a live row
+            // still carried by weapons on dev shards, so a reused id would resolve a stale record to a live row.
+            // A Tier B record is valid in the original v2 band, the 2026-08-06 v3 expansion band, OR the
+            // 2026-08-17 v4 expansion band - see WeaponModRegistry.TierBExpansionBandStart and
+            // WeaponModRegistry.TierBV4BandStart for why all three are disjoint.
             foreach (var mod in WeaponModRegistry.TierBMods)
             {
                 var record = (int)mod.Record;
 
-                Assert.IsTrue(record >= WeaponModRegistry.TierBPropertyBandStart && record <= WeaponModRegistry.TierBPropertyBandEnd,
-                    $"{mod.Id}: record {record} is outside the live Tier B band {WeaponModRegistry.TierBPropertyBandStart}-{WeaponModRegistry.TierBPropertyBandEnd}");
+                var inOriginalBand = record >= WeaponModRegistry.TierBPropertyBandStart && record <= WeaponModRegistry.TierBPropertyBandEnd;
+                var inExpansionBand = record >= WeaponModRegistry.TierBExpansionBandStart && record <= WeaponModRegistry.TierBExpansionBandEnd;
+                var inV4Band = record >= WeaponModRegistry.TierBV4BandStart && record <= WeaponModRegistry.TierBV4BandEnd;
+
+                Assert.IsTrue(inOriginalBand || inExpansionBand || inV4Band,
+                    $"{mod.Id}: record {record} is outside all three reserved Tier B ranges {WeaponModRegistry.TierBPropertyBandStart}-{WeaponModRegistry.TierBPropertyBandEnd}, {WeaponModRegistry.TierBExpansionBandStart}-{WeaponModRegistry.TierBExpansionBandEnd} and {WeaponModRegistry.TierBV4BandStart}-{WeaponModRegistry.TierBV4BandEnd}");
             }
         }
 
@@ -232,21 +283,29 @@ namespace ACE.Server.Tests
         // ================= CHANGE 6 - the resulting pool =================
 
         /// <summary>
-        /// The exact membership of each class pool, not just its depth. Depth alone would pass if two modifiers
-        /// swapped classes.
+        /// The exact membership of the POOL-CUT SURVIVORS within each class pool, not just their presence.
+        /// This file's scope is the pool cut, so this asserts the survivors are all still there and their
+        /// classes did not move. It was six survivors until Cleave went on 2026-08-07 (Change 8); the melee
+        /// list came down with it and no other class was touched, because Cleave was melee only.
+        /// The gate-off Tier A pool is UNCHANGED by the 2026-08-06 v3 expansion (all six
+        /// of its rows are Tier B), so this subset check is now also an exact one, but it stays written as a
+        /// subset check to keep this file's scope narrow to the pool cut rather than restating the current
+        /// exact depths, which are asserted in WeaponModTests.Registry_PoolDepthMatchesTheDesign instead.
         /// </summary>
         [TestMethod]
-        public void Change6_EachClassPoolHoldsExactlyTheseModifiers()
+        public void Change6_EachClassPoolStillHoldsExactlyTheseSurvivors()
         {
             var expected = new Dictionary<WeaponClass, WeaponModId[]>
             {
                 {
                     WeaponClass.Melee,
-                    new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.Cleave, WeaponModId.ShieldBypass }
+                    // Cleave was the fourth melee entry until it was removed on 2026-08-07 (Change 8)
+                    new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.ShieldBypass }
                 },
                 {
                     WeaponClass.Missile,
-                    new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.ShieldBypass, WeaponModId.SwiftFlight }
+                    // Swift Flight was the fifth missile entry until it was removed on 2026-08-17 (Change 9)
+                    new[] { WeaponModId.Devastation, WeaponModId.WeakPoint, WeaponModId.Bloodthirst, WeaponModId.ShieldBypass }
                 },
                 {
                     WeaponClass.Caster,
@@ -259,8 +318,10 @@ namespace ACE.Server.Tests
             // depend on a tunable
             foreach (var kvp in expected)
             {
-                CollectionAssert.AreEquivalent(kvp.Value, WeaponModRegistry.Pool(kvp.Key, false).Select(m => m.Id).ToArray(),
-                    $"the {kvp.Key} special pool membership changed");
+                var pool = WeaponModRegistry.Pool(kvp.Key, false).Select(m => m.Id).ToArray();
+
+                foreach (var id in kvp.Value)
+                    Assert.IsTrue(pool.Contains(id), $"{id} is missing from the {kvp.Key} pool - a pool-cut survivor must stay present");
 
                 foreach (var id in kvp.Value)
                 {
@@ -269,10 +330,6 @@ namespace ACE.Server.Tests
                 }
             }
 
-            Assert.AreEqual(5, WeaponModRegistry.Pool(WeaponClass.Melee, false).Count, "melee special pool");
-            Assert.AreEqual(5, WeaponModRegistry.Pool(WeaponClass.Missile, false).Count, "missile special pool");
-            Assert.AreEqual(3, WeaponModRegistry.Pool(WeaponClass.Caster, false).Count, "caster special pool");
-
             // the TINKER pools were not part of this change and must not have moved with it
             Assert.AreEqual(4, WeaponTinkerTable.Pool(WeaponClass.Melee).Count, "melee tinker pool");
             Assert.AreEqual(3, WeaponTinkerTable.Pool(WeaponClass.Missile).Count, "missile tinker pool");
@@ -280,48 +337,72 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// THE CASTER POOL NOW EQUALS THE PER-WEAPON SPECIAL CAP EXACTLY, and this test exists to say that is
-        /// INTENDED rather than to guard against it.
+        /// THE TIER A CASTER POOL IS NO DEEPER THAN THE PER-WEAPON SPECIAL CAP, and this test exists to say that
+        /// is INTENDED rather than to guard against it.
         ///
-        /// A caster that rolls three specials necessarily holds all three, so casters keep a magnitude lottery
+        /// A caster that rolls its maximum necessarily holds the whole pool, so casters keep a magnitude lottery
         /// and have no identity lottery left. That is a real consequence of cutting the pool to six
         /// damage-oriented rows, it was raised with the repo owner separately, and NOTHING in the code works
-        /// around it: there is no guard, and MaxSpecials is unchanged at 3. The distinct-draw path still has to
-        /// behave - it must return all three without repeating and without running short - which is the part
-        /// that is actually verified here.
+        /// around it: there is no guard. The distinct-draw path still has to behave - it must return all three
+        /// without repeating and without running short - which is the part that is actually verified here.
+        ///
+        /// UPDATED 2026-08-06 (cap raise): the cap moved from 3 to 4 while the Tier A caster pool stayed at 3,
+        /// making the relation "shallower than" rather than "equal to". A caster draw of 4 legitimately
+        /// returns 3.
+        ///
+        /// THE SAME-DAY v3 EXPANSION DID NOT REOPEN THIS. Attunement was originally drafted as a Tier A caster
+        /// row (which would have brought the Tier A caster pool to 4, equal to the cap again) but was reworked
+        /// to Tier B the same day - see WeaponModRegistry.TierBExpansionBandStart - so the Tier A caster pool
+        /// stays at 3 and this test's claim is unchanged.
         ///
         /// WHAT THE SINGLE GATE DID TO THIS CLAIM (2026-07-30). Under the two-gate arrangement
         /// "weapon_mods_enabled true, weapon_mod_tier_b_enabled false" was a REACHABLE shard state, so a real
-        /// caster could roll against a 3-deep pool. With one gate that combination no longer exists: a caster
-        /// that can roll anything at all is rolling against 9. The arithmetic below is still worth pinning -
-        /// the distinct-draw path must not run short on a pool exactly as deep as the cap - but it now
-        /// describes the Tier A half in isolation rather than a state a player can reach.
+        /// caster could roll against a shallow Tier A-only pool. With one gate that combination no longer
+        /// exists: a caster that can roll anything at all is rolling against the gate-on depth (12). The
+        /// arithmetic below is still worth pinning - the distinct-draw path must not run short on a pool
+        /// exactly as deep as the cap - but it now describes the Tier A half in isolation rather than a state
+        /// a player can reach.
         /// </summary>
         [TestMethod]
         public void Change6_ACasterAtTheSpecialCapNecessarilyHoldsTheWholePool()
         {
-            // the claim is about the TIER A caster pool specifically - with the gate on the caster pool is 9
-            // deep and the identity lottery comes back - so the gate state is a stated precondition here rather
-            // than an accident of the shipped default
-            Assert.IsFalse(WeaponModRegistry.Enabled(),
-                "precondition: this claim holds while weapon_mods_enabled is FALSE, which is its shipped default");
-
-            var pool = WeaponModRegistry.Pool(WeaponClass.Caster);
-
-            Assert.AreEqual(WeaponModRegistry.MaxSpecials, pool.Count,
-                "the caster pool is expected to equal the 3-special cap after the pool cut; if this changed, the 'no identity lottery for casters' note in the brief needs revisiting");
-
-            Assert.AreEqual(3, WeaponModRegistry.MaxSpecials, "the per-weapon cap is unchanged - the pool cut did not move it");
-
-            for (var draw = 0; draw < 500; draw++)
+            // the claim is about the TIER A caster pool specifically - with the gate on the caster pool is 12
+            // deep and the identity lottery comes back - so the gate state is a stated precondition here.
+            // weapon_mods_enabled now ships TRUE as standard content, so the gate is forced off explicitly
+            // rather than relied on as the shipped default.
+            var priorGate = PropertyManager.GetBool("weapon_mods_enabled").Item;
+            PropertyManager.ModifyBool("weapon_mods_enabled", false);
+            try
             {
-                var rolled = WeaponModRoller.RollDistinctSpecials(WeaponClass.Caster, WeaponModRegistry.MaxSpecials);
+                Assert.IsFalse(WeaponModRegistry.Enabled(),
+                    "precondition: this claim holds while weapon_mods_enabled is forced FALSE");
 
-                Assert.AreEqual(WeaponModRegistry.MaxSpecials, rolled.Count,
-                    "a caster draw at the cap must return three specials - the pool is exactly three deep, so it must not run short");
+                var pool = WeaponModRegistry.Pool(WeaponClass.Caster);
 
-                CollectionAssert.AreEquivalent(pool.Select(m => m.Id).ToArray(), rolled.Select(m => m.Id).ToArray(),
-                    "a caster at the cap holds the whole pool, every time");
+                Assert.AreEqual(3, pool.Count,
+                    "the Tier A caster pool is expected to be three deep after the pool cut; if this changed, the 'no identity lottery for casters' note in the brief needs revisiting");
+
+                // THE CAP MOVED PAST THE POOL ON 2026-08-06 (3 -> 4), so the pool is SHALLOWER than the cap rather
+                // than equal to it. The claim this test exists for is unaffected and if anything stronger: a
+                // caster on the Tier A half alone cannot even reach the cap, so it necessarily holds the whole
+                // pool whenever it holds its maximum.
+                Assert.AreEqual(4, WeaponModRegistry.MaxSpecials, "the per-weapon cap");
+                Assert.IsTrue(pool.Count < WeaponModRegistry.MaxSpecials, "the Tier A caster pool is shallower than the cap");
+
+                for (var draw = 0; draw < 500; draw++)
+                {
+                    var rolled = WeaponModRoller.RollDistinctSpecials(WeaponClass.Caster, WeaponModRegistry.MaxSpecials);
+
+                    Assert.AreEqual(pool.Count, rolled.Count,
+                        "a caster draw at the cap must return the whole pool - it must not run short of it, and it must not invent an extra");
+
+                    CollectionAssert.AreEquivalent(pool.Select(m => m.Id).ToArray(), rolled.Select(m => m.Id).ToArray(),
+                        "a caster at its maximum holds the whole pool, every time");
+                }
+            }
+            finally
+            {
+                PropertyManager.ModifyBool("weapon_mods_enabled", priorGate);
             }
         }
 
@@ -380,10 +461,10 @@ namespace ACE.Server.Tests
             Assert.AreEqual(3.0, WeaponModRegistry.Get(WeaponModId.WeakPoint).MaxRoll, 1e-12, "Weak Point was 17, then 2; now 3");
             Assert.AreEqual(6.0, WeaponModRegistry.Get(WeaponModId.Bloodthirst).MaxRoll, 1e-12, "Bloodthirst was 25, then 5; now 6");
 
-            // the three rows the retune deliberately did NOT touch
-            Assert.AreEqual(1.0, WeaponModRegistry.Get(WeaponModId.Cleave).MaxRoll, 1e-12, "Cleave is binary and stays +1");
+            // the rows the retune deliberately did NOT touch. Cleave was a third until 2026-08-07 (Change 8)
+            // and Swift Flight was a fourth until 2026-08-17 (Change 9); both removals are not retunes and do
+            // not change what the retune did or did not reach.
             Assert.AreEqual(0.50, WeaponModRegistry.Get(WeaponModId.ShieldBypass).MaxRoll, 1e-12);
-            Assert.AreEqual(6.0, WeaponModRegistry.Get(WeaponModId.SwiftFlight).MaxRoll, 1e-12);
         }
 
         /// <summary>

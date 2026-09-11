@@ -45,6 +45,56 @@
         // Default time it will take for a server to wait before shutting down after shutdown is called from console or in game admin.
         "ShutdownInterval": "60",
 
+        // ContainerShutdownWarningSeconds, default: 60
+        // Seconds of in-game warning before a container stop (SIGTERM/SIGINT) logs players off. 0 means shut
+        // down immediately with no warning. Automatically skipped when nobody is online.
+        "ContainerShutdownWarningSeconds": "60",
+
+        // WorldWatchdogEnabled, default: true
+        // Master switch for the world-thread watchdog poll thread. It stamps a heartbeat file once a
+        // second, logs FATAL when the world thread dies, and can take the process down.
+        // Leave it on. With it off there is no heartbeat file - and the container healthcheck reads a
+        // missing heartbeat file as unhealthy, so the container reports unhealthy forever - and no
+        // FATAL log line when the world dies, and no self-exit.
+        // It does NOT disable everything: the ace.world.* metrics and the container-stop triage in
+        // Program.InitiateContainerShutdown both go through WorldWatchdog.Classify, which computes the
+        // state on the calling thread from the world thread's own statics and needs no poll thread.
+        // That is deliberate - a shutdown correctness fix must not be switchable off by a monitoring
+        // knob. To back out only a misbehaving self-exit, use WorldWatchdogExitOnDeath.
+        "WorldWatchdogEnabled": true,
+
+        // WorldWatchdogStallSeconds, default: 60
+        // Seconds since the last world tick before the world is reported as "stalled". Reporting only -
+        // reaching this threshold never by itself exits the process.
+        "WorldWatchdogStallSeconds": 60,
+
+        // WorldWatchdogExitOnDeath, default: true
+        // Exit the process (code 70) when the world thread has actually died - it faulted, or it stopped
+        // ticking outside of a shutdown. A dead world never recovers on its own, so staying up only buys
+        // a healthy-looking container that serves nobody. There is a fixed 20 second grace before the
+        // exit so the fatal log line flushes and at least one metrics scrape observes the state.
+        "WorldWatchdogExitOnDeath": true,
+
+        // WorldWatchdogExitOnStallSeconds, default: 0
+        // Exit the process when the world has been stalled (but not dead) for this many seconds.
+        // 0 means never. Ships disabled deliberately: there is no measured baseline for the worst
+        // legitimate world-thread stall, so any non-zero value here is a guess that can kill a healthy
+        // server mid-hitch. Measure first, then set it.
+        "WorldWatchdogExitOnStallSeconds": 0,
+
+        // ShutdownHardDeadlineSeconds, default: 240
+        // Seconds after a shutdown's countdown should have finished before the process force-exits with
+        // code 71. Covers a world that hangs AFTER a normal shutdown has begun, where the waits for
+        // players to log off, for landblocks to unload and for the world to stop are all unbounded.
+        // The full wait is ShutdownInterval + this value.
+        "ShutdownHardDeadlineSeconds": 240,
+
+        // ShutdownDrainSeconds, default: 60
+        // Cap in seconds on the wait for the shard database queue to drain during a shutdown. The cap
+        // matters because stopping the shard database abandons whatever is still queued rather than
+        // flushing it, so this wait is the only thing that actually saves outstanding work.
+        "ShutdownDrainSeconds": 60,
+
         // ServerPerformanceMonitorAutoStart, default: false
         // Development recommendation: true
         // Server recommendation: true
@@ -243,5 +293,50 @@
 
     // Upon server startup, precache all DAT files that would be sent as compressed data
     "PrecacheCompressedDATFiles": false
+  },
+  // Market: the web and in-game trading module (Docs/Market/DESIGN.md).
+  // OFF by default. With Enabled false the server starts no listener and behaves exactly as
+  // it did before the module existed.
+  "Market": {
+    // Enabled, default: false
+    "Enabled": false,
+
+    // ListenUrl, default: "http://127.0.0.1:5090"
+    // Loopback by default so a misconfigured deployment fails closed. The container overrides
+    // this to "http://+:8080" and publishes it ONLY on the compose network, never to the host.
+    // Overridable at runtime by the ACE_MARKET_LISTEN_URL environment variable.
+    "ListenUrl": "http://127.0.0.1:5090",
+
+    // SharedKey: the value every request must send as X-Market-Key.
+    // Supply it from the deployment .env as ACE_MARKET_SHARED_KEY, which overrides this key.
+    // An empty key makes the API refuse to start rather than start unauthenticated.
+    // Never commit a real key.
+    "SharedKey": "",
+
+    // MaxInFlight, default: 8
+    // Concurrent request ceiling. Excess returns 429 immediately and never queues into the world.
+    "MaxInFlight": 8,
+
+    // WriteRatePerMinute, default: 120 - per-account budget for session/listings/buy/vault.
+    "WriteRatePerMinute": 120,
+
+    // RequestTimeoutMs, default: 3000
+    // On expiry the client gets 503 and the enqueued work still completes or rolls back on its
+    // own. It is never cancelled.
+    "RequestTimeoutMs": 3000,
+
+    // Login buckets. These count FAILED attempts too, or they do not blunt a password guess.
+    "LoginRatePerMinutePerAccount": 5,
+
+    // Per source address as the server sees it. The web app does not forward the browser's address,
+    // so through it this is ONE bucket for every player, not one per player. Raise it accordingly.
+    "LoginRatePerMinutePerIp": 30,
+
+    // TrustedForwardedForSource: the ONLY address whose X-Forwarded-For is honoured, i.e. the
+    // web container on the compose network. Empty ignores the header entirely.
+    "TrustedForwardedForSource": "",
+
+    // SessionLifetimeMinutes, default: 720. A restart invalidates every token regardless.
+    "SessionLifetimeMinutes": 720
   }
 }

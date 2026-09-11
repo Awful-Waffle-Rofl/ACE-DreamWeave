@@ -129,7 +129,23 @@ namespace ACE.Server.WorldObjects
             if (player.Teleporting)
                 return new ActivationResult(false);
 
-            if (Destination == null)
+            // A speed run ends by picking up the season's objective, NOT by killing the boss or by reaching this
+            // portal - so an instance-exiting portal used mid-run is a forfeit, and before this guard it was a
+            // SILENT one: the player teleported out and only then learned the clear was gone. Refuse the first
+            // use with a warning and let a second, deliberate use through. A finished run has already cleared
+            // SpeedChallengeActive, so this cannot block the way out after a legitimate completion.
+            if ((GetProperty(PropertyInt.PortalExitInstance) ?? 0) == 1 && !player.CheckSpeedChallengeExitConfirmed())
+                return new ActivationResult(false);
+
+            // Speed-challenge season portal (WaffleACE): the one portal in the game that carries no Destination
+            // of its own. Its entry position IS the active speed_season row, resolved at use time by
+            // SpeedSeasonManager (Docs/ProvingGroundsSpeed/DESIGN.md section 3.2) - which is what lets a
+            // rotation be a database row rather than a content apply. The generic "destination not yet
+            // implemented" refusal below must therefore not fire for it; its real refusal is the no-active-season
+            // block further down, next to the other Proving Grounds portal check.
+            var isSpeedChallengeEntry = GetProperty(PropertyBool.SpeedChallengeEntry) == true;
+
+            if (Destination == null && !isSpeedChallengeEntry)
             {
                 player.Session.Network.EnqueueSend(new GameMessageSystemChat($"Portal destination for portal ID {WeenieClassId} not yet implemented!", ChatMessageType.System));
                 return new ActivationResult(false);
@@ -276,6 +292,18 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
+            // Proving Grounds speed portal (SpeedChallengeEntry): with no active season there is no dungeon to
+            // enter and nowhere to file a result, so the portal refuses rather than dumping the player somewhere
+            // wrong. This is the PRIMARY refusal for this portal and it is an entirely normal state - the gap
+            // between two seasons - so it gets a plain player-facing message rather than a WeenieError.
+            if (isSpeedChallengeEntry && SpeedSeasonManager.GetActiveSeason() == null)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    "The trial grounds are being reset between seasons - no dungeon is set right now. Return when the next rotation begins.",
+                    ChatMessageType.System));
+                return new ActivationResult(false);
+            }
+
             // handle quest initial flagging
             if (Quest != null)
             {
@@ -321,6 +349,28 @@ namespace ACE.Server.WorldObjects
             return ApplyPortalRealm(source, dest.AsInstancedPosition(player, PlayerInstanceSelectMode.HomeRealmDefault));
         }
 
+        /// <summary>
+        /// Decides whether a PortalSameInstance-flagged portal may safely resolve via
+        /// PlayerInstanceSelectMode.Same (the player's current instance, unchanged) rather than the normal
+        /// HomeRealmDefault route. That mode only makes sense when the portal's own Destination is in the
+        /// SAME landblock the player is standing in: the player's current instance is - by construction -
+        /// whatever instance already contains that landblock (it is where they are standing right now), so
+        /// reusing it is safe. It is NOT safe when Destination names a DIFFERENT landblock: an ephemeral
+        /// instance is a private copy of the one landblock it was spun up for (see
+        /// LandblockManager.GetEphemeralLandblock / InstanceRouting.ValidateInstanceDestination), so
+        /// nothing guarantees the player's current instance also contains a second, different landblock -
+        /// routing there blind risks loading a landblock into an instance that was never meant to hold it,
+        /// or a landblock that silently falls back to a shared/empty copy. Refusing here is what forces
+        /// Portal.ActOnUse to fall back to the normal HomeRealmDefault resolution instead.
+        /// <para/>
+        /// Pure and static so this one rule can be unit tested with no server, mirroring
+        /// Player_SpeedChallenge.IsSeasonObjective.
+        /// </summary>
+        public static bool CanUseSameInstanceForPortal(LandblockId destinationLandblock, LandblockId playerLandblock)
+        {
+            return destinationLandblock.Landblock == playerLandblock.Landblock;
+        }
+
         public override void ActOnUse(WorldObject activator)
         {
             var player = activator as Player;
@@ -329,17 +379,114 @@ namespace ACE.Server.WorldObjects
 #if DEBUG
             // player.Session.Network.EnqueueSend(new GameMessageSystemChat("Portal sending player to destination", ChatMessageType.System));
 #endif
-            var portalDest = new Position(Destination);
-            AdjustDungeon(portalDest);
+            // Speed-challenge season portal (WaffleACE): SpeedChallengeEntry drops the player into a strictly
+            // single-player ephemeral copy of the CURRENT SEASON's dungeon and arms a timed run that starts when
+            // they land (see Player_SpeedChallenge.cs). Resolved FIRST and exactly once, because unlike the three
+            // arenas below this portal is not configured by properties on its own weenie: it carries no
+            // Destination at all, and its entry position is the active speed_season row.
+            var isSpeedChallenge = GetProperty(PropertyBool.SpeedChallengeEntry) == true;
+            var speedSeason = isSpeedChallenge ? SpeedSeasonManager.GetActiveSeason() : null;
+            var armSpeedChallenge = false;
 
-            // resolve which instance the destination lands in: house portals stay in
-            // the player's current instance; everything else routes to the default
-            // instance of the player's home realm. Either way an explicit PortalRealm
-            // wins (see ResolvePortalDestination / ApplyPortalRealm)
-            if (this is HousePortal)
-                portalDest = ApplyPortalRealm(this, portalDest.AsInstancedPosition(player, PlayerInstanceSelectMode.Same));
+            if (isSpeedChallenge && speedSeason == null)
+            {
+                // CheckUseRequirements already refused this case. A season can still rotate out in the window
+                // between that check and here, so it is re-checked rather than falling through to a normal
+                // teleport - there is no normal teleport to fall through TO, this weenie has no Destination.
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    "The trial grounds are being reset between seasons - no dungeon is set right now. Return when the next rotation begins.",
+                    ChatMessageType.System));
+                return;
+            }
+
+            Position portalDest;
+
+            if (isSpeedChallenge)
+            {
+                // The season row is already an exact, realm-qualified entry position, so it is built straight
+                // from the row and bound to that realm's DEFAULT instance (the same shape ApplyPortalRealm uses)
+                // rather than going through AdjustDungeon / ResolvePortalDestination. Both are deliberately
+                // skipped, and neither is an oversight:
+                //   * ResolvePortalDestination would rebind the position to the PLAYER's home realm default
+                //     instance (PlayerInstanceSelectMode.HomeRealmDefault) and discard season.RealmId, so a
+                //     season authored against a realm copy would silently run the base world's content instead.
+                //   * AdjustDungeonPos is a no-op for every dungeon as the code stands - AdjustPos.DungeonProfiles
+                //     is empty, every profile in Physics/Util/AdjustPos.cs being commented out - and
+                //     AdjustDungeonCells only corrects a cell id that disagrees with the position, which a row
+                //     authored from a /loc dump does not have. What it WOULD do is load the landblock in whatever
+                //     instance it is handed (LScape.get_landblock -> LandblockManager.GetLandblock), and the
+                //     instance at this point is the realm default, not the ephemeral instance the player actually
+                //     lands in - so its only reachable effect here is spinning up a shared-world copy of the
+                //     season dungeon that nothing ever uses.
+                // The realm binding itself is a hard requirement rather than a preference: an unknown realm id is
+                // a content error in the season row, and entering the wrong realm's copy of the dungeon would run
+                // the season against the wrong content without anything looking broken. Refuse instead.
+                var seasonRealm = RealmManager.GetRealm(speedSeason.RealmId);
+
+                if (seasonRealm == null)
+                {
+                    log.Error($"Portal {WeenieClassId} (SpeedChallengeEntry): speed season {speedSeason.Id} ({speedSeason.Name}) declares realm {speedSeason.RealmId}, which is not in the realm registry - refusing use rather than entering the wrong realm's dungeon.");
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                        "This season's dungeon is misconfigured and cannot be entered. Please report this to an administrator.",
+                        ChatMessageType.System));
+                    return;
+                }
+
+                // rotation component order is X, Y, Z, W - the same obj_cell_id/origin/angles -> Position
+                // conversion every other call site uses (e.g. DeveloperContentCommands.cs:2996)
+                portalDest = new Position(speedSeason.ObjCellId,
+                    speedSeason.OriginX, speedSeason.OriginY, speedSeason.OriginZ,
+                    speedSeason.AnglesX, speedSeason.AnglesY, speedSeason.AnglesZ, speedSeason.AnglesW,
+                    seasonRealm.DefaultInstanceID);
+
+                // Deliberate addition beyond the three arenas. THEIR misconfiguration is merely inert: a DPS
+                // portal missing PortalInstancing teleports to its own Destination and arms nothing. A season
+                // portal missing it would drop the player into the SHARED-WORLD copy of the season dungeon,
+                // un-armed and with no error raised anywhere, which is actively wrong. So it refuses - and only
+                // refuses. Instancing is never forced on here, because silently instancing a portal the content
+                // author did not mark would hide exactly the same mistake.
+                if ((GetProperty(PropertyInt.PortalInstancing) ?? 0) != 1)
+                {
+                    log.Error($"Portal {WeenieClassId} carries SpeedChallengeEntry but not PortalInstancing - refusing use. A season portal MUST be instanced; without it the player would enter the shared-world copy of {speedSeason.DungeonName} with no run armed.");
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                        "This portal is misconfigured and cannot be entered. Please report this to an administrator.",
+                        ChatMessageType.System));
+                    return;
+                }
+            }
             else
-                portalDest = ResolvePortalDestination(this, player, portalDest);
+            {
+                portalDest = new Position(Destination);
+                AdjustDungeon(portalDest);
+
+                // resolve which instance the destination lands in: house portals stay in
+                // the player's current instance; everything else routes to the default
+                // instance of the player's home realm. Either way an explicit PortalRealm
+                // wins (see ResolvePortalDestination / ApplyPortalRealm)
+                //
+                // PortalSameInstance opts a plain portal into the same "stay in the player's current
+                // instance" behavior HousePortal gets for free - the chute-back-to-hub case inside a
+                // per-run ephemeral dungeon copy - but only when it is actually safe: CanUseSameInstanceForPortal
+                // requires Destination to be in the landblock the player is currently standing in, because
+                // that is the only landblock guaranteed to exist in the player's current instance. A portal
+                // flagged for a DIFFERENT landblock is a content error (it would ask for a landblock an
+                // arbitrary ephemeral instance was never built to hold), so it is logged and falls back to
+                // the normal HomeRealmDefault route rather than routed blind.
+                var useSameInstance = this is HousePortal;
+
+                if (!useSameInstance && GetProperty(PropertyBool.PortalSameInstance) == true)
+                {
+                    if (CanUseSameInstanceForPortal(portalDest.LandblockId, player.Location.LandblockId))
+                        useSameInstance = true;
+                    else
+                        log.Warn($"Portal {WeenieClassId} carries PortalSameInstance but Destination ({portalDest.LandblockId.Landblock:X4}) is a different landblock from the one the player is in ({player.Location.LandblockId.Landblock:X4}) - falling back to the player's home realm default instance rather than routing into an instance that may not contain that landblock.");
+                }
+
+                if (useSameInstance)
+                    portalDest = ApplyPortalRealm(this, portalDest.AsInstancedPosition(player, PlayerInstanceSelectMode.Same));
+                else
+                    portalDest = ResolvePortalDestination(this, player, portalDest);
+            }
 
             // DPS-challenge portal: DpsChallengeDuration > 0 drops the player into a strictly single-player
             // arena and arms a timed damage trial that starts when they land (see Player_DpsChallenge.cs).
@@ -367,13 +514,42 @@ namespace ACE.Server.WorldObjects
             {
                 var destLandblockId = new LandblockId(portalDest.Cell | 0xFFFF);
                 Position.ParseInstanceID(portalDest.Instance, out _, out var destRealmId, out _);
-                // a DPS-, survival- or wave-challenge instance is never open to the owner's fellowship - the run is scored per player
-                var ephemeralLandblock = RealmManager.GetNewEphemeralLandblock(destLandblockId, player, destRealmId, openToFellowship: !isDpsChallenge && !isSurvivalChallenge && !isWaveChallenge);
+                // a DPS-, survival-, wave- or speed-challenge instance is never open to the owner's fellowship - the run is scored per player
+                var ephemeralLandblock = RealmManager.GetNewEphemeralLandblock(destLandblockId, player, destRealmId, openToFellowship: !isDpsChallenge && !isSurvivalChallenge && !isWaveChallenge && !isSpeedChallenge);
 
                 if (ephemeralLandblock != null && ephemeralLandblock.IsDungeon)
                 {
+                    // Prove the instance we just created actually resolves, using the SAME check the
+                    // teleport will run (Player.Teleport -> InstanceRouting.ValidateInstanceDestination),
+                    // and do it BEFORE any side effect is applied. Everything below this point is a
+                    // commitment: the exit position is stamped and the challenge flags are persisted ahead
+                    // of the teleport on purpose, so that a mid-run logout is caught at next login. If the
+                    // instance did not resolve, the teleport would refuse and those side effects would
+                    // already be in place, so the cheapest correct order is to find out first.
+                    //
+                    // Refusing the portal outright, rather than falling through to the non-instanced
+                    // destination, is the deliberate part. portalDest at this point is the arena's
+                    // coordinates in the player's HOME REALM DEFAULT instance - the shared-world copy - and
+                    // every landblock reached by an instanced portal keeps its content in a realm overlay,
+                    // so that copy is empty geometry: no monsters, no exit portal, /die to leave. That
+                    // exact outcome is the prod bug this guard was written for; silently arriving there is
+                    // strictly worse for the player than not travelling at all.
+                    var instancedDest = new Position(portalDest, ephemeralLandblock.Instance);
+
+                    instancedDest.ValidateInstanceDestination(player, out var instanceRejection);
+
+                    if (instanceRejection != InstanceRejection.None)
+                    {
+                        log.Error($"Portal {WeenieClassId}: the ephemeral instance 0x{ephemeralLandblock.Instance:X8} just created for landblock 0x{destLandblockId.Landblock:X4} does not validate ({instanceRejection}) - refusing use rather than sending {player.Name} into the shared-world copy of that landblock.");
+                        player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                            "The private instance could not be prepared. Please try again in a moment.",
+                            ChatMessageType.System));
+                        LandblockManager.AddToDestructionQueue(ephemeralLandblock);
+                        return;
+                    }
+
                     player.SetPosition(PositionType.EphemeralRealmExitTo, new Position(player.Location));
-                    portalDest = new Position(portalDest, ephemeralLandblock.Instance);
+                    portalDest = instancedDest;
                     player.Session.Network.EnqueueSend(new GameMessageSystemChat($"Entering a private instance (0x{ephemeralLandblock.Instance:X8})...", ChatMessageType.System));
 
                     if (isDpsChallenge)
@@ -404,12 +580,42 @@ namespace ACE.Server.WorldObjects
                         player.RushNextPlayerSave(5);
                         armWaveChallenge = true;
                     }
+
+                    if (isSpeedChallenge)
+                    {
+                        // persist the armed flag before teleport so a mid-run logout is caught at next login.
+                        // Same hard ordering constraint the wave branch above spells out: this MUST happen here,
+                        // ahead of ThreadSafeTeleport, and StartSpeedChallenge must run inside the
+                        // teleport-completion delegate below. The completion delegate runs before
+                        // OnTeleportComplete's exit reconciliation (Player_Location.cs:903), so by the time
+                        // CheckSpeedChallengeInstanceExit reads this flag the run is already bound to the season
+                        // instance. Arming any later would make that reconciliation see an active-but-unbound run
+                        // and forfeit it the instant the player arrives.
+                        player.SpeedChallengeActive = true;
+                        player.RushNextPlayerSave(5);
+                        armSpeedChallenge = true;
+                    }
                 }
                 else if (ephemeralLandblock != null)
                 {
                     log.Warn($"Portal {WeenieClassId} has PortalInstancing but destination 0x{destLandblockId.Landblock:X4} is not a dungeon - using normal destination");
                     LandblockManager.AddToDestructionQueue(ephemeralLandblock);
                 }
+            }
+
+            // Speed only, and the same deliberate addition as the PortalInstancing guard above. Reaching here
+            // un-armed means no ephemeral instance was created - the season's landblock is not a dungeon, or the
+            // instance allocation returned nothing - both of which are already logged just above. For the three
+            // arenas falling through is merely inert (they arrive somewhere harmless with no run armed), but a
+            // season portal's portalDest is the season entry position in the realm's DEFAULT instance, so falling
+            // through would put the player inside the SHARED-WORLD copy of the season dungeon. Refuse instead.
+            if (isSpeedChallenge && !armSpeedChallenge)
+            {
+                log.Error($"Portal {WeenieClassId} (SpeedChallengeEntry): no ephemeral instance was created for speed season {speedSeason.Id} ({speedSeason.Name}) at 0x{speedSeason.ObjCellId:X8} - refusing use rather than entering the shared-world copy of the dungeon.");
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    "This season's dungeon could not be prepared. Please report this to an administrator.",
+                    ChatMessageType.System));
+                return;
             }
 
             // exit-instance portal: used inside an ephemeral instance, its real destination is
@@ -441,8 +647,10 @@ namespace ACE.Server.WorldObjects
 
             WorldManager.ThreadSafeTeleport(player, portalDest, new ActionEventDelegate(() =>
             {
-                // If the portal just used is able to be recalled to,
-                // save the destination coordinates to the LastPortal character position save table
+                // If the portal just used is able to be recalled to, remember WHICH portal it was:
+                // LastPortalDID stores a weenie class id, not a position. Portal Recall rebuilds the
+                // portal from that weenie and re-resolves its destination (see
+                // WorldObject_Magic.HandleCastSpell_PortalRecall).
                 if (!NoRecall)
                     player.LastPortalDID = OriginalPortal == null ? WeenieClassId : OriginalPortal; // if walking through a summoned portal
 
@@ -482,6 +690,13 @@ namespace ACE.Server.WorldObjects
                         GetProperty(PropertyFloat.WaveChallengeInterWaveDelay) ?? 10.0,
                         GetProperty(PropertyFloat.WaveChallengeStallTimeout) ?? 150.0,
                         GetProperty(PropertyFloat.WaveChallengeWaveTimeLimit) ?? 300.0);
+
+                // speed trial: start the timed run on arrival, so the clock starts when the player LANDS rather
+                // than when they clicked. The season resolved at the top of ActOnUse is carried in here rather
+                // than re-read, so a rotation landing between the click and the landing cannot switch which
+                // season the run is filed into (StartSpeedChallenge captures season.Id at arm time).
+                if (armSpeedChallenge)
+                    player.StartSpeedChallenge(speedSeason);
 
                 // a Proving Grounds portal strips rare-gem buffs on arrival. Only the Prodigal spells go: the
                 // Incantations and Auras a player could have cast on themselves survive, because the strip set is

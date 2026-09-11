@@ -10,8 +10,10 @@ namespace ACE.Server.Tests
     /// <summary>
     /// Unit coverage for the banking amount parser and alternate-currency lookup. The parser is the
     /// security-sensitive surface (crafted amounts must never overflow into a bogus/negative long, and
-    /// negatives must be rejected). Deposit/withdraw/transfer flows mutate inventory + DB and are
-    /// exercised in-game via the test-loop rather than here.
+    /// negatives must be rejected). The account-wide pyreal pool itself (credit/debit/overflow/claim,
+    /// against a fake IAccountBankBackend) is exercised in <see cref="AccountBankTests"/>; the
+    /// Player-level deposit/withdraw/transfer flows still mutate inventory + DB and are exercised
+    /// in-game via the test-loop rather than here.
     /// </summary>
     [TestClass]
     public class BankTests
@@ -103,15 +105,56 @@ namespace ACE.Server.Tests
             // Class Ability Point currency weenie (Content/sql/weenies/1001010_classabilitypoint_currency.sql):
             // its "bank balance" is the CAP property, so the shop hook recognizes it as a named alt currency.
             Assert.AreEqual("Class Ability Points", Player.GetAlternateCurrencyName(1001010));
+            // MMD (tradenote250000, Factories/Enum/WeenieClassName.cs) - backed by banked pyreals, not its own balance.
+            Assert.AreEqual("Trade Notes (250,000)", Player.GetAlternateCurrencyName(20630));
             Assert.IsNull(Player.GetAlternateCurrencyName(273));    // coin
             Assert.IsNull(Player.GetAlternateCurrencyName(35810));  // Hero Token (a non-banked alt currency)
         }
 
         /// <summary>
-        /// The Class Ability Point vendor currency is not a bankable item - its balance IS the player's
-        /// AvailableClassAbilityPoints. This covers the credit -> read -> debit -> read cycle at the pure core
-        /// the instance hook (Player.DebitBankedAlternateCurrency for wcid 1001010) delegates to; the live
-        /// property round-trip + SaveBiotaToDatabase is exercised in-game (it needs a real Player + shard DB).
+        /// Pure debit core for the MMD vendor currency (wcid 20630, 250,000 pyreals/note); the live
+        /// property mutation + save needs a real Player and is exercised in-game.
+        /// </summary>
+        [TestMethod]
+        public void TryDebitBankedMmd_AffordableDebitReturnsExactPyrealCost()
+        {
+            // exactly 4 notes' worth banked, debit all 4 -> costs all of it
+            Assert.IsTrue(Player.TryDebitBankedMmd(1_000_000, 4, out var cost));
+            Assert.AreEqual(1_000_000, cost);
+
+            // a partial debit costs only its share
+            Assert.IsTrue(Player.TryDebitBankedMmd(1_000_000, 1, out cost));
+            Assert.AreEqual(250_000, cost);
+
+            // a zero debit is a no-op success
+            Assert.IsTrue(Player.TryDebitBankedMmd(1_000_000, 0, out cost));
+            Assert.AreEqual(0, cost);
+
+            // a remainder left over from floor division (900,000 = 3 notes + 150,000 leftover pyreals)
+            // still affords exactly 3 notes
+            Assert.IsTrue(Player.TryDebitBankedMmd(900_000, 3, out cost));
+            Assert.AreEqual(750_000, cost);
+        }
+
+        [TestMethod]
+        public void TryDebitBankedMmd_RejectsOverdraftAndNegative_WithoutMutating()
+        {
+            // more notes than the bank can cover: refused, out param left at 0 (caller must not hand over goods)
+            Assert.IsFalse(Player.TryDebitBankedMmd(900_000, 4, out var cost)); // 900,000 covers only 3 notes
+            Assert.AreEqual(0, cost);
+
+            // a negative amount (crafted/garbage) can never credit pyreals back
+            Assert.IsFalse(Player.TryDebitBankedMmd(1_000_000, -1, out cost));
+            Assert.AreEqual(0, cost);
+
+            // zero banked pyreals can never afford even one note
+            Assert.IsFalse(Player.TryDebitBankedMmd(0, 1, out cost));
+            Assert.AreEqual(0, cost);
+        }
+
+        /// <summary>
+        /// Credit -> read -> debit -> read cycle for the Class Ability Point currency's pure core
+        /// (wcid 1001010); the live property round-trip is exercised in-game.
         /// </summary>
         [TestMethod]
         public void TryDebitClassAbilityPoints_CreditReadDebitRead()
@@ -149,10 +192,8 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Withdrawals hand out STACKS, not singles (/b w n used to emit one 1-count note per pack slot).
-        /// Player.NextStackSize is the pure core of that: given what is still owed and the created object's own
-        /// MaxStackSize, it decides how big the next stack is. The surrounding loop and the partial-failure
-        /// accounting need a live Player + inventory and are exercised in-game via the test loop.
+        /// Withdrawals hand out STACKS, not singles (/b w n used to emit one 1-count note per slot).
+        /// Player.NextStackSize is that decision's pure core; the surrounding loop is exercised in-game.
         /// </summary>
         [TestMethod]
         public void NextStackSize_ClampsToTheObjectsOwnMaxStackSize()
@@ -201,7 +242,10 @@ namespace ACE.Server.Tests
         /// <summary>
         /// The vendor panel ("you have Np") and the client's own affordability check both read
         /// PropertyInt.CoinValue, so banked pyreals must be included in what we send - otherwise a player who
-        /// banked all their coin is shown 0p and the client will not send the purchase at all.
+        /// banked all their coin is shown 0p and the client will not send the purchase at all. Banked pyreals
+        /// are no longer a per-character property: the "banked" figure here is the account-wide pool balance,
+        /// read through AccountBankManager and passed in as a plain parameter, exactly as the real caller
+        /// (Player.GetSpendableCoinValue) reads AccountBankManager.GetBalance(Account.AccountId) before calling in.
         /// </summary>
         [TestMethod]
         public void CalcSpendableCoinValue_CountsBankedPyreals()
@@ -215,15 +259,21 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Peas are loot-drop spell components with an outsized value-to-burden ratio, banked as pyreals at
-        /// face value. The face value comes from a hardcoded allowlist rather than the item's own Value, so
-        /// this pins both halves: the three bankable wcids credit exactly their retail value, and every other
-        /// wcid (including the cheaper peas in the same family) is refused. The inventory sweep itself
-        /// (DepositPeas) needs a live Player and is exercised in-game.
+        /// Peas bank as pyreals at a hardcoded face-value allowlist, not the item's own Value: pins all
+        /// six pea wcids plus rejection of everything else, including the real scarabs. DepositPeas itself is exercised in-game.
         /// </summary>
         [TestMethod]
         public void TryGetFaceValue_BankablePeasCreditRetailFaceValue()
         {
+            Assert.IsTrue(BankablePeas.TryGetFaceValue(8329, 1, out var lead));
+            Assert.AreEqual(500, lead, "Lead Pea (peascarablead) face value");
+
+            Assert.IsTrue(BankablePeas.TryGetFaceValue(8328, 1, out var iron));
+            Assert.AreEqual(2_500, iron, "Iron Pea (peascarabiron) face value");
+
+            Assert.IsTrue(BankablePeas.TryGetFaceValue(8326, 1, out var copper));
+            Assert.AreEqual(5_000, copper, "Copper Pea (peascarabcopper) face value");
+
             Assert.IsTrue(BankablePeas.TryGetFaceValue(8331, 1, out var silver));
             Assert.AreEqual(12_500, silver, "Silver Pea (peascarabsilver) face value");
 
@@ -252,15 +302,11 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void TryGetFaceValue_RejectsEverythingElse()
         {
-            // the cheaper peas in the same family are deliberately NOT bankable
-            Assert.IsFalse(BankablePeas.TryGetFaceValue(8329, 1, out var lead));    // Lead Pea
-            Assert.AreEqual(0, lead);
-            Assert.IsFalse(BankablePeas.TryGetFaceValue(8328, 1, out _));           // Iron Pea
-            Assert.IsFalse(BankablePeas.TryGetFaceValue(8326, 1, out _));           // Copper Pea
-
             // the real scarab components must never be swept up as peas
-            Assert.IsFalse(BankablePeas.TryGetFaceValue(690, 1, out _));            // Pyreal Scarab
+            Assert.IsFalse(BankablePeas.TryGetFaceValue(690, 1, out var pyrealScarab)); // Pyreal Scarab
+            Assert.AreEqual(0, pyrealScarab);
             Assert.IsFalse(BankablePeas.TryGetFaceValue(687, 1, out _));            // Gold Scarab
+            Assert.IsFalse(BankablePeas.TryGetFaceValue(689, 1, out _));            // Iron Scarab
 
             Assert.IsFalse(BankablePeas.TryGetFaceValue(273, 1, out _));            // coin
             Assert.IsFalse(BankablePeas.TryGetFaceValue(0, 1, out _));
@@ -281,12 +327,9 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// EmoteManager's InqInt64Stat handler special-cases PropertyInt64.AvailableLuminance so the
-        /// affordability precheck counts banked Luminance, matching what SpendLuminance actually spends.
-        /// That special case matches on the enum value, while the 290 emote rows that drive it (across 24
-        /// weenies - every Seer and Mastery object) store the literal 6 in weenie_properties_emote_action.stat.
-        /// Renumbering the enum would silently unhook the fix and bring back "You do not have enough
-        /// Luminance." for players holding banked Luminance, with nothing failing to warn about it.
+        /// EmoteManager's InqInt64Stat special-cases PropertyInt64.AvailableLuminance (stat id 6) so banked
+        /// Luminance counts toward affordability; 290 emote rows store that literal 6, so renumbering the
+        /// enum would silently unhook the fix with nothing failing to warn about it.
         /// </summary>
         [TestMethod]
         public void AvailableLuminance_KeepsTheStatIdTheWorldDataUses()
@@ -295,11 +338,8 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The stack-splitting arithmetic behind the coin payout a player gets when vendor auto-deposit is off
-        /// (/b ad off). It is the only part of that path that can be tested here: creating the coin objects and
-        /// placing them needs a live Player and world database, so that half is exercised in-game. Conservation
-        /// is the property that matters - every pyreal the vendor owes must appear in exactly one stack, since
-        /// the sell path pays out whatever these sizes say and banks only what the pack refused.
+        /// Stack-splitting for the vendor auto-deposit-off (/b ad off) coin payout. Conservation is what's
+        /// tested: every pyreal must appear in exactly one stack; creating/placing the objects is exercised in-game.
         /// </summary>
         [TestMethod]
         public void CalcPayoutStackSizes_ConservesTheTotal()
@@ -365,5 +405,51 @@ namespace ACE.Server.Tests
             foreach (var size in sizes)
                 Assert.AreEqual(25_000, size);
         }
+
+        [TestMethod]
+        public void MarketWallet_MmdConversion_FloorsAndNeverOverdraws()
+        {
+            // The market prices in whole MMD; rounding instead of flooring would let a buyer spend a note they lack.
+            Assert.IsTrue(Player.TryDebitBankedMmd(250_000L * 4, 4, out var exact));
+            Assert.AreEqual(250_000L * 4, exact);
+
+            // 3.999 notes' worth of pyreals buys three notes, not four.
+            Assert.IsTrue(Player.TryDebitBankedMmd(250_000L * 4 - 1, 3, out var three));
+            Assert.AreEqual(250_000L * 3, three);
+            Assert.IsFalse(Player.TryDebitBankedMmd(250_000L * 4 - 1, 4, out _));
+
+            Assert.IsFalse(Player.TryDebitBankedMmd(250_000L * 4, -1, out _), "a negative debit must be refused");
+            Assert.IsTrue(Player.TryDebitBankedMmd(0, 0, out var zero), "a zero debit is legal and costs nothing");
+            Assert.AreEqual(0, zero);
+        }
+
+        [TestMethod]
+        public void MarketWallet_MmdConstantsAreTheOnesTheBankUses()
+        {
+            // Market prices are meaningless if these drift from the bank's own pair.
+            Assert.AreEqual(20630u, Player.MmdWcid);
+            Assert.AreEqual(250_000L, Player.MmdValue);
+        }
+
+        [TestMethod]
+        public void MarketWallet_CreditCore_RefusesANoteCountThatWouldWrapLong()
+        {
+            // Both credit helpers apply this delta to a balance, so a refusal must yield 0 and never the
+            // NEGATIVE product an unguarded multiply produces, which would debit the payee.
+            var maxNotes = long.MaxValue / 250_000L;
+
+            Assert.IsTrue(Player.TryCreditBankedMmd(maxNotes, out var atMax));
+            Assert.AreEqual(maxNotes * 250_000L, atMax);
+            Assert.IsTrue(atMax > 0, "the largest accepted credit must still be positive");
+
+            Assert.IsFalse(Player.TryCreditBankedMmd(maxNotes + 1, out var over), "a credit that would wrap long must be refused");
+            Assert.AreEqual(0, over, "a refused credit must move the balance by nothing, not by a wrapped negative");
+            Assert.IsFalse(Player.TryCreditBankedMmd(long.MaxValue, out var wrapped));
+            Assert.AreEqual(0, wrapped);
+
+            Assert.IsFalse(Player.TryCreditBankedMmd(0, out _), "a zero credit is not a credit");
+            Assert.IsFalse(Player.TryCreditBankedMmd(-1, out _));
+        }
+
     }
 }

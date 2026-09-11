@@ -32,6 +32,30 @@ namespace ACE.Server.WorldObjects
             PlayerManager.LogBroadcastChat(Channel.AllBroadcast, this, message);
         }
 
+        /// <summary>
+        /// WaffleACE fork: true when an equipped object actually COVERS the creature model, and so
+        /// takes over the look from the creature's own grafted objdesc rows
+        /// (Biota.PropertiesAnimPart / PropertiesPalette / PropertiesTextureMap).
+        ///
+        /// This is the same mask the equipment loop in CalculateObjDesc uses to decide what it will
+        /// draw, so the two can never disagree. Anything else a creature holds - a weapon, a shield, a
+        /// quiver - is equipped but paints nothing, and must not suppress the graft.
+        ///
+        /// KNOWN GAP: the graft is applied INSTEAD OF equipment, never as a base layer underneath it,
+        /// so a grafted creature wearing real coverage armor still loses the graft on the parts that
+        /// armor does not cover. Out of scope here.
+        ///
+        /// A NULL wieldedLocation returns true, which looks wrong and is deliberate: C#'s lifted !=
+        /// makes `(null & mask) != 0` true, so this is exactly what the inline expression in the loop
+        /// below has always evaluated to. Keeping the two identical is the point of extracting this;
+        /// changing the null case would silently alter which equipped items the loop draws. Nothing in
+        /// EquippedObjects reaches here with a null location anyway - TryEquipObject always sets it.
+        /// </summary>
+        public static bool SuppressesBiotaObjDesc(EquipMask? wieldedLocation)
+        {
+            return (wieldedLocation & (EquipMask.Clothing | EquipMask.Armor | EquipMask.Cloak)) != 0;
+        }
+
         public override ACE.Entity.ObjDesc CalculateObjDesc()
         {
             ACE.Entity.ObjDesc objDesc = new ACE.Entity.ObjDesc();
@@ -126,7 +150,16 @@ namespace ACE.Server.WorldObjects
 
             var eo = clothesAndCloaks.Concat(sortedArmorItems).ToList();
 
-            if (eo.Count == 0)
+            // WaffleACE fork: decide "nothing is covering the model" from what actually PAINTS the
+            // model, not from what happens to be equipped. `eo` above pulls in anything with
+            // ItemType.Armor, and a SHIELD is ItemType.Armor - so Legate Vessaryn (wcid 1002623)
+            // holding a Kite Shield made this list non-empty, skipped the graft branch, and then lost
+            // his whole Diforsa armor graft to the naked-part fill at the end of this method, because
+            // the equipment loop below ignores a shield anyway (its wield location is not in
+            // Clothing|Armor|Cloak, so it contributes nothing to `coverage`).
+            var covering = eo.Where(w => SuppressesBiotaObjDesc(w.CurrentWieldedLocation)).ToList();
+
+            if (covering.Count == 0)
             {
                 // Check if there is any defined ObjDesc in the Biota and, if so, apply them
                 if (Biota.PropertiesAnimPart.GetCount(BiotaDatabaseLock) > 0 || Biota.PropertiesPalette.GetCount(BiotaDatabaseLock) > 0 || Biota.PropertiesTextureMap.GetCount(BiotaDatabaseLock) > 0)
@@ -150,7 +183,7 @@ namespace ACE.Server.WorldObjects
                     continue;
 
                 // We can wield things that are not part of our model, only use those items that can cover our model.
-                if ((w.CurrentWieldedLocation & (EquipMask.Clothing | EquipMask.Armor | EquipMask.Cloak)) != 0)
+                if (SuppressesBiotaObjDesc(w.CurrentWieldedLocation))
                 {
                     if (w.ClothingBase.HasValue)
                         item = DatManager.PortalDat.ReadFromDat<ClothingTable>((uint)w.ClothingBase);
@@ -173,6 +206,12 @@ namespace ACE.Server.WorldObjects
                             clothingBaseEffect = item.ClothingBaseEffects[SetupTableId];
                         else
                             clothingBaseEffect = item.ClothingBaseEffects[thisSetupId];
+
+                        // Where this item's own ClothingTable texture entries begin. The item-level
+                        // merge below chains only onto entries at or after this point, so a row can
+                        // never splice itself onto a DIFFERENT equipped piece's swap that happens to
+                        // share a part index and end at the same texture.
+                        var firstTextureChange = objDesc.TextureChanges.Count;
 
                         foreach (CloObjectEffect t in clothingBaseEffect.CloObjectEffects)
                         {
@@ -218,6 +257,41 @@ namespace ACE.Server.WorldObjects
                                     objDesc.SubPalettes.Add(new PropertiesPalette { SubPaletteId = itemPal, Offset = palOffset, Length = numColors });
                                 }
                             }
+                        }
+
+                        // Merge the equipped item's OWN texture_map / palette rows into the wearer.
+                        //
+                        // Why this exists: retail composed every worn look purely from the item's
+                        // ClothingTable, which is all the loop above reads. Fork content instead
+                        // authors some looks as texture_map rows directly on the item (a recolour no
+                        // ClothingTable entry covers). Those rows already render when the item is its
+                        // own object - WorldObject.CalculateObjDesc applies them - so the piece looks
+                        // right on the ground and in the pack, and then silently loses its look the
+                        // moment it is worn. That asymmetry is the bug; this closes it.
+                        //
+                        // Deliberately INSIDE the ClothingBaseEffects branch: if this item's clothing
+                        // table has no entry for the wearer's model it is dressing nothing here, and
+                        // its raw rows would be swaps against a body the item never covers.
+                        //
+                        // Rows are read under the item's biota lock and copied, never handed to the
+                        // ObjDesc by reference. AnimPart rows are deliberately NOT merged: model swaps
+                        // on a wearer are what the coverage list above tracks, and injecting parts
+                        // here would desync it from the naked-part fill below.
+                        var itemTextures = w.Biota.PropertiesTextureMap.Clone(w.BiotaDatabaseLock);
+                        if (itemTextures != null)
+                        {
+                            foreach (var row in itemTextures)
+                                objDesc.MergeItemTextureChange(new PropertiesTextureMap { PartIndex = row.PartIndex, OldTexture = row.OldTexture, NewTexture = row.NewTexture }, firstTextureChange);
+                        }
+
+                        // Appended after this item's own ClothingTable sub-palettes, because later
+                        // entries win client-side and an item-level row is the more specific
+                        // statement of intent.
+                        var itemPalettes = w.Biota.PropertiesPalette.Clone(w.BiotaDatabaseLock);
+                        if (itemPalettes != null)
+                        {
+                            foreach (var row in itemPalettes)
+                                objDesc.SubPalettes.Add(new PropertiesPalette { SubPaletteId = row.SubPaletteId, Offset = row.Offset, Length = row.Length });
                         }
                     }
                 }

@@ -28,6 +28,16 @@ namespace ACE.Server.Tests
     {
         private static uint nextGuid = 0x7E000000;
 
+        private static int CountOccurrences(string haystack, string needle)
+        {
+            var count = 0;
+
+            for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+                count++;
+
+            return count;
+        }
+
         /// <summary>How many rolls to take when a test needs to see the whole random range.</summary>
         private const int RollSamples = 2000;
 
@@ -112,6 +122,7 @@ namespace ACE.Server.Tests
                 { DamageType.Cold,     ImbuedEffectType.ColdRending },
                 { DamageType.Acid,     ImbuedEffectType.AcidRending },
                 { DamageType.Electric, ImbuedEffectType.ElectricRending },
+                { DamageType.Health,   ImbuedEffectType.HealthRending },
             };
 
             foreach (var kvp in expected)
@@ -130,6 +141,22 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void GetRend_Health_MapsToHealthRending()
+        {
+            // a life caster (W_DamageType Health - see LifeCasterDisplay.IsLifeCaster) is treated
+            // like any other element: it earns the White Quartz imbue's Life Rending, not the
+            // elementless CriticalStrike fallback
+            Assert.AreEqual(ImbuedEffectType.HealthRending, PrismaticDriftStone.GetRend(DamageType.Health, ItemType.Caster),
+                "a life caster must earn HealthRending, same as any other elemental wand");
+
+            Assert.AreEqual(MaterialType.WhiteQuartz, PrismaticDriftStone.GetRendMaterial(ImbuedEffectType.HealthRending),
+                "HealthRending must stamp the White Quartz imbue material into the TinkerLog");
+
+            Assert.AreEqual("Life Rending", PrismaticDriftStone.GetRendName(ImbuedEffectType.HealthRending),
+                "the announcement must use the same name LifeCasterDisplay's appraisal line uses");
+        }
+
+        [TestMethod]
         public void GetRend_EveryRendIsInTheRetailIconUnderlayTable()
         {
             // every outcome this mechanic can produce must have a retail icon underlay, or the
@@ -138,7 +165,7 @@ namespace ACE.Server.Tests
             {
                 DamageType.Slash, DamageType.Pierce, DamageType.Bludgeon,
                 DamageType.Fire, DamageType.Cold, DamageType.Acid, DamageType.Electric,
-                DamageType.Nether, DamageType.Undef,
+                DamageType.Nether, DamageType.Health, DamageType.Undef,
             };
 
             var itemTypes = new[] { ItemType.MeleeWeapon, ItemType.MissileWeapon, ItemType.Caster };
@@ -183,7 +210,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GetRend_FullPriorityOrderIsDeterministic()
         {
-            // Fire > Cold > Acid > Electric > Nether > Slash > Pierce > Bludgeon.
+            // Fire > Cold > Acid > Electric > Health > Nether > Slash > Pierce > Bludgeon.
             // Walk the order: at each step, the union of that type with every LOWER priority type
             // must still resolve to the higher one.
             var order = new[]
@@ -192,6 +219,7 @@ namespace ACE.Server.Tests
                 Tuple.Create(DamageType.Cold,     ImbuedEffectType.ColdRending),
                 Tuple.Create(DamageType.Acid,     ImbuedEffectType.AcidRending),
                 Tuple.Create(DamageType.Electric, ImbuedEffectType.ElectricRending),
+                Tuple.Create(DamageType.Health,   ImbuedEffectType.HealthRending),
                 Tuple.Create(DamageType.Nether,   ImbuedEffectType.CriticalStrike),
                 Tuple.Create(DamageType.Slash,    ImbuedEffectType.SlashRending),
                 Tuple.Create(DamageType.Pierce,   ImbuedEffectType.PierceRending),
@@ -677,17 +705,21 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ConfirmationText_WarnsAboutForeclosedAttunement_OnlyForUnalignedCasters()
+        public void ConfirmationText_WarnsAboutForeclosedAlignment_OnlyForUnalignedCasters()
         {
-            // the warning exists so the CriticalStrike-on-an-unattuned-caster path is an INFORMED
-            // choice: an Attuned Drift Prism could have given it an element first, and this stone's
-            // permanent lock closes that door
-            const string warningMarker = "can never be attuned to an element afterward";
+            // the warning exists so the CriticalStrike-on-an-unaligned-caster path is an INFORMED
+            // choice: the stone's permanent lock closes the door on the caster ever taking an
+            // element. It says "alignment", never "attuned", because ApplyToWeapon now stamps
+            // AttunedStatus in the same dialog and the two senses must not share a word.
+            const string warningMarker = "can never gain an elemental alignment afterward";
 
             var unaligned = CreateCaster(DamageType.Undef);
 
             Assert.IsTrue(PrismaticDriftStone.GetConfirmationText(unaligned).Contains(warningMarker),
-                "an unaligned caster must be warned that the lock forecloses attunement");
+                "an unaligned caster must be warned that the lock forecloses elemental alignment");
+
+            Assert.AreEqual(1, CountOccurrences(PrismaticDriftStone.GetConfirmationText(unaligned), "attuned"),
+                "the word 'attuned' must appear exactly once in the dialog - the ownership sense only");
 
             var shouldNotWarn = new WorldObject[]
             {
@@ -701,7 +733,115 @@ namespace ACE.Server.Tests
             foreach (var weapon in shouldNotWarn)
             {
                 Assert.IsFalse(PrismaticDriftStone.GetConfirmationText(weapon).Contains(warningMarker),
-                    $"{weapon.GetType().Name} with damage type {weapon.W_DamageType} cannot be attuned by a prism, so it must not carry the warning");
+                    $"{weapon.GetType().Name} with damage type {weapon.W_DamageType} has nothing to align, so it must not carry the warning");
+            }
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // ownership: attuned + bonded
+        // ---------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void ApplyToWeapon_MakesTheWeaponAttunedAndBonded()
+        {
+            // the stone hands the player a permanently locked weapon, so it is theirs to keep:
+            // Attuned blocks trade/give, Bonded keeps it off the corpse on death
+            var weapons = new WorldObject[]
+            {
+                CreateMeleeWeapon(DamageType.Slash),
+                CreateMissileLauncher(DamageType.Undef),
+                CreateCaster(DamageType.Fire),
+                CreateCaster(DamageType.Undef),
+            };
+
+            foreach (var weapon in weapons)
+            {
+                Assert.AreNotEqual(AttunedStatus.Attuned, weapon.Attuned,
+                    $"{weapon.GetType().Name} must start un-attuned or the test proves nothing");
+
+                PrismaticDriftStone.ApplyToWeapon(weapon);
+
+                Assert.AreEqual(AttunedStatus.Attuned, weapon.Attuned,
+                    $"{weapon.GetType().Name} must come out attuned");
+
+                Assert.AreEqual(BondedStatus.Bonded, weapon.Bonded,
+                    $"{weapon.GetType().Name} must come out bonded");
+
+                Assert.IsTrue(weapon.IsAttunedOrContainsAttuned,
+                    $"{weapon.GetType().Name} must read as attuned to the inventory and trade guards");
+            }
+        }
+
+        [TestMethod]
+        public void ApplyToWeapon_DoesNotDemoteAStrongerOwnershipStatus()
+        {
+            // Sticky outranks both values the stone writes, and IsCleanWeapon only screens the
+            // tinker budget - a never-tinkered no-drop weapon reaches ApplyToWeapon, and a flat
+            // assignment would silently downgrade it to droppable/giveable
+            var weapon = CreateMeleeWeapon(DamageType.Slash);
+            weapon.Attuned = AttunedStatus.Sticky;
+            weapon.Bonded = BondedStatus.Sticky;
+
+            PrismaticDriftStone.ApplyToWeapon(weapon);
+
+            Assert.AreEqual(AttunedStatus.Sticky, weapon.Attuned,
+                "Sticky attunement outranks Attuned and must survive the stone");
+
+            Assert.AreEqual(BondedStatus.Sticky, weapon.Bonded,
+                "Sticky bonding outranks Bonded and must survive the stone");
+        }
+
+        [TestMethod]
+        public void ApplyToWeapon_LeavesTheNegativeBondTiersAlone()
+        {
+            // BondedStatus is NOT a ladder. Destroy (-2) and Slippery (-1) sort below Normal but are
+            // the opposite intent, not weaker protection: Destroy removes the item on death, Slippery
+            // forces it to drop anyway. Fork boss weapons carry Bonded = -2 deliberately, so a naive
+            // "anything below Bonded gets raised" test would invert that content's intent.
+            foreach (var start in new[] { BondedStatus.Destroy, BondedStatus.Slippery })
+            {
+                var weapon = CreateMeleeWeapon(DamageType.Slash);
+                weapon.Bonded = start;
+
+                PrismaticDriftStone.ApplyToWeapon(weapon);
+
+                Assert.AreEqual(start, weapon.Bonded,
+                    $"a weapon authored as {start} must keep that status, not be quietly protected");
+            }
+        }
+
+        [TestMethod]
+        public void ApplyToWeapon_BondsAWeaponSittingAtNormalOrUnset()
+        {
+            foreach (var start in new BondedStatus?[] { null, BondedStatus.Normal })
+            {
+                var weapon = CreateMeleeWeapon(DamageType.Slash);
+                weapon.Bonded = start;
+
+                PrismaticDriftStone.ApplyToWeapon(weapon);
+
+                Assert.AreEqual(BondedStatus.Bonded, weapon.Bonded,
+                    $"a weapon starting at {(start.HasValue ? start.ToString() : "unset")} must come out Bonded");
+            }
+        }
+
+        [TestMethod]
+        public void ConfirmationText_WarnsThatTheWeaponBecomesAttunedAndBonded()
+        {
+            // the ownership change is irreversible and is not what the player came for, so it has
+            // to be in the dialog rather than only in the after-the-fact chat line
+            foreach (var weapon in new WorldObject[] { CreateMeleeWeapon(DamageType.Slash), CreateCaster(DamageType.Undef) })
+            {
+                var text = PrismaticDriftStone.GetConfirmationText(weapon);
+
+                Assert.IsTrue(text.Contains("attuned and bonded"),
+                    $"{weapon.GetType().Name}'s confirmation must say the weapon becomes attuned and bonded");
+
+                // the dialog must not promise more than Attuned actually delivers: Player_Commerce's
+                // VerifySellItems never reads Attuned or Bonded, so a stoned weapon is still sellable
+                // to a vendor and the text must not claim otherwise
+                Assert.IsFalse(text.Contains("never to trade away"),
+                    $"{weapon.GetType().Name}'s confirmation must not overpromise - a vendor sale is still allowed");
             }
         }
 

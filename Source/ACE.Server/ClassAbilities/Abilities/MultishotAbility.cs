@@ -28,6 +28,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 3,
             CostPerRank = new[] { 1, 2, 3 },   // Tier-1 GC: rank 1 always 1 point (the class's power splash)
             Implemented = true,
+            AffinitySkill = Skill.AssessCreature,
         };
 
         public void AddExtraShots(Player attacker, int rank, List<float> shotDamageMultipliers)

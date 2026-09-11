@@ -69,7 +69,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "exsanguinating cast gains no Blood Charge; any other life cast builds one " +
                           "instead. Harm still builds charges but never spends them.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 

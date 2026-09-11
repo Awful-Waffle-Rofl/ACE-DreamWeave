@@ -24,8 +24,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Bloodlust",
             Description = "Your melee hits heal you for 1% of the damage dealt per rank. Higher Salvaging increases the lifesteal.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 2, 3 },
             Implemented = true,
+            AffinitySkill = Skill.Salvaging,
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
@@ -37,6 +38,13 @@ namespace ACE.Server.ClassAbilities.Abilities
             // rather than summed into the ability's, because the two are integerized differently - see
             // ApplyLifesteal. The rank-0 half in Player.ApplyEquipmentModOutgoingDamage passes an ability
             // fraction of 0 and the mod alone.
+            // SALVAGING IS SPECIALIZABLE, and the rider must keep paying when it is. Retail sells an
+            // augmentation (AugmentationSpecializeSalvaging) that moves Salvaging - and the four tinkerings -
+            // to SkillAdvancementClass.Specialized permanently, and Player_Skills preserves that status across
+            // a skill reset. GetClassAbilityScaling then takes the per-SPEC divisor, so a
+            // spec-only divisor of 0 (or a "spec is impossible" assumption anywhere in this chain) would
+            // silently ZERO the lifesteal rider for exactly the players who invested in the aug. Both
+            // divisors default to the same 150.0 on purpose: spec pays the same per point as trained here.
             var abilityFraction = rank * PropertyManager.GetDouble("class_ability_bloodlust_percent_per_rank").Item
                 + attacker.GetClassAbilityScaling(Skill.Salvaging,
                     PropertyManager.GetDouble("class_ability_bloodlust_salvage_per_trained").Item,

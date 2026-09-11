@@ -205,25 +205,25 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// The GearMaxHealth value reported to the CLIENT, which is deliberately not the server's gear
-        /// rating. The client rebuilds max health itself as
-        /// InitLevel + Ranks + Endurance/2 + Enlightenment * 2 + GearMaxHealth, and that Enlightenment * 2
-        /// term is baked into the client - the server dropped its own copy of it when enlightenment became
-        /// unlimited (see CreatureVital.GetMaxValue), so an enlightened player is shown a max 2 per
-        /// enlightenment above the one the server will actually heal them to. GearMaxHealth is the only
-        /// signed term of that sum the server controls, so folding -2/enl through it cancels the phantom.
+        /// The GearMaxHealth value reported to the CLIENT. Now simply the server's gear rating.
         ///
-        /// Server-side health math is unaffected: CreatureVital reads GetGearMaxHealth() (the equipped-items
-        /// sum) directly, and never this value nor the stored PropertyInt. The real rating is still carried
-        /// by the difference, so gear that genuinely grants max health (the Vigor weapon mod, tier-8 looted
-        /// clothing) continues to read correctly.
+        /// This used to subtract 2 per enlightenment. The client rebuilds max health itself as
+        /// InitLevel + Ranks + Endurance/2 + Enlightenment * 2 + GearMaxHealth, so while the server sent
+        /// PropertyInt.Enlightenment the client added a phantom 2/enlightenment the server would never heal
+        /// to, and GearMaxHealth - the only signed term the server controls - carried the cancelling term.
         ///
-        /// VERIFIED IN GAME 2026-08-02: the client honours a NEGATIVE GearMaxHealth rather than clamping it
-        /// at zero. Measured on an Enlightenment 8 character with base 325 - the displayed maximum went from
-        /// 341 to 325 once this shipped. That was the one behaviour that could not be settled from source,
-        /// so treat it as the reason this lever is available at all, not as an incidental detail.
+        /// The server no longer sends Enlightenment at all (its SendOnLogin/AssessmentProperty attributes
+        /// were removed when the count stopped being displayed), so the client's term is zero and there is
+        /// nothing left to cancel. Keeping the subtraction would now push every affected health bar 2 per
+        /// enlightenment BELOW the true maximum - the same defect it was written to fix, inverted.
+        ///
+        /// The two changes are therefore a pair. If Enlightenment is ever serialized to the client again,
+        /// this correction has to come back with it.
+        ///
+        /// Kept as a named method rather than inlined so the call sites stay greppable and the history above
+        /// stays attached to them.
         /// </summary>
-        public int GetNetworkGearMaxHealth() => GetGearMaxHealth() - 2 * Enlightenment;
+        public int GetNetworkGearMaxHealth() => GetGearMaxHealth();
 
         /// <summary>
         /// Called when a player equips/dequips an item w/ GearMaxHealth

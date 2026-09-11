@@ -8,6 +8,14 @@ namespace ACE.Server.Network.GameMessages
 
         public GameMessageGroup Group { get; private set; }
 
+        /// <remarks>
+        /// Both constructors below build this with new MemoryStream() / new MemoryStream(int capacity),
+        /// which leaves the backing array publicly visible. MessageFragment.CreateServerFragment relies
+        /// on that: it copies out of GetBuffer() instead of doing Seek + Read, because one message is
+        /// routinely shared across sessions that fragment it in parallel. Do not add a constructor that
+        /// assigns Data from a caller-supplied byte[] - GetBuffer() throws for those, and reverting to a
+        /// positional read would reintroduce the cross-session corruption it avoids.
+        /// </remarks>
         public System.IO.MemoryStream Data { get; private set; }
 
         protected System.IO.BinaryWriter Writer { get; private set; }

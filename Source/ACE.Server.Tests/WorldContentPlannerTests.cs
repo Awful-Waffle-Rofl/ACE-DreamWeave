@@ -97,6 +97,25 @@ namespace ACE.Server.Tests
             Assert.IsFalse(ACE.Server.WorldContentPlanner.IsExcludedFromAutoApply("sql/weenies/preview_of_a_thing.sql"));
         }
 
+        // ---- landblock export exclusion (never auto-applied) ------------------------
+
+        [TestMethod]
+        public void IsLandblockExport_MatchesWholeSegmentOnly()
+        {
+            // true: whole "landblocks" segment, any depth, either slash style, case-insensitive
+            Assert.IsTrue(ACE.Server.WorldContentPlanner.IsLandblockExport("sql/landblocks/016C.sql"));
+            Assert.IsTrue(ACE.Server.WorldContentPlanner.IsLandblockExport(@"sql\landblocks\016C.sql"));
+            Assert.IsTrue(ACE.Server.WorldContentPlanner.IsLandblockExport("MyAddedRoot/sql/landblocks/016C.sql"));
+            Assert.IsTrue(ACE.Server.WorldContentPlanner.IsLandblockExport("SQL/LANDBLOCKS/016C.sql"));
+
+            // false: not a "landblocks" segment (different unit, prefix/suffix match, no segment at all)
+            Assert.IsFalse(ACE.Server.WorldContentPlanner.IsLandblockExport("placements/marketplace_effigist.sql"));
+            Assert.IsFalse(ACE.Server.WorldContentPlanner.IsLandblockExport("sql/weenies/landblocks.sql"));
+            Assert.IsFalse(ACE.Server.WorldContentPlanner.IsLandblockExport("sql/landblocksfoo/x.sql"));
+            Assert.IsFalse(ACE.Server.WorldContentPlanner.IsLandblockExport(""));
+            Assert.IsFalse(ACE.Server.WorldContentPlanner.IsLandblockExport(null));
+        }
+
         [TestMethod]
         public void IsExcludedFromAutoApply_NormalWeenieIsNotExcluded_AndStillClassifies()
         {
@@ -440,8 +459,9 @@ namespace ACE.Server.Tests
                 if (rel.IndexOf(".claude/worktrees/", StringComparison.OrdinalIgnoreCase) >= 0)
                     continue;
 
-                // Mirror the boot applier: preview/ files are dropped at discovery and never planned.
-                if (ACE.Server.WorldContentPlanner.IsExcludedFromAutoApply(rel))
+                // Mirror the boot applier: preview/ and sql/landblocks/ files are dropped at discovery and never planned.
+                if (ACE.Server.WorldContentPlanner.IsExcludedFromAutoApply(rel) ||
+                    ACE.Server.WorldContentPlanner.IsLandblockExport(rel))
                     continue;
 
                 var header = ReadFirstLines(file, 30);

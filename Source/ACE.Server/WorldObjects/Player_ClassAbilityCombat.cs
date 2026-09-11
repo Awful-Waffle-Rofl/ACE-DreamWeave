@@ -9,6 +9,7 @@ using ACE.Server.Entity.Actions;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.WorldObjects
 {
@@ -58,15 +59,25 @@ namespace ACE.Server.WorldObjects
             }
 
             double parryChance = 0.0;
-            if (combatType == CombatType.Melee && TryGetClassAbility(ClassAbilityId.Parry, out var parryRank))
+            if (combatType == CombatType.Melee)
             {
-                var deception = GetClassAbilityScaling(Skill.Deception,
-                    PropertyManager.GetDouble("class_ability_parry_deception_per_trained").Item,
-                    PropertyManager.GetDouble("class_ability_parry_deception_per_spec").Item) * 0.01;
+                if (TryGetClassAbility(ClassAbilityId.Parry, out var parryRank))
+                {
+                    var deception = GetClassAbilityScaling(Skill.Deception,
+                        PropertyManager.GetDouble("class_ability_parry_deception_per_trained").Item,
+                        PropertyManager.GetDouble("class_ability_parry_deception_per_spec").Item) * 0.01;
 
-                parryChance = ParryAbility.ParryChance(parryRank,
-                    PropertyManager.GetDouble("class_ability_parry_percent_per_rank").Item,
-                    deception);
+                    parryChance = ParryAbility.ParryChance(parryRank,
+                        PropertyManager.GetDouble("class_ability_parry_percent_per_rank").Item,
+                        deception);
+                }
+
+                // Surefooted (Rogue T2) feeds the SAME parry term, and deliberately does NOT require Parry
+                // to be learned - it sits outside the branch above for exactly that reason. Added BEFORE
+                // Resolve, so the pooled Shield Block + Parry cap applies to the combined figure and this
+                // ability can only claim more of an already-bounded pool, never widen it. Returns 0 when
+                // unowned or the stack pool is empty.
+                parryChance += GetSurefootedParryBonus();
             }
 
             if (blockChance <= 0.0 && parryChance <= 0.0)
@@ -123,7 +134,101 @@ namespace ACE.Server.WorldObjects
                 // Riposte turns a parry into a free counter-strike
                 TriggerRiposte(attacker);
             }
+
+            // Pocket Sand (Rogue T3) fires on ANY avoidance kind, so it sits outside the block/parry fork -
+            // a Vanguard-built Rogue gets it off blocks exactly as a dodge-built one gets it off evades.
+            TryPocketSand(attacker);
         }
+
+        /// <summary>
+        /// Pocket Sand (Rogue T3): on any avoided attack, a chance to blind the attacker - a flat -30 to all
+        /// of its attack skills for 20 seconds.
+        ///
+        /// CALLED FROM THREE PLACES, because "avoidance" has no single choke point in this engine:
+        /// Player.OnEvade (the normal evade roll, melee and missile),
+        /// <see cref="OnClassAbilityAttackAvoided"/> (a class-ability block or parry, which skips OnEvade
+        /// entirely), and WorldObject.TryResistSpell (a resisted spell, which is not a physical attack at
+        /// all). Each call site owns its own "was this actually avoided" decision; this method owns
+        /// ownership, the roll, and the application, so no site can get the mechanic subtly different.
+        ///
+        /// THE DEBUFF IS WRITTEN OUTSIDE THE SPELL SYSTEM, through EnchantmentManager.AddClassAbilityDebuff
+        /// in a fork-reserved synthetic SpellCategory. That is what makes it stack additively with retail
+        /// Dirty Fighting's attack debuff instead of duelling it for one slot - see the ability's doc
+        /// comment and SpellCategory_ClassAbility_Base. It borrows DF's spell id purely as the client-facing
+        /// identity; no Spell object is constructed and nothing is cast, so it does not depend on the DF
+        /// patch dat being installed (FightDirty_ApplyHighAttack, which does cast, bails when it is not).
+        ///
+        /// Re-proccing REFRESHES the existing entry rather than adding a layer (the primitive keys on
+        /// category + spell id), which is why there is no cooldown here.
+        /// </summary>
+        public void TryPocketSand(Creature attacker)
+        {
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+                return;
+
+            // hot path (every avoided attack): a player with no class abilities at all pays only a cheap
+            // dictionary-count check
+            if (GetClassAbilityCache().Count == 0)
+                return;
+
+            if (attacker == null || attacker is Player || attacker.IsDead)
+                return;
+
+            if (!TryGetClassAbility(ClassAbilityId.PocketSand, out var rank))
+                return;
+
+            var deception = GetClassAbilityScaling(Skill.Deception,
+                PropertyManager.GetDouble("class_ability_pocketsand_deception_per_trained").Item,
+                PropertyManager.GetDouble("class_ability_pocketsand_deception_per_spec").Item) * 0.01;
+
+            var chance = PocketSandAbility.Chance(rank,
+                PropertyManager.GetDouble("class_ability_pocketsand_chance_base").Item,
+                PropertyManager.GetDouble("class_ability_pocketsand_chance_step").Item,
+                deception,
+                PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
+
+            if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
+                return;
+
+            var magnitude = (float)Math.Max(0.0, PropertyManager.GetDouble("class_ability_pocketsand_magnitude").Item);
+
+            if (magnitude <= 0.0f)
+                return;
+
+            attacker.EnchantmentManager.AddClassAbilityDebuff(
+                (uint)SpellId.DF_Specialized_AttackDebuff,
+                PocketSandPowerLevel,
+                this,
+                // FULLY QUALIFIED on purpose: inside Player, the bare name EnchantmentManager binds to
+                // WorldObject's FIELD of that name, not to the type, and the compiler rejects a const read
+                // through an instance reference.
+                (SpellCategory)Managers.EnchantmentManager.SpellCategory_ClassAbility_PocketSand,
+                EnchantmentTypeFlags.Skill | EnchantmentTypeFlags.Additive | EnchantmentTypeFlags.AttackSkills,
+                0,
+                -magnitude,
+                PropertyManager.GetDouble("class_ability_pocketsand_duration_seconds").Item);
+
+            attacker.EnqueueBroadcast(new GameMessageScript(attacker.Guid, PlayScript.DirtyFightingAttackDebuff));
+
+            // The sand puff itself: a raw 0x33 PhysicsScript sent by DataID (opcode 0xF754), which reaches every
+            // creature regardless of its own script table. Default 0x330008B2 (a brown two-emitter Splatter
+            // burst, 2 x 25 particles at the torso for ~0.6 s) was the owner's pick from the rendered contact
+            // sheets in Content/preview/pocket_sand_vfx/ (2026-08-17); 0x33000038 (gold cloud) is the runner-up.
+            // Tunable so it can be swapped live; 0 disables the puff and leaves only the DF head marker above.
+            var puffScript = (uint)Math.Max(0, PropertyManager.GetLong("class_ability_pocketsand_puff_script").Item);
+            if (puffScript != 0)
+                attacker.EnqueueBroadcast(new GameMessagePlayScriptId(attacker.Guid, puffScript));
+
+            SendClassAbilityCombatMessage($"You fling sand in {attacker.Name}'s eyes! (-{magnitude:N0} attack skills)");
+        }
+
+        /// <summary>
+        /// PowerLevel stamped on the Pocket Sand entry. It orders layers WITHIN a spell category, and this
+        /// ability is alone in its own synthetic category by construction, so the value never competes with
+        /// anything - 1 rather than 0 only so a hand-inspected registry row is obviously not a defaulted
+        /// struct.
+        /// </summary>
+        private const uint PocketSandPowerLevel = 1;
 
         /// <summary>
         /// Reflects a fraction of the equipped shield's effective armor level back at the attacker via the

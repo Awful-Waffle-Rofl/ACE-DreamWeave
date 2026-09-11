@@ -99,6 +99,18 @@ namespace ACE.Entity.Enum.Properties
         PCAPRecordedTimestamp9           = 8029,
         PCAPRecordedMaxVelocityEstimated = 8030,
         PCAPPhysicsDIDDataTemplatedFrom  = 8044,
+
+        /// <summary>
+        /// A raw 0x33xxxxxx PhysicsScript DataID replayed at this object every time a client builds
+        /// it, via opcode 0xF754 (PlayScriptId). Purely visual and additive: it layers on top of any
+        /// effect the object's Setup already bakes in, because the client allocates a fresh emitter
+        /// handle per create call rather than keying on the script.
+        ///
+        /// Unlike the Setup-swap approach it replaces, this touches neither the model nor the
+        /// appearance pipeline, so dye, tailoring and ClothingBase all keep working, and it is not
+        /// constrained by the object's part count.
+        /// </summary>
+        VisualEffectScript               = 9000,
     }
 
     public static class PropertyDataIdExtensions

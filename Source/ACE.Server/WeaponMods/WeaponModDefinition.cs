@@ -22,22 +22,46 @@ namespace ACE.Server.WeaponMods
     /// nobody can audit. Accepted consequence: retuning <see cref="MaxRoll"/> does NOT retune modifiers already
     /// sitting on existing weapons.
     ///
-    /// STORAGE, TIER B: SIMPLER, AND DELIBERATELY SO. DO NOT ASSUME THE TIER A REVERSAL MACHINERY ABOVE
-    /// APPLIES. A Tier B row has NO native property (<see cref="NativeInt"/> and <see cref="NativeFloat"/> are
-    /// both null, so <see cref="WritesNative"/> is false). Nothing is added to anything, so there is nothing
-    /// to subtract: <see cref="Record"/> holds the applied magnitude as a plain FRACTION (0.04 for 4%, 0.15
-    /// for 15%), and reversal is a bare RemoveProperty with no arithmetic and no native to restore.
-    /// <see cref="ApplyValue"/> / <see cref="ReverseValue"/> are never reached for a Tier B row, and
-    /// <see cref="WeaponModTinkerSet.ClearSpecials"/> clears Tier B records exactly the same way it clears
-    /// Tier A ones, because it walks the whole registry.
+    /// STORAGE, TIER B: A ROLL FRACTION, NOT A MAGNITUDE (HARD, and the OPPOSITE of Tier A above - do not
+    /// assume the reversal machinery applies). A Tier B row has NO native property (<see cref="NativeInt"/>
+    /// and <see cref="NativeFloat"/> are both null, so <see cref="WritesNative"/> is false). Nothing is added
+    /// to anything, so there is nothing to subtract, and reversal is a bare RemoveProperty with no arithmetic
+    /// and no native to restore. <see cref="ApplyValue"/> / <see cref="ReverseValue"/> are never reached for a
+    /// Tier B row, and <see cref="WeaponModTinkerSet.ClearSpecials"/> clears Tier B records exactly the same
+    /// way it clears Tier A ones, because it walks the whole registry.
+    ///
+    /// Having no reversal arithmetic is precisely what frees Tier B to store the ROLL rather than its result.
+    /// <see cref="Record"/> holds a fraction in [0, 1] - potency scaled by workmanship, everything the roll
+    /// contributed - and the magnitude is recomputed as <see cref="MaxRoll"/> x fraction x scale at EVERY
+    /// read. See <see cref="WeaponModValue.RollFraction"/>.
+    ///
+    /// THE CONSEQUENCE IS THE POINT: retuning <see cref="MaxRoll"/> or weapon_mod_magnitude_scale moves every
+    /// Tier B modifier already in the world, not just new rolls. Halve Quickening's MaxRoll and every weapon
+    /// carrying it is halved. That is a BALANCE LEVER Tier A deliberately does not have and cannot be given -
+    /// Tier A's magnitude storage exists so reversal subtracts exactly what it added from a native the loot
+    /// generator also wrote to, and a retune there would leave permanent drift on an item nobody can audit.
+    /// Making Tier A retroactive is a migration that rewrites natives on existing weapons, not a storage
+    /// change.
+    ///
+    /// It also means the appraisal panel's intensity percentage is EXACTLY the stored fraction for a Tier B
+    /// row: MaxRoll and scale appear in the magnitude and in the workmanship-10 ceiling it is measured
+    /// against, so both cancel and the reported figure cannot drift under a retune.
     ///
     /// The consequence a reader should take from that: a Tier B magnitude is INERT unless a combat hook reads
-    /// it. Adding a Tier B row without wiring its hook produces a record that costs a slot and does nothing.
+    /// it, and every such hook must go through <see cref="WeaponModCombat.ReadWeaponOnly"/> or
+    /// <see cref="WeaponModTinkerSet.ReadMagnitude"/> rather than reading <see cref="Record"/> directly. A raw
+    /// read now yields a fraction where the caller expects a magnitude - Quickening reads 0.83 instead of
+    /// 0.20 - which is a silent 4x error, not a crash. Adding a Tier B row without wiring its hook produces a
+    /// record that costs a slot and does nothing.
     /// </summary>
     public class WeaponModDefinition
     {
-        /// <summary>The potency floor every non-binary modifier rolls above, so a rolled special is never a no-op.</summary>
-        public const double DefaultMinPotency = 0.25;
+        /// <summary>
+        /// The potency floor every non-binary modifier rolls above, so a rolled special is never a no-op.
+        /// RETUNED FROM 0.25 TO 0.60 on 2026-08-06 as part of the v3 magnitude pass - see
+        /// Docs/WeaponMods/DESIGN.md for the benchmark this was tuned against.
+        /// </summary>
+        public const double DefaultMinPotency = 0.60;
 
         public WeaponModId Id;
 
@@ -81,17 +105,22 @@ namespace ACE.Server.WeaponMods
         public double NativeDefault;
 
         /// <summary>
-        /// Floor the native property may never be driven below by a reversal. 0 everywhere except Cleaving,
-        /// where the stored number is a TOTAL target count including the primary, so 1 - not 0 - is the bottom.
+        /// Floor the native property may never be driven below by a reversal. It exists for natives whose zero
+        /// is NOT their bottom - a count that includes the thing being counted, say, where the empty state is
+        /// 1 rather than 0. NO ROW SETS IT TODAY: the only one that ever did was Cleave (Cleaving stores a
+        /// total target count including the primary), retired 2026-08-07. The field stays because it is the
+        /// general rule for that shape of native, not Cleave's private arrangement.
         /// </summary>
         public double NativeFloor;
 
         /// <summary>
         /// TRUE when a reversal that lands exactly on <see cref="NativeDefault"/> should REMOVE the row instead
         /// of writing the default back. Safe only where absent and the default read identically at EVERY read
-        /// site, which is the case for the gear ratings (absent unambiguously reads 0) and REQUIRED for Cleave:
-        /// <c>Cleaving</c> is consumed as a null test (WorldObject_Weapon.cs:47-62), so writing its default of 1
-        /// explicitly would leave the weapon permanently flagged as cleaving.
+        /// site, which is the case for the gear ratings (absent unambiguously reads 0), and REQUIRED wherever a
+        /// native is consumed as a null TEST rather than for its value - writing the default back explicitly
+        /// there leaves the weapon flagged forever. (The row that made that case concrete was Cleave, whose
+        /// <c>Cleaving</c> is a null test at WorldObject_Weapon.cs:47-62; it was retired 2026-08-07, but the
+        /// rule is about the read site's shape and outlives any one row.)
         ///
         /// FALSE for Swift Flight, and this is not cosmetic. <c>MaximumVelocity</c>'s read sites DISAGREE on
         /// their fallback - WeaponProfile.cs:57 falls back to 1.0 while Creature_Missile.cs:322/:517 fall back to
@@ -106,12 +135,41 @@ namespace ACE.Server.WeaponMods
 
         /// <summary>
         /// TRUE = the modifier has no magnitude axis and always applies exactly <see cref="MaxRoll"/>, ignoring
-        /// potency, workmanship and the scale tunable. Cleave only: a fractional cleave target is meaningless.
+        /// potency, workmanship and the scale tunable. For a native whose only meaningful values are a small
+        /// count, an intermediate roll is not a weaker version of the effect - it is no effect at all - so the
+        /// magnitude axis is switched off rather than rounded. NO ROW SETS IT TODAY: the only one that ever
+        /// did was Cleave, retired 2026-08-07.
         /// </summary>
         public bool Binary;
 
         /// <summary>Which weapon classes may roll this modifier.</summary>
         public WeaponClass Classes;
+
+        /// <summary>
+        /// TRUE when this row raises the damage a SINGLE target takes from an ordinary attack. It is the
+        /// membership test for <see cref="WeaponModRegistry.DamagePool"/>, which the
+        /// weapon_mod_guarantee_damage_special tunable draws a set's FIRST special from, so that a set is never
+        /// entirely utility.
+        ///
+        /// WHAT IT DOES NOT MEAN. It is NOT "is this row good", and it is NOT "does this row eventually lead to
+        /// more damage". Two rows are deliberately FALSE despite being damage-adjacent, and the distinction is
+        /// the whole point of the flag:
+        ///
+        ///   ShieldBypass  - CONDITIONAL on the defender carrying a shield, so it is worth nothing against most
+        ///                   of the monster set. Its expected value is a fraction of its face value.
+        ///   SwiftFlight   - projectile velocity, which buys RANGE. It does not scale a hit.
+        ///
+        /// A third belonged here until 2026-08-07: Cleave was FALSE because its extra damage landed on
+        /// ADDITIONAL targets, leaving single-target output unchanged. That reading is the clearest example of
+        /// the rule and is kept here even though the row is gone.
+        ///
+        /// The leeches, Overload and SecondWind are sustain, not damage; Quickening (attack speed) and Ambush
+        /// (a flat multiplier on an opener) both scale what a single target takes, so both are TRUE.
+        ///
+        /// DEFAULTS TO FALSE, so a row added without thinking about it is excluded from the guaranteed draw
+        /// rather than silently included in it.
+        /// </summary>
+        public bool AffectsSingleTargetDamage;
 
         /// <summary>Composite format string, applied to (magnitude x <see cref="DisplayScale"/>).</summary>
         public string DisplayFormat;

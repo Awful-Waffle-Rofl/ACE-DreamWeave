@@ -12,6 +12,7 @@ using ACE.Server.Factories;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects.Entity;
 
 namespace ACE.Server.WorldObjects
@@ -382,7 +383,15 @@ namespace ACE.Server.WorldObjects
                 else
                 {
                     // Spell AOE secondary blasts land at a reduced fraction (1.0 = no scaling for a normal cast)
-                    DamageTarget(creatureTarget, damage.Value * ClassAbilityAoeDamageMultiplier, critical, critDefended, overpower);
+                    var spellDamage = damage.Value * ClassAbilityAoeDamageMultiplier;
+
+                    // Monster combat effects: a monster caster's landed spell hit. Dispatched BEFORE the hit
+                    // is applied, because the hook scales the damage by ref (a magic-damage ramp); the player
+                    // mirror below runs after the hit instead, since nothing it does changes the number.
+                    if (sourceCreature != null && player == null)
+                        sourceCreature.ApplySpellHitMonsterEffects(creatureTarget, this, ref spellDamage);
+
+                    DamageTarget(creatureTarget, spellDamage, critical, critDefended, overpower);
 
                     // Class ability hook: a player's landed war-spell hit can radiate (Spell AOE), recast
                     // (Echo Cast), or apply Vulnerability (Elemental Rend). Each handler owns its own
@@ -555,6 +564,10 @@ namespace ACE.Server.WorldObjects
                     // whereas CD/CDR applied to the total damage (base damage + additional crit damage)
                     weaponCritDamageMod = GetWeaponCritDamageMod(weapon, sourceCreature, attackSkill, target);
 
+                    // Weapon mods v3 Tier B (2026-08-06): Execution's spell half, the same multiplier as
+                    // DamageEvent.cs's physical path - see WeaponModRegistry.cs's Tier B v3 remarks.
+                    weaponCritDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Execution);
+
                     critDamageBonus = lifeMagicDamage * 0.5f * weaponCritDamageMod;
                 }
 
@@ -627,6 +640,10 @@ namespace ACE.Server.WorldObjects
                     // verify: CriticalMultiplier only applied to the additional crit damage,
                     // whereas CD/CDR applied to the total damage (base damage + additional crit damage)
                     weaponCritDamageMod = GetWeaponCritDamageMod(weapon, sourceCreature, attackSkill, target);
+
+                    // Weapon mods v3 Tier B (2026-08-06): Execution's spell half - see the life magic branch
+                    // above for the same hook.
+                    weaponCritDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Execution);
 
                     critDamageBonus *= weaponCritDamageMod;
                 }
@@ -905,8 +922,96 @@ namespace ACE.Server.WorldObjects
                     percent = damage / target.Health.MaxValue;
                 }
 
+                // Sanguine Ward (Blood Mage T3): a transient absorb pool eats the hit BEFORE it reaches
+                // Health. Like Mana Barrier below, the ward was wired only into Player.TakeDamage, which
+                // spell damage never reaches, so a Blood Mage's ward stopped melee and missile hits but not
+                // the spell damage the class actually faces.
+                //
+                // A REDUCTION applied before the vital write. `damage` is genuinely replaced by the
+                // post-ward value and `percent` recomputed - everything below (the vital write, the cloak
+                // spell proc, the reported number, the death branch) sees the reduced hit, exactly as the
+                // physical path in Player.TakeDamage does.
+                //
+                // Placed AFTER the cloak damage proc, matching the physical path's cloak-then-ward order,
+                // and inside the health branch so a Stamina/Mana Lowering drain never touches the pool.
+                // Called unconditionally for a player target: the physical site applies no attacker filter
+                // and no class_abilities_enabled gate either, so the ward already absorbs PvP and
+                // self-damage. AbsorbWithSanguineWard early-outs for free when no ward is up.
+                if (targetPlayer != null)
+                {
+                    var beforeSanguineWard = (uint)Math.Round(damage);
+                    var afterSanguineWard = targetPlayer.AbsorbWithSanguineWard(ProjectileSource, beforeSanguineWard);
+
+                    if (afterSanguineWard != beforeSanguineWard)
+                    {
+                        damage = afterSanguineWard;
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
+                // Mana Barrier (Archmage T2): spell damage never reaches Player.TakeDamage, so the
+                // incoming-damage dispatch that used to carry the barrier on a melee/missile hit never runs
+                // for a bolt. Absorbed here instead, in the ward's slot immediately above and to the ward's
+                // convention - a REDUCTION before the vital write, so `damage` is replaced, `percent`
+                // recomputed, and the vital write, the reported number and the target.IsAlive / OnDeath
+                // branch all see the reduced hit. The victim's damage line therefore reports the
+                // POST-barrier number, which is intended: it plus the "absorbs N points" line add up to the
+                // hit that was thrown.
+                //
+                // IT USED TO SIT BELOW THE VITAL WRITE AS A REFUND, AND THAT WAS A BUG - the write clamps
+                // at zero, so on an overkill bolt the barrier was handed the victim's remaining health
+                // instead of the damage thrown, and refunded a share of that on top of an emptied health
+                // bar. Running above the write removes the clamped number from the problem entirely, and
+                // incidentally satisfies the old "must stay above the full-amount-for-debugging
+                // reassignment of `amount`" constraint by a wide margin.
+                //
+                // Inside the health branch only, so a Stamina/Mana Lowering drain is never absorbed - the
+                // barrier trades Mana for Health, which would be nonsense against a mana drain.
+                if (targetPlayer != null)
+                {
+                    var beforeManaBarrier = (uint)Math.Round(damage);
+                    var afterManaBarrier = targetPlayer.AbsorbWithManaBarrier(ProjectileSource, beforeManaBarrier);
+
+                    if (afterManaBarrier != beforeManaBarrier)
+                    {
+                        damage = afterManaBarrier;
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
+                // Monster combat effects: the non-player mirror of the Sanguine Ward call above, in the same
+                // slot and with the same convention - a REDUCTION before the vital write, so everything
+                // below sees the filtered hit. Spell damage is written straight to Health here and never
+                // reaches Creature.TakeDamage, so a monster ward wired only there would stop melee and
+                // missile but not the spell damage a caster monster actually faces.
+                if (targetPlayer == null && damage > 0.0f)
+                {
+                    var beforeMonsterEffects = (uint)Math.Round(damage);
+                    var afterMonsterEffects = target.AbsorbMonsterEffectDamage(ProjectileSource, Spell.DamageType, beforeMonsterEffects);
+
+                    if (afterMonsterEffects != beforeMonsterEffects)
+                    {
+                        damage = afterMonsterEffects;
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
                 amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage));
                 target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount);
+
+                // summon damage feed ("/summondamage"): spell damage is written to the vital directly here,
+                // so it never reaches the Creature.TakeDamage hook that covers pet melee and missile. Inside
+                // the Health branch deliberately - the StaminaLowering / ManaLowering categories above return
+                // before this point, and a mana drain reported as "hits X for N damage!" would be a lie.
+                if (ProjectileSource is Pet castingPet)
+                    castingPet.NotifyOwnerOfDamage(target, (int)amount);
+
+                // World Events measured boss damage scaling (TECH-DESIGN 2.16). Spell damage is written
+                // straight to the vital here and never reaches Player.TakeDamage, so this site is not
+                // redundant with the one there. It must sit BEFORE the "full amount for debugging"
+                // reassignment of `amount` below, which overwrites the applied number with the pre-vital
+                // roll.
+                ACE.Server.WorldEvents.WorldEventBossDamageHook.NoteHit(ProjectileSource, targetPlayer, (int)amount, critical);
 
                 //if (targetPlayer != null && targetPlayer.Fellowship != null)
                     //targetPlayer.Fellowship.OnVitalUpdate(targetPlayer);
@@ -1028,6 +1133,35 @@ namespace ACE.Server.WorldObjects
         private const float ClassAbilityAoeChildSpeed = 15.0f;
 
         /// <summary>
+        /// The launch vector for a Spell AOE secondary projectile: from the struck target's chest
+        /// (its feet plus 75% of its height, where <see cref="SpawnClassAbilityAoeChild"/> spawns the child)
+        /// to the neighbor's mid-body (its feet plus half its height).
+        ///
+        /// <paramref name="positionalOffset"/> is the raw creature-to-creature offset from
+        /// <see cref="ACE.Server.Physics.Common.Position.GetOffset"/>, whose Z is the ELEVATION difference
+        /// between the two sets of feet. That term must be KEPT and the body-height correction ADDED to it.
+        /// Assigning over it instead - which this did until 2026-08-15 - silently flattens every blast to the
+        /// struck target's own ground plane, so on a ramp, a stairwell, or any sloped ground the child flies
+        /// over or under a neighbor that the caller's (spherical) range check had already accepted, and the
+        /// blast lands on nobody. On flat ground the elevation term is 0, which is why it looked correct.
+        ///
+        /// Pure so the Z handling is unit-testable without a live landblock, mirroring
+        /// <see cref="ACE.Server.ClassAbilities.CrimsonHarvestMath"/>. Returns <see cref="Vector3.Zero"/> for a
+        /// degenerate (unnormalizable) aim - two creatures occupying the same point - which the caller drops.
+        /// </summary>
+        internal static Vector3 GetAoeChildAimOffset(Vector3 positionalOffset, float primaryHeight, float neighborHeight)
+        {
+            var offset = positionalOffset;
+
+            offset.Z += (neighborHeight / 2.0f) - (primaryHeight * 0.75f);
+
+            if (offset.LengthSquared() < 0.0001f)
+                return Vector3.Zero;
+
+            return offset;
+        }
+
+        /// <summary>
         /// Class ability "Spell AOE": launches one secondary copy of this spell from the struck target
         /// (<paramref name="primaryTarget"/>) at a neighboring creature, so it reads visually as the
         /// same spell radiating outward from the target. The child is attributed to the original
@@ -1039,6 +1173,16 @@ namespace ACE.Server.WorldObjects
         public void SpawnClassAbilityAoeChild(Player caster, Creature primaryTarget, Creature neighbor, float damageMult)
         {
             if (caster == null || primaryTarget?.PhysicsObj == null || neighbor?.PhysicsObj == null || Spell == null)
+                return;
+
+            // Aim first: a degenerate (zero-length) aim vector is not launchable, and resolving it before
+            // anything is created keeps that case from leaking a world object / guid.
+            var offset = GetAoeChildAimOffset(
+                primaryTarget.PhysicsObj.Position.GetOffset(neighbor.PhysicsObj.Position),
+                primaryTarget.Height,
+                neighbor.Height);
+
+            if (offset == Vector3.Zero)
                 return;
 
             var spellType = GetProjectileSpellType(Spell.Id);
@@ -1066,10 +1210,6 @@ namespace ACE.Server.WorldObjects
             originPos.Z += primaryTarget.Height * 0.75f;
             origin.Pos = originPos;
             sp.Location = origin;
-
-            // aim from the struck target toward the neighbor, accounting for the height difference
-            var offset = primaryTarget.PhysicsObj.Position.GetOffset(neighbor.PhysicsObj.Position);
-            offset.Z = (neighbor.Height / 2.0f) - (primaryTarget.Height * 0.75f);
 
             var dir = Vector3.Normalize(offset);
             sp.PhysicsObj.Velocity = dir * ClassAbilityAoeChildSpeed;

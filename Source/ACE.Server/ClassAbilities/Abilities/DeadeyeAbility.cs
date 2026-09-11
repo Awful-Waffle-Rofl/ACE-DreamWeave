@@ -22,8 +22,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Deadeye",
             Description = "Increases your missile damage by 8% per rank (+24% at rank 3). Higher Fletching increases the bonus.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 2, 2, 2 },
             Implemented = true,
+            AffinitySkill = Skill.Fletching,
         };
 
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)

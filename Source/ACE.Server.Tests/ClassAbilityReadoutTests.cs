@@ -57,7 +57,7 @@ namespace ACE.Server.Tests
 
             var line = FormatReadoutLine(def, 3, readout);
 
-            Assert.AreEqual("  Savage Blows 3/3  36.7% melee dmg  (18/16/2.7)", line);
+            Assert.AreEqual("  Savage Blows 3/3  36.7% melee dmg  [18/16/2.7]", line);
         }
 
         [TestMethod]
@@ -71,7 +71,7 @@ namespace ACE.Server.Tests
                 Affinity = 20,
                 Gear = 30.9,
                 Effective = 70.9,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = "affinity cap",
@@ -79,7 +79,7 @@ namespace ACE.Server.Tests
 
             var line = FormatReadoutLine(def, 3, readout);
 
-            Assert.AreEqual("  Acid Proc 3/3  70.9pp proc  (20/20/30.9) capped: affinity cap", line);
+            Assert.AreEqual("  Acid Proc 3/3  70.9% proc  [20/20/30.9] capped: affinity cap", line);
             Assert.IsTrue(readout.Capped);
         }
 
@@ -102,7 +102,7 @@ namespace ACE.Server.Tests
 
             var line = FormatReadoutLine(def, 3, readout);
 
-            Assert.AreEqual("  Frenzy 3/3  5.4%/stack atk speed  (5/0.1/0.3)", line);
+            Assert.AreEqual("  Frenzy 3/3  5.4%/stack atk speed  [5/0.1/0.3]", line);
         }
 
         [TestMethod]

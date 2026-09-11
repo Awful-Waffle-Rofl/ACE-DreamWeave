@@ -7,11 +7,12 @@ namespace ACE.Server.ClassAbilities
     /// max every entry a class owns, per tier and in total. This is the number the design tables are written
     /// in (DESIGN.md and the per-class docs under Docs/ClassAbilities all quote a "T1 / T2 / T3 / total" CAP
     /// row), and it is also what decides whether maxing one tier can pay for the next tier's
-    /// "spent in class" gate - see <see cref="ClassAbilityTierGate.Tier3PointsSpentInClass"/>.
+    /// "spent in class" gate - see the <c>class_ability_tier3_spent_required</c> tunable read by
+    /// <see cref="ACE.Server.WorldObjects.Player.MeetsClassAbilityTierUnlock"/>.
     ///
     /// Kept as a pure static over an arbitrary sequence, with no live Player and no registry lookup of its
     /// own, so a test can assert a class's published totals against the definitions actually registered.
-    /// Mirrors the testability pattern of <see cref="ClassAbilityTierGate"/> and
+    /// Mirrors the testability pattern of
     /// <see cref="ClassAbilityTokenCatalog.Evaluate"/>.
     ///
     /// It sums <see cref="ClassAbilityDefinition.CostPerRank"/> in full, i.e. the cost of MAXING each entry,

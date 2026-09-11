@@ -206,22 +206,24 @@ namespace ACE.Server.Tests
             WeaponModManager.ResolveRefusal(WeaponModManager.ResolveAction(source), target);
 
         /// <summary>
-        /// Runs ApplySwap and holds it to its OWN contract rather than assuming it always succeeds. ApplySwap has
-        /// exactly two legitimate null paths, and this asserts both directions of that:
+        /// Runs ApplySwap and holds it to its OWN contract rather than assuming it always succeeds.
         ///
-        ///   - the weapon already holds the full trio, where its defence-in-depth guard on the permanent
-        ///     three-special bound refuses outright rather than replacing one of the three;
-        ///   - the weapon has nothing this system owns to remove.
+        /// REWORKED TWICE. The 2026-08-06 rework left exactly one legitimate null path (a weapon holding zero
+        /// specials, with nothing to reroll). The 2026-08-07 directive removed even that: Amethyst ADDS a
+        /// special when none are held, so ApplySwap has NO legitimate null path at all on a valid weapon.
         ///
-        /// A null in any other state is a failure, and so is a NON-null in either of those states - the second
-        /// direction is the one that catches the guard being deleted as redundant. Returns the lines, or null when
-        /// a guard legitimately fired.
+        /// What this now holds it to, in both directions:
+        ///
+        ///   - it never refuses, and CanApply never refuses, and the two agree;
+        ///   - on a ZERO-special weapon it ADDS - the count lands on exactly one and nothing is reported lost;
+        ///   - on any other count it TRADES - the count is unchanged and something is reported lost.
+        ///
+        /// The count assertions are the important half. "Did not refuse" would still pass if the swap silently
+        /// did nothing, and the muted-scale paths in this suite exercise exactly that shape.
         /// </summary>
         public static List<string> Swap(WorldObject weapon, WeaponClass weaponClass, double workmanship, string context)
         {
-            var specials = WeaponModTinkerSet.SpecialCount(weapon);
-            var atCap = specials >= WeaponModRegistry.MaxSpecials;
-            var removable = WeaponModTinkerSet.ReadComposition(weapon).Count + specials;
+            var before = WeaponModTinkerSet.SpecialCount(weapon);
 
             // read BEFORE the mutation: the bag is consumed on CanApply's word alone, so the two must agree
             // about the state the swap was entered in
@@ -232,16 +234,33 @@ namespace ACE.Server.Tests
             Assert.AreEqual(canApply, lines != null,
                 $"{context}: CanApply said {canApply} but ApplySwap {(lines == null ? "refused" : "ran")} - the bag is consumed before the apply on CanApply's word alone");
 
-            if (lines == null)
-            {
-                Assert.IsTrue(atCap || removable == 0,
-                    $"{context}: ApplySwap produced no result on a weapon holding {specials} specials with {removable} removable slots - its only legitimate refusals are the three-special guard and an empty weapon");
+            Assert.IsNotNull(lines,
+                $"{context}: ApplySwap refused a weapon holding {before} specials - since 2026-08-07 it has no legitimate refusal on a valid weapon");
 
-                return null;
+            var after = WeaponModTinkerSet.SpecialCount(weapon);
+            var reportedALoss = lines.Any(l => l.StartsWith("Lost:", StringComparison.Ordinal));
+
+            if (before == 0)
+            {
+                // the ADD path. At a muted magnitude scale the drawn special resolves to zero and is dropped,
+                // so landing back on zero is legitimate - what is never legitimate is reporting a loss when
+                // the weapon held nothing to lose.
+                Assert.IsTrue(after <= 1,
+                    $"{context}: a swap on a zero-special weapon left {after} specials - it may add at most one");
+
+                Assert.IsFalse(reportedALoss,
+                    $"{context}: the swap reported a loss on a weapon that held no specials");
+
+                return lines;
             }
 
-            Assert.IsFalse(atCap,
-                $"{context}: ApplySwap ran on a weapon already holding {WeaponModRegistry.MaxSpecials} specials - the defence-in-depth guard on the permanent three-special bound did not fire, so a player can reroll one special of a chosen trio");
+            // the TRADE path: one out, one in. A muted scale drops the replacement, so the count may fall by
+            // one, but it must never RISE - Amethyst is not a way to accumulate a set.
+            Assert.IsTrue(after <= before,
+                $"{context}: a swap grew the special count from {before} to {after} - it trades one for one and must never accumulate");
+
+            Assert.IsTrue(reportedALoss,
+                $"{context}: the swap removed nothing from a weapon holding {before} specials");
 
             return lines;
         }
@@ -292,10 +311,10 @@ namespace ACE.Server.Tests
         public void AssertInvariants(WorldObject weapon, WeaponClass weaponClass, string context)
         {
             // TEST DEFECT, fixed 2026-07-30: this read ReadReservedImbueSlots, which is the imbue popcount ALONE.
-            // The budget below is 10 = reserved + specials + tinkers where "tinkers" counts only what this system
-            // applied, so the reserved term has to cover the unreversible log entries too - otherwise the sum
-            // comes up short by exactly the number of foreign entries on any weapon carrying them (a five-Oak
-            // weapon sums to 5), and the harness reports a false failure rather than checking the invariant.
+            // The budget below is 10 = reserved + tinkers where "tinkers" counts only what this system applied,
+            // so the reserved term has to cover the unreversible log entries too - otherwise the sum comes up
+            // short by exactly the number of foreign entries on any weapon carrying them (a five-Oak weapon sums
+            // to 5), and the harness reports a false failure rather than checking the invariant.
             // ReadReservedSlots is also what production budgets against (WeaponModManager.cs ApplyReroll).
             var reserved = WeaponModTinkerSet.ReadReservedSlots(weapon);
             var specials = WeaponModTinkerSet.ReadSpecials(weapon);
@@ -308,15 +327,30 @@ namespace ACE.Server.Tests
             // counted by "reserved", never by WeaponModTinkerCount
             var unaccounted = WeaponModTinkerSet.ReadUnaccountedEntries(weapon).Count;
 
-            // ---- the slot model: 10 = reserved + specials + tinkers ----
-            Assert.AreEqual(WeaponModRegistry.TotalSlots, reserved + specials.Count + tinkerCount,
-                $"{context}: SLOT MODEL - reserved {reserved} + specials {specials.Count} + tinkers {tinkerCount} must be exactly {WeaponModRegistry.TotalSlots}");
+            // ---- the slot model: reserved + tinkers never EXCEEDS 10 ----
+            //
+            // CHANGED 2026-08-06 WITH THE SPECIAL/SLOT DECOUPLING. This used to read
+            // "reserved + specials.Count + tinkerCount", because a special consumed a tinker slot. It no longer
+            // does, and the sharp part of the invariant is that the special count does not appear here AT ALL:
+            // a weapon holding a full set must show the same tinker count as one holding none.
+            //
+            // RELAXED FROM == TO <= 2026-08-07 WITH THE SPECIAL-ONLY REROLL. The equality only ever held
+            // because ApplyReroll FORCED it - it refilled every unreserved slot on every use. Now that the
+            // reroll does not manage layer 1 at all, a partially hand-tinkered weapon sits legitimately below
+            // ten and stays there, exactly as it would under ordinary retail tinkering. Anything ABOVE ten is
+            // still a hard defect; anything below is now normal player state.
+            //
+            // The equality's real job - catching a silent revert of the decoupling - is now done directly by
+            // Reroll_LeavesTheTinkerCompositionByteIdentical, which is a stronger check than a sum that a
+            // budget refill could satisfy by coincidence.
+            Assert.IsTrue(reserved + tinkerCount <= WeaponModRegistry.TotalSlots,
+                $"{context}: SLOT MODEL - reserved {reserved} + tinkers {tinkerCount} exceeds {WeaponModRegistry.TotalSlots} (specials held: {specials.Count}, which must NOT be a term)");
 
-            // ---- NumTimesTinkered is pinned at 10, never 11 ----
+            // ---- NumTimesTinkered never exceeds 10 ----
             var numTimesTinkered = weapon.GetProperty(PropertyInt.NumTimesTinkered) ?? -1;
 
-            Assert.AreEqual(WeaponModRegistry.TotalSlots, numTimesTinkered,
-                $"{context}: TINKER CAP - NumTimesTinkered is {numTimesTinkered}; TinkeringDifficulty is an unguarded 10-element list indexed by it, so anything but exactly 10 is a latent crash or a reopened retail cap");
+            Assert.IsTrue(numTimesTinkered <= WeaponModRegistry.TotalSlots,
+                $"{context}: TINKER CAP - NumTimesTinkered is {numTimesTinkered}; TinkeringDifficulty is an unguarded 10-element list indexed by it, so anything ABOVE ten is a latent crash or a reopened retail cap. Below ten is legitimate player state since the reroll stopped forcing it (2026-08-07)");
 
             // ---- both logs parse, neither grows past ten ----
             Assert.IsTrue(WeaponModTinkerSet.TryParseLog(weapon.GetProperty(PropertyString.TinkerLog), out var retailLog),
@@ -341,25 +375,39 @@ namespace ACE.Server.Tests
                     $"{context}: LOG AGREES WITH COUNT - WeaponModTinkerLog holds {ownLog.Count} entries against {unaccounted} carried-forward entries plus a WeaponModTinkerCount of {recordedTinkers.Value}");
             }
 
-            // ---- the permanent three-special bound, and no weapon holds the same special twice ----
+            // ---- the permanent special bound, and no weapon holds the same special twice ----
             Assert.IsTrue(specials.Count <= WeaponModRegistry.MaxSpecials,
                 $"{context}: SPECIAL BOUND - {specials.Count} specials held, above the permanent per-weapon bound of {WeaponModRegistry.MaxSpecials}");
 
             Assert.AreEqual(specials.Count, specials.Select(s => s.Definition.Id).Distinct().Count(),
                 $"{context}: SPECIAL DISTINCTNESS - the same special is held twice");
 
-            // ---- no dead rows: the two LIVE record bands together hold EXACTLY one row per held special ----
+            // ---- no dead rows: the four LIVE record bands together hold EXACTLY one row per held special ----
             //
-            // Both bands, not just Tier A's: a Tier B record is written and cleared by the same ApplySpecial /
-            // ReverseSpecial pair, so scanning only 8130-8135 would let a zeroed Tier B row through unseen. The
-            // RETIRED band 8136-8140 is deliberately NOT scanned - a stale record there is the accepted cost
-            // recorded in WeaponModPoolCutTests, not a dead row this system wrote.
+            // All four, not just the original Tier A band: a Tier B record is written and cleared by the same
+            // ApplySpecial / ReverseSpecial pair, so scanning only 8130-8134 would let a zeroed v2, v3 or v4
+            // Tier B row through unseen. The RETIRED band 8135-8140 is deliberately NOT scanned - a stale
+            // record there is the accepted cost recorded in WeaponModPoolCutTests, not a dead row this system
+            // wrote. Omitting the v4 band (8027-8035) here would leave a stuck record at those ids invisible
+            // to this harness.
             //
             // The phase-2 reserved band 8148-8149 IS scanned, and must always be empty: nothing writes Sunder
             // or Rampage yet, so any row there means something is writing an id it does not own.
             var bandRows = 0;
 
             for (var id = WeaponModRegistry.PropertyBandStart; id <= WeaponModRegistry.PropertyBandEnd; id++)
+            {
+                if (weapon.GetProperty((PropertyFloat)id) != null)
+                    bandRows++;
+            }
+
+            for (var id = WeaponModRegistry.TierBExpansionBandStart; id <= WeaponModRegistry.TierBExpansionBandEnd; id++)
+            {
+                if (weapon.GetProperty((PropertyFloat)id) != null)
+                    bandRows++;
+            }
+
+            for (var id = WeaponModRegistry.TierBV4BandStart; id <= WeaponModRegistry.TierBV4BandEnd; id++)
             {
                 if (weapon.GetProperty((PropertyFloat)id) != null)
                     bandRows++;
@@ -372,7 +420,7 @@ namespace ACE.Server.Tests
             }
 
             Assert.AreEqual(specials.Count, bandRows,
-                $"{context}: NO DEAD ROWS - the reserved PropertyFloat bands {WeaponModRegistry.PropertyBandStart}-{WeaponModRegistry.PropertyBandEnd} and {WeaponModRegistry.TierBPropertyBandStart}-{WeaponModRegistry.TierBPropertyBandEnd} hold {bandRows} rows between them against {specials.Count} held specials; a record must be cleared with RemoveProperty, never zeroed");
+                $"{context}: NO DEAD ROWS - the reserved PropertyFloat bands {WeaponModRegistry.PropertyBandStart}-{WeaponModRegistry.PropertyBandEnd}, {WeaponModRegistry.TierBExpansionBandStart}-{WeaponModRegistry.TierBExpansionBandEnd}, {WeaponModRegistry.TierBV4BandStart}-{WeaponModRegistry.TierBV4BandEnd} and {WeaponModRegistry.TierBPropertyBandStart}-{WeaponModRegistry.TierBPropertyBandEnd} hold {bandRows} rows between them against {specials.Count} held specials; a record must be cleared with RemoveProperty, never zeroed");
 
             for (var id = WeaponModRegistry.TierBReservedBandStart; id <= WeaponModRegistry.TierBReservedBandEnd; id++)
             {
@@ -472,8 +520,119 @@ namespace ACE.Server.Tests
             }
         }
 
+        /// <summary>
+        /// THE SHARP INVARIANT OF THE 2026-08-07 SPECIAL-ONLY REROLL, and the direct replacement for the
+        /// "reserved + tinkers == TotalSlots" equality that WeaponModProbe.AssertInvariants had to relax to a
+        /// "&lt;=" on the same day.
+        ///
+        /// WHY IT IS STRONGER THAN THE EQUALITY IT REPLACES. A sum can be satisfied by coincidence: an
+        /// implementation that reversed the whole composition and refilled the budget would land back on ten
+        /// and pass, which is precisely what the old equality could not distinguish. A BYTE COMPARISON of the
+        /// composition cannot be satisfied that way - a refill would have to redraw the same seven materials in
+        /// the same order, from a four-material pool, sixty times running.
+        ///
+        /// THE COMPOSITION IS DELIBERATELY NOT FULL. Seven of ten, so a budget refill has three visibly empty
+        /// slots to reach for; a ten-tinker weapon would leave a refill nothing to do and this test nothing to
+        /// see. It is also mixed rather than uniform, so a redraw that happened to hit the right COUNT would
+        /// still have to hit the right split.
+        ///
+        /// AND THE SPECIALS MUST STILL MOVE. Without the second half this test would pass trivially against an
+        /// ApplyReroll that did nothing at all, which is a considerably worse bug than the one it is guarding.
+        /// </summary>
         [TestMethod]
-        public void Sequence_SwapsFillToThreeSpecialsAndThenTheGateRefuses()
+        public void Reroll_LeavesTheTinkerCompositionByteIdentical()
+        {
+            const int cycles = 60;
+
+            // 4 Iron + 3 Velvet: seven of ten, two materials from the melee pool of four, laid down by hand
+            var composition = Enumerable.Repeat(MaterialType.Iron, 4)
+                .Concat(Enumerable.Repeat(MaterialType.Velvet, 3))
+                .ToList();
+
+            var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee);
+            var probe = new WeaponModProbe(weapon);
+
+            WeaponModTinkerSet.ApplyTinkers(weapon, composition);
+
+            var log = WeaponModTinkerSet.SerializeLog(composition);
+
+            weapon.SetProperty(PropertyString.TinkerLog, log);
+            weapon.SetProperty(PropertyInt.NumTimesTinkered, composition.Count);
+
+            // every layer 1 native any melee material can reach, snapshotted AFTER the hand tinkering. Read as
+            // a set rather than as computed constants so the test does not have to restate the material table's
+            // arithmetic - what matters is that these numbers do not move, not what they are.
+            var natives = new Dictionary<PropertyFloat, double?>();
+
+            foreach (var material in WeaponTinkerTable.Pool(WeaponClass.Melee).Where(m => m.FloatProperty != null))
+                natives[material.FloatProperty.Value] = weapon.GetProperty(material.FloatProperty.Value);
+
+            var damage = weapon.GetProperty(PropertyInt.Damage);
+
+            Assert.AreEqual(7, WeaponModTinkerSet.ReadComposition(weapon).Count, "precondition: seven hand-laid tinkers");
+
+            // NOTE the reserved figure is ZERO here, not three: "reserved" counts slots this system CANNOT
+            // work with (imbues and unreversible log entries), and all seven of these are ordinary reversible
+            // materials. So the pre-2026-08-07 reroll would have seen ten available slots on this weapon and
+            // laid down ten - the three unspent slots below are the visible part of that, and the four Iron
+            // and three Velvet being redrawn is the rest.
+            Assert.AreEqual(0, WeaponModTinkerSet.ReadReservedSlots(weapon), "precondition: nothing here is unreversible, so nothing is reserved");
+            Assert.AreEqual(3, WeaponModRegistry.TotalSlots - WeaponModTinkerSet.ReadComposition(weapon).Count,
+                "precondition: three of the ten slots are unspent, so a budget refill would have somewhere visible to put them");
+
+            var signatures = new HashSet<string>();
+
+            for (var cycle = 1; cycle <= cycles; cycle++)
+            {
+                Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"cycle {cycle}: the reroll produced no result");
+
+                probe.AssertInvariants(weapon, WeaponClass.Melee, $"byte-identical composition cycle {cycle}");
+
+                // ---- the composition, byte for byte ----
+                Assert.AreEqual(log, weapon.GetProperty(PropertyString.TinkerLog),
+                    $"cycle {cycle}: TinkerLog moved. The reroll must not reverse, redraw, reorder or re-serialize the player's composition");
+
+                Assert.IsNull(weapon.GetProperty(PropertyString.WeaponModTinkerLog),
+                    $"cycle {cycle}: WeaponModTinkerLog was written. This weapon's tinkers are the player's, not this system's, and writing this row claims them");
+
+                Assert.AreEqual(7, weapon.GetProperty(PropertyInt.NumTimesTinkered),
+                    $"cycle {cycle}: NumTimesTinkered moved off the seven the player actually spent");
+
+                Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                    $"cycle {cycle}: WeaponModTinkerCount was written, which marks the weapon as managed and would suppress the retail integrity gate on it forever");
+
+                // ---- and the EFFECTS of that composition, which is where a reverse-then-refill would show up
+                //      even if it happened to rewrite an identical log ----
+                Assert.AreEqual(damage, weapon.GetProperty(PropertyInt.Damage),
+                    $"cycle {cycle}: Damage moved, so the four Iron were reversed, re-applied, or both");
+
+                foreach (var kvp in natives)
+                {
+                    Assert.AreEqual(kvp.Value, weapon.GetProperty(kvp.Key),
+                        $"cycle {cycle}: {kvp.Key} moved, so a layer 1 material was reversed or applied");
+                }
+
+                signatures.Add(string.Join("|", WeaponModTinkerSet.ReadSpecials(weapon)
+                    .OrderBy(s => s.Definition.Id)
+                    .Select(s => $"{s.Definition.Id}:{s.Magnitude:0.####}")));
+            }
+
+            Assert.IsTrue(signatures.Count > 1,
+                $"{cycles} rerolls produced {signatures.Count} distinct special set(s). The reroll must actually reroll the specials - a no-op would satisfy every byte-identical assertion above");
+        }
+
+        /// <summary>
+        /// REWORKED TWICE, and the swing is worth reading. The 2026-08-06 rework made Amethyst a special-only
+        /// reroll that could NOT grant a first special, so a zero-special weapon REFUSED. The 2026-08-07
+        /// directive reversed that: Amethyst adds a first special when none are held, so a zero-special weapon
+        /// is accepted and gains one.
+        ///
+        /// So this test now: confirms the zero-special weapon is ACCEPTED and that the swap adds exactly one
+        /// special without reporting a loss, then confirms it stays accepted once specials exist, including AT
+        /// the cap - rerolling a special AT the cap is the tool's other purpose.
+        /// </summary>
+        [TestMethod]
+        public void Sequence_SwapAddsAtZeroSpecialsAndAcceptsOnceAndAtTheCap()
         {
             var bag = WeaponModTestKit.MakeBag(MaterialType.Amethyst);
 
@@ -483,27 +642,54 @@ namespace ACE.Server.Tests
                 var probe = new WeaponModProbe(weapon);
 
                 Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(bag, weapon),
-                    $"{weaponClass}: a hand-tinkered ten-slot weapon must accept a swap");
+                    $"{weaponClass}: a zero-special weapon must ACCEPT a swap - Amethyst adds a first special");
 
-                var uses = 0;
+                Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(weapon), $"{weaponClass}: precondition - the weapon starts with no specials");
 
-                while (WeaponModTinkerSet.SpecialCount(weapon) < WeaponModRegistry.MaxSpecials)
+                var added = WeaponModManager.ApplySwap(weapon, weaponClass, 10.0);
+
+                Assert.IsNotNull(added, $"{weaponClass}: the swap must not refuse a zero-special weapon");
+                Assert.AreEqual(1, WeaponModTinkerSet.SpecialCount(weapon),
+                    $"{weaponClass}: a swap on a zero-special weapon must leave exactly one special");
+                Assert.IsFalse(added.Any(l => l.StartsWith("Lost:", StringComparison.Ordinal)),
+                    $"{weaponClass}: nothing was held, so nothing may be reported as lost");
+
+                // seed specials the only remaining way: a Tourmaline reroll, forced to produce at least the
+                // reachable count so this test does not depend on the live odds table
+                var reachable = ReachableSpecials(weaponClass);
+
+                var prior1 = PropertyManager.GetDouble("weapon_mod_special_chance_1").Item;
+
+                try
                 {
-                    Assert.IsTrue(++uses < 500, $"{weaponClass}: {uses} swaps without reaching three specials - the swap has stopped granting them");
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_1", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_2", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_3", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_4", 1.0);
 
-                    Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, weaponClass, 10.0), $"{weaponClass} swap {uses}: produced no result");
-
-                    probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} swap {uses}");
+                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0), $"{weaponClass}: seeding reroll produced no result");
+                }
+                finally
+                {
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_1", prior1);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_2", 0.60);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_3", 0.30);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_4", 0.10);
                 }
 
-                // three specials is a PERMANENT bound: the swap is refused outright rather than replacing one
-                Assert.AreEqual(WeaponModManager.WeaponModRefusal.SwapAtSpecialCap, WeaponModTestKit.Refusal(bag, weapon),
-                    $"{weaponClass}: a weapon at three specials must refuse further swaps");
+                Assert.AreEqual(reachable, WeaponModTinkerSet.SpecialCount(weapon), $"{weaponClass}: the forced reroll did not fill to the reachable pool depth");
 
-                // ... while the reroll stays available, which is what makes it the path back from a bad trio
+                Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(bag, weapon),
+                    $"{weaponClass}: a weapon holding at least one special must accept a swap, including at the cap - SwapAtSpecialCap is gone");
+
+                Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, weaponClass, 10.0), $"{weaponClass}: the swap produced no result");
+
+                probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} swap");
+
+                // ... and the reroll stays available too, which is what makes it the path back from a bad set
                 Assert.AreEqual(WeaponModManager.WeaponModRefusal.None,
                     WeaponModTestKit.Refusal(WeaponModTestKit.MakeBag(MaterialType.Tourmaline), weapon),
-                    $"{weaponClass}: the reroll must remain available at three specials");
+                    $"{weaponClass}: the reroll must remain available at the special cap");
             }
         }
 
@@ -631,6 +817,13 @@ namespace ACE.Server.Tests
         {
             var amethyst = WeaponModTestKit.MakeBag(MaterialType.Amethyst);
 
+            var prior1 = PropertyManager.GetDouble("weapon_mod_special_chance_1").Item;
+            var prior2 = PropertyManager.GetDouble("weapon_mod_special_chance_2").Item;
+            var prior3 = PropertyManager.GetDouble("weapon_mod_special_chance_3").Item;
+            var prior4 = PropertyManager.GetDouble("weapon_mod_special_chance_4").Item;
+
+            try
+            {
             foreach (var weaponClass in AllClasses)
             {
                 for (var round = 0; round < 15; round++)
@@ -638,14 +831,25 @@ namespace ACE.Server.Tests
                     var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
                     var probe = new WeaponModProbe(weapon);
 
-                    var uses = 0;
+                    var reachable = ReachableSpecials(weaponClass);
 
-                    while (WeaponModTinkerSet.SpecialCount(weapon) < WeaponModRegistry.MaxSpecials)
-                    {
-                        Assert.IsTrue(++uses < 500, $"{weaponClass}: could not reach three specials");
-                        WeaponModManager.ApplySwap(weapon, weaponClass, 10.0);
-                        probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} round {round} swap {uses}");
-                    }
+                    // REWORKED 2026-08-06: Amethyst can no longer grind a weapon up to a full set from zero -
+                    // it needs a special to reroll, not add - so a full set is seeded with a forced-odds reroll
+                    // instead, which is the only remaining way to reach one.
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_1", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_2", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_3", 1.0);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_4", 1.0);
+
+                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0), $"{weaponClass} round {round}: seeding reroll produced no result");
+                    probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} round {round} after the seeding reroll");
+
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_1", prior1);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_2", prior2);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_3", prior3);
+                    PropertyManager.ModifyDouble("weapon_mod_special_chance_4", prior4);
+
+                    Assert.AreEqual(reachable, WeaponModTinkerSet.SpecialCount(weapon), $"{weaponClass} round {round}: the seeding reroll did not fill to the reachable pool depth");
 
                     var trio = WeaponModTinkerSet.ReadSpecials(weapon).Select(s => s.Definition.Id).ToList();
 
@@ -666,8 +870,9 @@ namespace ACE.Server.Tests
                             $"{weaponClass} round {round}: {id} was dropped by the reroll but its record survived");
                     }
 
-                    // and the weapon accepts a swap again, so a bad trio is escapable rather than terminal
-                    if (after.Count < WeaponModRegistry.MaxSpecials)
+                    // and the weapon accepts a swap again as long as it holds at least one special - REWORKED
+                    // 2026-08-06: being AT the cap no longer refuses a swap, only holding zero specials does
+                    if (after.Count > 0)
                     {
                         Assert.AreEqual(WeaponModManager.WeaponModRefusal.None, WeaponModTestKit.Refusal(amethyst, weapon),
                             $"{weaponClass} round {round}: the weapon is not workable after the reroll");
@@ -676,6 +881,14 @@ namespace ACE.Server.Tests
                         probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} round {round} post-reroll swap");
                     }
                 }
+            }
+            }
+            finally
+            {
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_1", prior1);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_2", prior2);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_3", prior3);
+                PropertyManager.ModifyDouble("weapon_mod_special_chance_4", prior4);
             }
         }
 
@@ -881,21 +1094,29 @@ namespace ACE.Server.Tests
             var baseDefense = 1.03;
             var baseOffense = 1.07;
 
+            // REWORKED 2026-08-06: Amethyst needs an existing special to reroll, and can no longer grind one up
+            // from zero. Seed one with a reroll first - at the shipped defaults weapon_mod_special_chance_1 is
+            // 1.00, so a reroll now ALWAYS produces at least one special, which is what keeps this loop swap-
+            // driven rather than stalling on a zero-special weapon.
+            Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), "seeding reroll");
+            Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) > 0, "the seeding reroll produced no special at the shipped defaults");
+
             var swaps = 0;
 
             for (var i = 1; i <= 200; i++)
             {
-                if (WeaponModTinkerSet.SpecialCount(weapon) >= WeaponModRegistry.MaxSpecials)
+                if (WeaponModTinkerSet.SpecialCount(weapon) <= 0)
                 {
-                    // the swap's three-special guard refuses here by design, and a reroll is the only way back
-                    // out of a full trio - take it so the loop keeps driving real swaps rather than stalling
-                    Assert.IsNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0),
-                        $"swap {i}: the three-special guard did not fire on a weapon holding a full trio");
-
-                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"escape reroll at {i}");
+                    // the rare case: a swap replacement resolved to zero magnitude and the last special was
+                    // lost. A reroll re-seeds - at the shipped defaults it always produces at least one.
+                    Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, WeaponClass.Melee, 10.0), $"re-seeding reroll at {i}");
+                    Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) > 0, $"re-seeding reroll at {i} produced no special");
                 }
                 else
                 {
+                    // REWORKED 2026-08-06: being AT the cap no longer refuses a swap - rerolling a special AT
+                    // the cap is the tool's purpose - so every non-zero state is a real swap now, not just a
+                    // below-cap subset of them.
                     Assert.IsNotNull(WeaponModTestKit.Swap(weapon, WeaponClass.Melee, 10.0, $"swap {i}"), $"swap {i}: produced no result");
 
                     swaps++;
@@ -975,8 +1196,22 @@ namespace ACE.Server.Tests
 
         // ================= G. slayer =================
 
+        /// <summary>
+        /// RENAMED AND REWRITTEN 2026-08-07 (was Slayer_SurvivesFiftyRerollsUnchangedAndCostsNoSlot).
+        ///
+        /// "Costs no slot" used to be demonstrated INDIRECTLY: an unreserved weapon laid down all ten tinkers
+        /// on every reroll, so slayer quietly taking a slot would have shown up as a nine. The special-only
+        /// reroll lays down no tinkers, so that reading is gone - and the direct reading that replaces it is
+        /// better evidence anyway. Slayer costs no slot if and only if it is not counted as RESERVED and does
+        /// not appear as a special RECORD, and both are now asserted against the accessors themselves rather
+        /// than inferred from a total.
+        ///
+        /// SlayerCreatureType 166 and SlayerDamageBonus 138 are also the two properties an over-eager "reverse
+        /// everything the weapon carries" implementation is most likely to sweep up, which is why fifty rerolls
+        /// rather than one.
+        /// </summary>
         [TestMethod]
-        public void Slayer_SurvivesFiftyRerollsUnchangedAndCostsNoSlot()
+        public void Slayer_SurvivesFiftyRerollsByteIdenticalAndIsNeverCountedOrRecorded()
         {
             foreach (var weaponClass in AllClasses)
             {
@@ -992,14 +1227,21 @@ namespace ACE.Server.Tests
                     Assert.IsNotNull(WeaponModManager.ApplyReroll(weapon, weaponClass, 10.0), $"{weaponClass} reroll {i}");
                     probe.AssertInvariants(weapon, weaponClass, $"{weaponClass} slayer reroll {i}");
 
-                    // byte-identical, and the full ten slots still went to tinkers and specials
+                    // byte-identical
                     Assert.AreEqual((int)CreatureType.Olthoi, weapon.GetProperty(PropertyInt.SlayerCreatureType), $"{weaponClass} reroll {i}: SlayerCreatureType moved");
                     Assert.AreEqual(1.75, weapon.GetProperty(PropertyFloat.SlayerDamageBonus).Value, 1e-12, $"{weaponClass} reroll {i}: SlayerDamageBonus moved");
 
-                    var tinkers = weapon.GetProperty(PropertyInt.WeaponModTinkerCount) ?? -1;
+                    // and costs nothing, read directly off the two things a cost would show up in
+                    Assert.AreEqual(0, WeaponModTinkerSet.ReadReservedSlots(weapon),
+                        $"{weaponClass} reroll {i}: slayer is being counted as a reserved slot - it is not part of the ten-slot budget at all");
 
-                    Assert.AreEqual(WeaponModRegistry.TotalSlots, tinkers + WeaponModTinkerSet.SpecialCount(weapon),
-                        $"{weaponClass} reroll {i}: slayer consumed a slot - it is not part of the ten-slot budget");
+                    Assert.IsFalse(WeaponModTinkerSet.ReadSpecials(weapon).Any(s => s.Definition.NativeInt == PropertyInt.SlayerCreatureType
+                            || s.Definition.NativeFloat == PropertyFloat.SlayerDamageBonus),
+                        $"{weaponClass} reroll {i}: a special claims one of the slayer properties as its native, so a reversal would rewrite the weapon's slayer");
+
+                    // the layer 1 budget is untouched on a weapon that never had one
+                    Assert.IsNull(weapon.GetProperty(PropertyInt.WeaponModTinkerCount),
+                        $"{weaponClass} reroll {i}: the reroll wrote a tinker count on an untinkered weapon");
                 }
             }
         }
@@ -1008,16 +1250,19 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// The reroll's special-count distribution measured through the REAL application path rather than the
-        /// pure odds function: none 65 / one 25 / two 8 / three 2. 4000 samples with a wide tolerance - this is a
-        /// regression tripwire against the cumulative bands being read as conditional, not a precision
-        /// measurement.
+        /// pure odds function. RECOMPUTED 2026-08-06 for the v3 magnitude pass's special-chance retune
+        /// (1.00 / 0.60 / 0.30 / 0.10, from 0.35 / 0.10 / 0.02 / 0.00): none 0 / one 40 / two 30 / three 20 /
+        /// four 10, derived as P(exactly n) = P(at least n) - P(at least n+1) over the cumulative bands. 4000
+        /// samples with a wide tolerance - this is a regression tripwire against the cumulative bands being
+        /// read as conditional, not a precision measurement. The melee Tier A pool is 7 deep (v3 expansion),
+        /// well above the special cap of 4, so a draw of four is never truncated by pool depth here.
         /// </summary>
         [TestMethod]
         public void Statistics_RerollSpecialCountMatchesTheDesignedDistribution()
         {
             const int samples = 4000;
 
-            var counts = new int[4];
+            var counts = new int[5];
 
             for (var i = 0; i < samples; i++)
             {
@@ -1028,75 +1273,86 @@ namespace ACE.Server.Tests
                 counts[WeaponModTinkerSet.SpecialCount(weapon)]++;
             }
 
-            Assert.AreEqual(0.65, counts[0] / (double)samples, 0.03, "P(no special) over the real reroll path");
-            Assert.AreEqual(0.25, counts[1] / (double)samples, 0.03, "P(exactly one)");
-            Assert.AreEqual(0.08, counts[2] / (double)samples, 0.02, "P(exactly two)");
-            Assert.AreEqual(0.02, counts[3] / (double)samples, 0.012, "P(exactly three)");
-        }
-
-        [TestMethod]
-        public void Statistics_SwapAddsASpecialAtTheTunedChance()
-        {
-            const int samples = 4000;
-
-            var gained = 0;
-
-            for (var i = 0; i < samples; i++)
-            {
-                var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
-
-                Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0));
-
-                gained += WeaponModTinkerSet.SpecialCount(weapon);
-            }
-
-            var expected = PropertyManager.GetDouble("weapon_mod_swap_special_chance").Item;
-
-            Assert.AreEqual(expected, gained / (double)samples, 0.035,
-                $"one swap on a weapon holding no specials adds one with probability weapon_mod_swap_special_chance ({expected})");
+            Assert.AreEqual(0.00, counts[0] / (double)samples, 0.01, "P(no special) over the real reroll path - unreachable now that chance_1 defaults to 1.00");
+            Assert.AreEqual(0.40, counts[1] / (double)samples, 0.03, "P(exactly one)");
+            Assert.AreEqual(0.30, counts[2] / (double)samples, 0.03, "P(exactly two)");
+            Assert.AreEqual(0.20, counts[3] / (double)samples, 0.03, "P(exactly three)");
+            Assert.AreEqual(0.10, counts[4] / (double)samples, 0.02, "P(exactly four)");
         }
 
         /// <summary>
-        /// Design section 8 prices the swap at a mean of about 11.9 uses to reach a full trio from a fresh ten
-        /// tinker weapon, and about 12.5 when one imbue is preserved. The tolerance is deliberately wide: this
-        /// exists to catch the swap silently becoming a ratchet (a removal that never touches a special, say),
-        /// not to pin a number.
+        /// SUPERSEDED TWICE. weapon_mod_swap_special_chance used to be the odds ApplySwap added a special on a
+        /// weapon holding none; the 2026-08-06 rework retired that by making the swap refuse a zero-special
+        /// weapon outright. The 2026-08-07 directive retired the refusal in turn: Amethyst adds a first
+        /// special DETERMINISTICALLY, at no chance at all.
+        ///
+        /// That determinism is the thing worth pinning - the tunable is gone from this path in both
+        /// directions, so 500 samples must produce 500 additions, not a distribution.
         /// </summary>
         [TestMethod]
-        public void Statistics_MeanSwapsToAFullTrioMatchesTheDesignedGrind()
+        public void Statistics_SwapAlwaysAddsAFirstSpecialAndAlwaysAttemptsAReplacementOnceOneExists()
         {
-            Assert.AreEqual(11.9, MeanSwapsToThreeSpecials(null, 400), 2.0,
-                "mean swaps to three specials on a ten-slot weapon (design section 8)");
+            const int samples = 500;
 
-            // one imbue removes one slot from the removal pool, so a special is likelier to be the casualty
-            Assert.AreEqual(12.5, MeanSwapsToThreeSpecials((int)ImbuedEffectType.CriticalStrike, 400), 2.0,
-                "mean swaps to three specials with one imbue preserved");
+            for (var i = 0; i < samples; i++)
+            {
+                var zero = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
+
+                Assert.IsNotNull(WeaponModManager.ApplySwap(zero, WeaponClass.Melee, 10.0), $"sample {i}: swap refused a zero-special weapon");
+                Assert.AreEqual(1, WeaponModTinkerSet.SpecialCount(zero),
+                    $"sample {i}: a swap on a zero-special weapon must ALWAYS add exactly one - there is no chance roll on this path");
+
+                var seeded = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
+                WeaponModTinkerSet.ApplySpecial(seeded, WeaponModRegistry.Get(WeaponModId.ShieldBypass), 0.3);
+
+                Assert.IsNotNull(WeaponModManager.ApplySwap(seeded, WeaponClass.Melee, 10.0), $"sample {i}: swap refused on a weapon holding one special");
+            }
         }
 
-        private static double MeanSwapsToThreeSpecials(int? imbue, int trials)
+        /// <summary>
+        /// STILL TRUE AFTER 2026-08-07, FOR A COMPLETELY DIFFERENT REASON - which is why the test is kept and
+        /// retargeted rather than deleted. Design section 8's original swap priced a mean of about 11.9 uses
+        /// to GROW a fresh ten-tinker weapon up to a full set of specials.
+        ///
+        /// It used to be impossible because the swap REFUSED a zero-special weapon. It is now impossible
+        /// because of the shape of what replaced that refusal: the swap adds only when the weapon holds
+        /// nothing, and from one special onwards it removes one and adds one, so the count is pinned at 1
+        /// forever. Amethyst is a way to reach A special and then reroll it - never a way to accumulate a set.
+        ///
+        /// The only path to more than one special remains the Tourmaline reroll's odds table, covered by
+        /// Statistics_RerollSpecialCountMatchesTheDesignedDistribution above. If a future change lets the swap
+        /// grow a set, the design's grind pricing has to be revisited, and this test is the tripwire.
+        /// </summary>
+        [TestMethod]
+        public void Statistics_SwapCanNeverGrindFromZeroToAFullSet()
         {
-            var total = 0L;
+            var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee);
 
-            for (var trial = 0; trial < trials; trial++)
+            for (var use = 0; use < 20; use++)
             {
-                var weapon = WeaponModTestKit.MakeHandTinkered(WeaponClass.Melee, imbue);
+                Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0), $"use {use}: swap must not refuse");
 
-                var uses = 0;
-
-                while (WeaponModTinkerSet.SpecialCount(weapon) < WeaponModRegistry.MaxSpecials)
-                {
-                    Assert.IsTrue(++uses < 1000, $"trial {trial}: {uses} swaps without a trio - the swap has stopped granting specials");
-
-                    Assert.IsNotNull(WeaponModManager.ApplySwap(weapon, WeaponClass.Melee, 10.0), $"trial {trial} use {uses}: produced no result");
-                }
-
-                total += uses;
+                Assert.AreEqual(1, WeaponModTinkerSet.SpecialCount(weapon),
+                    $"use {use}: the swap must hold the count at exactly one - the first use adds, and every use after it trades one for one");
             }
 
-            return total / (double)trials;
+            Assert.IsTrue(WeaponModTinkerSet.SpecialCount(weapon) < WeaponModRegistry.MaxSpecials,
+                "twenty swaps must never accumulate a full set - only the Tourmaline reroll can produce more than one special");
         }
 
         // ---------------- helpers ----------------
+
+        /// <summary>
+        /// The most specials a weapon of this class can actually END UP HOLDING right now: the cap, bounded by
+        /// the depth of its pool at the live gate state.
+        ///
+        /// THE TWO STOPPED BEING THE SAME NUMBER ON 2026-08-06, when MaxSpecials went from 3 to 4 while the Tier
+        /// A caster pool stayed at 3. A loop written as "swap until SpecialCount reaches MaxSpecials" then never
+        /// terminates for a caster with weapon_mods_enabled off. Use this rather than the constant wherever a
+        /// test drives a weapon UP TO its maximum, regardless of the live gate state.
+        /// </summary>
+        private static int ReachableSpecials(WeaponClass weaponClass) =>
+            Math.Min(WeaponModRegistry.MaxSpecials, WeaponModRegistry.Pool(weaponClass).Count);
 
         private static void AssertBand(WorldObject weapon, PropertyInt property, int low, int high, string context)
         {

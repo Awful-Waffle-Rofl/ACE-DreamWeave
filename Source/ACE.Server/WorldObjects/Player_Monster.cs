@@ -18,12 +18,14 @@ namespace ACE.Server.WorldObjects
         {
             if (!Attackable || Teleporting) return;
 
-            var visibleObjs = PhysicsObj.ObjMaint.GetVisibleObjectsValuesOfTypeCreature();
+            // this used to fetch every visible Creature and skip the Players in the loop below.
+            // Player derives from Creature, so in a crowd almost the whole list was players.
+            // GetVisibleObjectsValuesOfTypeNonPlayerCreature applies the exact same "not a Player"
+            // test inside the lock, so the set of monsters checked here is unchanged.
+            var visibleObjs = PhysicsObj.ObjMaint.GetVisibleObjectsValuesOfTypeNonPlayerCreature();
 
             foreach (var monster in visibleObjs)
             {
-                if (monster is Player) continue;
-
                 //if (Location.SquaredDistanceTo(monster.Location) <= monster.VisualAwarenessRangeSq)
                 if (PhysicsObj.get_distance_sq_to_object(monster.PhysicsObj, true) <= monster.VisualAwarenessRangeSq)
                     AlertMonster(monster);

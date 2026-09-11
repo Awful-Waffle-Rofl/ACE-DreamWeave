@@ -1,3 +1,5 @@
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
 using System.Collections.Generic;
 
 using ACE.Entity;
@@ -5,6 +7,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
+using ACE.Server.MonsterEffects;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Tests
@@ -121,6 +124,63 @@ namespace ACE.Server.Tests
             };
 
             return CreateCreature(weenie, x: 50.0f);
+        }
+
+        /// <summary>
+        /// A minimal Creature for monster-effect attachment tests: no combat stats, just a wcid, a
+        /// WeenieType and (optionally) an authored PropertyString.MonsterCombatEffects value.
+        ///
+        /// The wcid is caller-supplied on purpose. Creature_MonsterEffects caches its resolved effect set by
+        /// (wcid, authored string), so passing the SAME wcid twice is the only way to exercise the sharing
+        /// invariant, and passing a fresh one (the default) is the only way to keep two unrelated tests from
+        /// colliding in that process-wide cache.
+        /// </summary>
+        public static Creature CreateEffectCarrier(string monsterCombatEffects = null, uint wcid = 0, WeenieType weenieType = WeenieType.Creature)
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = wcid != 0 ? wcid : nextWcid++,
+                WeenieType = weenieType,
+                PropertiesString = new Dictionary<PropertyString, string>
+                {
+                    { PropertyString.Name, "Test Effect Carrier" },
+                },
+            };
+
+            if (monsterCombatEffects != null)
+                weenie.PropertiesString[PropertyString.MonsterCombatEffects] = monsterCombatEffects;
+
+            return CreateCreature(weenie, x: 50.0f);
+        }
+
+        /// <summary>
+        /// A wcid no other fixture will hand out, for tests that need two creatures to share one.
+        /// </summary>
+        public static uint NextWcid() => nextWcid++;
+
+        /// <summary>
+        /// The state-array slot belonging to one handler on this creature.
+        ///
+        /// USE THIS RATHER THAN A LITERAL INDEX whenever a test attaches more than one effect.
+        /// MonsterEffectSet sorts its entries into dispatch order at construction, so a record's slot is NOT
+        /// its position in the authored list - a mutator sorts ahead of the records typed before it. A
+        /// hardcoded index silently reads a different effect's state when the ordering rule changes; this
+        /// fails loudly instead.
+        /// </summary>
+        public static int MonsterEffectSlot(Creature creature, IMonsterEffect handler)
+        {
+            var effects = creature.MonsterEffects;
+
+            Assert.IsNotNull(effects, "the creature carries no monster effects at all");
+
+            for (var i = 0; i < effects.Count; i++)
+            {
+                if (ReferenceEquals(effects[i].Handler, handler))
+                    return i;
+            }
+
+            Assert.Fail($"no slot on this creature holds the supplied {handler.GetType().Name}");
+            return -1;
         }
 
         private static Creature CreateCreature(Weenie weenie, float x)

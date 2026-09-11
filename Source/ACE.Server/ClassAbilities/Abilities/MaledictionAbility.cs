@@ -47,6 +47,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },
             Implemented = true,
+            AffinitySkill = Skill.LifeMagic,
         };
 
         /// <summary>

@@ -32,7 +32,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "of your Strength (a hidden reduction, capped; does not apply in PvP). Scales with " +
                           "Strength buffs and Enhanced Strength.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },   // Vanguard T3 GC: 5 flat (was a pre-redesign standalone 30, which exceeded the point cap)
+            CostPerRank = new[] { 3 },   // Vanguard T3 GC: 3 flat (was a pre-redesign standalone 30, which exceeded the point cap)
             Implemented = true,
         };
 

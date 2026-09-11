@@ -47,7 +47,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "without a hit). Each stack adds 2/3/4% by rank to all of your magic damage - " +
                           "+10/15/20% at a full stack.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

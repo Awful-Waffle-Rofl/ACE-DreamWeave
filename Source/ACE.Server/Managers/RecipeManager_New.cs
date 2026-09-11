@@ -35,9 +35,31 @@ namespace ACE.Server.Managers
             }
         }
 
+        /// <summary>Life Rending imbue recipe (Content/wcid-registry.tsv life-rending-imbue), shared by
+        /// both White Quartz sources - the standard salvage bag (21085, dispatched through the
+        /// WeenieClassName switch below) and Foolproof White Quartz (1002700, dispatched here instead;
+        /// see the guard's comment in GetNewRecipe for why).</summary>
+        private const uint LifeRendingImbueRecipeId = 1000050;
+
         public static Recipe GetNewRecipe(Player player, WorldObject source, WorldObject target)
         {
             Recipe recipe = null;
+
+            // WaffleACE - Foolproof White Quartz (wcid 1002700) cannot be a WeenieClassName case label:
+            // that enum is backed by `ushort` (max 65535) and every fork wcid starts at 1000000, so
+            // `(WeenieClassName)source.WeenieClassId` below would silently TRUNCATE 1002700 rather than
+            // matching it (confirmed: adding it as an enum member fails to compile with CS0031). Handled
+            // here instead, ahead of the switch, on the raw uint wcid. Same caster-only gate and same
+            // recipe id as the standard White Quartz bag's case in the switch below - see
+            // Content/wcid-registry.tsv life-rending-imbue and RecipeManager.foolproofTinkers (which
+            // guarantees this source's success chance).
+            if (source.WeenieClassId == 1002700)
+            {
+                if (target.WeenieType != WeenieType.Caster || target.Workmanship == null)
+                    return null;
+
+                return DatabaseManager.World.GetCachedRecipe(LifeRendingImbueRecipeId);
+            }
 
             switch ((WeenieClassName)source.WeenieClassId)
             {
@@ -353,6 +375,19 @@ namespace ACE.Server.Managers
                 case WeenieClassName.W_MATERIALACE36626FOOLPROOFREDGARNET:
                 case WeenieClassName.W_MATERIALACE36627FOOLPROOFSUNSTONE:
                 case WeenieClassName.W_MATERIALACE36628FOOLPROOFWHITESAPPHIRE:
+
+                    recipe = DatabaseManager.World.GetCachedRecipe(SourceToRecipe[(WeenieClassName)source.WeenieClassId]);
+                    break;
+
+                // WaffleACE - Life Rending (HealthRending) imbue on the standard (non-foolproof) White
+                // Quartz salvage bag. Caster-only: Health damage is only ever dealt by life spells, so a
+                // rend on a melee/missile weapon could never fire. (Foolproof White Quartz, wcid 1002700,
+                // is handled by the raw-wcid guard ABOVE this switch, not here - see that guard's comment
+                // for why: 1002700 does not fit in WeenieClassName's ushort backing.)
+                case WeenieClassName.W_MATERIALWHITEQUARTZ_CLASS:
+
+                    if (target.WeenieType != WeenieType.Caster || target.Workmanship == null)
+                        return null;
 
                     recipe = DatabaseManager.World.GetCachedRecipe(SourceToRecipe[(WeenieClassName)source.WeenieClassId]);
                     break;
@@ -682,6 +717,11 @@ namespace ACE.Server.Managers
             { WeenieClassName.W_LUMINOUSAMBEROFTHE48THTIERPARAGON_CLASS,   8748 },
             { WeenieClassName.W_LUMINOUSAMBEROFTHE49THTIERPARAGON_CLASS,   8749 },
             { WeenieClassName.W_LUMINOUSAMBEROFTHE50THTIERPARAGON_CLASS,   8750 },
+
+            // WaffleACE - Life Rending (HealthRending) imbue on the standard White Quartz salvage bag
+            // (Content/wcid-registry.tsv life-rending-imbue). Foolproof White Quartz (1002700) maps to
+            // the same recipe but cannot appear here - see the pre-switch guard in GetNewRecipe.
+            { WeenieClassName.W_MATERIALWHITEQUARTZ_CLASS,                 LifeRendingImbueRecipeId },
         };
     }
 }

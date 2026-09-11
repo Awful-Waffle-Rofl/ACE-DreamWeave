@@ -134,7 +134,9 @@ namespace ACE.Server.ClassAbilities
             EnhancedStatAbility.ClassIdForSkill(Skill.TwoHandedCombat),
             EnhancedStatAbility.ClassIdForAttribute(PropertyAttribute.Strength),
             ClassAbilityId.SavageBlows,
-            ClassAbilityId.BloodFury,
+            ClassAbilityId.BloodFury,     // RETIRED 2026-08-17 (Berserker/Rogue balance pass): slot RESERVED
+                                          // at index 40 so every later token wcid stays stable; it is
+                                          // unregistered, so the offering generators below skip it.
             ClassAbilityId.Executioner,
             EnhancedStatAbility.ClassIdForVital(PropertyAttribute2nd.MaxStamina),
             ClassAbilityId.DamageRating,
@@ -209,6 +211,16 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.Spellstorm,
             ClassAbilityId.Cascade,
             ClassAbilityId.DispellingEdge,
+
+            // Berserker + Rogue balance pass, 2026-08-17 (Docs/ClassAbilities/BERSERKER-ROGUE-BALANCE-PLAN.md).
+            // APPENDED, not filed under their classes above, for the same reason every prior addition was:
+            // the index drives the wcid. Break Armor fills Blood Fury's retired slot's REPLACEMENT (not its
+            // index - Blood Fury's index 40 stays reserved), Surefooted and Pocket Sand are new Rogue T2/T3
+            // abilities. Indices 89/90/91, minted from the overflow block (index >= OverflowStartIndex): wcids
+            // 1002060-62, 1002066-68, 1002072-74.
+            ClassAbilityId.BreakArmor,
+            ClassAbilityId.Surefooted,
+            ClassAbilityId.PocketSand,
         };
 
         public readonly struct Offering

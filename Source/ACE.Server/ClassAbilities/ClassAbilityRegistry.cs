@@ -45,7 +45,11 @@ namespace ACE.Server.ClassAbilities
             new HeavyDrawAbility(),
             new LongDrawAbility(),
             new SavageBlowsAbility(),
-            new BloodFuryAbility(),
+            // Blood Fury RETIRED 2026-08-17 (Berserker/Rogue balance pass): the Berserker T2 slot it held
+            // is taken by Break Armor below. Blood Fury's id (35) stays reserved in ClassAbilityDefinition,
+            // its token catalog slot stays reserved, and RetiredClassAbilities["bloodfury"] refunds held
+            // ranks.
+            new BreakArmorAbility(),
             new ExecutionerAbility(),
             new BloodlustAbility(),
 
@@ -59,6 +63,14 @@ namespace ACE.Server.ClassAbilities
             new ShieldBlockAbility(),
             new ShieldCheckAbility(),
             new RiposteAbility(),
+
+            // Berserker/Rogue balance pass 2026-08-17. Both are IPassiveStatAbility with no combat hook:
+            // Surefooted's stack pool is read in Player.RollClassAbilityAvoidance alongside Parry, and
+            // Pocket Sand is dispatched by hand from the three avoidance sites (Player.TryPocketSand).
+            // Filed here rather than appended so they sit with the avoidance tier they belong to -
+            // registration order is per-hook execution order, and neither of these is in any hook bucket.
+            new SurefootedAbility(),
+            new PocketSandAbility(),
 
             // Phase 6 - spell-damage skills
             new VoidDamageAbility(),

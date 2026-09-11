@@ -77,16 +77,29 @@ namespace ACE.Server.Entity
                     log.Warn($"Proficiency.OnSuccessUse({player.Name}, {skill.Skill}, {difficulty}) - totalXPGranted: {totalXPGranted:N0}");
                 }
 
-                var maxLevel = Player.GetMaxLevel();
-                var remainingXP = player.GetRemainingXP(maxLevel).Value;
+                // Clamp against the character's OWN ceiling (the synthesized chart's hard ceiling), not the
+                // retail chart's level-275 cap. This used to read Player.GetMaxLevel(), which is still the
+                // retail dat chart's last index; once levels were uncapped a character could carry more total
+                // XP than level 275 requires, and GetRemainingXP then returned a NEGATIVE remainder that was
+                // assigned straight into totalXPGranted and handed to GrantXP. GrantXP has no negative guard
+                // (only EarnXP does, and proficiency does not route through it), so UpdateXpAndLevel
+                // subtracted it from BOTH TotalExperience and AvailableExperience - snapping the character's
+                // total back to the level-275 total on every successful skill check.
+                var maxLevel = (uint)player.GetPlayerMaxLevel();
+                var remainingXP = player.GetRemainingXP(maxLevel) ?? 0;
 
-                if (totalXPGranted > remainingXP)
+                var clamped = ClampToRemaining(totalXPGranted, remainingXP);
+
+                if (clamped <= 0)
+                    return;
+
+                if (clamped != totalXPGranted)
                 {
                     // checks and balances:
                     // total xp = pp * 1.1
                     // pp = total xp / 1.1
 
-                    totalXPGranted = remainingXP;
+                    totalXPGranted = clamped;
                     pp = (uint)Math.Round(totalXPGranted / 1.1f);
                 }
 
@@ -108,6 +121,19 @@ namespace ACE.Server.Entity
                     player.HandleActionRaiseSkill(skill.Skill, pp);
                 }
             }
+        }
+
+        /// <summary>
+        /// Clamps a proficiency XP grant to the room the character still has below the XP chart's hard
+        /// ceiling. Never returns a negative value: a character already at or past the ceiling gets 0, which
+        /// the caller treats as "grant nothing". Pure, so the boundary is testable without a live Player.
+        /// </summary>
+        internal static long ClampToRemaining(long totalXPGranted, long remainingXP)
+        {
+            if (totalXPGranted <= 0 || remainingXP <= 0)
+                return 0;
+
+            return Math.Min(totalXPGranted, remainingXP);
         }
 
         public static void OnSuccessUse(Player player, CreatureSkill skill, int difficulty)

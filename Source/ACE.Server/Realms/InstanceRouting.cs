@@ -2,6 +2,8 @@ using ACE.Entity;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
 
+using log4net;
+
 namespace ACE.Server.Realms
 {
     /// <summary>
@@ -17,8 +19,42 @@ namespace ACE.Server.Realms
         Same,
     }
 
+    /// <summary>
+    /// Why <see cref="InstanceRouting.ValidateInstanceDestination(Position, Player, out InstanceRejection)"/>
+    /// refused a destination's instance. Every value other than <see cref="None"/> means the returned
+    /// position is NOT the one that was passed in - it has been rerouted to the player's home realm default
+    /// instance, i.e. the same coordinates in a different (usually shared-world) copy of the landblock.
+    /// </summary>
+    public enum InstanceRejection
+    {
+        /// <summary>The destination was accepted unchanged.</summary>
+        None = 0,
+
+        /// <summary>A non-ephemeral instance naming a realm id that is not in the realm registry.</summary>
+        RealmNotRegistered,
+
+        /// <summary>An ephemeral instance with no loaded landblock - it expired, unloaded, or never existed.</summary>
+        EphemeralInstanceNotLive,
+
+        /// <summary>
+        /// The ephemeral instance is live but hosts a DIFFERENT landblock than the destination cell names.
+        /// An ephemeral instance is a private copy of exactly one landblock, so this is a routing bug in the
+        /// caller, not an expiry.
+        /// </summary>
+        EphemeralLandblockMismatch,
+
+        /// <summary>
+        /// The ephemeral instance is live and hosts the right landblock, but its
+        /// <see cref="EphemeralRealm.Accepts(Player)"/> refused this player (not the owner, not admitted,
+        /// not fellowed in, or the instance is past its expiry), or it carries no realm info at all.
+        /// </summary>
+        EphemeralAccessDenied,
+    }
+
     public static class InstanceRouting
     {
+        private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
         /// <summary>
         /// Returns a copy of this position routed into the instance selected by mode.
         /// </summary>
@@ -50,21 +86,77 @@ namespace ACE.Server.Realms
         /// </summary>
         public static Position ValidateInstanceDestination(this Position pos, Player player)
         {
+            return pos.ValidateInstanceDestination(player, out _);
+        }
+
+        /// <summary>
+        /// As <see cref="ValidateInstanceDestination(Position, Player)"/>, but also reports WHY the
+        /// destination was refused, so a caller can decide that a reroute is not an acceptable outcome for
+        /// its path.
+        ///
+        /// <para/>
+        /// The reroute itself is not a neutral fallback: it keeps the coordinates and swaps the instance, so
+        /// a refused private-instance destination becomes the SHARED-WORLD copy of that landblock. For a
+        /// landblock whose content lives entirely in a realm overlay - every Proving Grounds arena, the
+        /// Loom, a Thread - the shared-world copy has no monsters, no NPCs and no exit portal, and
+        /// a player dropped there has to /die to get out. That is why every reroute is logged at WARN with
+        /// the failing condition named: the same silent reroute cost hours of diagnosis on prod, because
+        /// nothing anywhere recorded that it had happened.
+        ///
+        /// <para/>
+        /// The reroute is nevertheless the right answer on the LOGIN path
+        /// (WorldManager.DoPlayerEnterWorld), which is the reason this method still performs it rather than
+        /// simply failing: a character who logged out inside an ephemeral instance has a saved location that
+        /// is guaranteed invalid after a restart, and refusing there would strand them permanently. The
+        /// teleport path has no such constraint - a refused teleport just leaves the player where they
+        /// already were - so <see cref="Player.Teleport"/> refuses instead of accepting the reroute.
+        /// </summary>
+        public static Position ValidateInstanceDestination(this Position pos, Player player, out InstanceRejection rejection)
+        {
+            rejection = InstanceRejection.None;
+
             Position.ParseInstanceID(pos.Instance, out var isEphemeral, out var realmId, out _);
 
             if (isEphemeral)
             {
-                var landblock = LandblockManager.GetEphemeralLandblockUnsafe(pos.Instance);
-                if (landblock != null && landblock.Id.Landblock == (pos.Cell >> 16) && (landblock.InnerRealmInfo?.Accepts(player) ?? false))
+                var landblock = LandblockManager.GetEphemeralLandblock(pos.Instance);
+
+                if (landblock == null)
+                    rejection = InstanceRejection.EphemeralInstanceNotLive;
+                else if (landblock.Id.Landblock != (pos.Cell >> 16))
+                    rejection = InstanceRejection.EphemeralLandblockMismatch;
+                else if (!(landblock.InnerRealmInfo?.Accepts(player) ?? false))
+                    rejection = InstanceRejection.EphemeralAccessDenied;
+
+                if (rejection == InstanceRejection.None)
                     return pos;
 
-                return pos.AsInstancedPosition(player, PlayerInstanceSelectMode.HomeRealmDefault);
+                return Reroute(pos, player, rejection);
             }
 
             if (realmId != 0 && RealmManager.GetRealm(realmId) == null)
-                return pos.AsInstancedPosition(player, PlayerInstanceSelectMode.HomeRealmDefault);
+            {
+                rejection = InstanceRejection.RealmNotRegistered;
+                return Reroute(pos, player, rejection);
+            }
 
             return pos;
+        }
+
+        /// <summary>
+        /// Builds the home-realm-default reroute and records it. Every caller of this is a case where the
+        /// player does not end up where the caller asked for, so it is never silent.
+        /// </summary>
+        private static Position Reroute(Position pos, Player player, InstanceRejection rejection)
+        {
+            var rerouted = pos.AsInstancedPosition(player, PlayerInstanceSelectMode.HomeRealmDefault);
+
+            log.Warn($"InstanceRouting: refusing instance 0x{pos.Instance:X8} for {player?.Name ?? "(null player)"} " +
+                     $"(0x{(player?.Guid.Full ?? 0):X8}) at landblock 0x{(pos.Cell >> 16):X4} - {rejection}. " +
+                     $"Rerouting to instance 0x{rerouted.Instance:X8} (home realm {player?.HomeRealm ?? 0}), " +
+                     $"which is the same coordinates in a different copy of that landblock and may have no content.");
+
+            return rerouted;
         }
     }
 }

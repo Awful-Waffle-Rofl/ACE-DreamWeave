@@ -86,6 +86,18 @@ namespace ACE.Database.SQLFormatters
         }
 
         /// <summary>
+        /// If input is null or empty, NULL will be returned.<para />
+        /// If input is not null/empty, a MySQL hex literal (0x...) will be returned, suitable for a binary/blob column.
+        /// </summary>
+        protected static string GetSQLBinary(byte[] input)
+        {
+            if (input == null || input.Length == 0)
+                return null;
+
+            return "0x" + Convert.ToHexString(input);
+        }
+
+        /// <summary>
         /// This will find values that were not output to a values line, for example, if a property is a (int?), and it has no value, you might see ", ," in the sql.<para />
         /// This function will replace that ", ," with ", NULL,".<para />
         /// It also removes empty comments like the folliwng: " /*  */"

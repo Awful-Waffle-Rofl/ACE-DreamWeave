@@ -413,6 +413,13 @@ namespace ACE.Server.Factories
             if (wo.W_DamageType == DamageType.Nether)
                 return SpellId.CantripVoidMagicAptitude1;
 
+            // FORK ADDITION (Sanguine caster family): retail shipped no Health-typed caster, so this
+            // branch never existed for it and a Sanguine caster fell through to the War Magic aptitude
+            // below - the same shape of retail-assumption gap already closed in MutateCaster (wield
+            // skill) and CasterSlotSpells.Roll (bonus spell), and the last of the three.
+            if (wo.W_DamageType == DamageType.Health)
+                return SpellId.CANTRIPLIFEMAGICAPTITUDE1;
+
             if (wo.W_DamageType != DamageType.Undef)
                 return SpellId.CANTRIPWARMAGICAPTITUDE1;
 
@@ -427,8 +434,15 @@ namespace ACE.Server.Factories
 
         /// <summary>
         /// An alternate method to using the SpellSelectionCode from PropertyInt.TSysMutationdata
+        ///
+        /// WIDENED from private to internal for ACE.Server.SpellReroll. This is THE code generation actually
+        /// uses - RollEnchantments calls it at every spawn, and the PropertyInt.TsysMutationData route
+        /// immediately above is commented out - so a caller that wants the enchantment pool an item could
+        /// really have rolled from has to come through here rather than reading wo.SpellSelectionCode. The two
+        /// can and do disagree, and drawing from the TsysMutationData group would mean offering spells the
+        /// item could never have been generated with. Nothing else about the method changed.
         /// </summary>
-        private static int GetSpellSelectionCode_Dynamic(WorldObject wo, TreasureRoll roll)
+        internal static int GetSpellSelectionCode_Dynamic(WorldObject wo, TreasureRoll roll)
         {
             if (wo is Gem)
             {

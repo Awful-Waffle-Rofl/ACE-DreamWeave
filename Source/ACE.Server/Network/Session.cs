@@ -104,12 +104,12 @@ namespace ACE.Server.Network
             return true;
         }
 
-        public void ProcessPacket(ClientPacket packet)
+        public void ProcessPacket(ClientPacket packet, int dataSize)
         {
             if (!CheckState(packet))
                 return;
 
-            Network.ProcessPacket(packet);
+            Network.ProcessPacket(packet, dataSize);
         }
 
 

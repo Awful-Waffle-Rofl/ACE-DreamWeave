@@ -60,7 +60,7 @@ namespace ACE.Server.Network.Handlers
             {
                 if (loginRequest.NetAuthType == NetAuthType.AccountPassword && loginRequest.Password != "")
                 {
-                    if (ConfigManager.Config.Server.Accounts.AllowAutoAccountCreation)
+                    if (ConfigManager.Config.Server.Accounts.AllowAutoAccountCreation && PropertyManager.GetBool("account_creation_enabled").Item)
                     {
                         // no account, dynamically create one
                         if (WorldManager.WorldStatus == WorldManager.WorldStatusState.Open)

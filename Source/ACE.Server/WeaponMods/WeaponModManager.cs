@@ -107,11 +107,18 @@ namespace ACE.Server.WeaponMods
             /// <summary>The retail tinker log does not account for NumTimesTinkered, so the current set cannot be fully reversed.</summary>
             TinkerLogMismatch,
 
-            /// <summary>A swap trades one slot for another; it is not a way to fill empty ones.</summary>
-            SwapNeedsFullBudget,
-
-            /// <summary>Three specials is a permanent bound - no fourth, and no replacing one of the three.</summary>
-            SwapAtSpecialCap,
+            // REMOVED 2026-08-07 (repo-owner directive), and deliberately NOT re-addable without revisiting the
+            // ruling behind them:
+            //
+            //   SwapNeedsFullBudget - required NumTimesTinkered == 10. "Traditional tinkers should have no
+            //                         bearing" on Amethyst, and since the 2026-08-06 rework it does not touch
+            //                         tinkers at all, so gating it on the tinker counter gated it on something
+            //                         it neither reads nor writes.
+            //   SwapNeedsASpecial   - required at least one held special. Amethyst now ADDS one when the
+            //                         weapon holds none, so there is no such thing as nothing to work with.
+            //
+            // Both are gone rather than kept-but-unreachable: an enum member no rule can return is a rule a
+            // future reader will restore by accident.
         }
 
         // ---------------- classification (pure, no WorldObject needed) ----------------
@@ -162,7 +169,7 @@ namespace ACE.Server.WeaponMods
         /// session.
         /// </summary>
         public static WeaponModRefusal ResolveRefusal(WeaponModAction action, WeaponClass weaponClass, bool hasWorkmanship,
-            bool passesIntegrityGate, int numTimesTinkered, int specialCount, int reservedSlots)
+            bool passesIntegrityGate, int reservedSlots)
         {
             if (action == WeaponModAction.None)
                 return WeaponModRefusal.NotAModMaterial;
@@ -173,25 +180,32 @@ namespace ACE.Server.WeaponMods
             if (!hasWorkmanship)
                 return WeaponModRefusal.NoWorkmanship;
 
-            // reservedSlots is imbues PLUS every log entry this system cannot reverse, so a weapon whose whole
-            // budget is unreversible (ten Oak) is refused here rather than silently refilled on top
-            if (WeaponModTinkerSet.AvailableSlots(reservedSlots) <= 0)
-                return WeaponModRefusal.NoAvailableSlots;
-
-            if (!passesIntegrityGate)
-                return WeaponModRefusal.TinkerLogMismatch;
-
-            if (action == WeaponModAction.Swap)
+            // THE TWO TINKER GATES ARE REROLL-ONLY as of 2026-08-07 (repo-owner directive: "traditional tinkers
+            // should have no bearing" on Amethyst).
+            //
+            // Both describe the state of the TINKER budget - whether there is room in it, and whether the log
+            // accounting for it can be trusted. Tourmaline still cares because ApplyReroll runs against a
+            // weapon whose tinker composition it is preserving and echoing. Amethyst neither reads nor writes
+            // a tinker, a log or the counter, so gating it on any of them gated it on state it cannot touch.
+            //
+            // NOTE THE DELIBERATE ASYMMETRY: a ten-Oak or log-mismatched weapon is now Amethyst-able while
+            // still being refused by Tourmaline. That is the directive as given, not an oversight.
+            if (action == WeaponModAction.Reroll)
             {
-                // requiring a full budget is what stops Amethyst being strictly better than the reroll on a
-                // part-tinkered weapon
-                if (numTimesTinkered != WeaponModRegistry.TotalSlots)
-                    return WeaponModRefusal.SwapNeedsFullBudget;
+                // reservedSlots is imbues PLUS every log entry this system cannot reverse, so a weapon whose
+                // whole budget is unreversible (ten Oak) is refused here rather than silently refilled on top
+                if (WeaponModTinkerSet.AvailableSlots(reservedSlots) <= 0)
+                    return WeaponModRefusal.NoAvailableSlots;
 
-                if (specialCount >= WeaponModRegistry.MaxSpecials)
-                    return WeaponModRefusal.SwapAtSpecialCap;
+                if (!passesIntegrityGate)
+                    return WeaponModRefusal.TinkerLogMismatch;
             }
 
+            // NO SWAP-SPECIFIC REFUSAL REMAINS. Amethyst applies to any workmanship-bearing weapon that is not
+            // drift-stone locked: it ADDS a special when the weapon holds none, and rerolls one when it holds
+            // any number including the cap. The two conditions that used to sit here - a full tinker budget,
+            // and at least one held special - were both removed on 2026-08-07. See the WeaponModRefusal
+            // remarks for why they are deleted rather than kept unreachable.
             return WeaponModRefusal.None;
         }
 
@@ -238,8 +252,6 @@ namespace ACE.Server.WeaponMods
 
             return ResolveRefusal(action, WeaponClassifier.Classify(target), target.Workmanship != null,
                 WeaponModTinkerSet.PassesIntegrityGate(target),
-                target.GetProperty(PropertyInt.NumTimesTinkered) ?? 0,
-                WeaponModTinkerSet.SpecialCount(target),
                 WeaponModTinkerSet.ReadReservedSlots(target));
         }
 
@@ -401,14 +413,6 @@ namespace ACE.Server.WeaponMods
                     SendCraftMessage(player, $"The {target.Name}'s tinker log does not account for everything applied to it, so its current tinkers cannot be safely removed.");
                     break;
 
-                case WeaponModRefusal.SwapNeedsFullBudget:
-                    SendCraftMessage(player, $"The {target.Name} is not fully tinkered. A swap trades one slot for another; it cannot fill an empty one.");
-                    break;
-
-                case WeaponModRefusal.SwapAtSpecialCap:
-                    SendCraftMessage(player, $"The {target.Name} already carries three special modifiers. Only a full tourmaline reroll can change them now.");
-                    break;
-
                 default:
                     SendCraftMessage(player, $"The {source.Name} cannot be used on the {target.Name}.");
                     break;
@@ -431,29 +435,23 @@ namespace ACE.Server.WeaponMods
             if (target == null || weaponClass == WeaponClass.None || action == WeaponModAction.None)
                 return false;
 
-            // ApplySwap draws a replacement tinker from this pool and cannot proceed without one
-            if (WeaponTinkerTable.Pool(weaponClass).Count == 0)
-                return false;
-
-            if (action == WeaponModAction.Swap)
+            if (action == WeaponModAction.Reroll)
             {
-                var specialCount = WeaponModTinkerSet.SpecialCount(target);
-
-                // mirrors ApplySwap's defence-in-depth guard on the permanent three-special bound. Both halves
-                // have to move together: if this one is forgotten the bag is consumed and the apply then refuses,
-                // which is exactly the "bag eaten, nothing applied" hazard the consume-first ordering depends on
-                // this method to make unreachable.
-                if (specialCount >= WeaponModRegistry.MaxSpecials)
-                    return false;
-
-                // something this system owns has to exist for the swap to take away
-                var removable = WeaponModTinkerSet.ReadComposition(target).Count + specialCount;
-
-                if (removable <= 0)
-                    return false;
+                // REWORKED 2026-08-07 to a special-only reroll: it no longer refills the tinker budget, so the
+                // material-pool check that used to guard this branch is gone with it. What it needs instead is
+                // the same thing the swap needs - a class pool with at least one row to draw from. Unlike the
+                // swap it does NOT require an existing special, because this is the only path to a first one.
+                return WeaponModRegistry.Pool(weaponClass).Count > 0;
             }
 
-            return true;
+            // Swap: the special count no longer gates anything (2026-08-07). Amethyst ADDS a special to a
+            // weapon holding none and rerolls one on a weapon holding any number up to the cap, so every
+            // count from 0 to MaxSpecials is a working case rather than a refusal.
+            //
+            // The class pool still has to hold at least one row: ApplySwap's replacement draw degrades to "no
+            // replacement" rather than throwing when every row is already held, but a wholly empty pool means
+            // the swap cannot even ATTEMPT one, which is the bail-out this has to mirror.
+            return WeaponModRegistry.Pool(weaponClass).Count > 0;
         }
 
         /// <summary>
@@ -499,6 +497,11 @@ namespace ACE.Server.WeaponMods
                 return;
             }
 
+            // Captured BEFORE the roll: the tier transition is what drives the aura and the announcement,
+            // not the tier itself. Re-sending on an unchanged tier would add a SECOND emitter rather than
+            // replacing the first (see VisualEffectManager), so "still Exceptional" must be a no-op.
+            var tierBefore = WeaponQualityTiers.Evaluate(target);
+
             var lines = action == WeaponModAction.Reroll
                 ? ApplyReroll(target, weaponClass, workmanship)
                 : ApplySwap(target, weaponClass, workmanship);
@@ -512,14 +515,21 @@ namespace ACE.Server.WeaponMods
                 return;
             }
 
+            HandleTierTransition(player, target, tierBefore);
+
             target.ChangesDetected = true;
             target.SaveBiotaToDatabase();
 
             UpdateObj(player, target);
 
+            // MUST come after UpdateObj. That refresh rebuilds the object client-side and takes any
+            // running particle emitter with it, so a script sent before it is simply discarded - which is
+            // exactly why the aura never appeared while the tier messages read correctly.
+            ResetAuraForRebuild(player, target);
+
             SendCraftMessage(player, action == WeaponModAction.Reroll
-                ? $"The salvage reforges your {target.Name}."
-                : $"The salvage reworks a single slot on your {target.Name}.");
+                ? $"The salvage reworks every special modifier on your {target.Name}."
+                : $"The salvage reworks a single special modifier on your {target.Name}.");
 
             foreach (var line in lines)
                 SendCraftMessage(player, $"- {line}");
@@ -533,194 +543,167 @@ namespace ACE.Server.WeaponMods
         }
 
         /// <summary>
-        /// The Tourmaline reroll. Reverses everything the weapon currently carries from this system, then refills
-        /// the whole budget: imbues keep their slots, the special count is rolled from the cumulative odds and
-        /// HARD-clamped, and the remainder is drawn uniformly with replacement from the class material pool.
+        /// The Tourmaline reroll: SPECIAL-ONLY as of 2026-08-07 (repo-owner directive). It rerolls the whole
+        /// special set - how many, which ones, and at what magnitude - and touches NOTHING else.
+        ///
+        /// It no longer reforges layer 1. The player's chosen tinker composition, the imbue, NumTimesTinkered
+        /// and both logs all survive untouched. That is the point: the traditional crafting process stays
+        /// exactly as it was, and this system becomes a layer ON TOP of it rather than a replacement that
+        /// gambles away a deliberately-built tinker base every time a player wants a different special.
+        ///
+        /// THIS SUPERSEDES THE PRE-2026-08-07 SHAPE, which reversed every known tinker and redrew the entire
+        /// budget uniformly from the class material pool. Because of that, this path no longer needs a material
+        /// pool at all, and the "cannot proceed without one" refusal that guarded it is correspondingly gone.
+        ///
+        /// Division of labour with the other bag: Amethyst rerolls exactly ONE held special; this rerolls the
+        /// entire set including its size, and is the only way to gain a FIRST special.
         /// </summary>
         public static List<string> ApplyReroll(WorldObject target, WeaponClass weaponClass, double workmanship)
         {
             if (target == null || weaponClass == WeaponClass.None)
                 return null;
 
-            // 0. read the budget BEFORE anything is reversed: the slots this system cannot account for, and the
-            //    log entries that own them, both of which have to survive the rewrite intact
-            var reserved = WeaponModTinkerSet.ReadReservedSlots(target);
-            var preserved = WeaponModTinkerSet.ReadUnaccountedEntries(target);
-
-            // 1. reverse the current set - the layer 1 tinkers this system knows how to reverse, and every
-            //    recorded special magnitude (records cleared with RemoveProperty, never SetProperty(0))
-            WeaponModTinkerSet.ReverseTinkers(target, WeaponModTinkerSet.ReadComposition(target));
+            // 1. clear the specials the weapon currently carries. Each native property is walked back by its
+            //    recorded magnitude and the record itself is REMOVED, never SetProperty(0). Layer 1 is not
+            //    touched, so ReverseTinkers is deliberately NOT called here any more.
             WeaponModTinkerSet.ClearSpecials(target);
 
-            // 2. imbues AND unreversible log entries keep their slots and are never touched
-
-            // 3. specials: rolled, then clamped to min(3, 10 - reserved)
-            var specialCount = WeaponModRoller.ClampSpecialCount(WeaponModRoller.RollSpecialCount(), reserved);
+            // 2. roll a fresh set. Since the 2026-08-06 decoupling the clamp does not consider the tinker
+            //    budget - specials draw on their own allowance, so the count is independent of how heavily
+            //    the player has tinkered the weapon.
+            var specialCount = WeaponModRoller.ClampSpecialCount(WeaponModRoller.RollSpecialCount());
             var drawn = WeaponModRoller.RollDistinctSpecials(weaponClass, specialCount);
-
-            // 3a. resolve every magnitude BEFORE the budget is split, and DROP any that resolves to zero. A
-            //     zero-magnitude special is not applied at all: it writes no record and consumes no slot, so its
-            //     slot converts to a tinker below. This is what makes weapon_mod_magnitude_scale = 0 read as
-            //     "mute the layer" (all ten slots to tinkers) rather than burning three slots on 0.0 records in
-            //     the reserved band - see WeaponModValue.IsLiveMagnitude.
-            var specials = new List<(WeaponModDefinition Definition, double Magnitude)>();
-
-            foreach (var definition in drawn)
-            {
-                var magnitude = WeaponModValue.Roll(definition, workmanship);
-
-                if (WeaponModValue.IsLiveMagnitude(definition, magnitude))
-                    specials.Add((definition, magnitude));
-            }
-
-            // 4. the remainder is layer 1. The tinker count is derived from the specials ACTUALLY APPLIED, never
-            //    from the count that was rolled, or a dropped special would take its slot to the grave with it
-            //    and the budget would come up short of ten.
-            var tinkerCount = WeaponModTinkerSet.ComputeTinkerCount(reserved, specials.Count);
-            var tinkers = WeaponModRoller.RollTinkers(weaponClass, tinkerCount);
-
-            // 5. apply
-            WeaponModTinkerSet.ApplyTinkers(target, tinkers);
 
             var lines = new List<string>();
 
-            foreach (var (definition, magnitude) in specials)
+            foreach (var definition in drawn)
             {
-                WeaponModTinkerSet.ApplySpecial(target, definition, magnitude);
+                // The roll produces a FRACTION - potency scaled by workmanship - and that is what a Tier B row
+                // stores. The magnitude is resolved from it for the liveness test and the craft line; a Tier A
+                // row stores that magnitude instead. WeaponModTinkerSet.ApplySpecialAtFraction owns the split.
+                var fraction = WeaponModValue.RollFraction(WeaponModRoller.RollPotency(definition), workmanship);
+                var scale = WeaponModValue.MagnitudeScale();
+                var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale);
 
-                lines.Add(WeaponModDisplay.Describe(definition, magnitude));
+                // A magnitude that resolves to zero is not applied at all - no record is written. Since the
+                // decoupling there is no slot for it to hand back either, so it simply does not appear. This
+                // is what makes weapon_mod_magnitude_scale = 0 read as "mute the layer" rather than burning
+                // slots on 0.0 records. See WeaponModValue.IsLiveMagnitude.
+                if (!WeaponModValue.IsLiveMagnitude(definition, magnitude))
+                    continue;
+
+                WeaponModTinkerSet.ApplySpecialAtFraction(target, definition, fraction, scale);
+
+                lines.Add(WeaponModDisplay.Describe(definition, magnitude, scale));
             }
 
-            // 6. NumTimesTinkered = 10, WeaponModTinkerCount, and BOTH logs REPLACED - with the unaccounted
-            //    entries carried forward first, so their slots stay reserved on the next use too
-            WeaponModTinkerSet.WriteComposition(target, preserved, tinkers);
+            if (lines.Count == 0)
+                lines.Add("No special modifier took hold.");
 
-            var composition = WeaponModDisplay.DescribeComposition(tinkers);
+            // 3. NumTimesTinkered, WeaponModTinkerCount and both logs are left EXACTLY as they were - this path
+            //    no longer writes a composition, because it no longer changes one. The tinkers are echoed only
+            //    so the player can see the whole weapon in one message.
+            var composition = WeaponModDisplay.DescribeComposition(WeaponModTinkerSet.ReadComposition(target));
 
             if (composition.Length > 0)
-                lines.Add($"Tinkers: {composition}");
+                lines.Add($"Tinkers (unchanged): {composition}");
 
             return lines;
         }
 
         /// <summary>
-        /// The Amethyst swap: remove ONE random filled slot (tinker or special, never an imbue), then add ONE
-        /// random modifier - a special with probability weapon_mod_swap_special_chance, otherwise a random class
-        /// tinker.
+        /// The Amethyst swap: REWORKED 2026-08-06 (repo-owner directive, separately approved) into a
+        /// SPECIAL-ONLY REROLL. It removes ONE random held special and replaces it with a fresh one drawn from
+        /// the full class pool, distinct from whatever specials remain. It NEVER touches tinkers, and NEVER
+        /// applies the damage-first guarantee (weapon_mod_guarantee_damage_special) - that guarantee is
+        /// drop/reroll-only, an explicit ruling, so a swap replacement can land on a utility special same as
+        /// any other draw.
         ///
-        /// Both halves are random by design. It improves the RATE at which specials arrive, never their identity,
-        /// and it cannot reroll an existing special's magnitude in place. Those are what make it a gamble rather
-        /// than a ratchet, and the design's ceiling is priced on it.
+        /// THIS SUPERSEDES THE PRE-2026-08-06 SHAPE, which traded one random filled slot (tinker OR special)
+        /// for one random modifier (a special at weapon_mod_swap_special_chance, else a tinker) and refilled
+        /// the tinker budget to compensate. That shape is gone along with the tunable's role in it -
+        /// weapon_mod_swap_special_chance no longer applies on THIS path; a reroll always replaces,
+        /// unconditionally. See Docs/WeaponMods/DESIGN.md section 8 for the updated Amethyst description.
+        ///
+        /// SwapAtSpecialCap IS GONE, and that is the point of the rework: rerolling a special AT the cap is now
+        /// the tool's whole purpose, where before the cap made it a strictly worse way to gain a special that
+        /// the reroll or a below-cap swap already offered.
+        ///
+        /// AS OF 2026-08-07 IT HAS NO PRECONDITION ON THE WEAPON'S STATE AT ALL (repo-owner directive:
+        /// "Amethyst should be able to be applied basically always... traditional tinkers should have no
+        /// bearing"). Both conditions that used to gate it are gone - a full tinker budget, and holding at
+        /// least one special. The behaviour is now uniform across every special count:
+        ///
+        ///   0 specials       -> ADDS one. Amethyst is a second route to a first special, not just Tourmaline.
+        ///   1..cap specials  -> removes one at random and draws a replacement. The count does not change.
+        ///
+        /// So the count only ever moves 0 -> 1, and never grows past that. What remains outside this method:
+        /// the weapon must be a workmanship-bearing weapon and must not be drift-stone locked.
         /// </summary>
         public static List<string> ApplySwap(WorldObject target, WeaponClass weaponClass, double workmanship)
         {
             if (target == null || weaponClass == WeaponClass.None)
                 return null;
 
-            var tinkers = WeaponModTinkerSet.ReadComposition(target);
             var specials = WeaponModTinkerSet.ReadSpecials(target);
-
-            // DEFENCE IN DEPTH - DO NOT DELETE THIS AS REDUNDANT. A weapon already holding the full trio is
-            // refused here as well as by ResolveRefusal's SwapAtSpecialCap. Without it the swap would remove one
-            // of the three and roll a replacement, which IS the "reroll a single special" capability design
-            // section 5 says invalidates its power assessment ("Remove either property and the pricing in this
-            // section stops holding"): the +101.1% ceiling is priced on a perfect trio being a lottery, and a
-            // weapon that can retry one bad special at a fixed bag cost turns it into a grind. A bound that
-            // load-bearing does not get a single enforcement point, one refactor away from being bypassed.
-            //
-            // Shaped as a bail-out like the ones below so CanApply can - and does - mirror it exactly.
-            if (specials.Count >= WeaponModRegistry.MaxSpecials)
-                return null;
-
-            // slots this system cannot reverse are never candidates for removal and never dropped from the log
-            var preserved = WeaponModTinkerSet.ReadUnaccountedEntries(target);
-
-            var removable = tinkers.Count + specials.Count;
-
-            if (removable <= 0)
-                return null;
 
             var lines = new List<string>();
 
-            // ---- remove one random filled slot ----
-            var index = WeaponModRoller.NextIndex(removable);
-
-            // set only when the removed slot was a TINKER, and then taken out of the replacement draw below.
-            // Null whenever a special was removed, because the exclusion is deliberately confined to the
-            // tinker-replaces-tinker path.
-            MaterialType? removedMaterial = null;
-
-            if (index < tinkers.Count)
+            // ---- remove one random held special, IF the weapon holds any ----
+            //
+            // A ZERO-SPECIAL WEAPON IS NOT A REFUSAL as of 2026-08-07 (repo-owner directive): Amethyst adds a
+            // first special rather than turning the player away, so this whole step is simply skipped and the
+            // draw below becomes a pure addition. That makes Amethyst a second route to a first special
+            // alongside Tourmaline, which was previously the only one.
+            if (specials.Count > 0)
             {
-                var material = tinkers[index];
-
-                if (WeaponTinkerTable.TryGet(material, out var removedTinker))
-                {
-                    removedTinker.Reverse(target, 1);
-                    lines.Add($"Lost: 1 {removedTinker.DisplayName} tinker");
-                }
-
-                removedMaterial = material;
-
-                tinkers.RemoveAt(index);
-            }
-            else
-            {
-                var (removedSpecial, _) = specials[index - tinkers.Count];
+                var index = WeaponModRoller.NextIndex(specials.Count);
+                var (removedSpecial, _) = specials[index];
 
                 WeaponModTinkerSet.ReverseSpecial(target, removedSpecial);
                 lines.Add($"Lost: {removedSpecial.DisplayName}");
             }
 
-            // ---- add one random modifier ----
-            var held = WeaponModTinkerSet.ReadSpecials(target).Select(s => s.Definition.Id).ToList();
+            // ---- roll a replacement, distinct from whatever specials remain ----
+            //
+            // The removed special is NOT excluded from this draw - "distinct from those STILL HELD" means the
+            // remaining ones only, so a reroll can legitimately land back on the identity it just lost.
+            var stillHeld = WeaponModTinkerSet.ReadSpecials(target).Select(s => s.Definition.Id).ToList();
 
-            var wantsSpecial = held.Count < WeaponModRegistry.MaxSpecials
-                && WeaponModRoller.NextUnit() < PropertyManager.GetDouble("weapon_mod_swap_special_chance").Item;
+            // the plain 2-arg overload - NOT the damageOnly one - so no damage-first guarantee applies here,
+            // per the explicit ruling that the guarantee is drop/reroll-only
+            var addedSpecial = WeaponModRoller.RollSpecial(weaponClass, stillHeld);
+            var addedScale = WeaponModValue.MagnitudeScale();
+            var addedFraction = addedSpecial == null
+                ? 0.0
+                : WeaponModValue.RollFraction(WeaponModRoller.RollPotency(addedSpecial), workmanship);
+            var addedMagnitude = addedSpecial == null
+                ? 0.0
+                : WeaponModValue.MagnitudeFromFraction(addedSpecial, addedFraction, addedScale);
 
-            // a draw that lands on a special the weapon already holds redraws among the ones it does not - a
-            // weapon never holds the same special twice
-            var addedSpecial = wantsSpecial ? WeaponModRoller.RollSpecial(weaponClass, held) : null;
-            var addedMagnitude = addedSpecial == null ? 0.0 : WeaponModValue.Roll(addedSpecial, workmanship);
-
-            // a special that resolves to zero magnitude is not applied and does not take the slot - the draw
-            // falls through to a tinker instead, so the swap still trades exactly one slot for exactly one
-            // modifier and never writes a dead record into the reserved band (WeaponModValue.IsLiveMagnitude)
+            // a special that resolves to zero magnitude is not applied - the removed slot is simply lost this
+            // use, same rule as everywhere else a rolled magnitude can land on zero
+            // (WeaponModValue.IsLiveMagnitude)
             if (addedSpecial != null && !WeaponModValue.IsLiveMagnitude(addedSpecial, addedMagnitude))
                 addedSpecial = null;
 
             if (addedSpecial != null)
             {
-                WeaponModTinkerSet.ApplySpecial(target, addedSpecial, addedMagnitude);
+                WeaponModTinkerSet.ApplySpecialAtFraction(target, addedSpecial, addedFraction, addedScale);
 
-                lines.Add($"Gained: {WeaponModDisplay.Describe(addedSpecial, addedMagnitude)}");
-            }
-            else
-            {
-                // NEVER hand back the tinker just taken away. A swap that reports "Lost: 1 Granite tinker /
-                // Gained: 1 Granite tinker" spends a whole salvage bag on a guaranteed no-op, which is a bad
-                // deal and reads as a bug. removedMaterial is null when a SPECIAL was removed, so that path is
-                // untouched, and it is null again when the removed tinker is somehow not in this table. The
-                // draw itself can never fail on a non-empty pool - see WeaponModRoller.RollTinker's degenerate
-                // fallback, which is what keeps CanApply's promise that the apply cannot refuse after the bag
-                // has been consumed.
-                var material = WeaponModRoller.RollTinker(weaponClass, removedMaterial);
-
-                if (material == null)
-                    return null;
-
-                if (WeaponTinkerTable.TryGet(material.Value, out var addedTinker))
-                {
-                    addedTinker.Apply(target, 1);
-                    lines.Add($"Gained: 1 {addedTinker.DisplayName} tinker");
-                }
-
-                tinkers.Add(material.Value);
+                lines.Add($"Gained: {WeaponModDisplay.Describe(addedSpecial, addedMagnitude, addedScale)}");
             }
 
-            // NumTimesTinkered stays 10, and both logs are rewritten to the post-swap composition, unaccounted
-            // entries first so their slots stay reserved
-            WeaponModTinkerSet.WriteComposition(target, preserved, tinkers);
+            // Reachable only on a weapon that held NOTHING and drew nothing - an empty class pool, or a
+            // magnitude muted to zero by weapon_mod_magnitude_scale. Before the zero-special case was allowed
+            // through, "Lost:" was always present and this list could never be empty. An empty list is not
+            // null, so HandleApply does not log it as a CanApply desync; it just leaves the player with no
+            // message at all, which is why this line exists. Mirrors ApplyReroll's equivalent.
+            if (lines.Count == 0)
+                lines.Add("No special modifier took hold.");
+
+            // tinkers, NumTimesTinkered and both logs are UNTOUCHED - this path never reaches them at all, so
+            // there is no WriteComposition call here, deliberately
 
             return lines;
         }
@@ -730,6 +713,80 @@ namespace ACE.Server.WeaponMods
         private static void SendCraftMessage(Player player, string message)
         {
             player.Session.Network.EnqueueSend(new GameMessageSystemChat(message, ChatMessageType.Craft));
+        }
+
+        /// <summary>
+        /// Grants or removes the quality-tier aura after a reroll or swap, and announces a gain in teal.
+        ///
+        /// Only a CHANGE of tier does anything. Two reasons, and the first is a correctness constraint
+        /// rather than tidiness: a sent script allocates a fresh particle emitter every time (handle 0),
+        /// and those emitters are endless, so re-sending on a weapon that was already Exceptional would
+        /// leave two running and the aura would visibly brighten with each craft.
+        ///
+        /// LOSS IS NOT INSTANT ON THE CLIENT. A handle-0 emitter cannot be stopped by id -
+        /// ParticleManager.StopParticleEmitter and DestroyParticleEmitter both refuse handle 0 - so the
+        /// only thing that clears one is the client rebuilding the object. Clearing the property stops
+        /// it coming back, and it disappears on the next rebuild (relog, zoning, re-equip). Whether the
+        /// craft's own UpdateObj round-trip counts as a rebuild is NOT established; if it does, the aura
+        /// vanishes immediately and this comment is merely pessimistic.
+        /// </summary>
+        private static void HandleTierTransition(Player player, WorldObject target, WeaponQualityTier tierBefore)
+        {
+            var tierAfter = WeaponQualityTiers.Evaluate(target);
+
+            if (tierAfter == tierBefore)
+                return;
+
+            var scriptBefore = WeaponQualityTiers.ScriptFor(tierBefore);
+            var scriptAfter = WeaponQualityTiers.ScriptFor(tierAfter);
+
+            if (scriptAfter != scriptBefore)
+                target.VisualEffectScript = scriptAfter;
+
+            var total = WeaponQualityTiers.TotalIntensity(target);
+
+            if (tierAfter > tierBefore)
+            {
+                // Teal. ChatMessageType.Advancement (0x0D) is the only true teal the client has - see the
+                // verified palette catalog in ChatMessageType.cs, whose doc comments are otherwise wrong.
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    $"{WeaponQualityTiers.NameFor(tierAfter)}! Your {target.Name} totals {total}% across its modifiers and takes on a visible aura.",
+                    ChatMessageType.Advancement));
+            }
+            else if (tierBefore != WeaponQualityTier.None)
+            {
+                var lost = WeaponQualityTiers.NameFor(tierBefore);
+
+                SendCraftMessage(player, tierAfter == WeaponQualityTier.None
+                    ? $"Your {target.Name} falls to {total}%, below the {lost} threshold, and its aura fades."
+                    : $"Your {target.Name} falls to {total}%, down from {lost} to {WeaponQualityTiers.NameFor(tierAfter)}.");
+            }
+        }
+
+        /// <summary>
+        /// Clears this client's "already has an effect" record for the crafted weapon, so the aura is sent
+        /// afresh the next time the weapon is actually drawn.
+        ///
+        /// It deliberately does NOT send anything. A tinker target is inventory-only by construction (see
+        /// UpdateObj above), so at this moment the weapon is in the pack, where the client knows about it
+        /// but does not render it. Sending there attaches the script to nothing AND consumes the single
+        /// send that equipping it later depends on, leaving the weapon permanently bare - the exact failure
+        /// that made this look non-deterministic.
+        ///
+        /// Equipping is the natural and sufficient trigger: TryEquipObjectWithNetworking calls SendTo, which
+        /// reads the property this craft just set or cleared. So a weapon that gained a tier lights up when
+        /// worn, and one that lost it stays dark, with no timing involved.
+        ///
+        /// An earlier version delayed three seconds and then sent. That appeared to work only because the
+        /// delay gave the player time to re-equip, so the send sometimes landed on a drawn weapon - and it
+        /// risked a SECOND emitter whenever the equip path had already sent one inside the window.
+        /// </summary>
+        private static void ResetAuraForRebuild(Player player, WorldObject target)
+        {
+            if (player?.Session == null || target == null)
+                return;
+
+            VisualEffectManager.Forget(player.Session, target);
         }
 
         /// <summary>

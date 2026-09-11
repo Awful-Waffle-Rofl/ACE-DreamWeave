@@ -6,7 +6,6 @@ using System.Linq;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Entity.Enum.Properties;
-using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Managers;
 using ACE.Server.Network.Structure;
 using ACE.Server.WeaponMods;
@@ -30,8 +29,8 @@ namespace ACE.Server.Tests
     /// reachable from any pool, and inert at every read - rather than implying one from the other.
     ///
     /// WHAT IS NOT, AND WHY. The combat hooks themselves - ApplyWeaponModOutgoingDamage, ApplyWeaponModSpellHit,
-    /// GetWeaponModSpellDamageMod, GetWeaponModAttackSpeedMod, RollWeaponModOverload,
-    /// ApplyWeaponModCreatureDeath - all need a live Player with a session, equipped objects and vitals, which
+    /// GetWeaponModSpellDamageMod, GetWeaponModAttackSpeedMod, ApplyWeaponModCreatureDeath - all need a live
+    /// Player with a session, equipped objects and vitals, which
     /// ACE.Server.Tests cannot construct. Every one of them is a thin wrapper over a function in
     /// WeaponModCombat, and those functions ARE covered here; what is not covered is that the wrapper reads the
     /// right item and that the core site calls it at all. Those are live-loop checks and are queued in
@@ -46,18 +45,17 @@ namespace ACE.Server.Tests
         private static readonly WeaponClass[] Classes = { WeaponClass.Melee, WeaponClass.Missile, WeaponClass.Caster };
 
         /// <summary>
-        /// The seven rows, with the magnitude and class set each must carry. Pinned as a table rather than read
-        /// off the registry, so a retune has to move this file deliberately. Magnitudes are from
-        /// Docs/WeaponMods/DESIGN.md "Tier B - v2, new combat hooks".
+        /// The three SURVIVING v2 rows, with the magnitude and class set each must carry. Pinned as a table
+        /// rather than read off the registry, so a retune has to move this file deliberately. Magnitudes are
+        /// from Docs/WeaponMods/DESIGN.md "Tier B - v2, new combat hooks".
+        ///
+        /// LifeLeech, ManaLeech, StaminaLeech and Overload were retired 2026-08-17 in the catalog v4 pass and no
+        /// longer appear here - see PropertyFloat.cs and WeaponModId.cs for the retirement record.
         /// </summary>
         private static readonly (WeaponModId Id, PropertyFloat Record, double MaxRoll, WeaponClass Classes, string Name)[] Expected =
         {
-            (WeaponModId.LifeLeech,    PropertyFloat.WeaponModLifeLeech,    0.04, WeaponClass.All,                            "Life Leech"),
-            (WeaponModId.ManaLeech,    PropertyFloat.WeaponModManaLeech,    0.04, WeaponClass.All,                            "Mana Leech"),
-            (WeaponModId.StaminaLeech, PropertyFloat.WeaponModStaminaLeech, 0.04, WeaponClass.All,                            "Stamina Leech"),
-            (WeaponModId.Ambush,       PropertyFloat.WeaponModAmbush,       0.15, WeaponClass.All,                            "Ambush"),
-            (WeaponModId.Quickening,   PropertyFloat.WeaponModQuickening,   0.06, WeaponClass.Melee | WeaponClass.Missile,    "Quickening"),
-            (WeaponModId.Overload,     PropertyFloat.WeaponModOverload,     0.20, WeaponClass.Caster,                         "Overload"),
+            (WeaponModId.Ambush,       PropertyFloat.WeaponModAmbush,       0.30, WeaponClass.All,                            "Ambush"),
+            (WeaponModId.Quickening,   PropertyFloat.WeaponModQuickening,   0.24, WeaponClass.Melee | WeaponClass.Missile,    "Quickening"),
             (WeaponModId.SecondWind,   PropertyFloat.WeaponModSecondWind,   0.12, WeaponClass.All,                            "Second Wind"),
         };
 
@@ -91,10 +89,20 @@ namespace ACE.Server.Tests
         // ================= the rows =================
 
         [TestMethod]
-        public void TierB_HoldsExactlyTheseSevenRows()
+        public void TierB_HoldsExactlyTheseSurvivingV2RowsPlusTheV3AndV4Expansions()
         {
-            Assert.AreEqual(Expected.Length, WeaponModRegistry.TierBMods.Count,
-                "the Tier B half of the registry no longer holds exactly the seven rows this table names");
+            // 2026-08-06: the v3 expansion (Heft, Tension, Leverage, Attunement, Focus, Execution) added six
+            // more Tier B rows, covered in detail in WeaponModCatalogV3Tests.cs. Folded into this scope guard
+            // as a fixed count rather than dropped, so it still catches an accidental Tier B add/remove.
+            const int rowsAddedByTheV3Expansion = 6;
+
+            // 2026-08-17: the v4 expansion (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick
+            // Refresh, Arcane Defender, Panic Reload) added nine more, currently inert - covered in detail in
+            // WeaponModCatalogV4Tests.cs. Same reasoning as the v3 count above.
+            const int rowsAddedByTheV4Expansion = 9;
+
+            Assert.AreEqual(Expected.Length + rowsAddedByTheV3Expansion + rowsAddedByTheV4Expansion, WeaponModRegistry.TierBMods.Count,
+                "the Tier B half of the registry no longer holds exactly the three surviving v2 rows this table names plus the six v3-expansion rows plus the nine v4-expansion rows");
 
             foreach (var (id, record, maxRoll, classes, name) in Expected)
             {
@@ -106,7 +114,7 @@ namespace ACE.Server.Tests
                 Assert.AreEqual(classes, definition.Classes, $"{id}: class set moved");
                 Assert.AreEqual(name, definition.DisplayName, $"{id}: renaming a modifier changes what every player reads on the appraisal panel, so it has to be a decision rather than a refactor artifact");
 
-                Assert.AreEqual(WeaponModDefinition.DefaultMinPotency, definition.MinPotency, 1e-12, $"{id}: potency floor is 0.25, same as Tier A");
+                Assert.AreEqual(WeaponModDefinition.DefaultMinPotency, definition.MinPotency, 1e-12, $"{id}: potency floor matches DefaultMinPotency, same as Tier A");
                 Assert.IsFalse(definition.Binary, $"{id}: rolls a magnitude; a binary modifier would grant MaxRoll unconditionally");
             }
         }
@@ -173,8 +181,13 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The full apply / reverse cycle for a Tier B row on a real item: the record holds the fraction
-        /// exactly, nothing else on the item moves, and reversal REMOVES the row rather than zeroing it.
+        /// The full apply / reverse cycle for a Tier B row on a real item: the record holds the ROLL FRACTION
+        /// exactly, that fraction resolves back to the magnitude it came from, nothing else on the item moves,
+        /// and reversal REMOVES the row rather than zeroing it.
+        ///
+        /// REWRITTEN FOR THE 2026-08-07 STORAGE SPLIT. This test previously asserted the record held the
+        /// magnitude, which is now true only of Tier A. The workmanship sweep is what makes the distinction
+        /// visible: the fraction tracks workmanship while MaxRoll stays out of it entirely.
         /// </summary>
         [TestMethod]
         public void TierB_ApplyWritesOnlyTheRecordAndReverseRemovesIt()
@@ -186,15 +199,31 @@ namespace ACE.Server.Tests
                     var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee, workmanship: workmanship);
 
                     var before = SnapshotFloats(weapon);
-                    var magnitude = WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0);
+                    var fraction = WeaponModValue.RollFraction(1.0, workmanship);
+                    var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, 1.0);
+
+                    Assert.AreEqual(workmanship / 10.0, fraction, 1e-12,
+                        $"{definition.Id}: a perfect roll at workmanship {workmanship} is exactly that workmanship as a fraction, with no MaxRoll term in it");
+
+                    Assert.AreEqual(WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0), magnitude, 1e-12,
+                        $"{definition.Id}: fraction storage must be substitutable for Resolve - if these diverge, a rolled weapon and a seeded one stop agreeing");
 
                     Assert.AreEqual(definition.MaxRoll * workmanship / 10.0, magnitude, 1e-12,
                         $"{definition.Id}: a perfect roll at workmanship {workmanship} is exactly the linear fraction, with no rounding");
 
-                    WeaponModTinkerSet.ApplySpecial(weapon, definition, magnitude);
+                    WeaponModTinkerSet.ApplySpecialAtFraction(weapon, definition, fraction, 1.0);
 
-                    Assert.AreEqual(magnitude, weapon.GetProperty(definition.Record).Value, 1e-12,
-                        $"{definition.Id}: the record must hold the applied fraction exactly");
+                    Assert.AreEqual(fraction, weapon.GetProperty(definition.Record).Value, 1e-12,
+                        $"{definition.Id}: the record must hold the ROLL FRACTION, not the magnitude - a magnitude here would stop MaxRoll retunes reaching existing weapons");
+
+                    Assert.AreEqual(magnitude, WeaponModTinkerSet.ReadMagnitude(weapon, definition, 1.0), 1e-12,
+                        $"{definition.Id}: the stored fraction must resolve back to the magnitude it was applied at");
+
+                    // THE POINT OF THE SPLIT, asserted rather than described: the catalog moves under an
+                    // existing weapon. Halving the scale halves what this already-applied modifier is worth,
+                    // with no reroll and no migration.
+                    Assert.AreEqual(magnitude / 2.0, WeaponModTinkerSet.ReadMagnitude(weapon, definition, 0.5), 1e-12,
+                        $"{definition.Id}: a retune must reach a weapon already carrying the modifier");
 
                     var after = SnapshotFloats(weapon);
                     after.Remove(definition.Record);
@@ -220,7 +249,7 @@ namespace ACE.Server.Tests
             var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee);
 
             WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.Devastation), 4.0);
-            WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.LifeLeech), 0.04);
+            WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.Ambush), 0.30);
             WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Get(WeaponModId.SecondWind), 0.12);
 
             Assert.AreEqual(3, WeaponModTinkerSet.SpecialCount(weapon), "precondition: three records, one Tier A and two Tier B");
@@ -287,12 +316,18 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void TierB_TheMagnitudeBandIsExactlyMaxRollTimesPotencyTimesWorkmanship()
         {
+            // TOLERANCE WIDENED FROM 1e-15 TO 1e-12 on 2026-08-06: the v3 expansion added Heft, whose MaxRoll
+            // of 22 is over an order of magnitude larger than any prior Tier B row, and accumulates more
+            // floating-point error per multiply than 1e-15 tolerates. Still far tighter than the design cares
+            // about - this remains an exactness check, not a fuzzy one.
+            const double tolerance = 1e-12;
+
             foreach (var definition in WeaponModRegistry.TierBMods)
             {
-                Assert.AreEqual(definition.MaxRoll * 0.25 * 0.1, WeaponModValue.Resolve(definition, 0.25, 1.0, 1.0), 1e-15,
+                Assert.AreEqual(definition.MaxRoll * 0.25 * 0.1, WeaponModValue.Resolve(definition, 0.25, 1.0, 1.0), tolerance,
                     $"{definition.Id}: the floor of the band");
 
-                Assert.AreEqual(definition.MaxRoll, WeaponModValue.Resolve(definition, 1.0, 10.0, 1.0), 1e-15,
+                Assert.AreEqual(definition.MaxRoll, WeaponModValue.Resolve(definition, 1.0, 10.0, 1.0), tolerance,
                     $"{definition.Id}: the ceiling of the band");
 
                 // linearity in workmanship, exact because nothing rounds
@@ -300,7 +335,7 @@ namespace ACE.Server.Tests
 
                 for (var workmanship = 1; workmanship <= 10; workmanship++)
                 {
-                    Assert.AreEqual(unit * workmanship, WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0), 1e-15,
+                    Assert.AreEqual(unit * workmanship, WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0), tolerance,
                         $"{definition.Id}: workmanship {workmanship} must be exactly {workmanship} times workmanship 1");
                 }
             }
@@ -327,9 +362,12 @@ namespace ACE.Server.Tests
 
                 Assert.IsFalse(WeaponModRegistry.Enabled(), "precondition: the gate really is off at the live accessor");
 
-                // the depths the design prices against, at the LIVE accessor - Tier A only
-                Assert.AreEqual(5, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with weapon_mods_enabled FALSE: Tier A only");
-                Assert.AreEqual(5, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with weapon_mods_enabled FALSE: Tier A only");
+                // the depths the design prices against, at the LIVE accessor - Tier A only (unchanged by the
+                // 2026-08-06 v3 expansion or the 2026-08-17 v4 expansion, since every row each expansion adds
+                // is Tier B; melee came down by one on 2026-08-07 with the Cleave removal, and missile came
+                // down by one on 2026-08-17 with the Swift Flight removal, both Tier A removals)
+                Assert.AreEqual(4, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with weapon_mods_enabled FALSE: Tier A only");
+                Assert.AreEqual(4, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with weapon_mods_enabled FALSE: Tier A only");
                 Assert.AreEqual(3, WeaponModRegistry.Pool(WeaponClass.Caster).Count, "caster pool with weapon_mods_enabled FALSE: Tier A only");
 
                 foreach (var weaponClass in Classes)
@@ -439,9 +477,9 @@ namespace ACE.Server.Tests
         {
             WithGate(true, () =>
             {
-                Assert.AreEqual(11, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with the gate on: 5 Tier A + 6 Tier B");
-                Assert.AreEqual(11, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with the gate on: 5 Tier A + 6 Tier B");
-                Assert.AreEqual(9, WeaponModRegistry.Pool(WeaponClass.Caster).Count, "caster pool with the gate on: 3 Tier A + 6 Tier B");
+                Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 5 Tier B v4");
+                Assert.AreEqual(17, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 6 Tier B v4");
+                Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Caster).Count, "caster pool with the gate on: 3 Tier A + 2 Tier B v2 + 3 Tier B v3 + 8 Tier B v4");
 
                 foreach (var (id, _, _, classes, _) in Expected)
                 {
@@ -455,13 +493,10 @@ namespace ACE.Server.Tests
                     }
                 }
 
-                // Quickening and Overload are the two that would be silently dead in the wrong pool, so they
-                // are pinned by name as well as by the table above
+                // Quickening is the one that would be silently dead in the wrong pool, so it is pinned by name
+                // as well as by the table above
                 Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Caster).Any(m => m.Id == WeaponModId.Quickening),
                     "Quickening is melee and missile only - its hook reads GetEquippedWeapon(), which never returns a wand");
-
-                Assert.IsFalse(WeaponModRegistry.Pool(WeaponClass.Melee).Any(m => m.Id == WeaponModId.Overload),
-                    "Overload is caster only - a melee weapon has no spell to make free");
 
                 // and a deep draw actually reaches every one of them
                 foreach (var weaponClass in Classes)
@@ -560,7 +595,7 @@ namespace ACE.Server.Tests
         /// value across EVERY equipped item, which is right there (armor mods land on up to a dozen pieces and
         /// stack additively) and would be an overcount by however many items a player is wearing here.
         ///
-        /// Reusing one of them would have let a player stack Life Leech off a helmet, and it would have looked
+        /// Reusing one of them would have let a player stack Ambush off a helmet, and it would have looked
         /// completely ordinary in review, because the call reads identically. So this asserts the difference
         /// numerically: the same records on five items, the summing shape against the weapon-only one.
         /// </summary>
@@ -576,37 +611,41 @@ namespace ACE.Server.Tests
                 // can put a row anywhere, and the accessor must be indifferent to that rather than adding it in.
                 var otherEquipped = new List<WorldObject>();
 
+                // Seeded as ROLL FRACTIONS, because that is what a Tier B record holds since the 2026-08-07
+                // storage split. A full-strength roll is 1.0 and reads back as the row's MaxRoll.
                 for (var i = 0; i < 4; i++)
                 {
                     var piece = WeaponModTestKit.MakeWeapon();
 
-                    piece.SetProperty(PropertyFloat.WeaponModLifeLeech, 0.04);
+                    piece.SetProperty(PropertyFloat.WeaponModAmbush, 1.0);
                     otherEquipped.Add(piece);
                 }
 
-                weapon.SetProperty(PropertyFloat.WeaponModLifeLeech, 0.04);
+                weapon.SetProperty(PropertyFloat.WeaponModAmbush, 1.0);
 
-                var weaponOnly = WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.LifeLeech);
+                var ambush = WeaponModRegistry.Get(WeaponModId.Ambush);
+                var weaponOnly = WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Ambush);
 
-                Assert.AreEqual(0.04, weaponOnly, 1e-15, "the weapon-only accessor must return the weapon's own record, unchanged");
+                Assert.AreEqual(ambush.MaxRoll, weaponOnly, 1e-15,
+                    "the weapon-only accessor must resolve the weapon's own record and nothing else");
 
                 // the shape the armor system uses, computed here so the two are compared rather than described
                 var summedAcrossEquipped = otherEquipped.Concat(new[] { weapon })
-                    .Sum(i => i.GetProperty(PropertyFloat.WeaponModLifeLeech) ?? 0.0);
+                    .Sum(i => i.GetProperty(PropertyFloat.WeaponModAmbush) ?? 0.0);
 
-                Assert.AreEqual(0.20, summedAcrossEquipped, 1e-15, "precondition: five items at 0.04 sum to 0.20");
+                Assert.AreEqual(5.0, summedAcrossEquipped, 1e-15, "precondition: five items at a full-strength roll sum to 5.0");
 
                 Assert.AreNotEqual(summedAcrossEquipped, weaponOnly,
                     "the weapon-only accessor returned the SUM across equipped items - that is Creature.GetEquippedModValue's contract, and using it here multiplies every weapon mod by the number of items a player is wearing");
 
                 // and it is indifferent to the other items entirely: strip the weapon's own record and it reads
                 // zero however many other pieces carry one
-                weapon.RemoveProperty(PropertyFloat.WeaponModLifeLeech);
+                weapon.RemoveProperty(PropertyFloat.WeaponModAmbush);
 
-                Assert.AreEqual(0.0, WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.LifeLeech), 1e-15,
+                Assert.AreEqual(0.0, WeaponModCombat.ReadWeaponOnly(weapon, WeaponModId.Ambush), 1e-15,
                     "a weapon with no record of its own must read zero, whatever else is equipped");
 
-                Assert.AreEqual(0.16, otherEquipped.Sum(i => i.GetProperty(PropertyFloat.WeaponModLifeLeech) ?? 0.0), 1e-15,
+                Assert.AreEqual(4.0, otherEquipped.Sum(i => i.GetProperty(PropertyFloat.WeaponModAmbush) ?? 0.0), 1e-15,
                     "precondition: the other four items still carry their records, so the zero above is not vacuous");
             });
         }
@@ -689,16 +728,21 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1.0, WeaponModCombat.DamageMultiplier(-0.5), 1e-15, "a negative magnitude must never SLOW or WEAKEN anything");
             Assert.AreEqual(1.0, WeaponModCombat.DamageMultiplier(double.NaN), 1e-15);
 
-            // the maximum roll on a workmanship 10 weapon is exactly the design's +15%
-            Assert.AreEqual(1.15, WeaponModCombat.DamageMultiplier(WeaponModRegistry.Get(WeaponModId.Ambush).MaxRoll), 1e-15);
+            // the maximum roll on a workmanship 10 weapon is exactly the design's current MaxRoll (retuned to
+            // +30% on 2026-08-06, from +15%)
+            Assert.AreEqual(1.30, WeaponModCombat.DamageMultiplier(WeaponModRegistry.Get(WeaponModId.Ambush).MaxRoll), 1e-15);
         }
 
         /// <summary>
-        /// Overload's roll. The magnitude is a PROBABILITY, not a percent bonus, so the whole helper is a
-        /// comparison - and the boundary cases are what a wrong comparison would get wrong.
+        /// RollsFree's general behavior. The magnitude is a PROBABILITY, not a percent bonus, so the whole
+        /// helper is a comparison - and the boundary cases are what a wrong comparison would get wrong.
+        ///
+        /// FORMERLY "Overload_RollsFreeExactlyAtItsStatedRate", renamed 2026-08-17 when Overload (its only
+        /// caller) was retired in the catalog v4 pass. RollsFree itself survives - Cleanse and Siphon are its
+        /// intended Phase 2 reusers - so the test is re-pointed at a plain 0.20 chance rather than deleted.
         /// </summary>
         [TestMethod]
-        public void Overload_RollsFreeExactlyAtItsStatedRate()
+        public void RollsFree_FiresExactlyAtItsStatedRate()
         {
             Assert.IsTrue(WeaponModCombat.RollsFree(0.20, 0.0), "a roll of 0 is inside a 20% chance");
             Assert.IsTrue(WeaponModCombat.RollsFree(0.20, 0.199999), "a roll just under the chance fires");
@@ -711,7 +755,7 @@ namespace ACE.Server.Tests
             Assert.IsFalse(WeaponModCombat.RollsFree(0.5, double.NaN));
 
             // the observed rate over the whole unit interval is the stated rate
-            var chance = WeaponModRegistry.Get(WeaponModId.Overload).MaxRoll;
+            const double chance = 0.20;
             var fired = 0;
 
             for (var step = 0; step < 10000; step++)
@@ -760,94 +804,11 @@ namespace ACE.Server.Tests
             Assert.AreEqual(3, WeaponModCombat.RestoreFromMax(100, endgameFloor), "the worst roll on a workmanship 10 weapon is 3% of maximum");
         }
 
-        /// <summary>The exact fractional leech one hit earns, before the carry decides when it pays out.</summary>
-        [TestMethod]
-        public void Leech_AmountIsDamageTimesTheFraction()
-        {
-            Assert.AreEqual(2.0, WeaponModCombat.LeechAmount(50.0, 0.04), 1e-15);
-            Assert.AreEqual(0.8, WeaponModCombat.LeechAmount(20.0, 0.04), 1e-15);
-            Assert.AreEqual(0.0, WeaponModCombat.LeechAmount(0.0, 0.04), 1e-15, "a hit for no damage leeches nothing");
-            Assert.AreEqual(0.0, WeaponModCombat.LeechAmount(-5.0, 0.04), 1e-15);
-            Assert.AreEqual(0.0, WeaponModCombat.LeechAmount(50.0, 0.0), 1e-15, "an unequipped modifier leeches nothing");
-            Assert.AreEqual(0.0, WeaponModCombat.LeechAmount(double.NaN, 0.04), 1e-15);
-        }
-
-        /// <summary>
-        /// The accrual, which is the reason a 4% leech is not permanently dead. Each hit at the worst legal
-        /// magnitude is worth a fraction of a point; rounded independently every one of them would be zero.
-        ///
-        /// The property that matters is DRIFT-FREEDOM: after any number of hits the total paid out is within
-        /// half a point of the exact total, so accrual changes WHEN the value arrives and never HOW MUCH.
-        /// </summary>
-        [TestMethod]
-        public void Leech_AccrualPaysOutTheExactTotalWithinHalfAPoint()
-        {
-            var carry = 0.0;
-            var paid = 0;
-            var exactTotal = 0.0;
-
-            // 500 hits of 12 damage at the lowest magnitude a 4% leech can roll: 0.001, so each hit is worth
-            // 0.012 of a point and a per-hit round would pay nothing at all, forever
-            var magnitude = 0.04 * 0.25 * 0.1;
-
-            for (var hit = 0; hit < 500; hit++)
-            {
-                var exact = WeaponModCombat.LeechAmount(12.0, magnitude);
-
-                exactTotal += exact;
-                paid += WeaponModCombat.AccrueVital(carry, exact, out carry);
-
-                Assert.IsTrue(Math.Abs(paid - exactTotal) <= 0.5 + 1e-12,
-                    $"hit {hit}: paid {paid} against an exact total of {exactTotal} - the accrual has drifted");
-
-                Assert.IsTrue(Math.Abs(carry) <= 0.5 + 1e-12, $"hit {hit}: the carry reached {carry}, outside [-0.5, 0.5]");
-            }
-
-            Assert.IsTrue(paid > 0, "500 hits paid out nothing at all, so the accrual is not actually accruing");
-
-            // and a plain per-hit round would have paid nothing over the same sequence, which is the defect the
-            // carry exists to avoid
-            Assert.AreEqual(0, Enumerable.Range(0, 500).Sum(_ => (int)Math.Round(12.0 * magnitude, MidpointRounding.AwayFromZero)),
-                "precondition: rounding each hit independently pays zero over this sequence");
-        }
-
-        /// <summary>
-        /// The accrual is deliberately the SAME algorithm as BloodlustAbility.AccrueHeal, which solved this
-        /// exact problem for the Bloodlust equipment mod. It is reimplemented rather than called so
-        /// ACE.Server.WeaponMods keeps no dependency on the class-ability catalog - and duplicated logic drifts,
-        /// so the two are held to each other here over a sequence rather than by a comment alone.
-        /// </summary>
-        [TestMethod]
-        public void Leech_AccrualAgreesWithTheBloodlustPrecedent()
-        {
-            var random = new Random(20260731);
-
-            var weaponCarry = 0.0;
-            var bloodlustCarry = 0.0;
-
-            for (var hit = 0; hit < 5000; hit++)
-            {
-                var exact = random.NextDouble() * 3.0;
-
-                var weaponPaid = WeaponModCombat.AccrueVital(weaponCarry, exact, out weaponCarry);
-                var bloodlustPaid = BloodlustAbility.AccrueHeal(bloodlustCarry, exact, out bloodlustCarry);
-
-                Assert.AreEqual(bloodlustPaid, weaponPaid, $"hit {hit}: the two accruals disagree on the payout for {exact}");
-                Assert.AreEqual(bloodlustCarry, weaponCarry, 1e-12, $"hit {hit}: the two accruals disagree on the carry");
-            }
-
-            // the degenerate inputs too, where a divergence is likeliest
-            foreach (var exact in new[] { 0.0, -1.0, double.NaN, double.PositiveInfinity })
-            {
-                var w = 0.25;
-                var b = 0.25;
-
-                Assert.AreEqual(BloodlustAbility.AccrueHeal(b, exact, out b), WeaponModCombat.AccrueVital(w, exact, out w),
-                    $"the two accruals disagree on a degenerate input of {exact}");
-
-                Assert.AreEqual(b, w, 1e-12, $"the two accruals disagree on the carry after a degenerate input of {exact}");
-            }
-        }
+        // The three leech-specific tests that lived here (Leech_AmountIsDamageTimesTheFraction,
+        // Leech_AccrualPaysOutTheExactTotalWithinHalfAPoint, Leech_AccrualAgreesWithTheBloodlustPrecedent) were
+        // removed 2026-08-17 in the catalog v4 pass, alongside WeaponModCombat.AccrueVital and .LeechAmount
+        // themselves: LifeLeech/ManaLeech/StaminaLeech were the only callers, and all three were retired. See
+        // PropertyFloat.cs and WeaponModId.cs for the retirement record.
 
         // ================= helpers =================
 

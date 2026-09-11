@@ -3,6 +3,7 @@ using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
@@ -253,6 +254,42 @@ namespace ACE.Server.Entity
 
             target.IgnoreCloIcons = source.IgnoreCloIcons;
             target.IconId = source.IconId;
+
+            // Part of the look lives outside the property copies above: instance-level texture_map /
+            // palette rows, and the persistent particle script. Without these a tailored copy of a
+            // fork item came out grey-textured and inert, because everything the copies do cover
+            // (ClothingBase / PaletteTemplate / Shade / Setup) describes only the retail half of it.
+            CopyObjDescRows(source, target);
+
+            // Assigned directly rather than through Player.UpdateProperty: this is a fork-allocated
+            // PropertyDataId (9000) and the two shipped writers - /vfxprop and WeaponModManager - both
+            // set it without emitting a property update to the client, which has no notion of it.
+            // A null source clears it, which is correct: the target must not keep its old effect.
+            target.VisualEffectScript = source.VisualEffectScript;
+        }
+
+        /// <summary>
+        /// Replaces the target's instance-level ObjDesc rows (texture map, palette) with the source's.
+        ///
+        /// Replacement, not merge: tailoring means "wear this other thing's appearance", so a target
+        /// that had rows of its own and a source that has none must end up with none. Assigning null
+        /// is how that is expressed - BiotaUpdater removes any surplus child rows on the next save.
+        ///
+        /// AnimPart rows are left alone. They are model swaps rather than surface detail, and no
+        /// tailoring path copies a Setup part list today.
+        ///
+        /// Internal rather than private so the test assembly can exercise it directly: the two
+        /// callers around it need a live Player and a world database, this does not.
+        /// </summary>
+        internal static void CopyObjDescRows(WorldObject source, WorldObject target)
+        {
+            var textures = source.Biota.PropertiesTextureMap.Clone(source.BiotaDatabaseLock);
+            target.Biota.PropertiesTextureMap = textures?.ConvertAll(row => row.Clone());
+
+            var palettes = source.Biota.PropertiesPalette.Clone(source.BiotaDatabaseLock);
+            target.Biota.PropertiesPalette = palettes?.ConvertAll(row => row.Clone());
+
+            target.ChangesDetected = true;
         }
 
         public static void SetArmorProperties(WorldObject source, WorldObject target)
@@ -595,6 +632,25 @@ namespace ACE.Server.Entity
 
             player.UpdateProperty(target, PropertyBool.IgnoreCloIcons, source.IgnoreCloIcons);
             player.UpdateProperty(target, PropertyDataId.Icon, source.IconId);
+
+            // See SetCommonProperties for why these two are carried and why the script is assigned
+            // directly. Rows are not client-visible properties, so nothing needs sending for them
+            // here: both callers (ArmorApply / WeaponApply) follow this with a GameMessageUpdateObject,
+            // whose SerializeModelData re-runs CalculateObjDesc and picks the new rows up. The target
+            // is inventory-only by construction - VerifyUseRequirements looks it up with
+            // SearchLocations.MyInventory alone - so no wearer's ObjDesc can be stale as a result.
+            CopyObjDescRows(source, target);
+
+            var scriptBefore = target.VisualEffectScript;
+            target.VisualEffectScript = source.VisualEffectScript;
+
+            // Only on an actual change, and deliberately a Forget rather than a send. The item is in
+            // the pack right now, where the client knows it but does not draw it; sending there
+            // attaches the script to nothing AND spends the one send that equipping later depends on.
+            // Clearing the record instead means the effect arrives when the piece is first worn.
+            // This mirrors WeaponModManager.ResetAuraForRebuild, which documents the same trap.
+            if (target.VisualEffectScript != scriptBefore)
+                VisualEffectManager.Forget(player.Session, target);
         }
 
         public static void UpdateArmorProps(Player player, WorldObject source, WorldObject target)

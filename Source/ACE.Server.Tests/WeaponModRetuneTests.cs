@@ -79,79 +79,30 @@ namespace ACE.Server.Tests
         // ================= CHANGE 1 - a tinker is never replaced by itself =================
 
         /// <summary>
-        /// THE DEFECT: the swap drew its replacement tinker from the whole class pool, so a melee weapon had a
-        /// 1-in-4 chance (missile 1-in-3) of being handed back the material it had just lost. The player paid a
-        /// full salvage bag for a state change of exactly nothing.
-        ///
-        /// Driven with weapon_mod_swap_special_chance forced to 0 so BOTH halves are guaranteed to be layer 1,
-        /// which is the only path the exclusion covers, and across all three classes because each has its own
-        /// pool. Checked two ways: the player-facing lines must not name the same material, and the composition
-        /// itself must actually have changed - a no-op that stopped printing would still be a no-op.
+        /// SUPERSEDED 2026-08-06 (Amethyst rework). THE ORIGINAL DEFECT: the swap drew its replacement tinker
+        /// from the whole class pool, so a melee weapon had a 1-in-4 chance (missile 1-in-3) of being handed
+        /// back the material it had just lost - a full salvage bag spent on a guaranteed no-op. That whole
+        /// defect CLASS is gone now, not merely fixed: Amethyst never touches tinkers at all any more, so there
+        /// is no tinker-replacement draw left to exclude the removed material from. This test now asserts that
+        /// structurally - across repeated swaps on a seeded weapon, the tinker log and tinker count never move
+        /// at all, which makes the original defect unreachable by construction rather than merely rare.
         /// </summary>
         [TestMethod]
-        public void Change1_ATinkerReplacementIsNeverTheMaterialJustRemoved()
-        {
-            var prior = WeaponModTestKit.SwapTunable("weapon_mod_swap_special_chance", 0.0);
-
-            try
-            {
-                foreach (var weaponClass in Classes)
-                {
-                    for (var trial = 0; trial < 400; trial++)
-                    {
-                        var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
-
-                        Assert.AreEqual(0, WeaponModTinkerSet.SpecialCount(weapon),
-                            "precondition: a hand-tinkered weapon holds no specials, so the removal is always a tinker");
-
-                        var before = WeaponModTinkerSet.ReadComposition(weapon);
-
-                        var lines = WeaponModTestKit.Swap(weapon, weaponClass, 10.0, $"{weaponClass} trial {trial}");
-
-                        Assert.IsNotNull(lines, $"{weaponClass} trial {trial}: a full hand-tinkered weapon must accept a swap");
-                        Assert.AreEqual(2, lines.Count, $"{weaponClass} trial {trial}: a swap reports exactly one loss and one gain - got {string.Join(" / ", lines)}");
-
-                        var lost = TinkerMaterialName(lines[0]);
-                        var gained = TinkerMaterialName(lines[1]);
-
-                        Assert.IsNotNull(lost, $"{weaponClass} trial {trial}: expected a tinker loss line, got '{lines[0]}'");
-                        Assert.IsNotNull(gained, $"{weaponClass} trial {trial}: expected a tinker gain line, got '{lines[1]}'");
-
-                        Assert.AreNotEqual(lost, gained,
-                            $"{weaponClass} trial {trial}: the swap lost and gained 1 {lost} tinker - a full salvage bag spent on a guaranteed no-op, which is the exact defect reported from live play");
-
-                        var after = WeaponModTinkerSet.ReadComposition(weapon);
-
-                        Assert.AreEqual(before.Count, after.Count,
-                            $"{weaponClass} trial {trial}: a tinker-for-tinker swap trades one slot for one slot");
-
-                        CollectionAssert.AreNotEquivalent(before, after,
-                            $"{weaponClass} trial {trial}: the composition is unchanged after a swap, so the bag bought nothing");
-                    }
-                }
-            }
-            finally
-            {
-                PropertyManager.ModifyDouble("weapon_mod_swap_special_chance", prior);
-            }
-        }
-
-        /// <summary>
-        /// The same rule at the SHIPPED tunables rather than a forced 0 swap chance, over repeated swaps on the
-        /// same weapon. Whenever a run happens to trade a tinker for a tinker, the two must differ; runs that
-        /// touch a special are simply not this rule's business and are skipped.
-        /// </summary>
-        [TestMethod]
-        public void Change1_HoldsAtTheShippedTunablesAcrossRepeatedSwaps()
+        public void Change1_SwapNeverTouchesTinkersSoTheOriginalDefectClassIsUnreachable()
         {
             foreach (var weaponClass in Classes)
             {
-                for (var trial = 0; trial < 60; trial++)
+                for (var trial = 0; trial < 40; trial++)
                 {
                     var weapon = WeaponModTestKit.MakeHandTinkered(weaponClass);
+                    WeaponModTinkerSet.ApplySpecial(weapon, WeaponModRegistry.Pool(weaponClass, false)[0], 0.1);
+
+                    var beforeLog = weapon.GetProperty(PropertyString.WeaponModTinkerLog);
+                    var beforeCount = weapon.GetProperty(PropertyInt.WeaponModTinkerCount);
+
                     var probe = new WeaponModProbe(weapon);
 
-                    for (var use = 0; use < 12; use++)
+                    for (var use = 0; use < 12 && WeaponModTinkerSet.SpecialCount(weapon) > 0; use++)
                     {
                         var context = $"{weaponClass} trial {trial} use {use}";
                         var lines = WeaponModTestKit.Swap(weapon, weaponClass, 10.0, context);
@@ -161,14 +112,8 @@ namespace ACE.Server.Tests
 
                         probe.AssertInvariants(weapon, weaponClass, context);
 
-                        var lost = TinkerMaterialName(lines[0]);
-                        var gained = lines.Count > 1 ? TinkerMaterialName(lines[1]) : null;
-
-                        if (lost == null || gained == null)
-                            continue;
-
-                        Assert.AreNotEqual(lost, gained,
-                            $"{context}: the swap lost and gained 1 {lost} tinker at the shipped tunables");
+                        Assert.AreEqual(beforeLog, weapon.GetProperty(PropertyString.WeaponModTinkerLog), $"{context}: the tinker log moved");
+                        Assert.AreEqual(beforeCount, weapon.GetProperty(PropertyInt.WeaponModTinkerCount), $"{context}: the tinker count moved");
                     }
                 }
             }
@@ -338,12 +283,13 @@ namespace ACE.Server.Tests
         /// <summary>
         /// The full potency sweep at workmanship 1, 5 and 10. The numbers this asserts, computed from
         /// applied = MaxRoll x potency x (workmanship / 10), rounded away from zero, floored at 1 above zero,
-        /// at MaxRoll 3:
+        /// at MaxRoll 3. RECOMPUTED 2026-08-06 over the NEW potency band [0.60, 1] (DefaultMinPotency moved
+        /// from 0.25 with the v3 magnitude pass):
         ///
-        ///   workmanship 1  - raw 0.075 .. 0.30, always rounds to 0 and is floored to 1. ALWAYS 1.
-        ///   workmanship 5  - raw 0.375 .. 1.50; 2 only at raw exactly 1.5, i.e. potency exactly 1.0. {1, 2}
-        ///   workmanship 10 - raw 0.75 .. 3.00; 2 from raw 1.5 (potency 0.5) up, 3 from raw 2.5 (potency
-        ///                    0.8333...) up. {1, 2, 3}
+        ///   workmanship 1  - raw 0.18 .. 0.30, always rounds to 0 and is floored to 1. ALWAYS 1.
+        ///   workmanship 5  - raw 0.90 .. 1.50; 2 only at raw exactly 1.5, i.e. potency exactly 1.0. {1, 2}
+        ///   workmanship 10 - raw 1.80 .. 3.00; the MINIMUM raw is 1.8, already past the 1.5 rounding
+        ///                    threshold, so 1 is NOT reachable at workmanship 10 any more. {2, 3}
         ///
         /// So the band is exactly 1..3, and the top value is reachable well below the top of the potency band
         /// once workmanship is high enough - unlike the old MaxRoll-2 shape, 2 is no longer a top-workmanship-only
@@ -378,7 +324,7 @@ namespace ACE.Server.Tests
                 else if (workmanship == 5.0)
                     expected = new[] { 1.0, 2.0 };
                 else
-                    expected = new[] { 1.0, 2.0, 3.0 };
+                    expected = new[] { 2.0, 3.0 };
 
                 CollectionAssert.AreEquivalent(expected, seen.ToArray(),
                     $"workmanship {workmanship}: Weak Point produced {{{string.Join(", ", seen.OrderBy(v => v))}}}, expected {{{string.Join(", ", expected)}}}");
@@ -409,8 +355,8 @@ namespace ACE.Server.Tests
             for (var roll = 0; roll < 5000; roll++)
                 values.Add(WeaponModValue.Roll(weakPoint, 10.0));
 
-            CollectionAssert.AreEquivalent(new[] { 1.0, 2.0, 3.0 }, values.ToArray(),
-                $"Weak Point's live rolls at workmanship 10 produced {string.Join(", ", values.OrderBy(v => v))}; the only intended outcomes are 1, 2 and 3");
+            CollectionAssert.AreEquivalent(new[] { 2.0, 3.0 }, values.ToArray(),
+                $"Weak Point's live rolls at workmanship 10 produced {string.Join(", ", values.OrderBy(v => v))}; the only intended outcomes are 2 and 3 after the 2026-08-06 MinPotency retune (1 is no longer reachable)");
         }
 
         /// <summary>

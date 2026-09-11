@@ -6,11 +6,13 @@ using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 
 using ACE.Common.Cryptography;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network.Enum;
 using ACE.Server.Network.GameMessages;
 using ACE.Server.Network.GameMessages.Messages;
@@ -79,6 +81,39 @@ namespace ACE.Server.Network
         /// [World Manager Thread] WorldManager.UpdateWorld()->Session.Update(lastTick)->This.Update(lastTick)<para />
         /// </summary>
         private readonly ConcurrentQueue<ServerPacket> packetQueue = new ConcurrentQueue<ServerPacket>();
+
+        // Per-session network throughput. Mutated with Interlocked because outbound flush runs
+        // under a Parallel.ForEach across sessions in NetworkManager.DoSessionWork.
+        private long totalBytesSent;
+        private long totalPacketsSent;
+        private long totalBytesReceived;
+        private long totalPacketsReceived;
+
+        /// <summary>Cumulative UDP payload bytes sent to this session's client.</summary>
+        public long TotalBytesSent => totalBytesSent;
+        /// <summary>Cumulative UDP datagrams sent to this session's client.</summary>
+        public long TotalPacketsSent => totalPacketsSent;
+        /// <summary>Cumulative UDP payload bytes received from this session's client.</summary>
+        public long TotalBytesReceived => totalBytesReceived;
+        /// <summary>Cumulative UDP datagrams received from this session's client.</summary>
+        public long TotalPacketsReceived => totalPacketsReceived;
+
+        // 1-second rolling window used to derive the *PerSecond properties below. Rolled forward
+        // inside Update(), which already runs once per tick per session - no separate timer/thread.
+        private DateTime throughputWindowStart = DateTime.UtcNow;
+        private long throughputWindowBaseBytesSent;
+        private long throughputWindowBasePacketsSent;
+        private long throughputWindowBaseBytesReceived;
+        private long throughputWindowBasePacketsReceived;
+
+        /// <summary>UDP payload bytes/s sent to this session's client, over the last completed 1-second window.</summary>
+        public double BytesSentPerSecond { get; private set; }
+        /// <summary>UDP datagrams/s sent to this session's client, over the last completed 1-second window.</summary>
+        public double PacketsSentPerSecond { get; private set; }
+        /// <summary>UDP payload bytes/s received from this session's client, over the last completed 1-second window.</summary>
+        public double BytesReceivedPerSecond { get; private set; }
+        /// <summary>UDP datagrams/s received from this session's client, over the last completed 1-second window.</summary>
+        public double PacketsReceivedPerSecond { get; private set; }
 
         public readonly SessionConnectionData ConnectionData = new SessionConnectionData();
 
@@ -184,6 +219,8 @@ namespace ACE.Server.Network
             if (isReleased) // Session has been removed
                 return;
 
+            RollThroughputWindow();
+
             if (DateTime.UtcNow - lastCachedPacketPruneTime > cachedPacketPruneInterval)
                 PruneCachedPackets();
 
@@ -248,6 +285,35 @@ namespace ACE.Server.Network
             FlushPackets();
         }
 
+        /// <summary>
+        /// Rolls the 1-second throughput window forward when it has elapsed, deriving the
+        /// *PerSecond properties from the delta against the totals recorded at the last roll.
+        /// </summary>
+        private void RollThroughputWindow()
+        {
+            var now = DateTime.UtcNow;
+            var elapsed = (now - throughputWindowStart).TotalSeconds;
+
+            if (elapsed < 1.0)
+                return;
+
+            var currentBytesSent = totalBytesSent;
+            var currentPacketsSent = totalPacketsSent;
+            var currentBytesReceived = totalBytesReceived;
+            var currentPacketsReceived = totalPacketsReceived;
+
+            BytesSentPerSecond = (currentBytesSent - throughputWindowBaseBytesSent) / elapsed;
+            PacketsSentPerSecond = (currentPacketsSent - throughputWindowBasePacketsSent) / elapsed;
+            BytesReceivedPerSecond = (currentBytesReceived - throughputWindowBaseBytesReceived) / elapsed;
+            PacketsReceivedPerSecond = (currentPacketsReceived - throughputWindowBasePacketsReceived) / elapsed;
+
+            throughputWindowBaseBytesSent = currentBytesSent;
+            throughputWindowBasePacketsSent = currentPacketsSent;
+            throughputWindowBaseBytesReceived = currentBytesReceived;
+            throughputWindowBasePacketsReceived = currentPacketsReceived;
+            throughputWindowStart = now;
+        }
+
         private void PruneCachedPackets()
         {
             lastCachedPacketPruneTime = DateTime.UtcNow;
@@ -266,13 +332,25 @@ namespace ACE.Server.Network
         /// Processes and incoming packet from a client.
         /// </summary>
         /// <param name="packet">The ClientPacket to process.</param>
-        public void ProcessPacket(ClientPacket packet)
+        /// <param name="dataSize">
+        /// The exact received UDP datagram length, from Socket.EndReceiveFrom() in
+        /// ConnectionListener.OnDataReceive(). ClientPacket has no property that reconstructs this:
+        /// Header.Size is only the post-header data length, and the receive buffer can be larger
+        /// than Header.Size + PacketHeader.HeaderSize, so it can't be derived after the fact.
+        /// </param>
+        public void ProcessPacket(ClientPacket packet, int dataSize)
         {
             if (isReleased) // Session has been removed
                 return;
 
             packetLog.DebugFormat("[{0}] Processing packet {1}", session.LoggingIdentifier, packet.Header.Sequence);
             NetworkStatistics.C2S_Packets_Aggregate_Increment();
+
+            // Server-wide ace.network.bytes.received / ace.network.packets.received are recorded
+            // once, in ConnectionListener.OnDataReceive, before the packet is routed to a session.
+            // Only the per-session totals are recorded here.
+            Interlocked.Add(ref totalBytesReceived, dataSize);
+            Interlocked.Increment(ref totalPacketsReceived);
 
             if (!packet.VerifyCRC(ConnectionData.CryptoClient))
             {
@@ -777,6 +855,12 @@ namespace ACE.Server.Network
                 try
                 {
                     socket.SendTo(buffer, size, SocketFlags.None, endPoint);
+
+                    ServerMetrics.BytesSent.Add(size);
+                    ServerMetrics.PacketsSent.Add(1);
+                    NetworkStatistics.S2C_Bytes_Aggregate_Add(size);
+                    Interlocked.Add(ref totalBytesSent, size);
+                    Interlocked.Increment(ref totalPacketsSent);
                 }
                 catch (SocketException ex)
                 {

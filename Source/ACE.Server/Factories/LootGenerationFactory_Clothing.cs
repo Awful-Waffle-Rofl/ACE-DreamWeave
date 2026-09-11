@@ -6,6 +6,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Mutations;
+using ACE.Server.EquipmentMods;
 using ACE.Server.Factories.Entity;
 using ACE.Server.Factories.Enum;
 using ACE.Server.Factories.Tables;
@@ -291,6 +292,15 @@ namespace ACE.Server.Factories
             // ensure wield requirement is level 180?
             if (roll.ArmorType != TreasureArmorType.Society)
                 SetWieldLevelReq(wo, 180);
+
+            // Equipment mods: a rolled rating is the natural rating, so record it as the item's born-with
+            // value. This overwrites the stamp CreateNewWorldObject already took from the (rating-free)
+            // weenie template rather than adding to it - see EquipmentModManager.StampOriginalGearRatings.
+            // Obsidian pays out against these stamps, never against the live ratings, so a rating that is
+            // never stamped is never convertible: MutatePetDevice writes six of the same properties and
+            // deliberately gets no stamp, because a pet device has no ValidLocations and IsEligibleTarget
+            // refuses it anyway.
+            EquipmentModManager.StampOriginalGearRatings(wo);
 
             return true;
         }

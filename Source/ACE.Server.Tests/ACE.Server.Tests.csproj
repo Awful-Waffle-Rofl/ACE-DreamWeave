@@ -28,13 +28,18 @@
 
   <ItemGroup>
     <PackageReference Include="Appveyor.TestLogger" Version="2.0.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
-    <PackageReference Include="MSTest.TestAdapter" Version="4.3.2" />
-    <PackageReference Include="MSTest.TestFramework" Version="4.3.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="MSTest.TestAdapter" Version="4.4.0" />
+    <PackageReference Include="MSTest.TestFramework" Version="4.4.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\ACE.Server\ACE.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The MSTest host must load the shared framework to construct a WebApplication (MarketApiTests). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
     <ItemGroup>

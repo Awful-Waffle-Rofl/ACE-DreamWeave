@@ -53,7 +53,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "damage-over-time spells, that spell spreads to the 1/2/3 nearest other enemies " +
                           "by rank, keeping its remaining duration. A spread spell cannot spread again.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

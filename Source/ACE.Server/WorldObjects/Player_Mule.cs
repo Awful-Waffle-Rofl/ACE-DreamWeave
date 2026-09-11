@@ -101,6 +101,7 @@ namespace ACE.Server.WorldObjects
                 case MuleAction.GainTitle:         return "A mule cannot earn titles.";
                 case MuleAction.BuyHouse:          return "A mule cannot buy a dwelling.";
                 case MuleAction.StartChallenge:    return "A mule cannot enter a challenge.";
+                case MuleAction.ChangeFacet:       return "A mule cannot change facets.";
                 default:                           return "A mule cannot do that.";
             }
         }
@@ -124,8 +125,6 @@ namespace ACE.Server.WorldObjects
                 player.IsMule,
                 player.Level ?? 1,
                 PropertyManager.GetLong("mule_max_convert_level").Item,
-                CountAccountMules(player),
-                PropertyManager.GetLong("mule_max_per_account").Item,
                 out reason);
         }
 
@@ -147,11 +146,18 @@ namespace ACE.Server.WorldObjects
         ///   - classAbilityRankCount == 0. A character inside the level cap can legitimately hold ranks, and
         ///     they are inert on a mule (every path that would use them is guarded), so it only refused
         ///     otherwise-valid conversions.
-        /// The cap is what stops a developed character being laundered into an unkillable vault; it is not a
-        /// security boundary, and conversion is irreversible either way.
+        /// The level cap is what stops a developed character being laundered into an unkillable vault; it is
+        /// not a security boundary, and conversion is irreversible either way.
+        ///
+        /// THERE IS NO PER-ACCOUNT MULE LIMIT. One was tried ('mule_max_per_account', default 2) and removed
+        /// on 2026-08-31: it was read as a cap on how many characters an account could convert, when the only
+        /// limit that actually constrains play is the separate simultaneous-login rule (IpLimitManager, whose
+        /// 'mule_landblocks' key is unrelated to this system). Converting an extra character costs the account
+        /// a character slot and is irreversible, and a mule can do nothing but carry, so the count is not worth
+        /// gating. 'mule_system_enabled' remains the only switch that stops new conversions.
         /// </summary>
         public static bool IsEligibleForMule(bool systemEnabled, bool alreadyMule, int level, long maxConvertLevel,
-            int existingAccountMules, long maxPerAccount, out string reason)
+            out string reason)
         {
             reason = null;
 
@@ -173,47 +179,7 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
-            if (maxPerAccount <= 0)
-            {
-                reason = "Mule conversion is not available on this world.";
-                return false;
-            }
-
-            if (existingAccountMules >= maxPerAccount)
-            {
-                reason = $"Your account already has {existingAccountMules} mule{(existingAccountMules == 1 ? "" : "s")}; the limit is {maxPerAccount}.";
-                return false;
-            }
-
             return true;
-        }
-
-        /// <summary>
-        /// Counts the OTHER characters on this player's account that already carry the IsMule property.
-        /// Uses PlayerManager's account-scoped snapshot (online and offline together) rather than a direct
-        /// database query. Returns 0 when the account is unknown, which is the permissive direction - the
-        /// max-per-account rule is a courtesy limit, not a security boundary.
-        /// </summary>
-        private static int CountAccountMules(Player player)
-        {
-            if (player.Account == null)
-                return 0;
-
-            var count = 0;
-
-            foreach (var accountPlayer in PlayerManager.GetAccountPlayersSnapshot(player.Account.AccountId))
-            {
-                if (accountPlayer.Guid == player.Guid)
-                    continue;
-
-                if (accountPlayer.IsDeleted || accountPlayer.IsPendingDeletion)
-                    continue;
-
-                if (accountPlayer.GetProperty(PropertyBool.IsMule) ?? false)
-                    count++;
-            }
-
-            return count;
         }
 
         /// <summary>

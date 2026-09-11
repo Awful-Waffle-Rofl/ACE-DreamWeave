@@ -341,11 +341,9 @@ namespace ACE.Server.WorldObjects.Managers
 
                 case EmoteType.Enlightenment:
 
-                    if (player != null)
-                    {
-                        Enlightenment.HandleEnlightenmentRequest(player, false);
-                    }
-
+                    // RETIRED (XP-LANE-SPEC sec 4). The enum member is retail data and stays, but the
+                    // system it drove is gone - any retail or custom emote still carrying it now does
+                    // nothing rather than resetting the character.
                     break;
 
                 case EmoteType.MuleConversion:
@@ -577,6 +575,33 @@ namespace ACE.Server.WorldObjects.Managers
                         // are 290 of these checks across 24 weenies (every Seer and every Mastery object).
                         if ((PropertyInt64)emote.Stat == PropertyInt64.AvailableLuminance && targetObject is Player lumPlayer)
                             stat = lumPlayer.GetSpendableLuminance();
+
+                        // WaffleACE: BestSpeedRunCenti is a SEASONAL number and cannot be read raw here. It is
+                        // meaningless without SpeedChallengeSeasonId beside it - that is what its property doc
+                        // comment means by "read it only through GetCachedSpeedBest" - and this generic stat
+                        // inquiry is the only thing the Proving Grounds (Speed) reward NPC (wcid 1003002) has
+                        // to gate its three tiers on. A raw read hands last season's time to this season's
+                        // ceilings and pays for it.
+                        //
+                        // The case this closes is specifically the player who is ALREADY LOGGED IN when a
+                        // season rolls over. Seasons are a pure time-window computation over UtcNow
+                        // (SpeedSeasonManager.GetActiveSeason) and nothing notifies a live session when one
+                        // ends, so an online player's biota still carries the old pair. The other two clears
+                        // both miss them: TryFinishSpeedChallenge only re-stamps for someone who actually runs
+                        // the new season, and WorldManager's login clear only fires on a fresh enter-world. No
+                        // relog, no run, stale time, tier they never claimed - and it pays. Do not "simplify"
+                        // this back to the raw GetProperty above.
+                        if ((PropertyInt64)emote.Stat == PropertyInt64.BestSpeedRunCenti && targetObject is Player speedPlayer)
+                            stat = Player.GetSeasonAwareSpeedBest(speedPlayer.SpeedChallengeSeasonId, stat, SpeedSeasonManager.GetActiveSeason()?.Id);
+
+                        // WaffleACE: BestWaveScoreCenti (9022) superseded the whole-wave BestWaveScore (9021) and
+                        // nothing writes 9021 any more, but a character whose last gauntlet run predates that
+                        // still carries only 9021. The Proving Grounds (Wave) reward NPC (wcid 1001551) gates
+                        // its four tiers on this inquiry, so read it through the same legacy-aware getter /top
+                        // uses, or that character is told "the Mire has not counted you yet" for a score the
+                        // ladder still shows.
+                        if ((PropertyInt64)emote.Stat == PropertyInt64.BestWaveScoreCenti && targetObject is Player wavePlayer)
+                            stat = Player.GetBestWaveScoreCenti(wavePlayer);
 
                         if (stat == null && HasValidTestNoQuality(emote.Message))
                             ExecuteEmoteSet(EmoteCategory.TestNoQuality, emote.Message, targetObject, true);
@@ -1702,7 +1727,33 @@ namespace ACE.Server.WorldObjects.Managers
             //    return;
             //}
 
-            var nextDelay = ExecuteEmote(emoteSet, emote, targetObject);
+            // ExecuteEmote runs deferred on the world-simulation thread, far from whatever triggered the
+            // emote, and drives a ~150-case switch off content data. An unhandled exception here escapes to
+            // WorldManager's fatal handler, which does NOT crash the process - it STOPS the world. It would
+            // also strand IsBusy = true and leak Nested, wedging this NPC's emote system permanently even if
+            // the world survived. So one bad emote row must cost one emote chain, logged with the identity
+            // needed to find the row, and nothing more.
+            float nextDelay;
+
+            try
+            {
+                nextDelay = ExecuteEmote(emoteSet, emote, targetObject);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[EMOTE] {WorldObject.Name}.EmoteManager.DoEnqueue(): ExecuteEmote threw on 0x{WorldObject.Guid}:{WorldObject.WeenieClassId}\n-> {emoteSet.Category}: {emoteSet.Quest} to {(EmoteType)emote.Type}: {emote.Message}", ex);
+
+                // Abandon the rest of this emote set - after a mid-emote failure the chain's state is
+                // unknown - and unwind exactly as the normal end-of-set path below does, so IsBusy/Nested are
+                // restored rather than stranded. A finally is deliberately NOT used here: the success path
+                // must NOT unwind at this point, it continues into the next emote.
+                Nested--;
+
+                if (Nested == 0)
+                    IsBusy = false;
+
+                return;
+            }
 
             if (Debug)
                 Console.WriteLine($" - { nextDelay}");

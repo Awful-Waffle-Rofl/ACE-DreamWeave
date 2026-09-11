@@ -54,10 +54,20 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public readonly ReaderWriterLockSlim CharacterDatabaseLock = new ReaderWriterLockSlim();
 
-        private void SetPropertiesAtLogOut()
+        /// <summary>
+        /// internal, not private, so PlayerManager's final-logoff fallback can replay this step when
+        /// FinalizeLogout throws partway through. It stays out of the public surface: nothing outside
+        /// ACE.Server has any business stamping a logout onto a character.
+        /// </summary>
+        internal void SetPropertiesAtLogOut()
         {
-            // persist the final drained value of the offline bonus before recording the logoff time
-            // (next login accrues fresh offline time from this LogoffTimestamp)
+            // persist the final drained/accrued value of the offline bonus before recording the logoff time
+            // (next login accrues fresh offline time from this LogoffTimestamp). This ordering is load-bearing:
+            // UpdateOfflineBonus settles the online segment (active drain or idle accrual) up through "now" while
+            // offlineBonusLastCheck still reflects the prior reconcile, and only once that's settled does
+            // LogoffTimestamp advance to "now". If the order were reversed, the same span between the last
+            // reconcile and this logoff would get counted twice: once here as online time, and again at next
+            // login as offline time computed from the (now earlier) LogoffTimestamp.
             UpdateOfflineBonus();
 
             LogoffTimestamp = Time.GetUnixTime();

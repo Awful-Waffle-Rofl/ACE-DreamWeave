@@ -8,8 +8,19 @@ namespace ACE.Server.Entity
 {
     /// <summary>
     /// A multi-use salvage tool: an item that stands in for a full salvage bag but survives the use, spending
-    /// one of a finite pool of charges instead of being destroyed outright. The three Hammer items - Tourmaline,
-    /// Amethyst and Obsidian - are the only carriers today.
+    /// one of a finite pool of charges instead of being destroyed outright. FIVE Hammer items stand in for a
+    /// bag of a real material - Tiger Eye (1001918), Obsidian (1001912), Tourmaline (1001910), Amethyst
+    /// (1001911) and Serpentine (1001916) - and SalvageForge.MaterialTable is the authoritative enumeration of
+    /// them: each has a sealed vendor wrapper (1001913/1001914/1001915/1001917/1001919), and any code that
+    /// needs "the list of Hammers" must read that dictionary rather than restate the five here.
+    ///
+    /// A SIXTH weenie carries SalvageToolCharges without being one of them: 1001909 Awfully OP Mod Hammer, the
+    /// alpha-test maximizer, has capacity 100 and NO MaterialType at all. Every consumer that matches on
+    /// MaterialType therefore skips it for free, which is why it needs no exclusion anywhere - see
+    /// SalvageForge.IsEligibleHammer. It is also Attuned and Bonded, so it never reaches a vault or a trade.
+    ///
+    /// The Hollow Hammer (1002650) is NOT a carrier at all: no MaterialType, no Structure, no
+    /// SalvageToolCharges. It is the crafting tool used to forge one of the five.
     ///
     /// THE CHARGE COUNT LIVES ON PropertyInt.Structure, and MaxStructure is the tool's capacity. That is the
     /// whole reason the split is shaped this way: Structure/MaxStructure is what the CLIENT draws its own green

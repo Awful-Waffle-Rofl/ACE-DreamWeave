@@ -43,7 +43,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "projectiles matching the damage type of the swing, radiating outward in every " +
                           "direction - roughly one for each enemy around you.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 
@@ -142,7 +142,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = 0.0,
                 Gear = gear,
                 Effective = skill + gear,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc",
                 Per = null,
                 CapNote = null,

@@ -88,6 +88,26 @@ namespace ACE.Server.Tests
             Assert.AreEqual(long.MaxValue, Range(0, 500));
         }
 
+        /// <summary>
+        /// Pins the cumulative figures that StageTestCommands.MaxLuminancePerGrant is documented against.
+        /// That cap is sized as "one grant buys the first 40 points", and its doc comment quotes these
+        /// numbers to justify the size; if the curve is retuned the cap still re-derives correctly, but the
+        /// comment goes stale silently - this is what catches that.
+        /// </summary>
+        [TestMethod]
+        public void CumulativeCostsQuotedByTheMyLumGrantCapAreCorrect()
+        {
+            Assert.AreEqual(1_299_815_225L, Range(0, 20), "cumulative cost of the first 20 points");
+            Assert.AreEqual(72_751_548_490_990L, Range(0, 40), "cumulative cost of the first 40 points");
+            Assert.AreEqual(54_563_438_373_361L, Cost(41), "the 41st point on its own");
+
+            // the point of the resize: the old flat 1B cap did not even reach point 20
+            Assert.IsTrue(Range(0, 20) > 1_000_000_000L);
+
+            // and the resized cap stays orders of magnitude clear of the 64-bit ceiling
+            Assert.IsTrue(Range(0, 40) < long.MaxValue / 1000);
+        }
+
         private static void AssertWithin(double expected, double actual, double relativeTolerance)
         {
             var tolerance = System.Math.Abs(expected) * relativeTolerance;

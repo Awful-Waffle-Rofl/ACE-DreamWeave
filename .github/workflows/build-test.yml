@@ -1,10 +1,31 @@
 name: build and test
 
 on:
+  # Every push to master builds, unfiltered: the stage and prod image deploy gates read this
+  # job's conclusion on the SHA they deploy and fail on "no run found", so master must always
+  # carry a result.
   push:
     branches:
       - 'master'
+  # Pull requests skip the build when they touch nothing the build can see. Content units, the
+  # prod manifest, docs and markdown are applied by tools/apply-content.sh or read by people,
+  # never compiled; content-lint.yml covers Content/. A PR mixing code and content still builds.
+  # The one thing this defers: a handful of tests walk up to Content/ and could fail on a
+  # content-only change - they now surface on the master push after merge instead of on the PR.
   pull_request:
+    paths-ignore:
+      - 'Content/**'
+      - 'Docs/**'
+      - '**.md'
+
+concurrency:
+  # One in-flight run per pull request: pushing a fixup cancels the superseded run instead of
+  # queueing behind it. Master pushes are deliberately NEVER cancelled - the stage and prod
+  # deploy gates read this job's conclusion on the SHA they deploy (deploy-prod.yml hard-fails
+  # with no bypass), and a cancelled run fails that gate exactly as an absent one does - the
+  # gate tests `conclusion = success`, and "cancelled" is not success.
+  group: build-test-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test:
@@ -24,6 +45,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      # The image Dockerfile copies each project's .csproj as its own layer and then restores the
+      # whole solution, so a project added to Source/ACE.sln without a matching COPY line fails
+      # `dotnet restore` inside the image build - and only there, at deploy time, long after this
+      # workflow went green. That has broken the image four times (ACE.Content.Tools +
+      # ACE.Database.LoadTest, ACE.Dashboard, ACE.Database.LoadTest.Tests, ACE.Content.Tools.Tests).
+      # This step moves the failure onto the PR that causes it. The reverse direction (a COPY line
+      # whose directory is gone, which breaks the COPY itself) is only a warning, deliberately:
+      # this workflow and the Dockerfile are both published to the public ACE-DreamWeave mirror
+      # (tools/publish/public-allowlist.txt), and that mirror strips the ACE.Content.Tools* project
+      # family from Source/ACE.sln and omits its directories while copying the Dockerfile verbatim,
+      # so a hard failure there would break the mirror's CI on every push.
+      - name: Dockerfile covers every ACE.sln project
+        run: |
+          rc=0
+          sln_dirs=$(grep -oE '[^"]+\.csproj' Source/ACE.sln | tr -d '\r' | sed 's#\\.*##' | sort -u)
+          copy_dirs=$(grep -oE '^COPY \./Source/[^/]+/\*\.csproj' Dockerfile | sed 's#^COPY \./Source/##; s#/\*\.csproj$##' | sort -u)
+          for d in $sln_dirs; do
+            if ! printf '%s\n' "$copy_dirs" | grep -qxF "$d"; then
+              echo "::error file=Dockerfile::Source/ACE.sln contains $d but Dockerfile has no 'COPY ./Source/$d/*.csproj' line - the image build will fail at 'dotnet restore'."
+              rc=1
+            fi
+          done
+          for d in $copy_dirs; do
+            if [ ! -d "Source/$d" ]; then
+              echo "::warning file=Dockerfile::Dockerfile copies Source/$d/*.csproj but that directory does not exist here - an image build from this checkout would fail at that COPY."
+            fi
+          done
+          if [ "$rc" -eq 0 ]; then echo "Dockerfile COPY list matches Source/ACE.sln ($(printf '%s\n' "$sln_dirs" | wc -l) projects)."; fi
+          exit $rc
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
@@ -72,12 +122,26 @@ jobs:
       # Config.js.example fallback (root/no password/127.0.0.1:3306) that TestEnvironment copies
       # in when no real Config.js exists. Tests that need client .dat files still skip themselves
       # (Inconclusive) - that's a separate, unrelated dependency this job doesn't provide.
+      # --no-build is what keeps the whole solution from being compiled TWICE. `dotnet build` on
+      # the .sln above uses the solution's own configuration mapping, which sends the AnyCPU
+      # projects to bin/Release; `dotnet test` on a .csproj instead applies -p:Platform=x64 as a
+      # global property down the whole project-to-project graph, sending those same projects to
+      # bin/x64/Release. That moves ACE.Server's inputs, so it and everything above it rebuilt
+      # inside the first test step - 54s of a 4:54 run, against 15s of actual test execution.
+      # The sln build already emits every TEST project to bin/x64/Release/net10.0, which is
+      # exactly where --no-build -p:Platform=x64 looks, so nothing is missing. Keep -p:Platform=x64
+      # on these lines: without it --no-build looks in bin/Release/net10.0 and either errors or
+      # (locally) runs a stale AnyCPU assembly - see CLAUDE.md's Test section.
       - name: Test ACE.Server.Tests
-        run: dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+        run: dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+      # ACE.Content.Tools.Tests is excluded from the public ACE-DreamWeave publish alongside ACE.Content.Tools, so no-op if the project is absent
+      - name: Test ACE.Content.Tools.Tests
+        if: hashFiles('Source/ACE.Content.Tools.Tests/ACE.Content.Tools.Tests.csproj') != ''
+        run: dotnet test Source/ACE.Content.Tools.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
       - name: Test ACE.Database.Tests
-        run: dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+        run: dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
       - name: Test ACE.DatLoader.Tests
-        run: dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+        run: dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
       # pure comparison logic for the benchmark harness - no MySQL, no dat files, nothing to skip
       - name: Test ACE.Database.LoadTest.Tests
-        run: dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --test-adapter-path:. --settings Source/test.runsettings
+        run: dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings

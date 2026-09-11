@@ -47,8 +47,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your landed hits have a 10/15/20% chance (by rank) to strip one of the target's " +
                           "beneficial enchantments. Higher Arcane Lore increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.ArcaneLore,
         };
 
         /// <summary>
@@ -190,7 +191,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = total,
-                Unit = "pp",
+                Unit = "%",
                 Label = "dispel",
                 Per = null,
                 CapNote = capBit ? "affinity cap" : null,

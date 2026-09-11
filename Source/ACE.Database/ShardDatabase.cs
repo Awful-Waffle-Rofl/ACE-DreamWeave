@@ -22,7 +22,9 @@ using ACE.Entity.Enum.Properties;
 
 namespace ACE.Database
 {
-    public class ShardDatabase
+    // partial so the Mule Vendor vault DAO can live in its own file
+    // (ShardDatabase_AccountVault.cs) instead of growing this one further.
+    public partial class ShardDatabase
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -805,6 +807,48 @@ namespace ACE.Database
             return RemoveBiotaBatch(idList).All(r => r);
         }
 
+        /// <summary>
+        /// Permanently deletes a character row. Nine child tables cascade from character(id) through
+        /// real ON DELETE CASCADE foreign keys, so InnoDB removes them and EF issues only the parent
+        /// delete: the eight character_properties_* tables (contract_registry, fill_comp_book,
+        /// friend_list, quest_registry, shortcut_bar, spell_bar, squelch, title_book), plus
+        /// biota_properties_allegiance via FK_allegiance_character_Id - whose name suggests it belongs
+        /// to the biota family when its cascading parent is actually character.
+        ///
+        /// This is NOT the normal deletion path. In-game character deletion is a soft delete that
+        /// sets is_Deleted and delete_Time and leaves the row in place. This method is for callers
+        /// that own the guid outright and are reusing it, such as tester roster seeding.
+        ///
+        /// Note that character has no foreign key to biota, so this does not remove the player's
+        /// biota. Callers wanting both must also call RemoveBiota.
+        /// </summary>
+        public virtual bool RemoveCharacter(uint id)
+        {
+            using (var context = new ShardDbContext())
+            {
+                try
+                {
+                    var strategy = context.Database.CreateExecutionStrategy();
+
+                    strategy.Execute(() =>
+                    {
+                        using (var transaction = context.Database.BeginTransaction())
+                        {
+                            context.Character.Where(r => r.Id == id).ExecuteDelete();
+                            transaction.Commit();
+                        }
+                    });
+
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DATABASE] RemoveCharacter 0x{id:X8} failed: {ex.GetFullMessage()}");
+                    return false;
+                }
+            }
+        }
+
 
         public PossessedBiotas GetPossessedBiotasInParallel(uint id)
         {
@@ -1075,14 +1119,27 @@ namespace ACE.Database
             return result;
         }
 
+        /// <summary>
+        /// One character row, or null. Fix round 2, F5: the context is DISPOSED, unlike
+        /// <see cref="GetCharacterStubByName"/> and <see cref="GetCharacter"/> above it, which
+        /// deliberately keep theirs alive - GetCharacter registers its context in
+        /// <see cref="CharacterContexts"/> so SaveCharacter can reuse it, and this method does not.
+        /// Leaking one connection per call mattered once /mule &lt;name&gt; turned out to reach here for
+        /// every valid name typed, with no throttle in front of it.
+        ///
+        /// Disposing is safe because every caller reads SCALAR columns off the returned entity and
+        /// none of them saves it or walks a navigation property: OfflinePlayer's constructor takes
+        /// AccountId, and its IsDeleted / IsPendingDeletion take IsDeleted and DeleteTime.
+        /// AccountVaultManager.TryResolveCharacter takes AccountId. Those are all materialized by the
+        /// query itself, so nothing needs the context afterwards.
+        /// </summary>
         public Character GetCharacterStubByGuid(uint guid)
         {
-            var context = new ShardDbContext();
-
-            var result = context.Character
-                .FirstOrDefault(r => r.Id == guid);
-
-            return result;
+            using (var context = new ShardDbContext())
+            {
+                return context.Character
+                    .FirstOrDefault(r => r.Id == guid);
+            }
         }
 
         public bool SaveCharacter(Character character, ReaderWriterLockSlim rwLock)
@@ -1306,6 +1363,179 @@ namespace ACE.Database
             finally
             {
                 rwLock.ExitReadLock();
+            }
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // Proving Grounds: Speed - `character_speed_run`
+        //
+        // Plain (non-virtual) methods, and deliberately NOT mirrored on ShardDatabaseWithCaching:
+        // this table has nothing to do with the biota cache.
+        // ---------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Appends one completed run to `character_speed_run`, the RECORD OF TRUTH for the speed
+        /// board (DESIGN section 3.5). Append-only: rows are never updated and never deleted by
+        /// gameplay.
+        /// <para/>
+        /// No explicit transaction. A bare SaveChanges() is its own implicit transaction and is
+        /// therefore unaffected by the EnableRetryOnFailure resiliency wrapper ShardDbContext turns
+        /// on in OnConfiguring; a BeginTransaction() here would throw outright, because
+        /// MySqlRetryingExecutionStrategy refuses a user-initiated transaction.
+        /// </summary>
+        /// <returns>
+        /// false when the insert failed. The caller logs that loudly: the in-memory board cache is
+        /// updated synchronously on the world thread ahead of this write, so a failure here leaves
+        /// the cache ahead of the table until the next boot rebuilds it from the table.
+        /// </returns>
+        public bool AddSpeedRun(CharacterSpeedRun row)
+        {
+            if (row == null)
+            {
+                log.Error("[DATABASE] AddSpeedRun called with a null row.");
+                return false;
+            }
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    context.CharacterSpeedRun.Add(row);
+                    context.SaveChanges();
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DATABASE] AddSpeedRun failed for character 0x{row.CharacterId:X8}:{row.CharacterName}, season {row.SeasonId}, centiseconds {row.Centiseconds}, with exception: {ex.GetFullMessage()}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Every recorded speed run, every season. Read once at boot by SpeedBoardManager to build
+        /// the in-memory board cache; never on a hot path.
+        /// </summary>
+        public List<CharacterSpeedRun> GetAllSpeedRuns()
+        {
+            using (var context = new ShardDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.CharacterSpeedRun.ToList();
+            }
+        }
+
+        /// <summary>
+        /// Every stored facet row for one character. A slot with no row has never been visited; the
+        /// fresh build is generated on first switch, so a missing row is meaningful and must not be
+        /// backfilled here.
+        /// </summary>
+        public List<CharacterFacet> GetCharacterFacets(uint characterId)
+        {
+            using (var context = new ShardDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.CharacterFacet.Where(r => r.CharacterId == characterId).ToList();
+            }
+        }
+
+        /// <summary>
+        /// Inserts or replaces one facet row. A bare SaveChanges is its own implicit transaction and
+        /// is therefore unaffected by the EnableRetryOnFailure resiliency wrapper ShardDbContext turns
+        /// on in OnConfiguring; a BeginTransaction() here would throw outright, because
+        /// MySqlRetryingExecutionStrategy refuses a user-initiated transaction.
+        /// </summary>
+        /// <returns>
+        /// false when the write failed. The caller logs that loudly: the live Player has already been
+        /// mutated by the time this runs, so a failure leaves memory ahead of the table until the next
+        /// successful save.
+        /// </returns>
+        public bool SaveCharacterFacet(CharacterFacet row)
+        {
+            if (row == null)
+            {
+                log.Error("[DATABASE] SaveCharacterFacet called with a null row.");
+                return false;
+            }
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    var existing = context.CharacterFacet
+                        .FirstOrDefault(r => r.CharacterId == row.CharacterId && r.Slot == row.Slot);
+
+                    if (existing == null)
+                    {
+                        context.CharacterFacet.Add(row);
+                    }
+                    else
+                    {
+                        existing.Name = row.Name;
+                        existing.SkillsJson = row.SkillsJson;
+                        existing.AbilitiesJson = row.AbilitiesJson;
+                        existing.EquipJson = row.EquipJson;
+
+                        // EVERY column has to be copied here, not just the ones that look interesting.
+                        // This branch is field-by-field, so a column added to CharacterFacet and omitted
+                        // from this list persists on the INSERT path and then silently never updates
+                        // again - the row keeps whatever value it was first created with, forever, with
+                        // no error anywhere. ACE.Server.Tests has no database and never reaches
+                        // SaveChanges, so nothing in the suite can catch that; the only guard is this
+                        // comment plus CharacterFacetSchemaTests' source-shape assertion that the
+                        // assignment exists at all.
+                        existing.AttrsJson = row.AttrsJson;
+
+                        existing.UpdatedAt = row.UpdatedAt;
+                    }
+
+                    context.SaveChanges();
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DATABASE] SaveCharacterFacet failed for character 0x{row.CharacterId:X8} slot {row.Slot}, with exception: {ex.GetFullMessage()}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Every recorded run for one season. Used to rebuild a single season of the board cache
+        /// after admin tooling has written the table directly.
+        /// </summary>
+        public List<CharacterSpeedRun> GetSpeedRunsBySeason(int seasonId)
+        {
+            using (var context = new ShardDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.CharacterSpeedRun.Where(r => r.SeasonId == seasonId).ToList();
+            }
+        }
+
+        /// <summary>
+        /// Deletes every recorded run for one season and returns how many rows went. The ONLY delete
+        /// path on this table - gameplay never deletes - and it exists solely for the
+        /// /resetspeedboard admin command.
+        /// <para/>
+        /// ExecuteDelete issues a single DELETE statement, which is its own implicit transaction and
+        /// is therefore unaffected by the EnableRetryOnFailure resiliency wrapper ShardDbContext turns
+        /// on in OnConfiguring. A BeginTransaction() here would throw outright, because
+        /// MySqlRetryingExecutionStrategy refuses a user-initiated transaction.
+        /// <para/>
+        /// The caller must refresh SpeedBoardManager's cache for the season AFTER this returns: the
+        /// table is the record of truth and the cache is derived from it (DESIGN section 3.5).
+        /// </summary>
+        public int DeleteSpeedRunsBySeason(int seasonId)
+        {
+            using (var context = new ShardDbContext())
+            {
+                return context.CharacterSpeedRun.Where(r => r.SeasonId == seasonId).ExecuteDelete();
             }
         }
     }

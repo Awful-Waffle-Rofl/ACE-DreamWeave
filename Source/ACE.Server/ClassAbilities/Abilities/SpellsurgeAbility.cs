@@ -46,7 +46,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "(+10 points), decaying after 10 seconds without a proc. Sundermark's vulnerability " +
                           "proc does not build stacks.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 
@@ -113,7 +113,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = 0.0,
                 Gear = gear,
                 Effective = skill + gear,
-                Unit = "pp",
+                Unit = "%",
                 Label = "proc chance",
                 Per = "/stack",
                 CapNote = null,

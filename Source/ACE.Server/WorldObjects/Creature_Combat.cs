@@ -11,9 +11,16 @@ using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Structure;
 using ACE.Server.Physics.Animation;
+using ACE.Server.WeaponMods;
 
 namespace ACE.Server.WorldObjects
 {
+    /// <summary>
+    /// DIVERGES FROM UPSTREAM 08471633e (2026-08-17), for the first time: the weapon mods v4 catalog added the
+    /// Arcane Defender branch to <see cref="GetShieldMod"/>, and <see cref="GetAnimSpeed"/> now asks
+    /// ApplyClassAbilityAttackSpeed for the conditional (positional) attack-speed terms. See PR #493 for the
+    /// flagged maintenance cost at the next upstream merge.
+    /// </summary>
     partial class Creature
     {
         public enum DebugDamageType
@@ -525,8 +532,17 @@ namespace ACE.Server.WorldObjects
 
             // class abilities: Frenzy (stacking) + Attack Speed (constant) multiply attack speed on top of
             // the base cap, together up to their shared ceiling
+            //
+            // includeConditional: THIS is the combat site, so the positional weapon-mod term (Panic Reload)
+            // belongs here. The /abilities readouts call the one-argument overload and never see it - see
+            // Player_WeaponMods.GetWeaponModAttackSpeedMod for why a positional term must not reach them.
             if (this is Player player)
-                animSpeed = player.ApplyClassAbilityAttackSpeed(animSpeed);
+                animSpeed = player.ApplyClassAbilityAttackSpeed(animSpeed, includeConditional: true);
+            else
+                // monster combat effects: the monster half of the same ceiling, composed and clamped by
+                // monster_effect_speed_cap in Creature_MonsterEffects. No-op unless this monster's weenie
+                // authored a speed effect.
+                animSpeed = ApplyMonsterEffectAttackSpeed(animSpeed);
 
             return animSpeed;
         }
@@ -658,7 +674,42 @@ namespace ACE.Server.WorldObjects
 
             // does the player have a shield equipped?
             var shield = GetEquippedShield();
-            if (shield == null) return 1.0f;
+            if (shield == null)
+            {
+                // Arcane Defender (weapon mods v4): a caster with no shield deflects frontal blows as though
+                // the wand were one. Player-only - weapon mods are a player crafting system, and this file is
+                // Creature-level.
+                //
+                // EVERYTHING BELOW THIS BRANCH IS UNTOUCHED. A shield-carrying defender never enters here, so
+                // the equipped-shield result is byte-for-byte what it was.
+                var arcaneDefender = this is Player arcanePlayer
+                    ? arcanePlayer.GetCasterOnlyModValue(WeaponModId.ArcaneDefender)
+                    : 0.0;
+
+                if (arcaneDefender <= 0.0)
+                    return 1.0f;
+
+                // phantom weapons ignore all armor and shields
+                if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor))
+                    return 1.0f;
+
+                // is monster in front of player,
+                // within shield effectiveness area? (the same 180 degree frontal cone as a real shield)
+                var arcaneEffectiveAngle = 180.0f;
+                var arcaneAngle = GetAngle(attacker);
+                if (Math.Abs(arcaneAngle) > arcaneEffectiveAngle / 2.0f)
+                    return 1.0f;
+
+                // NO SHIELD-SKILL CAP HERE, unlike the equipped-shield path below: that cap is half the
+                // Shield skill (full when specialized), and a caster's Shield skill is untrained, so applying
+                // it would zero the row on exactly the build it exists for.
+                //
+                // THIS DOES NOT ENABLE SHIELD BLOCK OR THORNS, and cannot: both gate on
+                // GetEquippedShield() != null directly (Player_ClassAbilityCombat.cs:42 and :257-259) and
+                // neither reads GetShieldMod, so a wand-only Arcane Defender player still blocks nothing and
+                // reflects nothing.
+                return WeaponModCombat.ArcaneShieldMod(arcaneDefender, attacker.GetIgnoreShieldMod(weapon));
+            }
 
             // phantom weapons ignore all armor and shields
             if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor))

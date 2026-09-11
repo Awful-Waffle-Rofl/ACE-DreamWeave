@@ -1,5 +1,8 @@
+using System;
+
 using ACE.Common.Extensions;
 using ACE.Entity.Enum;
+using ACE.Server.Command.Handlers;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -51,6 +54,14 @@ namespace ACE.Server.Network.GameAction.Actions
 
             var tell = new GameEventTell(targetPlayer.Session, message, session.Player.GetNameWithSuffix(), session.Player.Guid.Full, targetPlayer.Guid.Full, ChatMessageType.Tell);
             targetPlayer.Session.Network.EnqueueSend(tell);
+
+            // WaffleACE: "xp" tell is the standard vtank convention for requesting a fellowship invite -
+            // honor it server-side with the same enforcement /fship join uses.
+            if (session.Player != targetPlayer && string.Equals(message.Trim(), "xp", StringComparison.OrdinalIgnoreCase)
+                && PropertyManager.GetBool("fellowship_xp_tell_invite_enabled").Item)
+            {
+                FellowshipCommands.TryJoinViaXpTell(session.Player, targetPlayer);
+            }
         }
     }
 }

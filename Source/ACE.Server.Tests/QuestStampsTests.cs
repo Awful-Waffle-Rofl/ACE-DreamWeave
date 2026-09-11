@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Server.Entity;
@@ -9,6 +12,11 @@ namespace ACE.Server.Tests
     /// (<see cref="QuestStamps"/>): internal bookkeeping registry rows must never be worth a stamp, the login
     /// backfill must count one stamp per distinct quest regardless of case, and the "next reward" lookup must
     /// return the next threshold not yet reached (an account sitting exactly on a threshold has reached it).
+    ///
+    /// Also covers the account-wide fold: the account total is the count of DISTINCT quest names stamped
+    /// anywhere on the account, derived from the union of the per-character QuestStampSeen_ ledger rows, so two
+    /// characters completing the same quest are worth one stamp to the account even though each still earns its
+    /// own per-character stamp.
     /// </summary>
     [TestClass]
     public class QuestStampsTests
@@ -65,6 +73,23 @@ namespace ACE.Server.Tests
             // and never reached master, but rows may exist on dev shards - they must never be counted
             Assert.IsFalse(QuestStamps.IsEligible("ContractAccepted_318"));
             Assert.IsFalse(QuestStamps.IsEligible("contractaccepted_318"));
+        }
+
+        /// <summary>
+        /// The Threads survey rows are a rolling counter, not a quest. Without the exclusion every
+        /// surveyed run printed "You've earned a quest stamp: DynDungeonSurveyWindow" and inflated the
+        /// account total on a timer (ruling P2-R35).
+        /// </summary>
+        [TestMethod]
+        public void IsEligible_ThreadDungeonSurveyRowsRejected()
+        {
+            Assert.IsFalse(QuestStamps.IsEligible("DynDungeonSurveyWindow"));
+            Assert.IsFalse(QuestStamps.IsEligible("DynDungeonSurveyCount"));
+            Assert.IsFalse(QuestStamps.IsEligible("DynDungeonSurveyTotal"));
+            Assert.IsFalse(QuestStamps.IsEligible("dyndungeonsurveycount_filos_doom"));
+
+            // A real quest that merely mentions a dungeon is untouched - the prefix only matches at the start.
+            Assert.IsTrue(QuestStamps.IsEligible("FilosDoomDynDungeonSurveyor"));
         }
 
         [TestMethod]
@@ -161,6 +186,144 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(0, QuestStamps.CountEligible(new string[0]));
             Assert.AreEqual(0, QuestStamps.CountEligible(null));
+        }
+
+        [TestMethod]
+        public void TryGetLedgeredQuestName_StripsThePrefix()
+        {
+            Assert.IsTrue(QuestStamps.TryGetLedgeredQuestName(QuestStamps.LedgerName("AlphaQuest"), out var questName));
+            Assert.AreEqual("AlphaQuest", questName);
+        }
+
+        [TestMethod]
+        public void TryGetLedgeredQuestName_PrefixMatchIsCaseInsensitive()
+        {
+            Assert.IsTrue(QuestStamps.TryGetLedgeredQuestName("queststampseen_AlphaQuest", out var questName));
+            Assert.AreEqual("AlphaQuest", questName);
+        }
+
+        [TestMethod]
+        public void TryGetLedgeredQuestName_RejectsNonLedgerRows()
+        {
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName("AlphaQuest", out _));
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName(QuestStamps.LedgerSeededMarker, out _));
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName("QuestStampTier1", out _));
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName(null, out _));
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName("", out _));
+        }
+
+        [TestMethod]
+        public void TryGetLedgeredQuestName_RejectsABarePrefix()
+        {
+            // "QuestStampSeen_" with nothing after it records no quest
+            Assert.IsFalse(QuestStamps.TryGetLedgeredQuestName(QuestStamps.LedgerPrefix, out _));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_LedgerRowAndBareQuestNameCollapse()
+        {
+            // one character holding the quest AND its ledger row is one stamp, not two
+            var character = new[] { "AlphaQuest", QuestStamps.LedgerName("AlphaQuest") };
+
+            Assert.AreEqual(1, QuestStamps.CountAccountStamps(new[] { character }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_SameQuestOnTwoCharactersIsOneStamp()
+        {
+            // this is the whole point of the account total: alts doing the same quest do not double-grant
+            var alpha = new[] { "AlphaQuest", QuestStamps.LedgerName("AlphaQuest") };
+            var beta = new[] { "AlphaQuest", QuestStamps.LedgerName("AlphaQuest") };
+
+            Assert.AreEqual(1, QuestStamps.CountAccountStamps(new[] { alpha, beta }));
+
+            // control: the old definition was the SUM of the per-character counts, which is what
+            // double-granted. Both characters legitimately keep their own per-character stamp.
+            Assert.AreEqual(1, QuestStamps.CountEligible(alpha));
+            Assert.AreEqual(1, QuestStamps.CountEligible(beta));
+            Assert.AreEqual(2, QuestStamps.CountEligible(alpha) + QuestStamps.CountEligible(beta));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_DistinctQuestsOnTwoCharactersBothCount()
+        {
+            var alpha = new[] { "AlphaQuest", QuestStamps.LedgerName("AlphaQuest") };
+            var beta = new[] { "BetaQuest", QuestStamps.LedgerName("BetaQuest") };
+
+            Assert.AreEqual(2, QuestStamps.CountAccountStamps(new[] { alpha, beta }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_DedupesCaseInsensitively()
+        {
+            var alpha = new[] { "AlphaQuest", QuestStamps.LedgerName("AlphaQuest") };
+            var beta = new[] { "alphaquest", QuestStamps.LedgerName("ALPHAQUEST") };
+
+            Assert.AreEqual(1, QuestStamps.CountAccountStamps(new[] { alpha, beta }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_LedgerRowsOverExcludedNamesAreNotAdmitted()
+        {
+            // a stray ledger row written over an excluded name must not slip past the exclusion by being
+            // re-admitted as the name it wraps
+            var character = new[]
+            {
+                QuestStamps.LedgerName("ClassAbility_Berserk"),
+                QuestStamps.LedgerName("QuestStampTier1"),
+                QuestStamps.LedgerName("ContractAccepted_318"),
+            };
+
+            Assert.AreEqual(0, QuestStamps.CountAccountStamps(new[] { character }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_SystemRowsContributeNothing()
+        {
+            var character = new[] { QuestStamps.LedgerSeededMarker, "QuestStampTier1", "QuestStampTier2", "QuestStampTier3", "QuestStampTier4" };
+
+            Assert.AreEqual(0, QuestStamps.CountAccountStamps(new[] { character }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_EmptyAccountIsZero()
+        {
+            Assert.AreEqual(0, QuestStamps.CountAccountStamps(new string[0][]));
+            Assert.AreEqual(0, QuestStamps.CountAccountStamps(new[] { new string[0] }));
+            Assert.AreEqual(0, QuestStamps.CountAccountStamps(null));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_ErasedQuestStillCountsFromItsLedgerRow()
+        {
+            // content erases the quest flag on completion but never the ledger row beside it, so the ledger
+            // row alone has to carry the account's memory of that quest
+            var alpha = new[] { QuestStamps.LedgerName("AlphaQuest") };
+            var beta = new[] { "BetaQuest", QuestStamps.LedgerName("BetaQuest") };
+
+            Assert.AreEqual(2, QuestStamps.CountAccountStamps(new[] { alpha, beta }));
+        }
+
+        [TestMethod]
+        public void CountAccountStamps_SkipsExcludedAndEmptyNames()
+        {
+            var character = new[] { "AlphaQuest", "ClassAbility_Berserk", "", null, "BetaQuest" };
+
+            Assert.AreEqual(2, QuestStamps.CountAccountStamps(new[] { character }));
+        }
+
+        [TestMethod]
+        public void CollectAccountStamps_AccumulatesAcrossCalls()
+        {
+            var stamped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            QuestStamps.CollectAccountStamps(new[] { "AlphaQuest" }, stamped);
+            QuestStamps.CollectAccountStamps(new[] { QuestStamps.LedgerName("alphaquest"), "BetaQuest" }, stamped);
+            QuestStamps.CollectAccountStamps(null, stamped);
+
+            Assert.AreEqual(2, stamped.Count);
+            Assert.IsTrue(stamped.Contains("ALPHAQUEST"));
+            Assert.IsTrue(stamped.Contains("betaquest"));
         }
 
         [TestMethod]

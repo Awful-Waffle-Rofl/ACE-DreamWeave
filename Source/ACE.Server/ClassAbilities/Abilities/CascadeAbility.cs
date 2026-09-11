@@ -48,7 +48,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// SINGLE RANK, BY RULING (user, 2026-08-04): "Cascade doesn't make sense with 3 tiers if the 1st is the
     /// only one that does anything. Eliminate ranks 2, 3." The design (sec 3) had given it ranks 1/2/3 at
     /// cost 3/3/3 while sec 7 registered a single rank-invariant tunable, so ranks 2 and 3 were pure cost
-    /// for no effect. It now matches Spellstorm and Spellsurge: one rank at cost 5.
+    /// for no effect. It now matches Spellstorm and Spellsurge: one rank at cost 3.
     /// <see cref="CascadeChance"/> still takes the rank so an unowned caller gets 0, and so a per-rank
     /// ladder (a base/step pair, the shape EchoCastAbility already uses) stays a one-line change if the
     /// entry is ever given something for rank to buy.
@@ -65,7 +65,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "A landed proc has a 25% chance to immediately fire again at a second nearby enemy. " +
                           "The second casting cannot cascade further.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 
@@ -244,7 +244,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = 0.0,
                 Gear = gear,
                 Effective = skill + gear,
-                Unit = "pp",
+                Unit = "%",
                 Label = "chain",
                 Per = null,
                 CapNote = null,

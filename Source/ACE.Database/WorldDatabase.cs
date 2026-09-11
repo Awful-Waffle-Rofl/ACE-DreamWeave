@@ -228,6 +228,34 @@ namespace ACE.Database
             }
         }
 
+        /// <summary>
+        /// One indexed read of weenie_properties_bool; used by World Events to find WorldEventCreature-flagged
+        /// weenies without caching every weenie.
+        /// </summary>
+        public virtual List<uint> GetWeenieClassIdsWithBool(WorldDbContext context, ushort propertyType, bool value)
+        {
+            return context.WeeniePropertiesBool
+                .Where(r => r.Type == propertyType && r.Value == value)
+                .Select(r => r.ObjectId)
+                .Distinct()
+                .OrderBy(id => id)
+                .ToList();
+        }
+
+        /// <summary>
+        /// One indexed read of weenie_properties_bool; used by World Events to find WorldEventCreature-flagged
+        /// weenies without caching every weenie.
+        /// </summary>
+        public List<uint> GetWeenieClassIdsWithBool(ushort propertyType, bool value)
+        {
+            using (var context = new WorldDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return GetWeenieClassIdsWithBool(context, propertyType, value);
+            }
+        }
+
         public Dictionary<uint, string> GetAllWeenieClassNames(WorldDbContext context)
         {
             return context.Weenie
@@ -501,6 +529,22 @@ namespace ACE.Database
         }
 
         /// <summary>
+        /// Realms Phase 4: every per-(realm, landblock) content rule. The table holds one
+        /// row per stripped landblock, so it is loaded whole and cached - see
+        /// WorldDatabaseWithEntityCache.CacheAllRealmLandblockRules.
+        /// Returns an empty list when nothing is stripped anywhere.
+        /// </summary>
+        public virtual List<RealmLandblockRule> GetAllRealmLandblockRules()
+        {
+            using (var context = new WorldDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.RealmLandblockRule.ToList();
+            }
+        }
+
+        /// <summary>
         /// ACRealms port Phase 2: the realm registry, loaded once at boot by RealmManager.
         /// Returns an empty list if the realm table has no rows (base world only).
         /// </summary>
@@ -511,6 +555,20 @@ namespace ACE.Database
                 context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
 
                 return context.Realm.ToList();
+            }
+        }
+
+        /// <summary>
+        /// Proving Grounds: Speed - the season registry, read at boot by SpeedSeasonManager.
+        /// Returns an empty list if the speed_season table has no rows.
+        /// </summary>
+        public virtual List<SpeedSeason> GetAllSpeedSeasons()
+        {
+            using (var context = new WorldDbContext())
+            {
+                context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                return context.SpeedSeason.ToList();
             }
         }
 

@@ -29,10 +29,30 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///
     /// MECHANIC COMPLETE. The arithmetic (<see cref="SanguineWardMath"/>), the transient per-player ward pool
     /// and its heartbeat expiry (Player_ClassAbilityBuffs: GetSanguineWardSelfCostFraction /
-    /// GrantSanguineWard / AbsorbWithSanguineWard), the consuming half on the take-damage path
-    /// (Player_Combat.TakeDamage, absorbing BEFORE the deduction reaches Health) and the grant trigger at the
-    /// life-projectile cast site (WorldObject_Magic.HandleCastSpell_Projectile, the DamageType.Health branch)
-    /// are all in place, so <see cref="ClassAbilityDefinition.Implemented"/> is TRUE.
+    /// GrantSanguineWard / AbsorbWithSanguineWard), the consuming half on every damage path (see below) and
+    /// the grant trigger at the life-projectile cast site (WorldObject_Magic.HandleCastSpell_Projectile, the
+    /// DamageType.Health branch) are all in place, so <see cref="ClassAbilityDefinition.Implemented"/> is
+    /// TRUE.
+    ///
+    /// THE CONSUMING HALF IS FIVE CALL SITES, NOT ONE, and none of them is redundant. There is no single
+    /// choke point through which a player loses health: Player.TakeDamage covers melee, missile and
+    /// hotspots, and the four magic paths write Health straight to the vital without ever passing through
+    /// it - SpellProjectile.DamageTarget (war/void/life bolts), HandleCastSpell_Boost (Harm),
+    /// HandleCastSpell_Transfer (Drain Health) and EnchantmentManager.ApplyDamageTick (DoT ticks). Only the
+    /// first was wired until 2026-09-03, so the ward absorbed melee and missile damage but not the spell
+    /// damage a Blood Mage actually faces. Do not "simplify" the other four away.
+    ///
+    /// THE DoT CALL SITS AT THE ACCUMULATION POINT, not in Player.TakeDamageOverTime where it started. It
+    /// was moved up on 2026-09-08: ApplyDamageTick used to cap its accumulated tick total to the victim's
+    /// current Health before calling down, so a ward applied below that cap could only ever reduce a figure
+    /// already at most current Health, leaving the player strictly alive - a warded player could not be
+    /// killed by a DoT of any size. Mana Barrier had the identical exposure at the identical line and both
+    /// were fixed together. Do not move it back down.
+    ///
+    /// Every site absorbs BEFORE its health write and after any cloak damage proc it has, replaces the
+    /// damage with what the ward returns, and reports the REDUCED number - see AbsorbWithSanguineWard for
+    /// the full caller contract, including why it is called unconditionally (no attacker filter, no
+    /// class_abilities_enabled gate) and how that differs from Mana Barrier's after-the-write refund.
     ///
     /// THE CAST SITE CLAMPS THE DAMAGE BASIS to the caster's health before the deduction. That clamp is not
     /// incidental: before payment and basis were decoupled the basis WAS the health actually removed, and
@@ -41,8 +61,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// against health that never left the pool.
     ///
     /// IPassiveStatAbility, like every other Blood Mage entry: the ward is read directly off the player at
-    /// two computation sites (the cast site for the self-cost and the grant, Player_Combat.TakeDamage for the
-    /// absorb), never dispatched from a combat event, so it hooks no interface. Without the marker the
+    /// its computation sites (the cast site for the self-cost and the grant, and the five damage sites above
+    /// for the absorb), never dispatched from a combat event, so it hooks no interface. That is also why
+    /// widening its coverage meant editing five call sites by hand rather than registering one more handler
+    /// on the incoming-damage hook. Without the marker the
     /// registry's "an Implemented ability must hook something" invariant fails - which is exactly what it did
     /// the moment Implemented flipped to true.
     /// </summary>

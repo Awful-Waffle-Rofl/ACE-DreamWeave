@@ -223,6 +223,50 @@ namespace ACE.Server.WorldObjects
         private int slowUpdateObjectPhysicsHits;
 
         /// <summary>
+        /// The creature branch's "should this object run a physics update this frame" rule, extracted pure so
+        /// it can be unit tested without a live Creature (TECH-DESIGN D6).
+        ///
+        /// The first three terms are the engine's own rule, unchanged: monsters normally drive their own
+        /// movement from Monster_Tick, so a physics update here is only wanted while an animation is playing
+        /// on something that is not an awake monster, while dying, or during the first frame of spawning.
+        ///
+        /// <paramref name="skyDrop"/> (WaffleACE, WP-17) forces it true, and that override is the whole trick
+        /// of the sky-drop spike. Without it a dropped creature stops ticking physics after its first frame
+        /// and hangs in the air: asleep it fails the animation term, and awake it fails it too.
+        /// </summary>
+        public static bool ShouldRunCreaturePhysics(bool isAnimating, bool isMonster, bool isAwake, bool isDying,
+            int initialUpdates, bool skyDrop)
+        {
+            return isAnimating && (!isMonster || !isAwake) || isDying || initialUpdates <= 1 || skyDrop;
+        }
+
+        /// <summary>
+        /// Whether a sky-dropping creature's fall is over (WP-17, D6 - pure): it is standing on walkable
+        /// ground, or its deadline has passed and it is force-settled instead. Callers read
+        /// <paramref name="onWalkable"/> straight off PhysicsObj.TransientState rather than using
+        /// PhysicsObj.IsGrounded, which also requires a zero cached velocity and so can flicker on landing.
+        /// </summary>
+        public static bool SkyDropSettled(bool onWalkable, double now, double deadline)
+        {
+            return onWalkable || now >= deadline;
+        }
+
+        /// <summary>
+        /// What to do when a sky-dropping creature is found with its physics INACTIVE (WP-17, D6 - pure).
+        /// True means "still in the air, re-arm the physics and keep falling"; false means the creature is
+        /// on walkable ground, i.e. the fall is over and the caller should land it.
+        ///
+        /// This exists because TransientStateFlags.Active is not a reliable proxy for "still falling": an
+        /// object that is not moving under its own power can have it cleared by several physics paths, and
+        /// a sky drop must not depend on it. Composes with <see cref="SkyDropSettled"/> - inactive plus
+        /// onWalkable is exactly the settled case.
+        /// </summary>
+        public static bool SkyDropShouldReactivate(bool physicsActive, bool onWalkable)
+        {
+            return !physicsActive && !onWalkable;
+        }
+
+        /// <summary>
         /// Handles calling the physics engine for non-player objects
         /// </summary>
         public virtual bool UpdateObjectPhysics()
@@ -232,11 +276,35 @@ namespace ACE.Server.WorldObjects
             // TODO: We should exclude objects that never tick physics (Monsters)
             // TODO: Perhaps for objects that have a throttle (Creatures), we use a list and only iterate through the pending creatures
 
-            if (PhysicsObj == null || !PhysicsObj.is_active())
+            if (PhysicsObj == null)
                 return false;
+
+            if (!PhysicsObj.is_active())
+            {
+                // World events sky-drop (WaffleACE, WP-17). A dropping creature must NEVER be skipped here:
+                // the fall depends on this method running, and more than one physics path clears
+                // TransientStateFlags.Active on an object that is not moving under its own power. Before
+                // WP-17 that early return was harmless (an inactive object has nothing to simulate); for a
+                // creature mid-fall it is terminal, because nothing else would ever clear WorldEventSkyDrop,
+                // Monster_Tick would hold its attacks forever, and the deadline branch below could never be
+                // reached to log or to force a landing.
+                //
+                // Inactive ON walkable ground can only mean the fall is already over, so that is a landing.
+                // Inactive in the AIR is re-armed with the engine's own set_active
+                // (Physics/PhysicsObj.cs:3455) and the drop carries on.
+                if (this is Creature inactiveDrop && inactiveDrop.WorldEventSkyDrop)
+                    return inactiveDrop.HandleSkyDropPhysicsInactive();
+
+                return false;
+            }
 
             bool isDying = false;
             bool cachedVelocityFix = false;
+
+            // World events sky-drop (WaffleACE, WP-17): non-null only while THIS object is a creature falling
+            // in from a world-event sky spawn. Held out here so the landed check below, which runs after
+            // update_object, can reach it - the pattern variable above is scoped to its own branch.
+            Creature skyDropCreature = null;
 
             if (this is Creature creature)
             {
@@ -249,13 +317,20 @@ namespace ACE.Server.WorldObjects
                 // except during the first frame of spawning, idle emotes, and dying
                 isDying = creature.IsDead;
 
+                if (creature.WorldEventSkyDrop)
+                    skyDropCreature = creature;
+
                 // determine if updates should be run for object
-                var runUpdate = PhysicsObj.IsAnimating && (!creature.IsMonster || !creature.IsAwake) || isDying || PhysicsObj.InitialUpdates <= 1;
+                var runUpdate = ShouldRunCreaturePhysics(PhysicsObj.IsAnimating, creature.IsMonster, creature.IsAwake,
+                    isDying, PhysicsObj.InitialUpdates, creature.WorldEventSkyDrop);
 
                 if (!runUpdate)
                     return false;
 
-                if (creature.IsMonster && !creature.IsAwake)
+                // WP-17: NOT while dropping. This exists to stop an idle monster's cached velocity from
+                // drifting, but zeroing it mid-fall would make PhysicsObj.IsGrounded (OnWalkable AND
+                // CachedVelocity == 0) read true in the air.
+                if (creature.IsMonster && !creature.IsAwake && !creature.WorldEventSkyDrop)
                     cachedVelocityFix = true;
             }
             else
@@ -332,6 +407,21 @@ namespace ACE.Server.WorldObjects
 
                 /*if (PhysicsObj.IsGrounded)
                     SendUpdatePosition();*/
+
+                // World events sky-drop (WaffleACE, WP-17): hand the creature back to the ordinary monster
+                // tick the moment it is standing on walkable ground, or when its deadline runs out.
+                //
+                // OnWalkable is read directly rather than through PhysicsObj.IsGrounded, whose extra
+                // "CachedVelocity == 0" clause can flicker between frames of a landing.
+                if (skyDropCreature != null)
+                {
+                    var onWalkable = (PhysicsObj.TransientState & TransientStateFlags.OnWalkable) != 0;
+
+                    skyDropCreature.LogSkyDropProgress();
+
+                    if (SkyDropSettled(onWalkable, PhysicsTimer.CurrentTime, skyDropCreature.WorldEventSkyDropDeadline))
+                        skyDropCreature.OnSkyDropLanded(!onWalkable, onWalkable ? "walkable" : "deadline");
+                }
 
                 //var dist = Vector3.Distance(ProjectileTarget.Location.Pos, newPos);
                 //Console.WriteLine("Dist: " + dist);

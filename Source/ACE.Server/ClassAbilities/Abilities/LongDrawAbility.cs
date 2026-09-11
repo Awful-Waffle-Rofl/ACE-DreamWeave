@@ -25,7 +25,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your missile damage grows with distance to the target: no bonus up close, up to " +
                           "+10% per rank at long range.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

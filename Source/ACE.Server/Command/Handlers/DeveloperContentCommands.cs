@@ -1077,6 +1077,7 @@ namespace ACE.Server.Command.Handlers.Processors
             // clear this spell out of the cache (and everything else)
             DatabaseManager.World.ClearSpellCache();
             WorldObject.ClearSpellCache();
+            MonsterSpellShapeCache.Clear();
 
             // load spell from db
             var spell = DatabaseManager.World.GetCachedSpell(spellId);
@@ -1229,6 +1230,8 @@ namespace ACE.Server.Command.Handlers.Processors
         }
 
         public static LandblockInstanceWriter LandblockInstanceWriter;
+
+        public static LandblockInstanceRealmWriter LandblockInstanceRealmWriter;
 
         [CommandHandler("createinst", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, 1, "Spawns a new wcid or classname as a landblock instance", "<wcid or classname>\n\nTo create a parent/child relationship: /createinst -p <parent guid> -c <wcid or classname>\nTo automatically get the parent guid from the last appraised object: /createinst -p -c <wcid or classname>\n\nTo manually specify a start guid: /createinst <wcid or classname> <start guid>\nStart guids can be in the range 0x000-0xFFF, or they can be prefixed with 0x7<landblock id>")]
         public static void HandleCreateInst(Session session, params string[] parameters)
@@ -2167,6 +2170,15 @@ namespace ACE.Server.Command.Handlers.Processors
             ExportSQLWeenie(session, param, true);
         }
 
+        [CommandHandler("export-sql-realm", AccessLevel.Developer, CommandHandlerFlag.None, 2, "Exports a landblock's per-realm content overrides (landblock_instance_realm and landblock_instance_link_realm) to a governed SQL file", "<landblock> <realm id>")]
+        public static void HandleExportSqlRealm(Session session, params string[] parameters)
+        {
+            var landblockParam = parameters[0];
+            var realmParam = parameters[1];
+
+            ExportSQLRealmLandblock(session, landblockParam, realmParam);
+        }
+
         [CommandHandler("export-sql", AccessLevel.Developer, CommandHandlerFlag.None, 1, "Exports content from database to SQL file", "<optional type> <id>\n<optional type> - landblock, encounter, event, quest, recipe, spell, weenie (default if not specified)\n<id> - wcid or content id to export")]
         public static void HandleExportSql(Session session, params string[] parameters)
         {
@@ -2438,6 +2450,98 @@ namespace ACE.Server.Command.Handlers.Processors
             CommandHandlerHelper.WriteOutputInfo(session, $"Exported {sql_folder}{sql_filename}");
         }
 
+        public static void ExportSQLRealmLandblock(Session session, string landblockParam, string realmParam)
+        {
+            DirectoryInfo di = VerifyContentFolder(session, false);
+
+            var sep = Path.DirectorySeparatorChar;
+
+            if (!ushort.TryParse(Regex.Match(landblockParam, @"[0-9A-F]{4}", RegexOptions.IgnoreCase).Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var landblockId))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, $"{landblockParam} not a valid landblock");
+                return;
+            }
+
+            if (!ushort.TryParse(realmParam, out var realmId))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, $"{realmParam} not a valid realm id");
+                return;
+            }
+
+            var instances = DatabaseManager.World.GetRealmInstancesByLandblock(landblockId, realmId);
+            if (instances == null)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, $"Couldn't find realm content for landblock {landblockId:X4}, realm {realmId}");
+                return;
+            }
+
+            var sql_folder = $"{di.FullName}{sep}sql{sep}realms{sep}";
+
+            di = new DirectoryInfo(sql_folder);
+
+            if (!di.Exists)
+                di.Create();
+
+            var sql_filename = $"{landblockId:X4}_realm{realmId}.sql";
+
+            try
+            {
+                if (LandblockInstanceRealmWriter == null)
+                {
+                    LandblockInstanceRealmWriter = new LandblockInstanceRealmWriter();
+                    LandblockInstanceRealmWriter.WeenieNames = DatabaseManager.World.GetAllWeenieNames();
+                }
+
+                using (StreamWriter sqlFile = new StreamWriter(sql_folder + sql_filename))
+                {
+                    // Unit-header skeleton for the human author to fill in before this file is
+                    // moved into Content/realms/ - see Source/.claude/skills/weenie-generator/
+                    // references/deployment_units.md for what these fields mean, and
+                    // tools/content-lint.sh for what it enforces on landblock_instance_realm units.
+                    sqlFile.WriteLine("-- @unit: TODO/fill-in-unit-path");
+                    sqlFile.WriteLine("-- @requires-restart: no");
+                    sqlFile.WriteLine($"-- @invalidate: realms, landblock:{landblockId:X4}");
+                    sqlFile.WriteLine("-- @depends-on: realms/realm1_registry");
+                    sqlFile.WriteLine("-- @min-server: none");
+                    sqlFile.WriteLine("-- @owner: TODO-owner-slug");
+                    sqlFile.WriteLine($"-- @owns: TODO (e.g. guid:{realmId}:0x<lo>-0x<hi>, block:{realmId}:0x{landblockId:X4})");
+                    sqlFile.WriteLine();
+                    sqlFile.WriteLine("/* TODO: human-authored unit description goes here before this file is committed");
+                    sqlFile.WriteLine($" * under Content/realms/. Raw export of landblock_instance_realm / landblock_instance_link_realm");
+                    sqlFile.WriteLine($" * rows for landblock 0x{landblockId:X4}, realm {realmId}. Fill in the @owner/@owns claims above");
+                    sqlFile.WriteLine(" * and run tools/content-lint.sh before committing.");
+                    sqlFile.WriteLine(" */");
+                    sqlFile.WriteLine();
+
+                    // Check if the realm has no override rows for this landblock
+                    if (instances.Count > 0)
+                        LandblockInstanceRealmWriter.CreateSQLDELETEStatement(instances, realmId, sqlFile);
+                    else
+                    {
+                        // We'll just create a dummy list with a fake instance in our landblock so we don't anger CreateSQLDeleteStatement()
+                        CommandHandlerHelper.WriteOutputInfo(session, $"Landblock {landblockId:X4} has no realm {realmId} content overrides.");
+                        List<LandblockInstance> dummyList = new List<LandblockInstance>();
+                        LandblockInstance dummyInstance = new LandblockInstance();
+                        dummyInstance.ObjCellId = (uint)(landblockId << 16);
+                        dummyList.Add(dummyInstance);
+                        LandblockInstanceRealmWriter.CreateSQLDELETEStatement(dummyList, realmId, sqlFile);
+                    }
+                    sqlFile.WriteLine();
+
+                    if (instances.Count > 0)
+                        LandblockInstanceRealmWriter.CreateSQLINSERTStatement(instances, realmId, sqlFile);
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                CommandHandlerHelper.WriteOutputInfo(session, $"Failed to export {sql_folder}{sql_filename}");
+                return;
+            }
+
+            CommandHandlerHelper.WriteOutputInfo(session, $"Exported {sql_folder}{sql_filename}");
+        }
+
         public static void ExportSQLEncounter(Session session, string param)
         {
             DirectoryInfo di = VerifyContentFolder(session, false);
@@ -2675,6 +2779,7 @@ namespace ACE.Server.Command.Handlers.Processors
                 CommandHandlerHelper.WriteOutputInfo(session, "Clearing spell cache");
                 DatabaseManager.World.ClearSpellCache();
                 WorldObject.ClearSpellCache();
+                MonsterSpellShapeCache.Clear();
             }
 
             if (mode.HasFlag(CacheType.Weenie))

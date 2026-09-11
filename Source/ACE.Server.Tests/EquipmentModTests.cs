@@ -39,6 +39,19 @@ namespace ACE.Server.Tests
             DefaultPropertyManager.LoadDefaultProperties();
         }
 
+        /// <summary>
+        /// Class abilities an equipment-mod row may name BEFORE their handler is registered, because the id
+        /// was reserved ahead of the handler on purpose.
+        ///
+        /// EMPTIED 2026-08-17 (Phase 1, Berserker/Rogue balance pass): BreakArmorAbility is registered, so
+        /// the "every LinkedAbility is registered" assertion applies to it like every other row now. Kept as
+        /// an explicit allow-list rather than a "skip unregistered ids" rule, in case a future id needs the
+        /// same staging. The same set exists in EquipmentModHookTests.
+        /// </summary>
+        private static readonly HashSet<ClassAbilityId> PendingHandlers = new()
+        {
+        };
+
         [TestMethod]
         public void Registry_HasOneRowPerCatalogEntry()
         {
@@ -90,7 +103,8 @@ namespace ACE.Server.Tests
 
                 // the linked ability must be a real, registered class ability - a mod that names a retired or
                 // typo'd id would silently never find its compose site in the later hook phase
-                Assert.IsTrue(ClassAbilityRegistry.Abilities.ContainsKey(mod.LinkedAbility),
+                Assert.IsTrue(ClassAbilityRegistry.Abilities.ContainsKey(mod.LinkedAbility)
+                        || PendingHandlers.Contains(mod.LinkedAbility),
                     $"{mod.Id}: LinkedAbility {mod.LinkedAbility} is not a registered class ability");
 
                 // format string must actually render (a bad placeholder would throw mid-appraisal)
@@ -259,15 +273,6 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void LowTierPotency_MatchesTheTunable()
-        {
-            var unfloored = EquipmentModRegistry.Get(EquipmentModId.Deadeye);
-
-            Assert.AreEqual(0.2, PropertyManager.GetDouble("equipment_mod_lowtier_potency").Item, 1e-12, "default low-tier potency");
-            Assert.AreEqual(0.2, EquipmentModRoller.LowTierPotency(unfloored), 1e-12);
-        }
-
-        [TestMethod]
         public void PotencyScale_DefaultsToOne()
         {
             Assert.AreEqual(1.0, PropertyManager.GetDouble("equipment_mod_potency_scale").Item, 1e-12);
@@ -275,9 +280,9 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ModsAreDisabledByDefault()
+        public void ModsAreEnabledByDefault()
         {
-            Assert.IsFalse(PropertyManager.GetBool("equipment_mods_enabled").Item, "the whole layer must ship gated off");
+            Assert.IsTrue(PropertyManager.GetBool("equipment_mods_enabled").Item, "the equipment mod layer ships enabled as standard content");
         }
 
         [TestMethod]
@@ -290,9 +295,8 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.028, EquipmentModValue.Resolve(deadeye, 1.0), 1e-12);
             Assert.AreEqual(0.014, EquipmentModValue.Resolve(deadeye, 0.5), 1e-12);
 
-            // a low-tier application is a fixed 20% of max (Deadeye sits on the catalog default floor of
-            // 0.10, which is below the 0.2 tunable, so the tunable wins)
-            Assert.AreEqual(0.0056, EquipmentModValue.Resolve(deadeye, EquipmentModRoller.LowTierPotency(deadeye)), 1e-12);
+            // an arbitrary interior potency resolves linearly - 20% of max
+            Assert.AreEqual(0.0056, EquipmentModValue.Resolve(deadeye, 0.2), 1e-12);
 
             // clamped at read: contaminated rows can never exceed the registry maximum
             Assert.AreEqual(0.028, EquipmentModValue.Resolve(deadeye, 99.0), 1e-12);
@@ -457,6 +461,9 @@ namespace ACE.Server.Tests
                 EquipmentModId.ElementalRend,
                 EquipmentModId.Resonance,
                 EquipmentModId.NetherBloom,
+                // 2026-08-17 Berserker/Rogue balance pass: id 18 was standalone Blood Fury (a rank-0 melee
+                // ramp) and became machinery Break Armor (a proc-chance amplifier) when Blood Fury retired.
+                EquipmentModId.BreakArmor,
                 // 2026-08-04 class-catalog reconciliation: all 19 new rows are machinery (see the section
                 // comment in EquipmentModRegistry - every linked ability returns 0 or identity at rank 0).
                 EquipmentModId.BloodCharge,
@@ -568,22 +575,29 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void NoModRendersAZeroMagnitudeAtItsMinimumRoll()
         {
+            // COMPARES THE MAGNITUDE TEXT, NOT THE WHOLE Describe LINE, and that distinction became
+            // load-bearing on 2026-08-07 when the intensity bracket was added. A full-line comparison would
+            // now pass on the BRACKET differing ("[10%]" vs no bracket) even if both magnitudes still
+            // rendered "+0%" - which is the exact failure this test exists to catch. Rendering the magnitude
+            // through the same Format/Resolve pair Describe uses keeps the subject unchanged.
+            string Magnitude(EquipmentModDefinition mod, double potency) =>
+                mod.Format(EquipmentModValue.Resolve(mod, potency));
+
             foreach (var mod in EquipmentModRegistry.AllMods)
             {
                 var floor = EquipmentModRoller.MinPotency(mod);
 
-                var atFloor = EquipmentModDisplay.Describe(mod, floor);
-                var atZero = EquipmentModDisplay.Describe(mod, 0.0);
+                var atFloor = Magnitude(mod, floor);
+                var atZero = Magnitude(mod, 0.0);
 
                 Assert.AreNotEqual(atZero, atFloor,
                     $"{mod.Id}: the weakest legal roll renders identically to a potency of 0 ({atFloor}) - " +
                     $"raise MinPotency or widen DisplayFormat (MaxMagnitude {mod.MaxMagnitude}, DisplayScale {mod.DisplayScale})");
 
-                // the low-tier (TigerEye) application is the other value the flow can stamp, and it is never
-                // below the floor - but assert it rather than infer it
-                var atLowTier = EquipmentModDisplay.Describe(mod, EquipmentModRoller.LowTierPotency(mod));
-
-                Assert.AreNotEqual(atZero, atLowTier, $"{mod.Id}: a low-tier application renders as a dead mod ({atLowTier})");
+                // the floor is now the ONLY value that needs checking. There used to be a second stamped
+                // value - the fixed low-tier (TigerEye) potency - and it was asserted separately here; with
+                // that path removed every potency the flow can produce comes from RollPotency, which never
+                // returns below the floor, so the assertion above covers the whole reachable band.
             }
         }
 
@@ -602,11 +616,11 @@ namespace ACE.Server.Tests
             Assert.AreEqual(100.0, frenziedPace.DisplayScale, 1e-12);
             Assert.AreEqual(EquipmentModRoller.DefaultMinPotency, EquipmentModRoller.MinPotency(frenziedPace), 1e-12);
 
-            Assert.AreEqual("Frenzied Pace: +0.03% attack speed per Frenzy stack",
+            Assert.AreEqual("Frenzied Pace [10%]: +0.03% attack speed per Frenzy stack",
                 EquipmentModDisplay.Describe(frenziedPace, EquipmentModRoller.MinPotency(frenziedPace)),
                 "the weakest legal Frenzied Pace - this line is what read '+0%' before the original fix");
 
-            Assert.AreEqual("Frenzied Pace: +0.3% attack speed per Frenzy stack",
+            Assert.AreEqual("Frenzied Pace [100%]: +0.3% attack speed per Frenzy stack",
                 EquipmentModDisplay.Describe(frenziedPace, 1.0), "a perfect roll must not gain spurious trailing zeros");
 
             // control: the OLD three-decimal format is what turned a low roll into a literal 0. Reproduced
@@ -617,7 +631,7 @@ namespace ACE.Server.Tests
 
             // a legacy sub-floor row (stamped before the floor existed, potency below the current 0.10
             // minimum) must still render a number under the shipped two-decimal format
-            Assert.AreEqual("Frenzied Pace: +0.01% attack speed per Frenzy stack", EquipmentModDisplay.Describe(frenziedPace, 0.034),
+            Assert.AreEqual("Frenzied Pace [3%]: +0.01% attack speed per Frenzy stack", EquipmentModDisplay.Describe(frenziedPace, 0.034),
                 "a legacy sub-floor row must still render a number");
         }
 
@@ -680,17 +694,18 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// StackCap now covers 13 rows total: the 5 pre-existing proc-chance caps (DoubleVolley, AcidProc,
-        /// EchoCast, ElementalRend, NetherBloom) plus the 8 new proc-chance rows (Spellblade, Runeblade,
-        /// Sundermark, Surge, Spellstorm, Cascade, DispellingEdge, ShieldWall). Every declared cap is 3.0
-        /// (three perfect rolls); no other row declares one.
+        /// StackCap now covers 14 rows total: the 5 pre-existing proc-chance caps (DoubleVolley, AcidProc,
+        /// EchoCast, ElementalRend, NetherBloom), the 8 rows from the 2026-08-04 reconciliation (Spellblade,
+        /// Runeblade, Sundermark, Surge, Spellstorm, Cascade, DispellingEdge, ShieldWall), and Break Armor,
+        /// added 2026-08-17 when mod 18 was repurposed from Blood Fury into a proc-chance mod. Every declared
+        /// cap is 3.0 (three perfect rolls); no other row declares one.
         /// </summary>
         [TestMethod]
-        public void Reconciliation_StackCapCoversExactlyThirteenRowsAtThreePointZero()
+        public void Reconciliation_StackCapCoversExactlyFourteenRowsAtThreePointZero()
         {
             var capped = EquipmentModRegistry.AllMods.Where(m => m.StackCap > 0.0).ToList();
 
-            Assert.AreEqual(13, capped.Count, "5 pre-existing proc-chance caps + 8 new proc-chance caps = 13");
+            Assert.AreEqual(14, capped.Count, "5 pre-existing + 8 reconciliation + Break Armor = 14 proc-chance caps");
 
             foreach (var mod in capped)
                 Assert.AreEqual(3.0, mod.StackCap, 1e-12, $"{mod.Id}: every declared StackCap is three perfect rolls");
@@ -710,6 +725,7 @@ namespace ACE.Server.Tests
                 EquipmentModId.Cascade,
                 EquipmentModId.DispellingEdge,
                 EquipmentModId.ShieldWall,
+                EquipmentModId.BreakArmor,
             };
 
             CollectionAssert.AreEquivalent(expectedCapped, capped.Select(m => m.Id).ToList(), "the capped-row set diverged from the ratified list");

@@ -95,8 +95,17 @@ namespace ACE.Server.Entity
                         // handle special case to prevent message: Pumpkin Shield casts Web of Defense on you, refreshing Aura of Defense
                         var spellDuration = equip ? double.PositiveInfinity : spell.Duration;
 
-                        if (!equip && caster is Player player && player.AugmentationIncreasedSpellDuration > 0 && !isWeaponSpell)
-                            spellDuration *= 1.0f + player.AugmentationIncreasedSpellDuration * 0.2f;
+                        // Additive retail + Custom Dreamweave duration term, matching the two
+                        // EnchantmentManager sites so the surpass comparison is made against the same
+                        // boosted duration those sites will actually write.
+                        //
+                        // This site's OWN guards are preserved verbatim: !equip is kept, and there is
+                        // deliberately NO spell.DotDuration == 0 clause here even though both
+                        // EnchantmentManager sites carry one. That asymmetry is PRE-EXISTING and is a real
+                        // bug (for a DoT this comparison uses a boosted duration BuildEntry never writes).
+                        // It is explicitly out of scope; do not harmonize it here.
+                        if (!equip && caster is Player player && CustomAugmentations.HasSpellDurationAug(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom) && !isWeaponSpell)
+                            spellDuration *= CustomAugmentations.SpellDurationMultiplier(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom, CustomAugBroker.SpellDurationBonus);
 
                         var entryDuration = entry.Duration == -1 ? double.PositiveInfinity : entry.Duration;
 

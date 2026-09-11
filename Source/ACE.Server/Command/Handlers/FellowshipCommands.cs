@@ -1,7 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
+using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
@@ -13,7 +15,7 @@ namespace ACE.Server.Command.Handlers
 {
     /// <summary>
     /// WaffleACE: server-managed fellowship controls. The in-client fellowship panel is slow and clunky, so
-    /// these commands drive the same in-memory <see cref="Fellowship"/> model the client UI uses — every path
+    /// these commands drive the same in-memory <see cref="Fellowship"/> model the client UI uses - every path
     /// reuses the existing Player/Fellowship methods that emit the client GameEvents, so the panel stays in sync.
     /// </summary>
     public static class FellowshipCommands
@@ -23,8 +25,8 @@ namespace ACE.Server.Command.Handlers
             "<subcommand>\n" +
             "  create [name]        - create a fellowship (XP sharing always on)\n" +
             "  add [playername]     - invite a player to your fellowship\n" +
-            "  join [playername]    - join the fellowship that a player is in\n" +
-            "  addlandblock         - add every fellowship-less player on your landblock to your fellowship\n" +
+            "  join [playername]    - join the OPEN fellowship that a player is in\n" +
+            "  addlandblock         - invite every fellowship-less player on your landblock (auto-accept honoured)\n" +
             "  joinlandblock        - join the largest open fellowship on your landblock, or create one\n" +
             "  noleech [on|off]     - (leader) toggle auto-ejection of members not contributing XP\n" +
             "  quit                 - leave your fellowship\n" +
@@ -36,7 +38,7 @@ namespace ACE.Server.Command.Handlers
 
             if (parameters.Length == 0)
             {
-                Msg(session, "Usage: /fship <create|add|join|addlandblock|joinlandblock|noleech|quit|disband|list>. See /help fship.");
+                HandleStatus(player);
                 return;
             }
 
@@ -59,6 +61,35 @@ namespace ACE.Server.Command.Handlers
                     Msg(session, $"Unknown /fship subcommand: {sub}");
                     break;
             }
+        }
+
+        private const string UsageLine = "Usage: /fship <create|add|join|addlandblock|joinlandblock|noleech|quit|disband|list>";
+
+        /// <summary>
+        /// Bare /fship: a light summary of the fellowship the player is currently in, then the usage line.
+        /// Players not in a fellowship just get the usage line.
+        /// </summary>
+        private static void HandleStatus(Player player)
+        {
+            var fellowship = player.Fellowship;
+
+            if (fellowship == null)
+            {
+                Msg(player, "You are not in a fellowship.");
+                Msg(player, UsageLine);
+                return;
+            }
+
+            var members = fellowship.GetFellowshipMembers();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Fellowship: {fellowship.FellowshipName}");
+            sb.AppendLine($"  Leader: {LeaderName(fellowship, members)}");
+            sb.AppendLine($"  Members: {members.Count}/{Fellowship.MaxFellows}");
+            sb.AppendLine($"  Leech prevention: {(fellowship.LeechManagementEnabled ? "ON" : "OFF")}");
+            sb.Append(UsageLine);
+
+            Msg(player, sb.ToString());
         }
 
         private static void HandleCreate(Player player, string[] args)
@@ -153,8 +184,55 @@ namespace ACE.Server.Command.Handlers
             Msg(player, $"You have joined the fellowship \"{fellowship.FellowshipName}\".");
         }
 
+        /// <summary>
+        /// WaffleACE: per-caller last-use unix timestamp for /fship addlandblock, gating 'fellowship_addlandblock_cooldown'.
+        /// The command invites everyone unfellowed on the caller's landblock in one shot, so it is rate-limited
+        /// to stop invite spam. Guarded by <see cref="_addLandblockCooldownLock"/> since commands run on
+        /// per-player session threads.
+        /// </summary>
+        private static readonly Dictionary<uint, double> _addLandblockLastUse = new Dictionary<uint, double>();
+        private static readonly object _addLandblockCooldownLock = new object();
+
+        /// <summary>
+        /// WaffleACE: whether an online character is staff, and so must never be swept into a mass invite.
+        /// A "+Named" admin or moderator standing on a landblock to watch or moderate is not a party member,
+        /// and pulling one in silently changes the XP split for everyone actually fighting.
+        ///
+        /// Two independent tests, because either one alone leaks. <see cref="Player.IsPlussed"/> is the "+Name"
+        /// flag itself, but for Sentinel..Admin it is only stamped onto the character when
+        /// Server.Accounts.OverrideCharacterPermissions is on (WorldManager.cs:143), so on its own the rule
+        /// would hang on a config toggle; the session access level is read directly and does not. Advocates are
+        /// deliberately NOT excluded - an advocate is a player with a support flag, not staff, the same reading
+        /// <see cref="WorldEvents.WorldEventAudienceSampler.CountsTowardAudience"/> takes. A character with no
+        /// session falls back to the persisted flag alone, so an unknown access level never on its own makes
+        /// someone staff: the exclusion is for known staff, never for merely unknown.
+        /// </summary>
+        private static bool IsStaff(Player player)
+        {
+            return player.IsPlussed || (player.Session != null && player.Session.AccessLevel >= AccessLevel.Sentinel);
+        }
+
         private static void HandleAddLandblock(Player player)
         {
+            var cooldown = PropertyManager.GetLong("fellowship_addlandblock_cooldown").Item;
+            var now = Time.GetUnixTime();
+
+            lock (_addLandblockCooldownLock)
+            {
+                if (_addLandblockLastUse.TryGetValue(player.Guid.Full, out var lastUse))
+                {
+                    var remaining = lastUse + cooldown - now;
+
+                    if (remaining > 0)
+                    {
+                        Msg(player, $"You can use /fship addlandblock again in {(int)Math.Ceiling(remaining)} second(s).");
+                        return;
+                    }
+                }
+
+                _addLandblockLastUse[player.Guid.Full] = now;
+            }
+
             if (player.CurrentLandblock == null)
             {
                 Msg(player, "You are not on a landblock.");
@@ -185,7 +263,9 @@ namespace ACE.Server.Command.Handlers
                     && p.CurrentLandblock == player.CurrentLandblock
                     && p.Fellowship == null
                     && !p.IsOlthoiPlayer
+                    && !IsStaff(p)
                     && !p.GetCharacterOption(CharacterOption.IgnoreFellowshipRequests)
+                    && !p.MuleBlocked(MuleAction.JoinFellowship, notify: false)
                     && fellowship.GetLeechLockoutRemaining(p) <= 0)
                 .ToList();
 
@@ -195,22 +275,26 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            var added = 0;
-            var full = false;
+            var invited = 0;
+            var auto = 0;
 
             foreach (var candidate in candidates)
             {
-                if (fellowship.GetFellowshipMembers().Count >= Fellowship.MaxFellows)
-                {
-                    full = true;
+                if (fellowship.GetFellowshipMembers().Count + invited >= Fellowship.MaxFellows)
                     break;
-                }
 
-                fellowship.AddConfirmedMember(player, candidate, true);
-                added++;
+                // AddFellowshipMember already applies leech lockout, busy, and roster-full rules, and either
+                // auto-adds (AutomaticallyAcceptFellowshipRequests) or sends the standard accept/decline dialog.
+                fellowship.AddFellowshipMember(player, candidate);
+                invited++;
+
+                if (candidate.Fellowship == fellowship)
+                    auto++;
             }
 
-            Msg(player, $"Added {added} player(s) to your fellowship.{(full ? " Fellowship is now full; some players were skipped." : "")}");
+            var pending = invited - auto;
+
+            Msg(player, $"Invited {invited} player(s) to your fellowship ({auto} joined automatically, {pending} asked to confirm).");
         }
 
         private static void HandleJoinLandblock(Player player)
@@ -254,7 +338,7 @@ namespace ACE.Server.Command.Handlers
             player.FellowshipCreate($"{player.Name}'s Fellowship", true);
 
             if (player.Fellowship != null)
-                Msg(player, $"No open fellowship found on your landblock — created \"{player.Fellowship.FellowshipName}\".");
+                Msg(player, $"No open fellowship found on your landblock - created \"{player.Fellowship.FellowshipName}\".");
         }
 
         private static void HandleLeech(Player player, string[] args)
@@ -356,7 +440,7 @@ namespace ACE.Server.Command.Handlers
                 foreach (var x in local.OrderByDescending(x => x.Members.Count))
                 {
                     var here = x.Members.Values.Count(m => m.CurrentLandblock == landblock);
-                    sb.AppendLine($"  {x.Fellowship.FellowshipName} — leader {LeaderName(x.Fellowship, x.Members)}, {x.Members.Count}/{Fellowship.MaxFellows} member(s) ({here} here)");
+                    sb.AppendLine($"  {x.Fellowship.FellowshipName} - leader {LeaderName(x.Fellowship, x.Members)}, {x.Members.Count}/{Fellowship.MaxFellows} member(s) ({here} here)");
                 }
             }
 
@@ -364,21 +448,56 @@ namespace ACE.Server.Command.Handlers
             {
                 sb.AppendLine("-- Elsewhere --");
                 foreach (var x in elsewhere.OrderByDescending(x => x.Members.Count))
-                    sb.AppendLine($"  {x.Fellowship.FellowshipName} — leader {LeaderName(x.Fellowship, x.Members)}, {x.Members.Count}/{Fellowship.MaxFellows} member(s)");
+                    sb.AppendLine($"  {x.Fellowship.FellowshipName} - leader {LeaderName(x.Fellowship, x.Members)}, {x.Members.Count}/{Fellowship.MaxFellows} member(s)");
             }
 
             Msg(player, sb.ToString().TrimEnd());
         }
 
         /// <summary>
+        /// WaffleACE: the "xp" tell convention players use with vtank to request a fellowship invite. Sending a
+        /// tell whose body is exactly "xp" to a fellowshipped player attempts to free-join the sender into the
+        /// recipient's fellowship, through the same <see cref="TryDirectJoin"/> guards as /fship join. Called from
+        /// <see cref="Network.GameAction.Actions.GameActionTell"/> after the tell itself has already been delivered.
+        /// </summary>
+        internal static void TryJoinViaXpTell(Player sender, Player recipient)
+        {
+            if (sender.Fellowship != null)
+            {
+                Msg(sender, "You are already in a fellowship. Use /fship quit first.");
+                return;
+            }
+
+            if (sender.IsOlthoiPlayer)
+            {
+                Msg(sender, "An Olthoi cannot join a fellowship.");
+                return;
+            }
+
+            var fellowship = recipient.Fellowship;
+
+            if (fellowship == null)
+                return;
+
+            if (TryDirectJoin(sender, fellowship))
+                Msg(sender, $"You have joined the fellowship \"{fellowship.FellowshipName}\".");
+        }
+
+        /// <summary>
         /// Free-join a fellowship directly (no accept/decline prompt), applying the same guards the client
         /// invite path enforces. Returns false and messages the player on failure.
         /// </summary>
-        private static bool TryDirectJoin(Player player, Fellowship fellowship)
+        internal static bool TryDirectJoin(Player player, Fellowship fellowship)
         {
             if (fellowship.IsLocked)
             {
                 Msg(player, "That fellowship is locked and cannot be joined.");
+                return false;
+            }
+
+            if (!fellowship.Open)
+            {
+                Msg(player, "That fellowship is closed. Ask its leader for an invite, or use /fship list to find an open one.");
                 return false;
             }
 

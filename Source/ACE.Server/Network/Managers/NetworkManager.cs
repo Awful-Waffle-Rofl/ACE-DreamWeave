@@ -42,7 +42,7 @@ namespace ACE.Server.Network.Managers
         /// </summary>
         public static readonly ActionQueue InboundMessageQueue = new ActionQueue();
 
-        public static void ProcessPacket(ConnectionListener connectionListener, ClientPacket packet, IPEndPoint endPoint)
+        public static void ProcessPacket(ConnectionListener connectionListener, ClientPacket packet, IPEndPoint endPoint, int dataSize)
         {
             if (connectionListener.ListenerEndpoint.Port == ConfigManager.Config.Server.Network.Port + 1)
             {
@@ -129,7 +129,7 @@ namespace ACE.Server.Network.Managers
                                     log.Warn($"Bad handshake from {endPoint}, aborting session.");
                                 }
 
-                                session.ProcessPacket(packet);
+                                session.ProcessPacket(packet, dataSize);
                             }
                             else
                             {
@@ -150,7 +150,7 @@ namespace ACE.Server.Network.Managers
                     if (session != null)
                     {
                         if (session.EndPointC2S.Equals(endPoint))
-                            session.ProcessPacket(packet);
+                            session.ProcessPacket(packet, dataSize);
                         else
                             log.DebugFormat("Session for Id {0} has IP {1} but packet has IP {2}", packet.Header.Id, session.EndPointC2S, endPoint);
                     }

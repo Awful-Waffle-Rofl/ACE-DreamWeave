@@ -29,7 +29,20 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Flag indicates if a corpse is from a monster or a player
         /// </summary>
+        /// <remarks>
+        /// This is a plain runtime field, not a persisted property: it is set once at
+        /// Creature_Death.CreateCorpse() and is always FALSE again on a corpse restored from the shard
+        /// database. Code that runs on the reload path must use <see cref="WorldObject.Level"/> instead
+        /// (see <see cref="RecalculateDecayTime"/>, which is the only thing that ever sets it, and only
+        /// for a player corpse).
+        /// </remarks>
         public bool IsMonster = false;
+
+        /// <summary>
+        /// The configured maximum wall-clock lifetime of a player corpse, in seconds.
+        /// A value of 0 or less disables the cap.
+        /// </summary>
+        public static long MaxLifetimeSeconds => PropertyManager.GetLong("player_corpse_max_lifetime_seconds").Item;
 
         /// <summary>
         /// A new biota be created taking all of its values from weenie.
@@ -65,13 +78,65 @@ namespace ACE.Server.WorldObjects
 
         protected override void OnInitialInventoryLoadCompleted()
         {
-            if (Level.HasValue)
-            {
-                var dtTimeToRot = DateTime.UtcNow.AddSeconds(TimeToRot ?? 0);
-                var tsDecay = dtTimeToRot - DateTime.UtcNow;
+            // Level is only ever set on a PLAYER corpse (RecalculateDecayTime), so it is this class's
+            // established discriminator between player and monster corpses on the reload path, where the
+            // ephemeral IsMonster field has been reset to false by the database round trip.
+            if (!Level.HasValue)
+                return;
 
-                log.Info($"[CORPSE] {Name} (0x{Guid}) Reloaded from Database: Corpse Level: {Level ?? 0} | InventoryLoaded: {InventoryLoaded} | Inventory.Count: {Inventory.Count} | TimeToRot: {TimeToRot} | CreationTimestamp: {CreationTimestamp} ({Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}) | Corpse should not decay before: {dtTimeToRot.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}, {tsDecay.ToString("%d")} day(s), {tsDecay.ToString("%h")} hours, {tsDecay.ToString("%m")} minutes, and {tsDecay.ToString("%s")} seconds from now.");
+            var dtTimeToRot = DateTime.UtcNow.AddSeconds(TimeToRot ?? 0);
+            var tsDecay = dtTimeToRot - DateTime.UtcNow;
+
+            log.Info($"[CORPSE] {Name} (0x{Guid}) Reloaded from Database: Corpse Level: {Level ?? 0} | InventoryLoaded: {InventoryLoaded} | Inventory.Count: {Inventory.Count} | TimeToRot: {TimeToRot} | CreationTimestamp: {CreationTimestamp} ({Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}) | Corpse should not decay before: {dtTimeToRot.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}, {tsDecay.ToString("%d")} day(s), {tsDecay.ToString("%h")} hours, {tsDecay.ToString("%m")} minutes, and {tsDecay.ToString("%s")} seconds from now.");
+
+            // Enforce the absolute wall-clock deadline. See HasExceededMaxLifetime() for why the TimeToRot
+            // countdown on its own cannot bound a corpse's lifetime, and why this check is NOT redundant.
+            var maxLifetimeSeconds = MaxLifetimeSeconds;
+
+            if (HasExceededMaxLifetime(CreationTimestamp, Time.GetUnixTime(), maxLifetimeSeconds))
+            {
+                log.Info($"[CORPSE] {Name} (0x{Guid}) has outlived the maximum player corpse lifetime of {maxLifetimeSeconds} seconds (created {Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}); forcing it to rot.");
+
+                // Hand the corpse to the normal decay path instead of tearing it down here. A TimeToRot of 0
+                // is the existing "instant rot" value, so the next WorldObject.Decay() tick skips the
+                // countdown branch entirely and falls straight through to the one destruction path, which
+                // pukes the corpse's contents onto the landblock before destroying it. Decaying inline is
+                // not an option: this runs from the container load action, where CurrentLandblock and
+                // Location may not be set yet, and that path dereferences both.
+                TimeToRot = 0;
             }
+        }
+
+        /// <summary>
+        /// Returns TRUE if a corpse created at <paramref name="creationTimestamp"/> (whole seconds since the
+        /// UTC unix epoch, as written by the WorldObject weenie constructor) has already outlived
+        /// <paramref name="maxLifetimeSeconds"/> as of <paramref name="nowUnixTime"/>.
+        /// A <paramref name="maxLifetimeSeconds"/> of 0 or less disables the cap, and a corpse with no
+        /// creation timestamp cannot be aged, so both report as not expired.
+        /// </summary>
+        /// <remarks>
+        /// WHY THIS EXISTS, AND WHY IT IS NOT REDUNDANT WITH TimeToRot - do not delete it as duplicated
+        /// bookkeeping. TimeToRot is a countdown, and the ONLY thing that decrements it is
+        /// WorldObject.Decay(), which is only ever reached from the landblock heartbeat in
+        /// Landblock.TickMultiThreadedWork(). A landblock with no players in it goes dormant after 1 minute
+        /// and is queued for unload 5 minutes after that; LandblockManager.UnloadLandblocks() then removes
+        /// it from landblockGroups and it stops being ticked at all. Landblock.Unload() persists the
+        /// partially decremented TimeToRot, and the object removal path deliberately avoids clearing it on
+        /// anything but a pickup, so when a player finally returns the countdown RESUMES from where it
+        /// stopped. Downtime is skipped, never counted. That makes a corpse's real lifetime a function of
+        /// how often somebody visits its landblock rather than of elapsed time, and a corpse in a landblock
+        /// nobody revisits never finishes decaying at all. This absolute deadline is the only thing that
+        /// actually bounds wall-clock lifetime.
+        /// </remarks>
+        public static bool HasExceededMaxLifetime(int? creationTimestamp, double nowUnixTime, long maxLifetimeSeconds)
+        {
+            if (maxLifetimeSeconds <= 0)
+                return false;
+
+            if (!creationTimestamp.HasValue)
+                return false;
+
+            return nowUnixTime - creationTimestamp.Value >= maxLifetimeSeconds;
         }
 
         /// <summary>
@@ -106,8 +171,7 @@ namespace ACE.Server.WorldObjects
             if (Inventory.Count == 0)
                 TimeToRot = EmptyDecayTime;
             else
-                // a player corpse decays after 5 mins * playerLevel with a minimum of 1 hour
-                TimeToRot = Math.Max(3600, (player.Level ?? 1) * 300);
+                TimeToRot = CalculatePlayerCorpseDecayTime(player.Level ?? 1, MaxLifetimeSeconds);
 
             var dtTimeToRot = DateTime.UtcNow.AddSeconds(TimeToRot ?? 0);
             var tsDecay = dtTimeToRot - DateTime.UtcNow;
@@ -115,6 +179,28 @@ namespace ACE.Server.WorldObjects
             Level = player.Level ?? 1;
 
             log.Info($"[CORPSE] {Name}.RecalculateDecayTime({player.Name}) 0x{Guid}: Player Level: {player.Level} | Inventory.Count: {Inventory.Count} | TimeToRot: {TimeToRot} | CreationTimestamp: {CreationTimestamp} ({Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}) | Corpse should not decay before: {dtTimeToRot.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}, {tsDecay.ToString("%d")} day(s), {tsDecay.ToString("%h")} hours, {tsDecay.ToString("%m")} minutes, and {tsDecay.ToString("%s")} seconds from now.");
+        }
+
+        /// <summary>
+        /// The pure arithmetic behind <see cref="RecalculateDecayTime"/>, split out so the floor and the cap
+        /// can be unit tested without constructing a Player.
+        /// Floor: 1 hour, as in retail. Ceiling: <paramref name="maxLifetimeSeconds"/>, which wins over the
+        /// floor if an operator configures a cap below one hour, since the cap is the harder guarantee.
+        /// A <paramref name="maxLifetimeSeconds"/> of 0 or less disables the ceiling.
+        /// </summary>
+        public static double CalculatePlayerCorpseDecayTime(int playerLevel, long maxLifetimeSeconds)
+        {
+            // a player corpse decays after 5 mins * playerLevel with a minimum of 1 hour
+            var decayTime = Math.Max(3600.0, playerLevel * 300.0);
+
+            // This server has no fixed level cap - a character's personal maximum is 275 + 5 per
+            // enlightenment (see Enlightenment / EnlightenmentXpCurve), so 300 seconds per level can exceed
+            // a week on its own at a sufficiently enlightened character, without any landblock ever going
+            // dormant. Clamp the nominal countdown to the configured maximum lifetime.
+            if (maxLifetimeSeconds > 0 && decayTime > maxLifetimeSeconds)
+                decayTime = maxLifetimeSeconds;
+
+            return decayTime;
         }
 
         /// <summary>
@@ -239,7 +325,23 @@ namespace ACE.Server.WorldObjects
             set { if (!value) RemoveProperty(PropertyBool.CorpseGeneratedRare); else SetProperty(PropertyBool.CorpseGeneratedRare, value); }
         }
 
-        public bool IsOnNoDropLandblock => Location != null ? NoDrop_Landblocks.Contains(Location.LandblockId.Landblock) : false;
+        public bool IsOnNoDropLandblock => IsNoDropLocation(Location);
+
+        /// <summary>
+        /// True when a player corpse at this position must not receive any death items.
+        /// Covers the retail no-drop landblock list AND every ephemeral (private, on-demand)
+        /// instance. An ephemeral instance is torn down a few minutes after its last player leaves,
+        /// and Landblock.Unload destroys every non-player object in it - corpse and contents
+        /// included, DB rows and all - so a corpse left there is unrecoverable by anyone.
+        /// (2026-08-30: a First Pin death cost a player seven items this way.)
+        /// </summary>
+        public static bool IsNoDropLocation(Position location)
+        {
+            if (location == null)
+                return false;
+
+            return NoDrop_Landblocks.Contains(location.LandblockId.Landblock) || location.IsEphemeralRealm;
+        }
 
         public override bool EnterWorld()
         {

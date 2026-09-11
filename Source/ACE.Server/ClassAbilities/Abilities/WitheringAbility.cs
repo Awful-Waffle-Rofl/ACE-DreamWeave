@@ -25,8 +25,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Increases your void damage-over-time tick damage by 8% per rank (+24% at rank 3). " +
                           "Higher Creature Enchantment increases the bonus.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.CreatureEnchantment,
         };
 
         /// <summary>

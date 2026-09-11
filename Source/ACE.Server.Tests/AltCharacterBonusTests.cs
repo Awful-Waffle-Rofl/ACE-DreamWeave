@@ -7,8 +7,9 @@ namespace ACE.Server.Tests
     /// <summary>
     /// Boundary math for the alt character bonus (<see cref="AltCharacterBonus"/>): a character's progression
     /// score must fold enlightenment above level so any enlightenment outranks a max-level un-enlightened
-    /// character, the "below" comparison must be strict (equality = no bonus, so the alt stops boosting exactly
-    /// when it catches up), and the multiplier must only scale positive amounts and never overflow a long.
+    /// character, the "below" comparison must require at least the configured gap (equality or a same-side
+    /// deficit smaller than the gap = no bonus, so the alt stops boosting once it is within the gap), and the
+    /// multiplier must only scale positive amounts and never overflow a long.
     /// </summary>
     [TestClass]
     public class AltCharacterBonusTests
@@ -16,46 +17,32 @@ namespace ACE.Server.Tests
         private const int MaxLevel = 275;
 
         [TestMethod]
-        public void GetProgression_LevelOnlyWhenUnenlightened()
+        public void GetProgression_IsLevelAlone()
         {
             Assert.AreEqual(1, AltCharacterBonus.GetProgression(1, 0, MaxLevel));
             Assert.AreEqual(200, AltCharacterBonus.GetProgression(200, 0, MaxLevel));
             Assert.AreEqual(275, AltCharacterBonus.GetProgression(275, 0, MaxLevel));
+            Assert.AreEqual(531, AltCharacterBonus.GetProgression(531, 0, MaxLevel));
         }
 
+        /// <summary>
+        /// Enlightenment is RETIRED and no longer contributes to the score (XP-LANE-SPEC sec 4). These
+        /// assertions are the inverse of the ones they replaced, which pinned enlightenment as worth a whole
+        /// max-level climb. The reason the term had to go: the retirement credit converts an enlightened
+        /// character's count into LEVEL, so counting it again would score the same progress twice and hand
+        /// every alt on the account a permanent catch-up bonus.
+        /// </summary>
         [TestMethod]
-        public void GetProgression_EnlightenmentAddsAFullLevelClimb()
+        public void GetProgression_IgnoresEnlightenment()
         {
-            // one enlightenment is worth a whole max-level climb
-            Assert.AreEqual(276, AltCharacterBonus.GetProgression(1, 1, MaxLevel));
-            Assert.AreEqual(825, AltCharacterBonus.GetProgression(0, 3, MaxLevel));
-        }
+            Assert.AreEqual(1, AltCharacterBonus.GetProgression(1, 1, MaxLevel));
+            Assert.AreEqual(0, AltCharacterBonus.GetProgression(0, 3, MaxLevel));
 
-        [TestMethod]
-        public void GetProgression_AnyEnlightenmentOutranksMaxLevel()
-        {
-            var enlightenedFresh = AltCharacterBonus.GetProgression(1, 1, MaxLevel);
-            var maxLevelUnenlightened = AltCharacterBonus.GetProgression(MaxLevel, 0, MaxLevel);
+            // an enlightened character no longer outranks a max-level one on the count alone
+            Assert.IsTrue(AltCharacterBonus.GetProgression(1, 20, MaxLevel) < AltCharacterBonus.GetProgression(MaxLevel, 0, MaxLevel));
 
-            Assert.IsTrue(enlightenedFresh > maxLevelUnenlightened);
-        }
-
-        [TestMethod]
-        public void GetProgression_FreshEnlightenmentDipsBelowPreEnlightenmentScore()
-        {
-            // The alt-character progression score folds every character's enlightenment at the FIXED global
-            // cap (275), so levels earned above 275 (the enlightenment overage) count toward the score. When a
-            // character enlightens, its level resets to 1 while enlightenment climbs by one, which briefly
-            // LOWERS its progression below the pre-enlightenment value - the desirable consequence being that a
-            // freshly enlightened character re-qualifies for its own catch-up bonus for the ~5 levels it takes
-            // to re-earn that overage.
-            var beforeEnl = AltCharacterBonus.GetProgression(280, 1, MaxLevel);  // enl 1 at its personal cap (280)
-            var afterEnl = AltCharacterBonus.GetProgression(1, 2, MaxLevel);     // just enlightened to enl 2, back to level 1
-
-            Assert.IsTrue(afterEnl < beforeEnl, "a fresh enlightenment should dip below the pre-enlightenment progression");
-
-            // it climbs back to the pre-enlightenment score after re-leveling the 5 levels earned above the base cap
-            Assert.AreEqual(beforeEnl, AltCharacterBonus.GetProgression(5, 2, MaxLevel));
+            // and the credited level is what carries it instead: ENL 20 credits to level 531
+            Assert.IsTrue(AltCharacterBonus.GetProgression(531, 20, MaxLevel) > AltCharacterBonus.GetProgression(MaxLevel, 0, MaxLevel));
         }
 
         [TestMethod]
@@ -66,14 +53,38 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void IsBelow_StrictComparison()
+        public void IsBelow_RequiresConfiguredGap()
         {
-            // a fresh alt below a level-200 main => bonus active
-            Assert.IsTrue(AltCharacterBonus.IsBelow(1, 200));
-            // exactly caught up => no bonus (this is the "until it reaches an equal level" cutoff)
-            Assert.IsFalse(AltCharacterBonus.IsBelow(200, 200));
-            // past it (e.g. the account's own high-water mark) => no bonus
-            Assert.IsFalse(AltCharacterBonus.IsBelow(276, 200));
+            const long gap = 5;
+
+            // exactly 5 behind => bonus active (the gap boundary itself qualifies)
+            Assert.IsTrue(AltCharacterBonus.IsBelow(195, 200, gap));
+            // 4 behind => not enough of a gap yet => no bonus
+            Assert.IsFalse(AltCharacterBonus.IsBelow(196, 200, gap));
+            // exactly caught up (0 behind) => no bonus
+            Assert.IsFalse(AltCharacterBonus.IsBelow(200, 200, gap));
+            // ahead (negative deficit), e.g. the account's own high-water mark => no bonus
+            Assert.IsFalse(AltCharacterBonus.IsBelow(276, 200, gap));
+            // far below => still active
+            Assert.IsTrue(AltCharacterBonus.IsBelow(1, 200, gap));
+        }
+
+        [TestMethod]
+        public void IsBelow_GapZeroRestoresOldStrictBehaviour()
+        {
+            // gap 0: any nonzero deficit qualifies, but equality still does not (never <=)
+            Assert.IsTrue(AltCharacterBonus.IsBelow(1, 200, 0));
+            Assert.IsTrue(AltCharacterBonus.IsBelow(199, 200, 0));
+            Assert.IsFalse(AltCharacterBonus.IsBelow(200, 200, 0));
+            Assert.IsFalse(AltCharacterBonus.IsBelow(276, 200, 0));
+        }
+
+        [TestMethod]
+        public void IsBelow_NegativeGapClampsToZero()
+        {
+            // a bad config row (negative gap) must not invert the logic - behaves as gap 0
+            Assert.IsTrue(AltCharacterBonus.IsBelow(199, 200, -5));
+            Assert.IsFalse(AltCharacterBonus.IsBelow(200, 200, -5));
         }
 
         [TestMethod]

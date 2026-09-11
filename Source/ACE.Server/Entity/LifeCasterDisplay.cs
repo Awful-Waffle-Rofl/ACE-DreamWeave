@@ -31,12 +31,22 @@ namespace ACE.Server.Entity
     /// THE SERVER STILL READS THEM. Suppression is display-only: ResistanceModifierType and
     /// ElementalDamageMod stay on the weenie and keep driving GetWeaponResistanceModifier and
     /// GetCasterElementalDamageModifier exactly as before. Nothing here touches the mechanic.
+    ///
+    /// THE "- Life Rending" LINE IS NOT LIFE-CASTER-EXCLUSIVE. It shipped later than the rest of this
+    /// class, as a salvage-bag imbue (White Quartz - Content/wcid-registry.tsv life-rending-imbue) that
+    /// any weapon class can carry via PropertyInt.ImbuedEffect's HealthRending bit, same as any other
+    /// elemental rend. A plain Fire wand imbued with it still casts Harm/Drain/Hecatomb through it and
+    /// still cleaves Health resistance on hit, even though the wand's own W_DamageType is Fire. So
+    /// GetAppraisalLines checks HealthRending independently of IsLifeCaster, while the fixed-value
+    /// cleave line and the damage-bonus block below it stay gated on IsLifeCaster (they read
+    /// ResistanceModifierType/ElementalDamageMod, which only ever mean something on a true Health caster).
     /// </summary>
     public static class LifeCasterDisplay
     {
         /// <summary>
         /// True when this item is the kind of caster whose appraisal the client cannot label - i.e. it
-        /// declares Health as its damage type. Everything below keys off this one test.
+        /// declares Health as its damage type. Gates the fixed-value cleave line and the damage-bonus
+        /// block; the HealthRending line in GetAppraisalLines below is deliberately NOT gated on this.
         /// </summary>
         public static bool IsLifeCaster(WorldObject wo)
         {
@@ -44,26 +54,39 @@ namespace ACE.Server.Entity
         }
 
         /// <summary>
-        /// The "Property Details:" lines for a life caster. Deliberately terse, matching the client's own
-        /// register rather than flavor text: the block sits directly under the client's "Properties:" line
-        /// and should read as a continuation of it.
+        /// The "Property Details:" lines for a life caster, plus the "- Life Rending" line for ANY item
+        /// carrying the HealthRending imbue regardless of its own damage type. Deliberately terse,
+        /// matching the client's own register rather than flavor text: the block sits directly under the
+        /// client's "Properties:" line and should read as a continuation of it.
         /// </summary>
         public static IEnumerable<string> GetAppraisalLines(WorldObject wo)
         {
             var lines = new List<string>();
 
-            if (!IsLifeCaster(wo))
+            if (wo == null)
                 return lines;
 
-            // fixed-value cleave (the ResistanceModifierType route)
-            if (wo.ResistanceModifierType == DamageType.Health && (wo.ResistanceModifier ?? 0) > 0)
+            var isLifeCaster = IsLifeCaster(wo);
+
+            // fixed-value cleave (the ResistanceModifierType route) - only a life caster can carry this,
+            // since ResistanceModifierType is read against DamageType.Health in GetWeaponResistanceModifier
+            if (isLifeCaster && wo.ResistanceModifierType == DamageType.Health && (wo.ResistanceModifier ?? 0) > 0)
                 lines.Add("- Resistance Cleaving: Life");
 
             // skill-scaled cleave (the ImbuedEffectType route). Named "Life Rending" to match the elemental
             // rends' own naming, and listed separately because the two are combined by Math.Max in
             // GetWeaponResistanceModifier - an item carrying both gains nothing from the weaker one.
+            //
+            // NOT gated on IsLifeCaster: since Life Rending shipped as a salvage-bag imbue (White Quartz),
+            // ANY item can carry PropertyInt.ImbuedEffect's HealthRending bit - a plain war wand imbued
+            // with it still casts Harm/Drain fine and still cleaves Health resistance on hit, even though
+            // its own W_DamageType is Fire, not Health. The line must appear whenever the bit is set,
+            // independent of what element the item itself deals.
             if (wo.GetImbuedEffects().HasFlag(ImbuedEffectType.HealthRending))
                 lines.Add("- Life Rending");
+
+            if (!isLifeCaster)
+                return lines;
 
             // The conservative damage multiplier.
             //

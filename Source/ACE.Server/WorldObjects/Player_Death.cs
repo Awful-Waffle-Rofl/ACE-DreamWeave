@@ -15,6 +15,7 @@ using ACE.Server.Managers;
 using ACE.Server.Network.Structure;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WorldEvents;
 
 namespace ACE.Server.WorldObjects
 {
@@ -144,6 +145,35 @@ namespace ACE.Server.WorldObjects
         public bool IsInDeathProcess;
 
         /// <summary>
+        /// Asheron's Protection (WaffleACE): true for the rest of the current death sequence when the player
+        /// died while a world event was Active and within its radius (WorldEventManager.ProtectsDeathAt),
+        /// latched ONCE in Die() at the moment of death - never re-evaluated later, since corpse creation
+        /// runs in a delayed ActionChain and the player can teleport away, or the event can resolve, before
+        /// it fires. Waives vitae, item loss and enchantment purge, same as an arena death, but does NOT
+        /// affect the teleport destination - the player still returns to their lifestone.
+        /// </summary>
+        private bool worldEventDeathInProgress;
+
+        /// <summary>
+        /// True while the current death sequence is a world-event-protected death - read by the death-penalty
+        /// skips in Player_Death.cs (vitae, enchantment purge, death items).
+        /// </summary>
+        public bool WorldEventDeathInProgress => worldEventDeathInProgress;
+
+        /// <summary>
+        /// Threads: true when this player was dying inside a live run's instance AT THE MOMENT
+        /// OF DEATH. Latched once in Die(), same reason as worldEventDeathInProgress: CreateCorpse,
+        /// CalculateDeathItems(_Olthoi) and ThreadSafeTeleportOnDeath all run inside the delayed
+        /// (animLength + 1.0f) ActionChain, and if the run were reaped (TTL, empty-landblock unload)
+        /// during that window a live GetRun(Location.Instance) read would flip to false mid-sequence -
+        /// dropping BOTH the item-loss waiver and the entry-point return with no warning. A dead run's
+        /// gem is still cleaned up separately (ThreadDungeonSweeper), so latching here costs nothing.
+        /// </summary>
+        private bool dynamicDungeonDeathInProgress;
+
+        public bool ThreadDungeonDeathInProgress => dynamicDungeonDeathInProgress;
+
+        /// <summary>
         /// Broadcasts the player death animation, updates vitae, and sends network messages for player death
         /// Queues the action to call TeleportOnDeath and enter portal space soon
         /// </summary>
@@ -160,8 +190,31 @@ namespace ACE.Server.WorldObjects
             // The score (the last wave fully cleared) was already banked as each wave cleared.
             var waveDeath = TryBeginWaveChallengeDeath();
 
-            // either Proving Grounds run death waives the normal death penalties for the rest of the sequence
-            var arenaDeath = survivalDeath || waveDeath;
+            // speed challenge (WaffleACE): a death inside the season instance FORFEITS the run - no time is
+            // recorded and no row is written - but it is penalty-free in exactly the same way as the other two.
+            var speedDeath = TryBeginSpeedChallengeDeath();
+
+            // any Proving Grounds run death waives the normal death penalties for the rest of the sequence
+            var arenaDeath = survivalDeath || waveDeath || speedDeath;
+
+            // Asheron's Protection (WaffleACE): a death within an Active world event's radius waives the
+            // normal death penalties (vitae, item loss, enchantment purge) the same way an arena death does,
+            // but does NOT change the teleport destination - the player still returns to their lifestone.
+            // Latched exactly once, here, at the moment of death: corpse creation below runs in a delayed
+            // ActionChain, and by the time it fires the player may have teleported away, or the event may
+            // have resolved, so every later read in this sequence must use the latched value, never
+            // re-evaluate WorldEventManager.ProtectsDeathAt.
+            worldEventDeathInProgress = WorldEventManager.ProtectsDeathAt(Location);
+
+            // Threads (WaffleACE): latched here for the same reason as worldEventDeathInProgress
+            // immediately above - everything that reads it runs later, inside the delayed dieChain.
+            dynamicDungeonDeathInProgress = ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(Location.Instance) != null;
+
+            if (worldEventDeathInProgress)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    "Asheron's power holds death's toll at bay. You lose nothing.", ChatMessageType.Broadcast));
+            }
 
             if (topDamager?.Guid == Guid && IsPKType)
             {
@@ -217,18 +270,25 @@ namespace ACE.Server.WorldObjects
 
             // update vitae
             // players who died in a PKLite fight do not accrue vitae
-            // Proving Grounds arena deaths (survival / wave) accrue no vitae either
+            // Proving Grounds arena deaths (survival / wave / speed) accrue no vitae either
             // Mule (WaffleACE): a mule never accrues vitae at all. Vitae is only ever worked off through
             // UpdateXpVitae on an XP grant, and a mule can never earn XP (GrantXP refuses it), so a penalty
             // applied here would be permanent and would compound with every death - permanently cutting the
             // carrying capacity the character exists for. hadVitae, read just above, is therefore always false
             // for a mule, so corpse creation stays consistent with not having applied it. Mules still die and
             // still leave corpses; nothing else about death or item drops changes.
-            if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule)
+            // Threads (WaffleACE): a death inside a live run waives vitae the same way an arena
+            // death does (Task 9 brief; not itself named by TECH-DESIGN S10, which covers only the death
+            // RETURN destination - this extends the existing no-penalty pattern to match "no loss inside
+            // a run"). ThreadDungeonDeathInProgress is latched in Die() beside worldEventDeathInProgress
+            // (see ~:211), for the same reason: everything below runs later, inside the delayed dieChain,
+            // by which point the player may have teleported out of the run's instance.
+            if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule && !worldEventDeathInProgress && !ThreadDungeonDeathInProgress)
                 InflictVitaePenalty();
 
-            // Proving Grounds arena deaths skip the enchantment purge entirely - the player keeps their buffs
-            if (!arenaDeath)
+            // Proving Grounds arena deaths, and Asheron's Protection deaths, skip the enchantment purge
+            // entirely - the player keeps their buffs
+            if (!arenaDeath && !worldEventDeathInProgress)
             {
                 if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
                 {
@@ -270,11 +330,11 @@ namespace ACE.Server.WorldObjects
         public void ThreadSafeTeleportOnDeath()
         {
             // teleport to sanctuary or best location
-            // Proving Grounds arena deaths (survival / wave) return the player to the arena entrance
+            // Proving Grounds arena deaths (survival / wave / speed) return the player to the arena entrance
             // (EphemeralRealmExitTo) instead of their lifestone, so a death simply drops them back outside the
             // Proving Grounds portal
             Position newPosition;
-            if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress)
+            if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || ThreadDungeonDeathInProgress)
             {
                 var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
                 newPosition = (exitTo != null ? new Position(exitTo) : Sanctuary) ?? Instantiation ?? Location;
@@ -320,6 +380,8 @@ namespace ACE.Server.WorldObjects
                     // the arena death sequence is fully complete - clear the markers
                     EndSurvivalChallengeDeath();
                     EndWaveChallengeDeath();
+                    EndSpeedChallengeDeath();
+                    worldEventDeathInProgress = false;
 
                     if (IsLoggingOut)
                         LogOut_Final(true);
@@ -513,14 +575,15 @@ namespace ACE.Server.WorldObjects
             // if player dies in a PKLite battle,
             // they don't drop any items, and revert back to NPK status
 
-            // if player dies on a No Drop landblock,
-            // they don't drop any items
+            // if player dies on a No Drop landblock, they don't drop any items.
+            // Every ephemeral (private instance) landblock counts as no-drop: the instance and everything
+            // in it, corpse included, is destroyed shortly after the last player leaves (Corpse.IsNoDropLocation)
 
-            // Proving Grounds arena deaths (survival / wave) are penalty-free: drop nothing (same as a no-drop landblock)
+            // Proving Grounds arena deaths (survival / wave / speed) are penalty-free: drop nothing (same as a no-drop landblock)
             // server-wide switch: when player_death_no_item_loss is on, death costs nothing. This returns before
             // the coin calculation below, so it suppresses the half-pyreal loss as well as items, for every
             // death including PK deaths
-            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress)
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || WorldEventDeathInProgress || ThreadDungeonDeathInProgress)
                 return new List<WorldObject>();
 
             var numItemsDropped = GetNumItemsDropped(corpse);
@@ -1116,8 +1179,16 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public List<WorldObject> CalculateDeathItems_Olthoi(Corpse corpse, bool hadVitae, bool killerIsOlthoiPlayer, bool killerIsPkPlayer)
         {
-            // the same server-wide switch covers the Olthoi slag / PK-loot path
-            if (PropertyManager.GetBool("player_death_no_item_loss").Item)
+            // the same server-wide switch covers the Olthoi slag / PK-loot path, and so does the
+            // no-drop location rule (retail no-drop landblocks + every ephemeral instance): a corpse
+            // left in an ephemeral instance is destroyed with it, slag and PK loot included.
+            // Same guard as the ordinary item-drop path (see below): a Proving Grounds arena death or an
+            // Asheron's Protection world-event death must waive Olthoi slag / PK loot exactly like it
+            // waives ordinary item loss. The three arena flags were missing here before this fix too - a
+            // pre-existing gap of the same defect class as the world-event one, closed at the same time.
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock
+                || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress
+                || WorldEventDeathInProgress || ThreadDungeonDeathInProgress)
                 return new List<WorldObject>();
 
             if (killerIsOlthoiPlayer)

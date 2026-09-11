@@ -38,6 +38,13 @@ namespace ACE.Server.WorldObjects
         public ObjectMaint ObjMaint => PhysicsObj.ObjMaint;
 
         /// <summary>
+        /// GUIDs of objects for which this client already has a persistent visual effect running.
+        /// Lives on Player, so it resets naturally on relog - which is correct, because a relog
+        /// rebuilds every object client-side and drops their emitters. See VisualEffectManager.
+        /// </summary>
+        public HashSet<uint> VisualEffectsSent { get; } = new HashSet<uint>();
+
+        /// <summary>
         /// Returns the list of WorldObjects this Player this player currently knows about
         /// </summary>
         public List<WorldObject> GetKnownObjects()
@@ -48,7 +55,22 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Sends a network message to player for CreateObject, if applicable
         /// </summary>
-        public void TrackObject(WorldObject worldObject, bool delay = false)
+        /// <param name="sharedCreate">
+        /// Optional CreateObject message already serialized once for a whole broadcast fan-out
+        /// (see <see cref="WorldObject.NotifyPlayers"/>). GameMessage payloads are built in the
+        /// constructor and NetworkSession.EnqueueSend only stores the reference, so one message
+        /// object can be handed to every session - this is the same sharing EnqueueBroadcast does.
+        /// It is only used for recipients with Adminvision == false, because the adminvision /
+        /// adminnodraw flags change the serialized payload; an Adminvision recipient still builds
+        /// its own message.
+        /// </param>
+        /// <param name="resend">
+        /// True when the caller is re-sending CreateObject for an object the client still holds, with
+        /// no delete in between (/fi). That path skips RemoveTrackedObject, so nothing calls
+        /// VisualEffectManager.Forget, and without this flag the rebuild would silently strip every
+        /// particle script the object had for the rest of the session.
+        /// </param>
+        public void TrackObject(WorldObject worldObject, bool delay = false, GameMessageCreateObject sharedCreate = null, bool resend = false)
         {
             //Console.WriteLine($"TrackObject({worldObject.Name}, {delay})");
 
@@ -59,7 +81,13 @@ namespace ACE.Server.WorldObjects
             if (worldObject.Visibility && !Adminvision)
                 return;
 
-            Session.Network.EnqueueSend(new GameMessageCreateObject(worldObject, Adminvision, Adminvision));
+            Session.Network.EnqueueSend(sharedCreate != null && !Adminvision
+                ? sharedCreate
+                : new GameMessageCreateObject(worldObject, Adminvision, Adminvision));
+
+            // A client drops every attached particle script when it rebuilds an object, so re-emit
+            // them right behind the create. See VisualEffectManager.
+            VisualEffectManager.SendTo(Session, worldObject, resend);
 
             //Console.WriteLine($"Player {Name} - TrackObject({worldObject.Name})");
 
@@ -68,14 +96,15 @@ namespace ACE.Server.WorldObjects
             {
                 foreach (var wieldedItem in creature.EquippedObjects.Values)
                     if (IsInChildLocation(wieldedItem))
-                        TrackEquippedObject(creature, wieldedItem);
+                        TrackEquippedObject(creature, wieldedItem, resend);
 
                 if (creature.IsMoving)
                     creature.BroadcastMoveTo(this);
             }
         }
 
-        public bool AddTrackedObject(WorldObject worldObject)
+        /// <param name="sharedCreate">see <see cref="TrackObject"/> - optional CreateObject serialized once for a whole fan-out</param>
+        public bool AddTrackedObject(WorldObject worldObject, GameMessageCreateObject sharedCreate = null)
         {
             // does this work for equipped objects?
             if (ObjMaint.KnownObjectsContainsValue(worldObject.PhysicsObj))
@@ -87,11 +116,17 @@ namespace ACE.Server.WorldObjects
             ObjMaint.AddKnownObject(worldObject.PhysicsObj);
             ObjMaint.AddVisibleObject(worldObject.PhysicsObj);
 
-            TrackObject(worldObject);
+            TrackObject(worldObject, false, sharedCreate);
             return true;
         }
 
-        public void RemoveTrackedObject(WorldObject wo, bool fromPickup)
+        /// <param name="sharedDelete">
+        /// Optional DeleteObject message already serialized once for a whole broadcast fan-out
+        /// (see Landblock.RemoveWorldObjectInternal). Unlike CreateObject this payload has no
+        /// recipient-dependent component at all - it is the object guid plus the object's
+        /// ObjectInstance sequence - so the one message is valid for every recipient, admin or not.
+        /// </param>
+        public void RemoveTrackedObject(WorldObject wo, bool fromPickup, GameMessageDeleteObject sharedDelete = null)
         {
             //log.Info($"{Name}.RemoveTrackedObject({wo.Name} ({wo.Guid}), {fromPickup})");
 
@@ -103,7 +138,11 @@ namespace ACE.Server.WorldObjects
                     Session.Network.EnqueueSend(new GameMessageParentEvent(wo.Wielder, wo));
             }
             else
-                Session.Network.EnqueueSend(new GameMessageDeleteObject(wo));
+                Session.Network.EnqueueSend(sharedDelete ?? new GameMessageDeleteObject(wo));
+
+            // The client drops this object's emitters when it destroys the object, so allow a re-send
+            // the next time it comes into view.
+            VisualEffectManager.Forget(Session, wo);
 
             if (wo is Creature creature)
             {
@@ -113,7 +152,8 @@ namespace ACE.Server.WorldObjects
         }
 
 
-        public void TrackEquippedObject(Creature wielder, WorldObject wieldedItem)
+        /// <param name="resend">see <see cref="TrackObject"/> - re-send with no preceding delete</param>
+        public void TrackEquippedObject(Creature wielder, WorldObject wieldedItem, bool resend = false)
         {
             //Console.WriteLine($"Player {Name} - TrackEquippedObject({wieldedItem.Name}) on Wielder {wielder.Name}");
 
@@ -126,6 +166,10 @@ namespace ACE.Server.WorldObjects
                 return;
 
             Session.Network.EnqueueSend(new GameMessageCreateObject(wieldedItem));
+
+            // This is the path that carries ANOTHER player's wielded weapon into your client, so it is
+            // the one that decides whether other people see the effect on your bow.
+            VisualEffectManager.SendTo(Session, wieldedItem, resend);
         }
 
         public void RemoveTrackedEquippedObject(Creature formerWielder, WorldObject worldObject)
@@ -149,6 +193,8 @@ namespace ACE.Server.WorldObjects
             //Session.Network.EnqueueSend(new GameMessagePickupEvent(worldObject));
 
             Session.Network.EnqueueSend(new GameMessageDeleteObject(worldObject));
+
+            VisualEffectManager.Forget(Session, worldObject);
         }
 
         public void DeCloak()

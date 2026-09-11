@@ -623,6 +623,8 @@ namespace ACE.Server.WorldObjects
 
                 if (wo == null) continue;
 
+                ApplyWieldScale(wo);
+
                 //if (wo.ValidLocations == null || (ItemCapacity ?? 0) > 0)
                 {
                     if (!TryAddToInventory(wo))
@@ -631,6 +633,47 @@ namespace ACE.Server.WorldObjects
                 //else
                     //TryWieldObject(wo, (EquipMask)wo.ValidLocations);
             }
+        }
+
+        /// <summary>
+        /// WaffleACE fork: applies this creature's ScaleWieldedToBody flag (PropertyBool 9038) to one
+        /// freshly created create_list Wield item.
+        ///
+        /// A wielded item is its own WorldObject with its own ObjScale and does NOT inherit the wielder's,
+        /// so a boss scaled up to DefaultScale 5.3 otherwise holds a normal-sized sword. When the flag is
+        /// set we push the wielder's scale onto the item before it is added to inventory and equipped.
+        ///
+        /// This deliberately covers AMMO as well as the launcher, because ammo is a wielded child of the
+        /// creature and is drawn on the body at the same scale as everything else it carries. It does NOT
+        /// reach launched projectiles: Creature_Missile.LaunchProjectile builds the projectile from
+        /// ammo.WeenieClassId rather than cloning the equipped ammo object, so the arrow in flight is
+        /// always the weenie's own size.
+        /// </summary>
+        private void ApplyWieldScale(WorldObject wo)
+        {
+            var scale = ResolveWieldScale(ScaleWieldedToBody, ObjScale, wo.ObjScale);
+
+            if (scale == null)
+                return;
+
+            wo.ObjScale = scale;
+
+            // normally a no-op: an item that has never entered a landblock has no PhysicsObj yet, and
+            // Landblock.AddWorldObjectInternal -> InitPhysicsObj will read the ObjScale we just set.
+            wo.PhysicsObj?.SetScaleStatic(scale.Value);
+        }
+
+        /// <summary>
+        /// Returns the ObjScale a create_list Wield item should be given, or null to leave it alone.
+        /// The item's own scale is preserved as a RATIO - a shield authored at 0.75 stays three quarters
+        /// the size of the body it hangs on, rather than being flattened to the body scale.
+        /// </summary>
+        public static float? ResolveWieldScale(bool scaleWieldedToBody, float? bodyScale, float? itemScale)
+        {
+            if (!scaleWieldedToBody || bodyScale == null)
+                return null;
+
+            return bodyScale.Value * (itemScale ?? 1.0f);
         }
 
         public static List<PropertiesCreateList> CreateListSelect(List<PropertiesCreateList> createList)

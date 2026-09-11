@@ -25,7 +25,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "extra target - even a weapon with no innate cleave. Each Whirlwind swing costs +100% " +
                           "stamina; with too little stamina it falls back to a normal swing.",
             MaxRank = 1,
-            CostPerRank = new[] { 5 },
+            CostPerRank = new[] { 3 },
             Implemented = true,
         };
 

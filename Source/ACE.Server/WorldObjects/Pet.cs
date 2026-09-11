@@ -13,6 +13,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics.Animation;
 
 namespace ACE.Server.WorldObjects
@@ -57,6 +58,55 @@ namespace ACE.Server.WorldObjects
             ItemUseable = Usable.No;
 
             SuppressGenerateEffect = true;
+        }
+
+        /// <summary>
+        /// Reports one hit this pet just landed to its own owner, as "&lt;pet&gt; hits &lt;target&gt; for N damage!".
+        /// Opt-in per character via "/summondamage on|off" (Player.SummonDamageMessages), off by default.
+        ///
+        /// Only ever addressed to P_PetOwner, so a player never sees another player's summons. Zero and
+        /// negative (healing) results are dropped so the feed carries hits only, and a squelched target is
+        /// skipped for the same reason the player's own combat lines are.
+        ///
+        /// Called from the four places a pet's damage can reach a creature's health. Creature.TakeDamage is
+        /// only the first of them - melee, via Monster_Melee, and missile, via ProjectileCollisionHelper.
+        /// SpellProjectile.DamageTarget is the second: a spell projectile writes the vital directly and never
+        /// reaches TakeDamage. The other two resolve with no projectile at all and so reach neither, and they
+        /// are separate methods rather than one: WorldObject_Magic.HandleCastSpell_Boost's Health case is a
+        /// Harm, and HandleCastSpell_Transfer's Health case is a Drain Health. Mana Barrier and Sanguine Ward
+        /// each need a call at both of those sites for exactly the same reason, and sit beside these.
+        ///
+        /// Two deliberate gaps. Mana and stamina drains are not reported - "hits X for N damage!" would
+        /// misdescribe them, and the spell-projectile and life-magic hooks both sit in the Health branch for
+        /// that reason. Damage-over-time ticks are not reported either, and cannot be without a wider change:
+        /// EnchantmentManager applies them through Creature.TakeDamageOverTime, whose signature carries no
+        /// source at all, so by the time a tick lands there is nothing left identifying the pet that caused it.
+        /// </summary>
+        public void NotifyOwnerOfDamage(WorldObject target, int amount)
+        {
+            if (amount <= 0 || target == null)
+                return;
+
+            var owner = P_PetOwner;
+
+            if (owner?.Session == null || !owner.SummonDamageMessages)
+                return;
+
+            if (owner.SquelchManager.Squelches.Contains(target, ChatMessageType.CombatSelf))
+                return;
+
+            owner.Session.Network.EnqueueSend(new GameMessageSystemChat(FormatDamageMessage(Name, target.Name, amount), ChatMessageType.CombatSelf));
+        }
+
+        /// <summary>
+        /// The one place the feed's line is composed. Split out from NotifyOwnerOfDamage purely so the
+        /// wording has regression coverage without a live Player - the same rationale as
+        /// Player_Commerce.IsAcceptableToSell. The pet's Name already carries the owner's, because Pet.Init
+        /// prefixes it, so the rendered line reads "Bob's Wisp hits Drudge Skulker for 42 damage!".
+        /// </summary>
+        internal static string FormatDamageMessage(string petName, string targetName, int amount)
+        {
+            return $"{petName} hits {targetName} for {amount} damage!";
         }
 
         /// <param name="spawnStagger">

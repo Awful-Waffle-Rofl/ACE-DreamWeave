@@ -266,8 +266,8 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void IsModMaterial_RefusesTinkeringTool_BecauseTheClientHijacksItsUseForItsOwnSalvagePanel()
         {
-            Assert.IsFalse(EquipmentModManager.IsModMaterial(ItemType.TinkeringTool, EquipmentModManager.LowTierMaterial));
             Assert.IsFalse(EquipmentModManager.IsModMaterial(ItemType.TinkeringTool, EquipmentModManager.HighTierMaterial));
+            Assert.IsFalse(TigerEyeArmorTinker.IsTigerEyeSalvage(ItemType.TinkeringTool, TigerEyeArmorTinker.SourceMaterial));
             Assert.IsFalse(WeaponModManager.IsModMaterial(ItemType.TinkeringTool, WeaponModManager.RerollMaterial));
             Assert.IsFalse(WeaponModManager.IsModMaterial(ItemType.TinkeringTool, WeaponModManager.SwapMaterial));
 
@@ -276,7 +276,8 @@ namespace ACE.Server.Tests
             Assert.IsFalse(WeaponModManager.IsModMaterial(MakeTool(MaterialType.Tourmaline, 10, "Tourmaline Hammer", ItemType.TinkeringTool)));
 
             // the bag path is untouched
-            Assert.IsTrue(EquipmentModManager.IsModMaterial(ItemType.TinkeringMaterial, EquipmentModManager.LowTierMaterial));
+            Assert.IsTrue(EquipmentModManager.IsModMaterial(ItemType.TinkeringMaterial, EquipmentModManager.HighTierMaterial));
+            Assert.IsTrue(TigerEyeArmorTinker.IsTigerEyeSalvage(ItemType.TinkeringMaterial, TigerEyeArmorTinker.SourceMaterial));
             Assert.IsTrue(WeaponModManager.IsModMaterial(ItemType.TinkeringMaterial, WeaponModManager.RerollMaterial));
         }
 
@@ -289,8 +290,8 @@ namespace ACE.Server.Tests
         public void IsModMaterial_RefusesRawGemsAndUndesignatedMaterials()
         {
             // refused: the raw-gem guard, which is the reason the ItemType is checked at all
-            Assert.IsFalse(EquipmentModManager.IsModMaterial(ItemType.Gem, EquipmentModManager.LowTierMaterial));
             Assert.IsFalse(EquipmentModManager.IsModMaterial(ItemType.Gem, EquipmentModManager.HighTierMaterial));
+            Assert.IsFalse(TigerEyeArmorTinker.IsTigerEyeSalvage(ItemType.Gem, TigerEyeArmorTinker.SourceMaterial));
             Assert.IsFalse(WeaponModManager.IsModMaterial(ItemType.Gem, WeaponModManager.RerollMaterial));
             Assert.IsFalse(WeaponModManager.IsModMaterial(ItemType.Gem, WeaponModManager.SwapMaterial));
 

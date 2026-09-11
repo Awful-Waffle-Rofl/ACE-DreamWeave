@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 using ACE.Entity.Enum;
@@ -15,20 +16,33 @@ using Timer = System.Timers.Timer;
 namespace ACE.Server.Managers
 {
     /// <summary>
-    /// One-way relay of in-game public global chat to Discord, routed per channel: General and
-    /// Trade each go to their own Discord channel via a separate incoming webhook.
+    /// One-way relay of in-game chat to Discord, routed per channel: General, Trade, the staff
+    /// Audit feed and the World Events announcement feed each go to their own Discord channel via a
+    /// separate incoming webhook.
     ///
     /// Each channel has its own queue and is flushed independently on a timer, so a busy channel
     /// never trips its webhook's rate limit and a slow/dead webhook never blocks the network
     /// thread. A channel is relayed only when the relay is enabled AND that channel has a webhook
     /// URL configured - a channel with no URL is silently skipped.
     ///
+    /// The Audit feed is the staff-only record of admin command usage (see
+    /// PlayerManager.BroadcastToAuditChannel), which is otherwise seen only by staff who happen to
+    /// be online with the channel active. Relaying it gives monitoring a durable copy.
+    ///
+    /// The Events feed carries only the three World Events beats a player who is NOT logged in
+    /// would want pushed at them - the teaser, the run going live, and the outcome (see
+    /// WorldEventAnnouncer.Broadcast's relayToDiscord parameter). The intra-run chatter (the 30s
+    /// Announced line, the 60s/30s countdown warnings, per-wave local flavour, the boss's parting
+    /// line) is deliberately NOT relayed: in game it is atmosphere, in Discord it would be spam.
+    ///
     /// Configuration precedence (highest first):
     ///   1. Environment variables (ACE_DISCORD_RELAY_ENABLED, ACE_DISCORD_WEBHOOK_URL_GENERAL,
-    ///      ACE_DISCORD_WEBHOOK_URL_TRADE) - lets a single container image be disabled in Stage
+    ///      ACE_DISCORD_WEBHOOK_URL_TRADE, ACE_DISCORD_WEBHOOK_URL_AUDIT,
+    ///      ACE_DISCORD_WEBHOOK_URL_EVENTS) - lets a single container image be disabled in Stage
     ///      and enabled in Prod purely from compose.
     ///   2. PropertyManager DB properties (discord_relay_enabled, discord_webhook_url_general,
-    ///      discord_webhook_url_trade) - runtime toggleable via /modifybool and /modifystring.
+    ///      discord_webhook_url_trade, discord_webhook_url_audit, discord_webhook_url_events) -
+    ///      runtime toggleable via /modifybool and /modifystring.
     ///   3. Defaults (disabled, empty URLs).
     /// </summary>
     public static class DiscordRelayManager
@@ -57,14 +71,28 @@ namespace ACE.Server.Managers
 
         private static readonly bool? envEnabled;
 
-        // One relay destination per in-game channel. Add a row here (plus the matching config
-        // properties) to route another channel. Allegiance/Society/Olthoi are private/group
+        // One relay destination per in-game public chat channel. Add a row here (plus the matching
+        // config properties) to route another channel. Allegiance/Society/Olthoi are private/group
         // channels and are intentionally not routed.
-        private static readonly IReadOnlyDictionary<ChatType, RelayChannel> channels = new Dictionary<ChatType, RelayChannel>
+        private static readonly IReadOnlyDictionary<ChatType, RelayChannel> chatChannels = new Dictionary<ChatType, RelayChannel>
         {
-            [ChatType.General] = new RelayChannel(ChatType.General, "ACE_DISCORD_WEBHOOK_URL_GENERAL", "discord_webhook_url_general"),
-            [ChatType.Trade]   = new RelayChannel(ChatType.Trade,   "ACE_DISCORD_WEBHOOK_URL_TRADE",   "discord_webhook_url_trade"),
+            [ChatType.General] = new RelayChannel("General", "ACE_DISCORD_WEBHOOK_URL_GENERAL", "discord_webhook_url_general"),
+            [ChatType.Trade]   = new RelayChannel("Trade",   "ACE_DISCORD_WEBHOOK_URL_TRADE",   "discord_webhook_url_trade"),
         };
+
+        // The staff Audit feed. Not a ChatType - it is fed by PlayerManager.BroadcastToAuditChannel
+        // rather than by player chat, so it is held outside the chat routing table.
+        private static readonly RelayChannel auditChannel =
+            new RelayChannel("Audit", "ACE_DISCORD_WEBHOOK_URL_AUDIT", "discord_webhook_url_audit");
+
+        // The World Events announcement feed. Like Audit, not a ChatType - it is fed by
+        // WorldEventAnnouncer rather than by player chat.
+        private static readonly RelayChannel eventsChannel =
+            new RelayChannel("Events", "ACE_DISCORD_WEBHOOK_URL_EVENTS", "discord_webhook_url_events");
+
+        // Everything Flush() drains: chat plus audit plus world events.
+        private static readonly IReadOnlyList<RelayChannel> allChannels =
+            new List<RelayChannel>(chatChannels.Values) { auditChannel, eventsChannel };
 
         // Guard so overlapping flushes never run (timer + slow POST).
         private static int flushing;
@@ -102,12 +130,14 @@ namespace ACE.Server.Managers
             private readonly string envUrl;
             private readonly string dbPropertyKey;
 
-            public ChatType ChatType { get; }
+            /// <summary>Human-readable channel name; used only in log lines.</summary>
+            public string Name { get; }
+
             public ConcurrentQueue<string> Queue { get; } = new ConcurrentQueue<string>();
 
-            public RelayChannel(ChatType chatType, string envVarName, string dbPropertyKey)
+            public RelayChannel(string name, string envVarName, string dbPropertyKey)
             {
-                ChatType = chatType;
+                Name = name;
                 envUrl = Clean(Environment.GetEnvironmentVariable(envVarName));
                 this.dbPropertyKey = dbPropertyKey;
             }
@@ -127,13 +157,60 @@ namespace ACE.Server.Managers
         /// </summary>
         public static void QueueMessage(ChatType chatType, string playerName, string message)
         {
-            if (!Enabled)
-                return;
-
             if (string.IsNullOrWhiteSpace(message))
                 return;
 
-            if (!channels.TryGetValue(chatType, out var channel))
+            if (!chatChannels.TryGetValue(chatType, out var channel))
+                return;
+
+            Enqueue(channel, $"`{Sanitize(playerName)}`: {Sanitize(message)}");
+        }
+
+        /// <summary>
+        /// Queue an Audit channel line (an admin command record) for relay to Discord. Cheap and
+        /// non-blocking; safe to call from world/network threads and from the console. No-ops
+        /// unless the relay is enabled and discord_webhook_url_audit is configured.
+        /// </summary>
+        /// <param name="issuerName">The staff member who ran the command, or null for console.</param>
+        public static void QueueAudit(string issuerName, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            // Most audit messages already open with the issuer's own name ("Bob has deleted ..."),
+            // so only prefix when it would actually add information.
+            var prefix = !string.IsNullOrWhiteSpace(issuerName)
+                         && !message.StartsWith(issuerName, StringComparison.OrdinalIgnoreCase)
+                ? $"`{Sanitize(issuerName)}`: "
+                : "";
+
+            Enqueue(auditChannel, $"{prefix}{Sanitize(Redact(message))}");
+        }
+
+        /// <summary>
+        /// Queue a World Events announcement for relay to Discord. Cheap and non-blocking; safe to
+        /// call from the world thread. No-ops unless the relay is enabled and
+        /// discord_webhook_url_events is configured.
+        ///
+        /// The line arrives already composed for in-game chat, carrying
+        /// WorldEventAnnouncer.AnnouncePrefix - it is relayed verbatim (after sanitizing) rather
+        /// than restyled, so what Discord shows is exactly what players saw. It still goes through
+        /// Sanitize because outcome lines embed PLAYER names (the MVP and the top killer).
+        /// </summary>
+        public static void QueueWorldEvent(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            Enqueue(eventsChannel, Sanitize(message));
+        }
+
+        /// <summary>
+        /// Shared gate for every queue: relay on, destination configured, backlog not saturated.
+        /// </summary>
+        private static void Enqueue(RelayChannel channel, string line)
+        {
+            if (!Enabled)
                 return;
 
             if (string.IsNullOrWhiteSpace(channel.WebhookUrl))
@@ -142,8 +219,18 @@ namespace ACE.Server.Managers
             if (channel.Queue.Count >= MaxQueuedLines)
                 return;
 
-            channel.Queue.Enqueue($"`{Sanitize(playerName)}`: {Sanitize(message)}");
+            channel.Queue.Enqueue(line);
         }
+
+        // "/modifystring discord_webhook_url_audit <url>" is itself announced on the Audit channel,
+        // which would post the new webhook's secret token straight into Discord. Strip the token
+        // out of anything that looks like a Discord webhook URL before it is relayed.
+        private static readonly Regex WebhookUrlPattern = new Regex(
+            @"(https?://(?:[\w-]+\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/)[\w-]+",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static string Redact(string input)
+            => string.IsNullOrEmpty(input) ? input : WebhookUrlPattern.Replace(input, "$1[redacted]");
 
         /// <summary>
         /// Neutralize Discord markdown/mention control characters so player text can't ping roles,
@@ -196,7 +283,7 @@ namespace ACE.Server.Managers
             {
                 var enabled = Enabled;
 
-                foreach (var channel in channels.Values)
+                foreach (var channel in allChannels)
                 {
                     var url = enabled ? channel.WebhookUrl : null;
 
@@ -214,7 +301,7 @@ namespace ACE.Server.Managers
                         if (batch.Length == 0)
                             break;
 
-                        Post(url, batch);
+                        Post(channel.Name, url, batch);
                     }
                 }
             }
@@ -251,7 +338,7 @@ namespace ACE.Server.Managers
             return sb.ToString();
         }
 
-        private static void Post(string url, string content)
+        private static void Post(string channelName, string url, string content)
         {
             var payload = System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -260,10 +347,10 @@ namespace ACE.Server.Managers
             });
 
             // Fire-and-forget: never block the flush timer thread on network I/O.
-            _ = PostAsync(url, payload);
+            _ = PostAsync(channelName, url, payload);
         }
 
-        private static async System.Threading.Tasks.Task PostAsync(string url, string payload)
+        private static async System.Threading.Tasks.Task PostAsync(string channelName, string url, string payload)
         {
             try
             {
@@ -271,11 +358,11 @@ namespace ACE.Server.Managers
                 var response = await httpClient.PostAsync(url, body).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
-                    log.Warn($"[DISCORD] Webhook POST failed: {(int)response.StatusCode} {response.ReasonPhrase}");
+                    log.Warn($"[DISCORD] Webhook POST failed for {channelName}: {(int)response.StatusCode} {response.ReasonPhrase}");
             }
             catch (Exception ex)
             {
-                log.Warn("[DISCORD] Webhook POST threw", ex);
+                log.Warn($"[DISCORD] Webhook POST threw for {channelName}", ex);
             }
         }
     }

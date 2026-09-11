@@ -947,6 +947,29 @@ namespace ACE.Server.WorldObjects
             set { if (value == 0) RemoveProperty(PropertyInt.AugmentationIncreasedSpellDuration); else SetProperty(PropertyInt.AugmentationIncreasedSpellDuration, value); }
         }
 
+        /// <summary>
+        /// Fi's Lingering Casting (Custom Dreamweave Augmentation)
+        /// +10% spell duration each (custom_aug_spell_duration_bonus), uncapped. Read alongside
+        /// AugmentationIncreasedSpellDuration at all three duration sites - see
+        /// CustomAugmentations.SpellDurationMultiplier.
+        /// </summary>
+        public int AugmentationSpellDurationCustom
+        {
+            get => GetProperty(PropertyInt.AugmentationSpellDurationCustom) ?? 0;
+            set { if (value == 0) RemoveProperty(PropertyInt.AugmentationSpellDurationCustom); else SetProperty(PropertyInt.AugmentationSpellDurationCustom, value); }
+        }
+
+        /// <summary>
+        /// Bo's Quickened Grasp (Custom Dreamweave Augmentation)
+        /// +10% pick-up animation speed each (custom_aug_pickup_speed_bonus), uncapped in count but
+        /// sharing the pickup_animation_speed_max ceiling with the Quickhand quest boons.
+        /// </summary>
+        public int AugmentationPickupSpeed
+        {
+            get => GetProperty(PropertyInt.AugmentationPickupSpeed) ?? 0;
+            set { if (value == 0) RemoveProperty(PropertyInt.AugmentationPickupSpeed); else SetProperty(PropertyInt.AugmentationPickupSpeed, value); }
+        }
+
         // ========================================
         // ======= Luminance Augmentations ========
         // ========================================

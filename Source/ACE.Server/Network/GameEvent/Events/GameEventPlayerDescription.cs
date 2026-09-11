@@ -71,11 +71,11 @@ namespace ACE.Server.Network.GameEvent.Events
             // pushes thereafter, or a player who banked all their coin logs in to "you have 0p" and cannot buy.
             _propertiesInt[PropertyInt.CoinValue] = Session.Player.GetSpendableCoinValue();
 
-            // The client bakes Enlightenment * 2 into its own max-health formula and the server does not
-            // (see Player.GetNetworkGearMaxHealth). The login snapshot has to carry the same corrected
-            // GearMaxHealth that HandleMaxHealthUpdate pushes thereafter, or an enlightened player logs in
-            // to a health bar whose maximum is 2/enl above anything they can heal to. Always assigned, so a
-            // stale stored rating cannot survive into the snapshot.
+            // The login snapshot has to carry the same GearMaxHealth that HandleMaxHealthUpdate pushes
+            // thereafter, so the two can never disagree. Always assigned, so a stale stored rating cannot
+            // survive into the snapshot. (This used to carry an enlightenment correction as well; the
+            // server no longer sends Enlightenment, so there is no phantom term left to cancel - see
+            // Player.GetNetworkGearMaxHealth.)
             _propertiesInt[PropertyInt.GearMaxHealth] = Session.Player.GetNetworkGearMaxHealth();
 
             // Deliberately NOT sending PropertyInt.EncumbranceCapacity here. It was added to this snapshot

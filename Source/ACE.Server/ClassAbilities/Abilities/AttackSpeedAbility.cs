@@ -28,8 +28,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Permanently increases your attack speed by 5% per rank (+15% at rank 3), any weapon. " +
                           "Higher Lockpick increases the bonus. Stacks with Frenzy up to the attack-speed ceiling.",
             MaxRank = 3,
-            CostPerRank = new[] { 5, 5, 5 },
+            CostPerRank = new[] { 3, 3, 3 },
             Implemented = true,
+            AffinitySkill = Skill.Lockpick,
         };
 
         /// <summary>

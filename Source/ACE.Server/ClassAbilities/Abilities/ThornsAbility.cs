@@ -12,9 +12,17 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// <summary>
     /// Requires an equipped shield, and reflects a fraction of the shield's effective armor level
     /// (per rank) back at the attacker on every damaging hit, so the skill scales with shield
-    /// quality (gear synergy) rather than damage taken. Monsters can't have Thorns, so no reflect
-    /// loops. Reflected damage is attributed to the player, so kill credit and the attacker's
-    /// DamageHistory work through the normal path.
+    /// quality (gear synergy) rather than damage taken. Reflected damage is attributed to the player,
+    /// so kill credit and the attacker's DamageHistory work through the normal path.
+    ///
+    /// REFLECT LOOPS ARE NO LONGER RULED OUT BY THE MONSTER SIDE. Monsters cannot learn Thorns, which is
+    /// what this comment used to rest on, but a monster CAN now carry a reflect effect of its own
+    /// (PropertyString 9015 MonsterCombatEffects), and monster reflect plus this ability is a genuine
+    /// two-system loop: the monster answers a hit by calling player.TakeDamage, which dispatches Thorns,
+    /// which calls attacker.TakeDamage straight back. What breaks the loop is the reflect latch -
+    /// Creature.TryEnterReflect / ExitReflect, held across the whole monster incoming-damage dispatch in
+    /// Creature_MonsterEffects.cs - not anything on this side. Nothing here needs to change; do not remove
+    /// the latch on the belief that this ability is one-sided.
     /// </summary>
     public class ThornsAbility : IIncomingDamageAbility, IAbilityReadout
     {
@@ -26,10 +34,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "thorns",
             DisplayName = "Thorns",
             Description = "While you have a shield equipped, creatures that strike you take reflected damage " +
-                          "equal to 10% of your shield's armor level per rank.",
+                          "equal to 5% of your shield's armor level per rank.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 2, 3 },   // Tier-1 GC: rank 1 always 1 point (the class's power splash)
             Implemented = true,
+            AffinitySkill = Skill.Shield,
         };
 
         public void OnDamageTaken(Player defender, int rank, Creature attacker, DamageType damageType, uint damageTaken)

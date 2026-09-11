@@ -595,5 +595,20 @@ namespace ACE.Server.WorldObjects.Managers
 
             return result;
         }
+
+        /// <summary>
+        /// Class-ability debuffs are written straight into the registry rather than through
+        /// <see cref="Add"/>, so they would otherwise miss the invalidation Add does - and every getter above
+        /// caches its answer for the object's lifetime until something clears it. Overriding the Spell-free
+        /// core covers both public entry points, because the Spell overload delegates to this one virtually.
+        /// </summary>
+        public override PropertiesEnchantmentRegistry AddClassAbilityDebuff(uint spellId, uint powerLevel, WorldObject caster, SpellCategory category, EnchantmentTypeFlags statModType, uint statModKey, float statModValue, double durationSeconds, bool refreshOnlyOwnCaster = false)
+        {
+            var result = base.AddClassAbilityDebuff(spellId, powerLevel, caster, category, statModType, statModKey, statModValue, durationSeconds, refreshOnlyOwnCaster);
+
+            ClearCache();
+
+            return result;
+        }
     }
 }

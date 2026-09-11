@@ -56,6 +56,18 @@ namespace ACE.Server.WorldObjects
             set { if (!value.HasValue) RemoveProperty(PropertyFloat.ResistHealthDrain); else SetProperty(PropertyFloat.ResistHealthDrain, value.Value); }
         }
 
+        /// <summary>
+        /// FORK ADDITION - ResistHealthDrain with the life_drain_resist_floor applied. Retail data sets
+        /// 116 creature weenies to 0 and ~350 more below 0.75, which zeroed or gutted Life drains for the
+        /// Blood Mage; the floor keeps those creatures visibly resistant without making them immune.
+        /// Every reader of ResistHealthDrain that feeds damage MUST go through this, never the raw property.
+        /// </summary>
+        public double GetEffectiveResistHealthDrain()
+        {
+            var floor = PropertyManager.GetDouble("life_drain_resist_floor").Item;
+            return Math.Max(floor, ResistHealthDrain ?? 1.0);
+        }
+
         public double? ResistHealthBoost
         {
             get => GetProperty(PropertyFloat.ResistHealthBoost);
@@ -209,7 +221,7 @@ namespace ACE.Server.WorldObjects
                     // FORK CHANGE: retail dropped weaponResistanceMod on this branch, so life damage was the
                     // only damage school with no weapon cleave/rend path at all - callers computed the
                     // modifier and it was silently discarded here. See GetLifeVulnerabilityMod.
-                    return (ResistHealthDrain ?? 1.0) * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod()
+                    return GetEffectiveResistHealthDrain() * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod()
                            * GetLifeVulnerabilityMod(weaponResistanceMod);
                 case ResistanceType.StaminaBoost:
                     return (ResistStaminaBoost ?? 1.0) * GetHealingRatingMod();     // does healing rating affect these?

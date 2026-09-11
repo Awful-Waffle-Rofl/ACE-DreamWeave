@@ -120,8 +120,34 @@ namespace ACE.Server.Managers
                 if (first.LogoffTimestamp <= currentUnixTime)
                 {
                     playersPendingLogoff.RemoveFirst();
-                    first.LogOut_Inner();
-                    first.Session.logOffRequestTime = DateTime.UtcNow;
+
+                    // Remove-then-act on the world thread: an escaping throw stops the world (WorldManager's
+                    // fatal handler does not crash the process, it stops the tick) and, because the player has
+                    // already been dequeued, would leave them online forever - which blocks shutdown's
+                    // "waiting for N players to log off" wait. Contain it and log the character.
+                    //
+                    // We deliberately do NOT re-add to playersPendingLogoff: a permanently failing logoff
+                    // would then hot-loop every tick. Instead we make sure the 15-minute final-logoff backstop
+                    // is armed (AddPlayerToFinalLogoffQueue is idempotent - it Contains-checks first), because
+                    // LogOut_Inner may have thrown before it got to arm it itself.
+                    try
+                    {
+                        first.LogOut_Inner();
+                        first.Session.logOffRequestTime = DateTime.UtcNow;
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"PlayerManager.Tick(): LogOut_Inner threw for {first.Name} (0x{first.Guid}), dropping from the logoff queue and arming the final-logoff backstop", ex);
+
+                        try
+                        {
+                            AddPlayerToFinalLogoffQueue(first);
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not arm the final-logoff backstop for {first.Name} (0x{first.Guid}); they may stay online until restart", ex2);
+                        }
+                    }
                 }
                 else
                 {
@@ -136,9 +162,101 @@ namespace ACE.Server.Managers
                 if (currentUnixTime >= first.LogOffFinalizedTime)
                 {
                     playersPendingFinalLogoff.RemoveFirst();
-                    first.ForcedLogOffRequested = true;
-                    first.Session?.Terminate(SessionTerminationReason.AutoForcedLogOff, new GameMessageBootAccount(" because the character was forced to log off by system"));
-                    first.ForceLogoff();
+
+                    // Same remove-then-act contract as the queue above, but this IS the backstop - nothing
+                    // else will ever log this character off. So on failure we do not re-queue (that would
+                    // hot-loop a bad logoff every tick); we log, then force them out of the online set
+                    // directly, which is the terminal step Player.FinalizeLogout would have performed. Leaving
+                    // them online instead would block shutdown's "waiting for N players to log off" wait
+                    // indefinitely.
+                    try
+                    {
+                        first.ForcedLogOffRequested = true;
+                        first.Session?.Terminate(SessionTerminationReason.AutoForcedLogOff, new GameMessageBootAccount(" because the character was forced to log off by system"));
+                        first.ForceLogoff();
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"PlayerManager.Tick(): ForceLogoff threw for {first.Name} (0x{first.Guid}), replaying the terminal logout steps by hand", ex);
+
+                        // ForceLogoff routes to Player.FinalizeLogout, which performs six steps in a
+                        // deliberate order: dequeue from the final-logoff queue (already done above by
+                        // RemoveFirst), remove the object from its landblock, stamp the logout properties,
+                        // persist final state, switch the character out of the online set, and only then
+                        // release the account bank cache entry. A throw partway through - a DB save fault is
+                        // exactly the failure class this sweep contains - leaves the rest of that list unrun,
+                        // and each unrun step leaks something distinct: a WorldObject still resident in
+                        // Landblock.players whose Player_Tick keeps firing every tick against a terminated
+                        // Session, a stale LogoffTimestamp that inflates the next login's offline bonus, an
+                        // unpersisted character, and an AccountBankManager entry that has no TTL and is only
+                        // ever evicted by ReleaseAccountBank. So replay the steps here, in FinalizeLogout's
+                        // order, each one independently contained so a second failure does not block the
+                        // steps after it.
+                        try
+                        {
+                            // showError: false, unlike FinalizeLogout's call, precisely because this is a
+                            // replay - FinalizeLogout may already have removed the object before it threw, and
+                            // a "Couldn't find" warning for the expected case would be noise.
+                            first.CurrentLandblock?.RemoveWorldObject(first.Guid, false, false, false);
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not remove {first.Name} (0x{first.Guid}) from landblock 0x{first.CurrentLandblock?.Id}; they may keep ticking until restart", ex2);
+                        }
+
+                        // Before the save, exactly as FinalizeLogout orders it, and it must not be skipped:
+                        // this is what advances LogoffTimestamp. If the replay omitted it, the persisted
+                        // timestamp would stay at whatever a PRIOR session's logout wrote, and
+                        // Player_OfflineBonus.AccrueOfflineBonus grants (now - LogoffTimestamp) at the next
+                        // login - so a stale value inflates that grant (capped by offline_bonus_max_seconds,
+                        // but inflated). That is economy math, not just bookkeeping.
+                        try
+                        {
+                            first.SetPropertiesAtLogOut();
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not stamp the logout properties for {first.Name} (0x{first.Guid}); their LogoffTimestamp stays at the previous logout, which inflates the next login's offline bonus", ex2);
+                        }
+
+                        try
+                        {
+                            first.SavePlayerToDatabase();
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not save {first.Name} (0x{first.Guid}) during forced logoff; their final state is not persisted", ex2);
+                        }
+
+                        try
+                        {
+                            // The most likely failure point in FinalizeLogout is a step AFTER this one, in
+                            // which case the character is already offline and calling again would return
+                            // false - SwitchPlayerFromOnlineToOffline reports its own "should never happen"
+                            // for a failed onlinePlayers.Remove. Checking first keeps that expected replay
+                            // case out of the error log, so a real stuck-online player stays visible.
+                            if (GetOnlinePlayer(first.Guid) == null)
+                                log.Info($"PlayerManager.Tick(): {first.Name} (0x{first.Guid}) was already switched offline before ForceLogoff threw; skipping that replay step");
+                            else if (!SwitchPlayerFromOnlineToOffline(first))
+                                log.Error($"PlayerManager.Tick(): SwitchPlayerFromOnlineToOffline returned false for {first.Name} (0x{first.Guid})");
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not force {first.Name} (0x{first.Guid}) offline; they may stay online until restart and block shutdown", ex2);
+                        }
+
+                        // Last, and only after the online/offline switch, exactly as FinalizeLogout orders it:
+                        // ReleaseAccountBank consults the account's online snapshot and would decline to
+                        // release while this character still counted as online.
+                        try
+                        {
+                            first.ReleaseAccountBank();
+                        }
+                        catch (Exception ex2)
+                        {
+                            log.Error($"PlayerManager.Tick(): could not release the account bank cache for {first.Name} (0x{first.Guid}); the entry stays resident until restart", ex2);
+                        }
+                    }
                 }
                 else
                 {
@@ -677,6 +795,10 @@ namespace ACE.Server.Managers
             if (PropertyManager.GetBool("log_audit", true).Item)
                 log.Info($"[AUDIT] {(issuer != null ? $"{issuer.Name}: " : "")}{message}");
 
+            // Mirror to Discord for off-server monitoring. No-ops unless the relay is enabled and
+            // discord_webhook_url_audit is set; never blocks (queued and flushed on a timer).
+            DiscordRelayManager.QueueAudit(issuer?.Name, message);
+
             //LogBroadcastChat(Channel.Audit, issuer, message);
         }
 
@@ -800,7 +922,19 @@ namespace ACE.Server.Managers
                 player.Session.Network.EnqueueSend(new GameEventChannelBroadcast(player.Session, channel, "EMOTE", message));
         }
 
-        public static bool GagPlayer(Player issuer, string playerName)
+        /// <summary>
+        /// Gag length applied when @gag is given no duration: five minutes, matching retail.
+        /// </summary>
+        public const double DefaultGagDurationSeconds = 300;
+
+        /// <summary>
+        /// GagDuration value that marks a permanent gag. Player.GagsTick never counts a gag at or above this
+        /// value down, so it only ends via @ungag. Finite rather than double.MaxValue because the value
+        /// round-trips through a MySQL DOUBLE column in biota_properties_float.
+        /// </summary>
+        public const double PermanentGagDurationSeconds = 1e12;
+
+        public static bool GagPlayer(Player issuer, string playerName, double durationSeconds = DefaultGagDurationSeconds)
         {
             var player = FindByName(playerName);
 
@@ -809,13 +943,43 @@ namespace ACE.Server.Managers
 
             player.SetProperty(ACE.Entity.Enum.Properties.PropertyBool.IsGagged, true);
             player.SetProperty(ACE.Entity.Enum.Properties.PropertyFloat.GagTimestamp, Common.Time.GetUnixTime());
-            player.SetProperty(ACE.Entity.Enum.Properties.PropertyFloat.GagDuration, 300);
+            player.SetProperty(ACE.Entity.Enum.Properties.PropertyFloat.GagDuration, durationSeconds);
 
             player.SaveBiotaToDatabase();
 
-            BroadcastToAuditChannel(issuer, $"{issuer.Name} has gagged {player.Name} for five minutes.");
+            BroadcastToAuditChannel(issuer, $"{issuer.Name} has gagged {player.Name} {DescribeGagDuration(durationSeconds)}.");
 
             return true;
+        }
+
+        /// <summary>
+        /// Renders a gag length for chat: "permanently", "for 5 minutes", "for 2 hours", "for 1.5 days".
+        /// </summary>
+        public static string DescribeGagDuration(double durationSeconds)
+        {
+            if (durationSeconds >= PermanentGagDurationSeconds)
+                return "permanently";
+
+            double amount;
+            string unit;
+
+            if (durationSeconds >= 86400)
+            {
+                amount = Math.Round(durationSeconds / 86400, 1);
+                unit = "day";
+            }
+            else if (durationSeconds >= 3600)
+            {
+                amount = Math.Round(durationSeconds / 3600, 1);
+                unit = "hour";
+            }
+            else
+            {
+                amount = Math.Round(durationSeconds / 60, 1);
+                unit = "minute";
+            }
+
+            return $"for {amount:0.#} {unit}{(amount == 1 ? "" : "s")}";
         }
 
         public static bool UnGagPlayer(Player issuer, string playerName)

@@ -82,14 +82,18 @@ namespace ACE.Server.Tests
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Archer));
         }
 
+        /// <summary>
+        /// ELEVEN, not nine, since 2026-08-17: the Berserker/Rogue balance pass adds Surefooted (T2) and
+        /// Pocket Sand (T3) to this trainer's stocked list.
+        /// </summary>
         [TestMethod]
-        public void Parse_RogueTrainer_ResolvesNineRogueAbilities()
+        public void Parse_RogueTrainer_ResolvesElevenRogueAbilities()
         {
-            const string trainerAbilities = "poisonweapon,rogue_training,enhanced_finesseweapons,enhanced_quickness,parry,riposte,crit_damage_rating,attackspeed,acidproc";
+            const string trainerAbilities = "poisonweapon,rogue_training,enhanced_finesseweapons,enhanced_quickness,parry,riposte,surefooted,crit_damage_rating,attackspeed,acidproc,pocketsand";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
-            Assert.AreEqual(9, skills.Count);
+            Assert.AreEqual(11, skills.Count);
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Rogue));
         }
 
@@ -104,10 +108,14 @@ namespace ACE.Server.Tests
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Vanguard));
         }
 
+        /// <summary>
+        /// ELEVEN again, since 2026-08-17: Blood Fury was retired and dropped from this trainer's stocked
+        /// list, then the Berserker/Rogue balance pass added Break Armor in its place.
+        /// </summary>
         [TestMethod]
         public void Parse_BerserkerTrainer_ResolvesElevenBerserkerAbilities()
         {
-            const string trainerAbilities = "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,savageblows,bloodfury,executioner,enhanced_stamina,damage_rating,whirlwind,bloodlust";
+            const string trainerAbilities = "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,savageblows,breakarmor,executioner,enhanced_stamina,damage_rating,whirlwind,bloodlust";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
@@ -169,9 +177,9 @@ namespace ACE.Server.Tests
             var trainerLists = new[]
             {
                 "multishot,archer_training,enhanced_missileweapons,enhanced_coordination,deadeye,eagleeye,heavydraw,crit_rating,doublevolley,longdraw",
-                "poisonweapon,rogue_training,enhanced_finesseweapons,enhanced_quickness,parry,riposte,crit_damage_rating,attackspeed,acidproc",
+                "poisonweapon,rogue_training,enhanced_finesseweapons,enhanced_quickness,parry,riposte,surefooted,crit_damage_rating,attackspeed,acidproc,pocketsand",
                 "thorns,taunt,battlehardened,vanguard_training,enhanced_heavyweapons,enhanced_endurance,damage_resist_rating,shieldblock,shieldcheck,crit_resist_rating,enhanced_health",
-                "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,savageblows,bloodfury,executioner,enhanced_stamina,damage_rating,whirlwind,bloodlust",
+                "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,savageblows,breakarmor,executioner,enhanced_stamina,damage_rating,whirlwind,bloodlust",
                 "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,enhanced_mana,flatcastspeed,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend",
                 "netherrush,void_training,enhanced_voidmagic,enhanced_self,empoweredsummons,enhanced_summoning,summon2x,voiddamage,withering,netherbloom,soultether",
                 // Blood Mage trainer (Content/sql/weenies/1001950_npc_bloodmage_trainer.sql), added 2026-08-03.

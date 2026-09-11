@@ -36,6 +36,12 @@ namespace ACE.Server.WorldObjects
 
             DamageHistory.TryPrune();
 
+            // monster combat effects: the periodic clock every timed effect rides (dot ticks, ward refresh,
+            // lazy expiry of anything the combat hooks left behind). Here rather than on the 0.2s AI tick,
+            // which does not run while a monster is idle, or the emote heartbeat, which returns early once
+            // it has aggro - a timed effect on either would stop at exactly the wrong moment.
+            MonsterEffectHeartbeat();
+
             // delete items when RemainingLifespan <= 0
             foreach (var expireItem in expireItems)
             {

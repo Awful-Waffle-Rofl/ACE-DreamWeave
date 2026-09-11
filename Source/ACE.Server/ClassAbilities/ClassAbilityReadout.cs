@@ -53,8 +53,15 @@ namespace ACE.Server.ClassAbilities
         /// </summary>
         public double Effective { get; init; }
 
-        /// <summary>Display unit: one of "%", "pp" (percentage points), "" (flat), "s", "m", "x".</summary>
+        /// <summary>Display unit: one of "%", "" (flat), "s", "m", "x".</summary>
         public string Unit { get; init; }
+
+        /// <summary>
+        /// Optional leading character(s) rendered immediately before <see cref="Effective"/> (e.g. "+" for a
+        /// flat stat bonus so the line reads "+50 skills" instead of "50 stat"). Null/empty for every
+        /// readout that doesn't opt in - FormatReadoutLine treats null the same as "".
+        /// </summary>
+        public string Prefix { get; init; }
 
         /// <summary>Short player-facing noun phrase, e.g. "melee dmg", "proc", "shield AL". Keep under ~14 chars.</summary>
         public string Label { get; init; }

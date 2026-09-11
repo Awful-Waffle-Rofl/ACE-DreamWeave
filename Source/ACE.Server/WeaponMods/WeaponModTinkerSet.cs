@@ -12,9 +12,14 @@ namespace ACE.Server.WeaponMods
     /// The slot arithmetic, the tinker-log format, and the apply/reverse of a whole layer 1 set. Everything here
     /// is deliberately free of Player, Session and database, so the reversal math can be tested directly.
     ///
-    /// THE SLOT MODEL:
+    /// THE SLOT MODEL (CHANGED 2026-08-06 - SPECIALS ARE NO LONGER IN IT):
     ///
-    ///     10 = reservedSlots + specialCount + tinkerCount
+    ///     10 = reservedSlots + tinkerCount            specials are bounded separately by MaxSpecials
+    ///
+    /// It used to read "10 = reservedSlots + specialCount + tinkerCount", so every special a weapon rolled cost
+    /// it a tinker. That made an inert special strictly WORSE than no special, which is the defect this change
+    /// removes. Tinker capacity is now <see cref="AvailableSlots"/> - ten minus the reserved slots - whatever
+    /// the weapon happens to be carrying in specials.
     ///
     /// RESERVED SLOTS ARE NOT JUST IMBUES (HARD). A slot consumed by a tinker this table does not own - Oak,
     /// imbue salvage, or a bag with no MaterialType - is one this system can neither reverse nor account for,
@@ -29,6 +34,17 @@ namespace ACE.Server.WeaponMods
     /// EXCEED 10: TinkeringDifficulty is an unguarded 10-element list indexed directly by that counter
     /// (RecipeManager.cs:244, list at :323-336), so any ungated recipe path reaching it at 11 throws. The
     /// counter always reads 10 because the budget is always full, whatever the mix inside it.
+    ///
+    /// SPECIALS NEVER INCREMENTED THAT COUNTER, BEFORE OR AFTER THE DECOUPLING, and this is the fact the whole
+    /// migration question turns on. <see cref="WriteComposition"/> SETS the counter to 10 unconditionally, and
+    /// specials are not written into either tinker log. What specials used to do was SHORTEN the log, because
+    /// the tinker count they were subtracted from was the number of log entries written - so a pre-decoupling
+    /// weapon holding N specials carries NumTimesTinkered 10 against a log of 10 - N entries. After the
+    /// decoupling the log is written at full length again and the two agree by construction.
+    ///
+    /// THAT ASYMMETRY IS WHY THE INTEGRITY GATE STAYS SUPPRESSED ON A MANAGED WEAPON. See
+    /// <see cref="PassesIntegrityGate"/>: tightening it would refuse every weapon rolled before this change,
+    /// which is exactly the migration hazard. No data migration is needed and none should be written.
     ///
     /// Slayer is NOT a slot: SlayerCreatureType 166 and SlayerDamageBonus 138 are untouched and cost nothing.
     /// </summary>
@@ -76,17 +92,24 @@ namespace ACE.Server.WeaponMods
             return ClampReserved(imbue + Math.Max(0, unknown - imbue));
         }
 
-        /// <summary>Slots left for layer 1 tinkers once reserved slots and specials have taken theirs. Never negative.</summary>
-        public static int ComputeTinkerCount(int reservedSlots, int specialCount)
-        {
-            var reserved = ClampReserved(reservedSlots);
-            var specials = Math.Clamp(specialCount, 0, WeaponModRegistry.MaxSpecials);
+        /// <summary>
+        /// Slots left for layer 1 tinkers once the reserved slots have taken theirs. Never negative.
+        ///
+        /// IT NO LONGER TAKES A SPECIAL COUNT (2026-08-06). The parameter was dropped rather than kept and
+        /// ignored, deliberately: an overload that silently discarded it would leave every existing call site
+        /// compiling and quietly changing meaning, and the call sites are exactly what needed reviewing.
+        /// Identical to <see cref="AvailableSlots"/> by construction now - both names are kept because they
+        /// answer different questions ("how many tinkers do I roll" against "is there anything here to work
+        /// with at all") and the second is what <see cref="WeaponModManager.ResolveRefusal"/> gates on.
+        /// </summary>
+        public static int ComputeTinkerCount(int reservedSlots) => AvailableSlots(reservedSlots);
 
-            return Math.Max(0, WeaponModRegistry.TotalSlots - reserved - specials);
-        }
-
-        /// <summary>Slots a weapon has available for tinkers and specials together, once reserved slots are taken.</summary>
-        public static int AvailableSlots(int reservedSlots) => WeaponModRegistry.TotalSlots - ClampReserved(reservedSlots);
+        /// <summary>
+        /// Slots a weapon has available for TINKERS, once reserved slots are taken. Since the 2026-08-06
+        /// decoupling this is the whole of the non-reserved budget: specials do not draw on it.
+        /// </summary>
+        public static int AvailableSlots(int reservedSlots) =>
+            Math.Max(0, WeaponModRegistry.TotalSlots - ClampReserved(reservedSlots));
 
         // ---------------- log format (pure) ----------------
 
@@ -237,7 +260,44 @@ namespace ACE.Server.WeaponMods
 
         // ---------------- specials on an item ----------------
 
-        /// <summary>Every special currently recorded on the weapon, with the applied magnitude it holds.</summary>
+        /// <summary>
+        /// THE RAW STORED VALUE, whose MEANING DEPENDS ON THE TIER - a Tier A record holds an applied
+        /// magnitude, a Tier B record holds a roll fraction. Use <see cref="ReadMagnitude"/> unless you are
+        /// doing Tier A reversal arithmetic, which is the one thing that needs the number as stored.
+        /// </summary>
+        public static double? ReadRecord(WorldObject weapon, WeaponModDefinition definition) =>
+            weapon == null || definition == null ? null : weapon.GetProperty(definition.Record);
+
+        /// <summary>
+        /// A held special's EFFECTIVE MAGNITUDE, in the native property's own units, whichever tier it is.
+        /// This is the number the engine acts on and the number the appraisal panel prints, and it is the one
+        /// every caller outside the reversal arithmetic wants.
+        ///
+        /// For Tier A it is the record verbatim. For Tier B the record is a roll fraction and the magnitude is
+        /// recomputed against the LIVE catalog on every read - which is the whole point of the split: retuning
+        /// a MaxRoll or the scale tunable moves weapons already in the world.
+        /// </summary>
+        public static double ReadMagnitude(WorldObject weapon, WeaponModDefinition definition, double scale)
+        {
+            var record = ReadRecord(weapon, definition);
+
+            if (record == null || double.IsNaN(record.Value))
+                return 0.0;
+
+            return definition.Tier == WeaponModTier.B
+                ? WeaponModValue.MagnitudeFromFraction(definition, record.Value, scale)
+                : record.Value;
+        }
+
+        /// <summary>ReadMagnitude against the live weapon_mod_magnitude_scale tunable.</summary>
+        public static double ReadMagnitude(WorldObject weapon, WeaponModDefinition definition) =>
+            ReadMagnitude(weapon, definition, WeaponModValue.MagnitudeScale());
+
+        /// <summary>
+        /// Every special currently recorded on the weapon, with its EFFECTIVE MAGNITUDE - not the raw record.
+        /// Tier B entries are resolved against the live catalog on the way out, so a caller never has to know
+        /// which tier it is holding. <see cref="ReadRecord"/> is the raw accessor for the one caller that does.
+        /// </summary>
         public static List<(WeaponModDefinition Definition, double Magnitude)> ReadSpecials(WorldObject weapon)
         {
             var specials = new List<(WeaponModDefinition, double)>();
@@ -245,12 +305,12 @@ namespace ACE.Server.WeaponMods
             if (weapon == null)
                 return specials;
 
+            var scale = WeaponModValue.MagnitudeScale();
+
             foreach (var definition in WeaponModRegistry.AllMods)
             {
-                var magnitude = weapon.GetProperty(definition.Record);
-
-                if (magnitude != null)
-                    specials.Add((definition, magnitude.Value));
+                if (weapon.GetProperty(definition.Record) != null)
+                    specials.Add((definition, ReadMagnitude(weapon, definition, scale)));
             }
 
             return specials;
@@ -258,17 +318,70 @@ namespace ACE.Server.WeaponMods
 
         public static int SpecialCount(WorldObject weapon) => ReadSpecials(weapon).Count;
 
-        /// <summary>Adds a special's magnitude to its native property and records exactly what was added.</summary>
+        /// <summary>
+        /// THE SINGLE PLACE THE TIER STORAGE SPLIT IS WRITTEN. A Tier A row adds its magnitude to a native
+        /// property and records exactly what it added, because reversal has to subtract that same number back
+        /// off a value the loot generator may also have contributed to. A Tier B row writes no native at all,
+        /// so it records the ROLL FRACTION instead and lets every read re-derive the magnitude from the live
+        /// catalog.
+        ///
+        /// Returns the applied magnitude, so a caller can report what it just did without recomputing it.
+        /// </summary>
+        public static double ApplySpecialAtFraction(WorldObject weapon, WeaponModDefinition definition, double fraction, double scale)
+        {
+            if (weapon == null || definition == null)
+                return 0.0;
+
+            var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale);
+
+            if (definition.Tier == WeaponModTier.B)
+            {
+                // SetProperty, never player.UpdateProperty: this row is bookkeeping and must never reach the
+                // client. No native is written - a Tier B row has none.
+                weapon.SetProperty(definition.Record, WeaponModValue.Clamp01(fraction));
+
+                return magnitude;
+            }
+
+            definition.WriteNative(weapon, definition.ApplyValue(definition.ReadNative(weapon), magnitude));
+
+            weapon.SetProperty(definition.Record, magnitude);
+
+            return magnitude;
+        }
+
+        /// <summary>ApplySpecialAtFraction against the live weapon_mod_magnitude_scale tunable.</summary>
+        public static double ApplySpecialAtFraction(WorldObject weapon, WeaponModDefinition definition, double fraction) =>
+            ApplySpecialAtFraction(weapon, definition, fraction, WeaponModValue.MagnitudeScale());
+
+        /// <summary>
+        /// Applies a special so the weapon ends up carrying <paramref name="magnitude"/> RIGHT NOW, converting
+        /// to whatever its tier actually stores. The contract is unchanged from before the storage split, which
+        /// is why the roll path and every existing caller still read naturally.
+        ///
+        /// PREFER <see cref="ApplySpecialAtFraction"/> WHEREVER THE ROLL IS IN HAND. This overload has to invert
+        /// through <see cref="WeaponModValue.FractionFor"/> for a Tier B row, and that inversion is lossy at the
+        /// edges: a magnitude above the row's current ceiling clamps to a full-strength roll rather than
+        /// round-tripping. Exact for any magnitude the catalog can actually produce, which is why it remains
+        /// the natural way to seed a weapon.
+        /// </summary>
         public static void ApplySpecial(WorldObject weapon, WeaponModDefinition definition, double magnitude)
         {
             if (weapon == null || definition == null)
                 return;
 
-            definition.WriteNative(weapon, definition.ApplyValue(definition.ReadNative(weapon), magnitude));
+            if (definition.Tier != WeaponModTier.B)
+            {
+                definition.WriteNative(weapon, definition.ApplyValue(definition.ReadNative(weapon), magnitude));
 
-            // SetProperty, never player.UpdateProperty: this row is bookkeeping for the reversal arithmetic and
-            // must never reach the client.
-            weapon.SetProperty(definition.Record, magnitude);
+                weapon.SetProperty(definition.Record, magnitude);
+
+                return;
+            }
+
+            var scale = WeaponModValue.MagnitudeScale();
+
+            weapon.SetProperty(definition.Record, WeaponModValue.FractionFor(definition, magnitude, scale));
         }
 
         /// <summary>
@@ -277,17 +390,27 @@ namespace ACE.Server.WeaponMods
         /// modifier ever rolled, so a heavily rerolled weapon would accumulate up to 20 junk rows that all read
         /// as absent. This is the ClearMods pattern from EquipmentModManager.
         /// </summary>
+        /// <remarks>
+        /// READS THE RAW RECORD, NOT <see cref="ReadMagnitude"/>, and that is required rather than incidental.
+        /// Tier A reversal must subtract back exactly the number that was ADDED, which is what the record
+        /// holds; re-deriving it from the live catalog would subtract a retuned value from a native the old
+        /// value went into, and the difference would stick permanently on an item nobody can audit.
+        ///
+        /// The Tier B case reaches the same two lines and is a no-op by construction: a Tier B row has no
+        /// native, so <see cref="WeaponModDefinition.WriteNative"/> returns without writing and the roll
+        /// fraction never enters any arithmetic. Only the RemoveProperty below does anything for it.
+        /// </remarks>
         public static void ReverseSpecial(WorldObject weapon, WeaponModDefinition definition)
         {
             if (weapon == null || definition == null)
                 return;
 
-            var magnitude = weapon.GetProperty(definition.Record);
+            var record = ReadRecord(weapon, definition);
 
-            if (magnitude == null)
+            if (record == null)
                 return;
 
-            definition.WriteNative(weapon, definition.ReverseValue(definition.ReadNative(weapon), magnitude.Value));
+            definition.WriteNative(weapon, definition.ReverseValue(definition.ReadNative(weapon), record.Value));
 
             weapon.RemoveProperty(definition.Record);
         }
@@ -359,6 +482,21 @@ namespace ACE.Server.WeaponMods
         /// counter claims; it says NOTHING about whether this table can reverse those entries. Ten Oak passes it
         /// cleanly. The budget half of that problem is <see cref="ComputeReservedSlots"/>, which must be applied
         /// alongside the gate, never instead of it.
+        ///
+        /// THE SUPPRESSION ON A MANAGED WEAPON IS DELIBERATELY UNCHANGED BY THE 2026-08-06 DECOUPLING, AND
+        /// TIGHTENING IT WOULD BE A MIGRATION BUG. It is tempting to un-suppress it now, because a weapon
+        /// written by the NEW code does satisfy it: the log is written at full tinker length, so log entries
+        /// plus imbue bits account for all ten slots. But a weapon rolled by the OLD code carries a log short by
+        /// exactly its special count, and un-suppressing would refuse it with TinkerLogMismatch - permanently,
+        /// because the only way to rewrite that log is a reroll, which is what the refusal blocks. Weapons in
+        /// that state exist on the dev shard today. So the gate stays suppressed and the accounting stays where
+        /// it always was, in <see cref="ComputeReservedSlots"/>.
+        ///
+        /// NOR DOES AN OLD WEAPON GAIN FREE CAPACITY FROM THE SUPPRESSION. Capacity comes from
+        /// <see cref="ReadReservedSlots"/>, which counts UNKNOWN log entries against KNOWN ones. Specials appear
+        /// in neither, so a short log changes nothing about the reserved figure, and the one path that grants
+        /// tinkers - <see cref="WeaponModManager.ApplyReroll"/> - reverses everything the weapon currently holds
+        /// before it refills. The old set is undone, then a new full-length set is applied.
         /// </summary>
         public static bool PassesIntegrityGate(WorldObject weapon)
         {

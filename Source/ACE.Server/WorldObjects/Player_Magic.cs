@@ -12,6 +12,7 @@ using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics;
+using ACE.Server.WeaponMods;
 
 namespace ACE.Server.WorldObjects
 {
@@ -592,12 +593,16 @@ namespace ACE.Server.WorldObjects
                 {
                     manaUsed = (uint)Math.Round(manaUsed * GetClassAbilityManaSurcharge(spell));
 
-                    // Tier B weapon mod: Overload, a flat chance the cast costs nothing at all, read off the
-                    // equipped WAND. Rolled AFTER the surcharge so a free cast is free of the surcharge too,
-                    // and inside the same casterItem == null branch, because a weapon-spell proc draws from
-                    // item mana rather than the player's pool and has no caster in hand to carry the mod.
-                    if (RollWeaponModOverload())
-                        manaUsed = 0;
+                    // Efficiency (WeaponModId.Efficiency): reduces spell mana cost on the player's own casts
+                    // (never weapon-spell procs, which draw from item mana above). Read off the equipped
+                    // WAND, not the melee/missile weapon - see Player_WeaponMods.cs for why the two accessors
+                    // are separate.
+                    var preEfficiency = manaUsed;
+
+                    manaUsed = (uint)Math.Round(manaUsed * WeaponModCombat.CostMultiplier(GetCasterOnlyModValue(WeaponModId.Efficiency)));
+
+                    if (preEfficiency >= 1 && manaUsed < 1)
+                        manaUsed = 1;
                 }
             }
             else if (castingPreCheckStatus == CastingPreCheckStatus.CastFailed)
@@ -1082,7 +1087,9 @@ namespace ACE.Server.WorldObjects
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
 
             // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
-            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell);
+            // Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
+            // Player_WeaponMods_Casting.cs.
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, target);
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, isWeaponSpell, spellChain);
@@ -1211,7 +1218,9 @@ namespace ACE.Server.WorldObjects
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
 
             // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
-            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell);
+            // Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
+            // Player_WeaponMods_Casting.cs. This is an untargeted (self) cast, so target is null.
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, null);
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, false, spellChain);

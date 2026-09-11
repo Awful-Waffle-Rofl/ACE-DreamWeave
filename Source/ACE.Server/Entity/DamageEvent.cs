@@ -11,6 +11,7 @@ using ACE.Entity.Models;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Entity
@@ -163,6 +164,13 @@ namespace ACE.Server.Entity
 
             var damage = damageEvent.DoCalculateDamage(attacker, defender, damageSource);
 
+            // monster combat effects: a non-player attacker's landed hit, after the calculation and before
+            // the event is handed back, so the damage applied and the damage reported both include whatever
+            // a rider changed. ONE site covers monster melee (Monster_Melee) and monster missile
+            // (ProjectileCollisionHelper) - both resolve through this method, Creature-typed on both sides.
+            if (attacker is not Player && damageEvent.HasDamage)
+                attacker.ApplyOutgoingHitMonsterEffects(defender, damageEvent);
+
             damageEvent.HandleLogging(attacker, defender);
 
             return damageEvent;
@@ -216,6 +224,18 @@ namespace ACE.Server.Entity
                     playerDefender.OnClassAbilityAttackAvoided(attacker, avoidance, CombatType);
                     return 0.0f;
                 }
+            }
+
+            // monster combat effects: the mirror of the block above for a NON-player defender, rolled from
+            // the same slot - before the evade roll - so an authored avoid and the monster's own evade are
+            // one decision rather than two chances to miss. Pooled across the monster's avoidance effects
+            // and clamped by monster_effect_avoidance_cap inside; no-op unless its weenie authored one.
+            // Reported as an evade because that is what it is from the attacker's side: the attack simply
+            // did not land, and no block/parry synergy exists on the monster side to distinguish.
+            if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
+            {
+                Evaded = true;
+                return 0.0f;
             }
 
             // evasion chance
@@ -297,6 +317,11 @@ namespace ACE.Server.Entity
                     // verify: CriticalMultiplier only applied to the additional crit damage,
                     // whereas CD/CDR applied to the total damage (base damage + additional crit damage)
                     CriticalDamageMod = 1.0f + WorldObject.GetWeaponCritDamageMod(Weapon, attacker, attackSkill, defender);
+
+                    // Weapon mods v3 Tier B (2026-08-06): Execution MULTIPLIES CriticalDamageMod by
+                    // (1 + magnitude), read directly off the weapon - see WeaponModRegistry.cs's Tier B v3
+                    // remarks for why this is a multiplier rather than a write into GetWeaponCritDamageMod.
+                    CriticalDamageMod *= 1.0f + (float)WeaponModCombat.ReadWeaponOnly(Weapon, WeaponModId.Execution);
 
                     CriticalDamageRatingMod = Creature.GetPositiveRatingMod(attacker.GetCritDamageRating());
 
@@ -450,6 +475,11 @@ namespace ACE.Server.Entity
 
             if (DamageSource.ItemType == ItemType.MissileWeapon)
                 BaseDamageMod.ElementalBonus = WorldObject.GetMissileElementalDamageBonus(Weapon, attacker, DamageType);
+
+            // Weapon mods v3 Tier B: Heft into DamageBonus, Tension/Leverage into DamageMod - both inside the
+            // "(base + bonus + elemental) * DamageMod" bracket. Kept out of BaseDamageMod's constructor so that
+            // class stays byte-identical to upstream; see WeaponModCombat.ApplyBaseDamageMods for the reasoning.
+            WeaponModCombat.ApplyBaseDamageMods(BaseDamageMod, Weapon);
 
             BaseDamage = (float)ThreadSafeRandom.Next(BaseDamageMod.MinDamage, BaseDamageMod.MaxDamage);
         }

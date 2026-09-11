@@ -23,6 +23,7 @@ using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Managers;
 using ACE.Server.Physics;
 using ACE.Server.Physics.Common;
+using ACE.Server.WorldEvents;
 
 using Character = ACE.Database.Models.Shard.Character;
 using Position = ACE.Entity.Position;
@@ -37,6 +38,45 @@ namespace ACE.Server.Managers
 
         public static bool WorldActive { get; private set; }
         private static volatile bool pendingWorldStop;
+
+        /// <summary>
+        /// WaffleACE liveness: Environment.TickCount64 as of the top of the most recent world tick.
+        /// Written by the world thread only, read by WorldWatchdog on its own thread.
+        ///
+        /// This exists because a dead or hung world thread is otherwise INVISIBLE from outside the
+        /// process: the .NET process stays alive, SocketManager's listener threads keep the UDP port
+        /// bound, and a port-probe healthcheck keeps reporting healthy. On 2026-09-01 that combination
+        /// hid a world thread that had died to an unhandled exception for 5h22m while every login
+        /// failed. See WorldWatchdog for what consumes this.
+        ///
+        /// Deliberately a monotonic tick count and not DateTime.UtcNow: the write sits at the top of a
+        /// loop that iterates at least ~100 times a second, so it must be a single interlocked 8-byte
+        /// store with no syscall and no allocation, and it must not move backwards when the wall clock
+        /// is adjusted (NTP, DST, a container host clock step).
+        /// </summary>
+        private static long lastWorldTickTicks;
+
+        /// <summary>
+        /// Reader for <see cref="lastWorldTickTicks"/>. Interlocked.Read because a 64-bit field is not
+        /// guaranteed to be read atomically on a 32-bit runtime, and a torn read here would look like
+        /// an enormous staleness and could trip the watchdog on a perfectly healthy world.
+        /// </summary>
+        internal static long LastWorldTickTicks => Interlocked.Read(ref lastWorldTickTicks);
+
+        /// <summary>
+        /// Latched true by the first world tick and never cleared. It is FALSE for the whole duration
+        /// of LandblockManager.PreloadConfigLandblocks(), which on a large permaload list legitimately
+        /// runs for minutes - the watchdog must be able to tell "has not started yet" apart from
+        /// "started and then stopped ticking", because only the second one is a fault.
+        /// </summary>
+        internal static volatile bool WorldEverStarted;
+
+        /// <summary>
+        /// Set true by the world thread's own catch block when it dies to an unhandled exception. This
+        /// is the unambiguous death signal: WorldActive alone cannot distinguish a crash from a normal
+        /// shutdown, since both clear it.
+        /// </summary>
+        internal static volatile bool WorldThreadFaulted;
 
         public enum WorldStatusState
         {
@@ -69,6 +109,14 @@ namespace ACE.Server.Managers
                     // This delegate runs on a bare background thread, so an escaping exception would
                     // otherwise terminate the process with no log line at all. Log it loudly instead.
                     log.Fatal("World thread terminated by an unhandled exception. The world is stopped.", ex);
+
+                    // WaffleACE liveness: publish the death so WorldWatchdog (on its own thread) can
+                    // report it and, if configured, take the process down instead of leaving a hollow
+                    // server bound to its port. Nothing else goes in this block: we are on the dying
+                    // thread, so anything that could itself throw would skip the finally below, and
+                    // the finally is what ServerManager's shutdown waits depend on. In particular do
+                    // NOT call Environment.Exit or start a shutdown from here.
+                    WorldThreadFaulted = true;
                 }
                 finally
                 {
@@ -130,7 +178,47 @@ namespace ACE.Server.Managers
             });
         }
 
+        /// <summary>
+        /// Login materialization. Runs deferred on the world-simulation thread (enqueued by
+        /// PlayerEnterWorld above), far from the handler that requested the login, and it builds a Player out
+        /// of persisted shard state - so any corruption in that state surfaces here. An unhandled exception
+        /// would escape to WorldManager's fatal handler, which does NOT crash the process: it STOPS the
+        /// world, leaving every session connected to a frozen shard. One corrupted character must cost one
+        /// failed login, not the world.
+        /// </summary>
         private static void DoPlayerEnterWorld(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
+        {
+            // Whole-body containment rather than piecemeal null checks: the body has many null candidates
+            // coming out of DB state (possessedBiotas, the Location reassignments, Instantiation) and
+            // hardening them one at a time is a refactor of a login path that is otherwise working.
+            try
+            {
+                DoPlayerEnterWorld_Inner(session, character, playerBiota, possessedBiotas);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"WorldManager.DoPlayerEnterWorld: failed to materialize character {character?.Name} (0x{character?.Id:X8}) for account {session?.Account}; aborting this login", ex);
+
+                // Signal the client and end the login cleanly. EnterGameGeneric dismisses with a popup and
+                // returns the player to character select, which is the right outcome for "this character
+                // could not be brought into the world". AccountSelectCallbackException is the existing
+                // termination reason closest to "a login callback threw"; no new reason is added here
+                // because SessionTerminationReasonDescriptions is an index-aligned array.
+                try
+                {
+                    session?.Terminate(ACE.Server.Network.Enum.SessionTerminationReason.AccountSelectCallbackException,
+                        new GameMessageCharacterError(ACE.Server.Network.Enum.CharacterError.EnterGameGeneric),
+                        null,
+                        "DoPlayerEnterWorld threw");
+                }
+                catch (Exception ex2)
+                {
+                    log.Error($"WorldManager.DoPlayerEnterWorld: could not terminate the session for character {character?.Name} after a failed enter-world", ex2);
+                }
+            }
+        }
+
+        private static void DoPlayerEnterWorld_Inner(Session session, Character character, Biota playerBiota, PossessedBiotas possessedBiotas)
         {
             Player player;
 
@@ -301,15 +389,52 @@ namespace ACE.Server.Managers
             }
 
             // Wave challenge (WaffleACE): a player who logged out mid-gauntlet forfeits the run. The waves they
-            // actually cleared were already banked into BestWaveScore as each one cleared, so nothing is lost here.
-            // Same handling as the two challenges above - clear the persisted run flag and re-home them to their
-            // lifestone rather than deposit them back at the (now-gone) arena entrance.
+            // actually cleared were already banked into BestWaveScoreCenti as each one cleared, so nothing from a
+            // completed wave is lost here - but this path does NOT go through FinishWaveChallengeRun, so any
+            // partial progress on the wave that was in flight at logout is NOT banked; the run simply ends at the
+            // last full clear. Same handling as the two challenges above - clear the persisted run flag and
+            // re-home them to their lifestone rather than deposit them back at the (now-gone) arena entrance.
             if (session.Player.WaveChallengeActive)
             {
                 session.Player.WaveChallengeActive = false;
                 session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
                 if (session.Player.Sanctuary != null)
                     session.Player.Location = new Position(session.Player.Sanctuary);
+            }
+
+            // Speed challenge (WaffleACE): a player who logged out mid-run forfeits it - no time is recorded and
+            // no character_speed_run row is written, because the run only ever files a row at the objective. The
+            // ephemeral run state (bound instance, start time, season id) died with the session, which is
+            // precisely why the active flag is persisted separately: it is the only thing left to catch here.
+            // Same handling as the three challenges above - clear the persisted run flag and re-home them to
+            // their lifestone rather than deposit them back at the (now-gone) season instance entrance.
+            if (session.Player.SpeedChallengeActive)
+            {
+                session.Player.SpeedChallengeActive = false;
+                session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                if (session.Player.Sanctuary != null)
+                    session.Player.Location = new Position(session.Player.Sanctuary);
+            }
+
+            // Speed season rollover (WaffleACE): drop a personal-best cache left over from an EARLIER season.
+            // TryFinishSpeedChallenge already re-stamps the pair on the first clear of a new season, but that
+            // only fires for a player who actually runs it again. Without this, a player who set a qualifying
+            // time in season N, never claimed the reward, and never enters season N+1 still carries the season
+            // N number on their biota, and the reward NPC - which reads the cached best, not the board - would
+            // pay them in N+1 off a time they set in a season that is over. Both properties are removed
+            // together for the reason their doc comments give: a BestSpeedRunCenti without its matching
+            // SpeedChallengeSeasonId is indistinguishable from a stale one. The decision itself - including
+            // why a NULL active season is a scheduling gap that must clear NOTHING rather than a season
+            // change - lives in Player.ShouldClearStaleSpeedBest, where it is unit tested.
+            //
+            // This is only ONE of the three places the staleness has to be caught, and on its own it is the
+            // weakest: it fires exclusively on a fresh enter-world. TryFinishSpeedChallenge covers the player
+            // who runs the new season, and the InqInt64Stat gate in EmoteManager covers the player who is
+            // online across the rollover and never relogs at all. Removing any one of them re-opens a payout.
+            if (Player.ShouldClearStaleSpeedBest(session.Player.SpeedChallengeSeasonId, SpeedSeasonManager.GetActiveSeason()?.Id))
+            {
+                session.Player.BestSpeedRunCenti = null;
+                session.Player.SpeedChallengeSeasonId = null;
             }
 
             // ACRealms port: a saved position may point into an instance that no longer
@@ -331,6 +456,9 @@ namespace ACE.Server.Managers
                     session.Player.Location = validatedLocation;
                 }
             }
+
+            // Threads cleanup layer (b): destroy gems bound to runs that died while this player was offline
+            ACE.Server.ThreadDungeons.ThreadDungeonSweeper.SweepPlayer(session.Player);
 
             session.Player.PlayerEnterWorld();
 
@@ -485,6 +613,14 @@ namespace ACE.Server.Managers
 
             while (!pendingWorldStop)
             {
+                // WaffleACE liveness stamp - MUST stay the first statement in this loop body. Everything
+                // below it can block (database callbacks, landblock ticks, physics), and the whole point
+                // of the stamp is to age while that happens so a hung tick is distinguishable from a
+                // healthy one. One interlocked store per iteration at ~100+ iterations/sec is free; do
+                // not move it, guard it behind a rate limiter, or replace it with a wall-clock read.
+                Interlocked.Exchange(ref lastWorldTickTicks, Environment.TickCount64);
+                WorldEverStarted = true;
+
                 /*
                 When it comes to thread safety for Landblocks and WorldObjects, ACE makes the following assumptions:
 
@@ -515,6 +651,11 @@ namespace ACE.Server.Managers
                 ServerPerformanceMonitor.RestartEvent(ServerPerformanceMonitor.MonitorType.PlayerManager_Tick);
                 PlayerManager.Tick();
                 ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.PlayerManager_Tick);
+
+                // WaffleACE: IP active-player limit re-check sweep. Self-rate-limited to ip_limit_sweep_seconds
+                // and returns immediately when the feature is off, so calling it every tick is cheap. This is
+                // the ONLY reaction site for the limit after login - see IpLimitManager.Tick.
+                IpLimitManager.Tick();
 
                 ServerPerformanceMonitor.RestartEvent(ServerPerformanceMonitor.MonitorType.NetworkManager_InboundClientMessageQueueRun);
                 NetworkManager.InboundMessageQueue.RunActions();
@@ -554,6 +695,10 @@ namespace ACE.Server.Managers
                 Timers.PortalYearTicks += worldTickTimer.Elapsed.TotalSeconds;
             }
 
+            // Any world event still running dies with the world thread, not with the process: its spawned
+            // objects are transient and must be destroyed while the landblocks are still up.
+            WorldEventManager.OnShutdown();
+
             // World has finished operations and concedes the thread to garbage collection
             WorldActive = false;
         }
@@ -575,7 +720,54 @@ namespace ACE.Server.Managers
 
             HouseManager.Tick();
 
-            FellowshipManager.Tick();
+            // The three sweeps below are the tail of the world heartbeat and, unlike LandblockManager.Tick
+            // and HouseManager.Tick above, carry no containment of their own. UpdateGameWorld and its caller
+            // UpdateWorld have no outer catch either, so a throw from any of them escapes to WorldManager's
+            // fatal handler, which does NOT crash the process - it STOPS the world (process up, sessions
+            // connected, nothing ticking). That is the exact shape of the 2026-09-01 Portal Recall outage.
+            // Each is contained separately so one failing manager does not skip the ones after it; none of
+            // them is restartable from here, so on failure we log the manager and move on, and the sweep is
+            // simply retried on the next heartbeat.
+            try
+            {
+                FellowshipManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): FellowshipManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                WorldEventManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): WorldEventManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // WaffleACE Threads: reaps expired runs and runs whose private landblock has already
+                // unloaded. Self-rate-limited to a 15-second sweep and returns immediately otherwise.
+                ACE.Server.ThreadDungeons.ThreadDungeonManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): ThreadDungeonManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // WaffleACE Mule Vendor: drops account vault stores that no vendor window is looking at.
+                // Self-rate-limited to a one-minute sweep and returns immediately otherwise, so calling it
+                // from the heartbeat is cheap.
+                AccountVaultManager.Tick(Time.GetUnixTime());
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): AccountVaultManager.Tick() threw; skipping it this heartbeat", ex);
+            }
 
             ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.UpdateGameWorld_Entire);
             ServerPerformanceMonitor.RegisterCumulativeEvents();

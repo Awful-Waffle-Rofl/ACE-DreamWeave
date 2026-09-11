@@ -33,8 +33,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "themselves at the same target for free - no mana, no wind-up. Higher Magic Item " +
                           "Tinkering increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 5, 5, 5 },
+            CostPerRank = new[] { 3, 3, 3 },
             Implemented = true,
+            AffinitySkill = Skill.MagicItemTinkering,
         };
 
         /// <summary>
@@ -118,7 +119,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = total,
-                Unit = "pp",
+                Unit = "%",
                 Label = "recast",
                 Per = null,
                 CapNote = null,

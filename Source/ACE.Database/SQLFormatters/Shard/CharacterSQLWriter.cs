@@ -26,7 +26,7 @@ namespace ACE.Database.SQLFormatters.Shard
         {
             writer.WriteLine("INSERT INTO `character` (`id`, `account_Id`, `name`, `is_Plussed`, `is_Deleted`, `delete_Time`, `last_Login_Timestamp`, `total_Logins`, `character_Options_1`, `character_Options_2`, `gameplay_Options`, `spellbook_Filters`, `hair_Texture`, `default_Hair_Texture`)");
 
-            var output = $"VALUES ({input.Id}, {input.AccountId}, {GetSQLString(input.Name)}, {input.IsPlussed}, {input.IsDeleted}, {input.DeleteTime}, {input.LastLoginTimestamp}, {input.TotalLogins}, {input.CharacterOptions1}, {input.CharacterOptions2}, {input.GameplayOptions}, {input.SpellbookFilters}, {input.HairTexture}, {input.DefaultHairTexture});";
+            var output = $"VALUES ({input.Id}, {input.AccountId}, {GetSQLString(input.Name)}, {input.IsPlussed}, {input.IsDeleted}, {input.DeleteTime}, {input.LastLoginTimestamp}, {input.TotalLogins}, {input.CharacterOptions1}, {input.CharacterOptions2}, {GetSQLBinary(input.GameplayOptions)}, {input.SpellbookFilters}, {input.HairTexture}, {input.DefaultHairTexture});";
 
             output = FixNullFields(output);
 

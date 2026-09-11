@@ -325,7 +325,12 @@ namespace ACE.Server.Network.Structure
             // remaining applications, which is exactly what the client's green uses-remaining bar is for (the
             // same bar a summoning device or healing kit draws). Tested with SalvageTool.IsSalvageTool rather
             // than a wcid list on purpose: a list would silently fail to cover the next tool added.
-            if (wo is CraftTool && !SalvageTool.IsSalvageTool(wo) && (wo.ItemType == ItemType.TinkeringMaterial || wo.WeenieClassId >= 36619 && wo.WeenieClassId <= 36628 || wo.WeenieClassId >= 36634 && wo.WeenieClassId <= 36636))
+            // WaffleACE - the hardcoded 36619-36628/36634-36636 range was replaced with
+            // RecipeManager.IsFoolproofTinker, which contains that exact range (verified against
+            // RecipeManager.foolproofTinkers) plus the rare foolproofs (30094-30106) and the fork's own
+            // Foolproof White Quartz (1002700). The rare-foolproof widening is harmless: those wcids are
+            // guaranteed-success materials too, and this suppression only ever hides a Structure line.
+            if (wo is CraftTool && !SalvageTool.IsSalvageTool(wo) && (wo.ItemType == ItemType.TinkeringMaterial || RecipeManager.IsFoolproofTinker(wo.WeenieClassId)))
             {
                 if (PropertiesInt.ContainsKey(PropertyInt.Structure))
                     PropertiesInt.Remove(PropertyInt.Structure);
@@ -380,6 +385,13 @@ namespace ACE.Server.Network.Structure
             // [AssessmentProperty], so this line is the only place the count reaches the client.
             propertyDetails.AddRange(SalvageTool.GetAppraisalLines(wo));
 
+            // The Hollow Hammer (WaffleACE) - see ACE.Server/Entity/SalvageForge.cs. UNGATED for the same
+            // reason as the SalvageTool block above: this is a rendering of the EXAMINING PLAYER'S OWN
+            // current tinkering skills, not of a feature toggle's effect, and it needs the examiner (not just
+            // the item) to compute, which is why it is threaded in here rather than through a static-only
+            // helper like SalvageTool's.
+            propertyDetails.AddRange(SalvageForge.GetAppraisalLines(wo, examiner));
+
             WritePropertyDetails(PropertiesString, propertyDetails);
 
             if (!Success)
@@ -395,7 +407,26 @@ namespace ACE.Server.Network.Structure
                 //PropertiesString.Clear();
             }
 
+            ApplyClientValue(wo, PropertiesInt);
+
             BuildFlags();
+        }
+
+        /// <summary>
+        /// Last word on the Value the identify response reports, after every type-specific mask above.
+        /// A zero-value pickable item is reported as worth 1, matching the create-object header
+        /// (WorldObject.ClientValue), so appraising the item after a mule opens no longer resets the
+        /// client's local Value to 0 and re-triggers its sell-pane drag refusal. Only an EXISTING
+        /// Value entry is rewritten, and only ever to 1: an object with no Value at all keeps sending
+        /// none, and an entry a mask above set to 0 for an item whose REAL Value is positive (the
+        /// Container block masks a salvage bag's accumulated Value to its base weenie's) stays 0 -
+        /// the decision is keyed on WorldObject.IsClientValueSpoofed, never on the real Value itself
+        /// (code review on 60471c991).
+        /// </summary>
+        internal static void ApplyClientValue(WorldObject wo, Dictionary<PropertyInt, int> propertiesInt)
+        {
+            if (propertiesInt.TryGetValue(PropertyInt.Value, out var value) && value <= 0 && WorldObject.IsClientValueSpoofed(wo))
+                propertiesInt[PropertyInt.Value] = 1;
         }
 
         /// <summary>
@@ -763,10 +794,12 @@ namespace ACE.Server.Network.Structure
             // trace, with addresses, is in RatingAbility.GenerateAll.
             //
             // GearMaxHealth 379 just above is the one member of the Gear* family that is not display-only:
-            // the client also reads it in its vital-max computation at 0x00592D20 (alongside Enlightenment
-            // 390), which is why Player_Vitals.GetNetworkGearMaxHealth sends a compensated value on the
-            // property-update path. That computation is reached only from call sites outside the assess
-            // panel's code range, so the raw value sent here is display data and does not feed it.
+            // the client also reads it in its vital-max computation at 0x00592D20, alongside Enlightenment
+            // 390. That mattered while the server still sent Enlightenment - GetNetworkGearMaxHealth had to
+            // cancel the client's Enlightenment * 2 term - but 390 is no longer serialized, so the term is
+            // zero and no compensation is sent. Either way that computation is reached only from call sites
+            // outside the assess panel's code range, so the value sent here is display data and does not
+            // feed it.
             // GearCrit 372, GearCritResist 373 and GearHealingBoost 376 have no such second site at all:
             // each appears exactly once in .text, inside the Gear* renderer.
         }

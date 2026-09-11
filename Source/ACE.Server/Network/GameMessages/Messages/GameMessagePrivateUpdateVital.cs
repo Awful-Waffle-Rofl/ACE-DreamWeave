@@ -12,7 +12,7 @@ namespace ACE.Server.Network.GameMessages.Messages
 
             Writer.Write((uint)creatureVital.Vital);
             Writer.Write(creatureVital.Ranks);
-            Writer.Write(creatureVital.StartingValue);
+            Writer.Write(creatureVital.NetworkStartingValue);   // was StartingValue - see EnhancedVitalRefreshTests
             Writer.Write(creatureVital.ExperienceSpent);
             Writer.Write(creatureVital.Current);
         }

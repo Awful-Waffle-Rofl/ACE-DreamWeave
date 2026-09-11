@@ -15,8 +15,56 @@
     <InternalsVisibleTo Include="ACE.Server.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The Market hosts Kestrel in-process. The Web SDK is deliberately not used: it would change
+         this console server's output type and static-web-asset handling.
+         THE RUNTIME IMAGE MUST MATCH - the root Dockerfile is pinned to dotnet/aspnet for this. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <PropertyGroup>
     <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- DATAS (Dynamic Adaptation To Application Sizes) is ON here, which is also the .NET 9+
+         default under Server GC. It was deliberately turned OFF on 2026-09-05 (#919) and that
+         build reached prod on 2026-09-06; this line puts it back, on the repo owner's call after
+         a live session on the DATAS-off build felt worse.
+
+         Keep the measurements, because the revert is a trade and not a refutation. Prometheus,
+         env=prod, the hour before the 19:34 UTC container recreate against the 70 minutes after:
+
+           time_in_gc_ratio            0.447    ->  0.000
+           GC pause, ms per second     5.82     ->  0.76
+           gen0 collections per second 0.116    ->  0.010
+           gen0 budget                 64 MB    ->  2392 MB
+           tick p50                    0.95 ms  ->  0.68 ms
+           tick p99, mean of samples   17.3 ms  ->  27.9 ms
+           tick p99, max of samples    81.5 ms  ->  81.9 ms
+
+         Total GC cost fell hard and p50 improved, but per-collection pause ROSE: 5.82/0.116 is
+         ~50 ms per collection before, 0.756/0.010 is ~76 ms after (the gen0 counter increments on
+         every GC, so it stands in for total collections; gen2 rate was 0.001 on both sides).
+         DATAS-off trades many small pauses for a few large ones, and on a 16.7 ms frame budget it
+         is the large ones a player feels. The tick p99 that #919 set out to fix moved the wrong
+         way, which is the whole reason this is being put back.
+
+         State the weakness of that too, so the next session does not re-litigate it on half the
+         picture. The two windows are not load-matched - 46 players and 198 landblocks before
+         against 35 and 136 after - and prod at the same hour the previous day, at the same 35
+         players with DATAS still on, showed a WORSE p99 mean of 32.2 ms. So the p99 case for
+         reverting is suggestive rather than settled; the per-collection pause case is the solid
+         half of it.
+
+         If DATAS-off is tried again, bound the pause instead of removing the mechanism. Raise
+         DOTNET_GCDTargetTCP above its 2% default, or cap the gen0 budget with DOTNET_GCgen0size
+         rather than letting it run out to 2.4 GB, and judge it on per-collection pause, not on
+         total time in GC. -->
+    <!-- MSBuild property / env var / runtimeconfig key are three different spellings of one
+         setting - GarbageCollectionAdaptationMode here, DOTNET_GCDynamicAdaptationMode in the
+         deploy compose files, System.GC.DynamicAdaptationMode in the generated runtimeconfig.json.
+         All three take 1 enabled / 0 disabled. Verify the generated file after changing this,
+         because a typo in an MSBuild property is silently ignored rather than failing the build.
+         Note that stage cannot validate any change here: at 2-3 players its pauses are already
+         ~0 ms, so the signal only exists on prod's dashboard. -->
     <GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <RetainVMGarbageCollection>true</RetainVMGarbageCollection>
@@ -133,9 +181,25 @@
     <None Remove="Entity\Mutations\Recipes\3800004E - Sandstone.txt" />
     <None Remove="Entity\Mutations\Recipes\39000000 - Paragon Weapons.txt" />
     <None Remove="Entity\Mutations\Recipes\39000001 - Lucky White Rabbit%27s Foot.txt" />
+    <None Remove="Entity\Mutations\Recipes\3A000000 - White Quartz.txt" />
     <None Include="..\..\LICENSE">
       <Pack>True</Pack>
       <PackagePath></PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\Content\events\axes\*.json">
+      <Link>Content\events\axes\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\Content\events\axes\species\*.json">
+      <Link>Content\events\axes\species\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\Content\dungeons\dynamic\*.json">
+      <Link>Content\dungeons\dynamic\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
@@ -237,6 +301,7 @@
     <EmbeddedResource Include="Entity\Mutations\Recipes\3800004E - Sandstone.txt" />
     <EmbeddedResource Include="Entity\Mutations\Recipes\39000000 - Paragon Weapons.txt" />
     <EmbeddedResource Include="Entity\Mutations\Recipes\39000001 - Lucky White Rabbit's Foot.txt" />
+    <EmbeddedResource Include="Entity\Mutations\Recipes\3A000000 - White Quartz.txt" />
   </ItemGroup>
 
   <ItemGroup>
@@ -244,7 +309,7 @@
     <PackageReference Include="log4net" Version="2.0.17" />
     <PackageReference Include="Log4Net.Async.Standard" Version="3.1.0" />
     <PackageReference Include="McMaster.NETCore.Plugins" Version="2.0.0" />
-    <PackageReference Include="MySqlConnector" Version="2.6.1" />
+    <PackageReference Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>
 
   <ItemGroup>

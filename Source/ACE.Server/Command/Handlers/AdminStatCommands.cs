@@ -119,7 +119,7 @@ namespace ACE.Server.Command.Handlers
 
             sb.Append($"Total Server Objects: {ServerObjectManager.ServerObjects.Count:N0}{'\n'}");
 
-            sb.Append($"World DB Cache Counts - Weenies: {DatabaseManager.World.GetWeenieCacheCount():N0}, LandblockInstances: {DatabaseManager.World.GetLandblockInstancesCacheCount():N0}, PointsOfInterest: {DatabaseManager.World.GetPointsOfInterestCacheCount():N0}, Cookbooks: {DatabaseManager.World.GetCookbookCacheCount():N0}, Spells: {DatabaseManager.World.GetSpellCacheCount():N0}, Encounters: {DatabaseManager.World.GetEncounterCacheCount():N0}, Events: {DatabaseManager.World.GetEventsCacheCount():N0}{'\n'}");
+            sb.Append($"World DB Cache Counts - Weenies: {DatabaseManager.World.GetWeenieCacheCount():N0}, LandblockInstances: {DatabaseManager.World.GetLandblockInstancesCacheCount():N0}, PointsOfInterest: {DatabaseManager.World.GetPointsOfInterestCacheCount():N0}, Cookbooks: {DatabaseManager.World.GetCookbookCacheCount():N0}, Spells: {DatabaseManager.World.GetSpellCacheCount():N0}, Encounters: {DatabaseManager.World.GetEncounterCacheCount():N0}, Events: {DatabaseManager.World.GetEventsCacheCount():N0}, RealmLandblockRules: {DatabaseManager.World.GetRealmLandblockRuleCacheCount():N0}{'\n'}");
             //sb.Append($"Shard DB Counts - Biotas: {DatabaseManager.Shard.BaseDatabase.GetBiotaCount():N0}{'\n'}");
             sb.Append($"Shard DB Counts - Biotas: ~{DatabaseManager.Shard.BaseDatabase.GetEstimatedBiotaCount(ConfigManager.Config.MySql.Shard.Database):N0}{'\n'}");
             if (DatabaseManager.Shard.BaseDatabase is ShardDatabaseWithCaching shardDatabaseWithCaching)
@@ -284,6 +284,43 @@ namespace ACE.Server.Command.Handlers
 
             foreach (var landblockGroup in sortedByTopTickMultiThreadedWorkTracker)
                 sb.Append($"{landblockGroup.Count,3},   {landblockGroup.XMin,2:X2} - {landblockGroup.XMax,2:X2},     {landblockGroup.YMin,2:X2} - {landblockGroup.YMax,2:X2}  ,                  {landblockGroup.TickPhysicsTracker.AverageAmount,5:N3} {landblockGroup.TickPhysicsTracker.LargestAmount,5:N3},                            {landblockGroup.TickMultiThreadedWorkTracker.AverageAmount,5:N3} {landblockGroup.TickMultiThreadedWorkTracker.LargestAmount,5:N3}{'\n'}");
+
+            CommandHandlerHelper.WriteOutputInfo(session, sb.ToString());
+        }
+
+        // netstats
+        [CommandHandler("netstats", AccessLevel.Advocate, CommandHandlerFlag.None, 0, "Displays a summary of per-session network throughput")]
+        public static void HandleNetStats(Session session, params string[] parameters)
+        {
+            var sb = new StringBuilder();
+
+            sb.Append($"Network Statistics - Per Session (sorted by bytes/s sent, descending){'\n'}");
+            sb.Append($"Account/Player                  Sent B/s  Sent P/s   Recv B/s  Recv P/s   Total Sent B   Total Sent P   Total Recv B   Total Recv P{'\n'}");
+
+            long totalBytesSent = 0, totalPacketsSent = 0, totalBytesReceived = 0, totalPacketsReceived = 0;
+            double totalBytesSentPerSecond = 0, totalPacketsSentPerSecond = 0, totalBytesReceivedPerSecond = 0, totalPacketsReceivedPerSecond = 0;
+
+            var players = PlayerManager.GetAllOnline().Where(p => p.Session?.Network != null).OrderByDescending(p => p.Session.Network.BytesSentPerSecond);
+
+            foreach (var player in players)
+            {
+                var network = player.Session.Network;
+                var name = $"{player.Session.Account}/{player.Name}";
+
+                sb.Append($"{name,-32} {network.BytesSentPerSecond,9:N0} {network.PacketsSentPerSecond,9:N1}  {network.BytesReceivedPerSecond,9:N0} {network.PacketsReceivedPerSecond,9:N1}  {network.TotalBytesSent,13:N0} {network.TotalPacketsSent,14:N0} {network.TotalBytesReceived,14:N0} {network.TotalPacketsReceived,14:N0}{'\n'}");
+
+                totalBytesSent += network.TotalBytesSent;
+                totalPacketsSent += network.TotalPacketsSent;
+                totalBytesReceived += network.TotalBytesReceived;
+                totalPacketsReceived += network.TotalPacketsReceived;
+
+                totalBytesSentPerSecond += network.BytesSentPerSecond;
+                totalPacketsSentPerSecond += network.PacketsSentPerSecond;
+                totalBytesReceivedPerSecond += network.BytesReceivedPerSecond;
+                totalPacketsReceivedPerSecond += network.PacketsReceivedPerSecond;
+            }
+
+            sb.Append($"{"Totals",-32} {totalBytesSentPerSecond,9:N0} {totalPacketsSentPerSecond,9:N1}  {totalBytesReceivedPerSecond,9:N0} {totalPacketsReceivedPerSecond,9:N1}  {totalBytesSent,13:N0} {totalPacketsSent,14:N0} {totalBytesReceived,14:N0} {totalPacketsReceived,14:N0}{'\n'}");
 
             CommandHandlerHelper.WriteOutputInfo(session, sb.ToString());
         }

@@ -91,6 +91,14 @@ namespace ACE.Server.ClassAbilities.Abilities
         {
             var skill = (double)BonusForRank(rank);
 
+            var label = Kind switch
+            {
+                EnhancedStatKind.Skill => "skills",
+                EnhancedStatKind.Attribute => "attr",
+                EnhancedStatKind.Vital => "vital",
+                _ => throw new ArgumentOutOfRangeException(nameof(Kind), Kind, "Unhandled EnhancedStatKind"),
+            };
+
             return new ClassAbilityReadout
             {
                 HasValue = true,
@@ -99,7 +107,8 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Gear = 0.0,
                 Effective = skill,
                 Unit = "",
-                Label = "stat",
+                Prefix = "+",
+                Label = label,
                 Per = null,
                 CapNote = null,
             };

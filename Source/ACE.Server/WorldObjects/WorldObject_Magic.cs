@@ -206,6 +206,18 @@ namespace ACE.Server.WorldObjects
                     if (casterCreature != null)
                         targetPlayer.SetCurrentAttacker(casterCreature);
 
+                    // Pocket Sand (Rogue T3): a resisted spell is an avoided attack, so it feeds the same
+                    // proc an evade or a parry does. Monster casters only. The multi-projectile early return
+                    // near the top of this method means a projectile spell reaches here once per projectile
+                    // that actually connected and was resisted, which is the right granularity - each of
+                    // those was an attack this player turned aside. Re-procs refresh rather than stack.
+                    // Same guard as the OnEvade trigger: a "resist" that is really Invincible or lifestone
+                    // immunity (forced true above) is not an attack this player turned aside, and must not
+                    // be a risk-free proc farm.
+                    if (casterCreature != null && casterCreature is not Player
+                        && !targetPlayer.Invincible && !targetPlayer.UnderLifestoneProtection)
+                        targetPlayer.TryPocketSand(casterCreature);
+
                     Proficiency.OnSuccessUse(targetPlayer, targetPlayer.GetCreatureSkill(Skill.MagicDefense), magicSkill);
                 }
 
@@ -565,6 +577,64 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
+            // Sanguine Ward (Blood Mage T3): the transient absorb pool eats the hit BEFORE it reaches
+            // Health. Harm never reaches Player.TakeDamage, where the ward used to be consumed from, so it
+            // did nothing against a Harm until this call was added.
+            //
+            // A REDUCTION. tryBoost AND boost are both rewritten here (the same pairing the cloak proc
+            // above uses), so the vital write, the caster's "you drain N points" line, the victim's line
+            // and the death check all see the post-ward number.
+            //
+            // Placed AFTER the cloak damage proc, matching the physical path's order, and gated to the
+            // harmful Health direction only so a Heal can never consume the pool. No attacker filter and no
+            // class_abilities_enabled gate: the physical site in Player.TakeDamage calls the ward
+            // unconditionally, before any PvP/self/dead-attacker filtering, so the ward already absorbs PvP
+            // and self-damage and this site must not be stricter. Deliberately NOT gated on
+            // `targetCreature != this` either, unlike the cloak block above, for that same reason.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is Player sanguineWardTarget)
+            {
+                var afterSanguineWard = (int)sanguineWardTarget.AbsorbWithSanguineWard(this, (uint)-tryBoost);
+
+                tryBoost = boost = -afterSanguineWard;
+            }
+
+            // Mana Barrier (Archmage T2): Harm writes the victim's Health straight to the vital below and
+            // never reaches Player.TakeDamage, so the incoming-damage dispatch that used to carry the
+            // barrier on a melee/missile hit never runs here. Absorbed at this point instead, in the ward's
+            // slot immediately above and with the identical rewrite - tryBoost AND boost both - so the
+            // vital write, both combat lines and HandleBoostTransferDeath at the end of the method all see
+            // the post-barrier number.
+            //
+            // IT USED TO SIT BELOW THE VITAL WRITE AS A REFUND, AND THAT WAS A BUG: UpdateVitalDelta clamps
+            // at zero, so on a killing Harm the barrier was handed the victim's remaining health instead of
+            // the damage thrown, refunded a share of that, and averted a death it had not paid for.
+            //
+            // `boost` IS NOW REWRITTEN, where the old refund deliberately left it alone. That is the
+            // intended consequence of the convention change, and it matches the ward sitting right above:
+            // the caster's "you drain N points" line reports what the victim actually lost, so the absorb
+            // line and the damage line add up. Gated to the harmful Health direction only, so a beneficial
+            // Heal is never touched.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is Player manaBarrierTarget)
+            {
+                var afterManaBarrier = (int)manaBarrierTarget.AbsorbWithManaBarrier(this, (uint)-tryBoost);
+
+                tryBoost = boost = -afterManaBarrier;
+            }
+
+            // Monster combat effects: the non-player mirror of the Sanguine Ward call above, gated to the
+            // harmful Health direction for the same reason, and rewriting tryBoost AND boost the same way so
+            // the vital write, both combat lines and the death check see the filtered number.
+            //
+            // THIS IS THE THIRD independent path by which damage reaches a monster: life magic writes the
+            // vital right here, so neither Creature.TakeDamage nor SpellProjectile.DamageTarget covers a
+            // Harm landing on one. A filter wired at only two of the three is silently partial.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player)
+            {
+                var afterMonsterEffects = (int)targetCreature.AbsorbMonsterEffectDamage(this, DamageType.Health, (uint)-tryBoost);
+
+                tryBoost = boost = -afterMonsterEffects;
+            }
+
             string srcVital;
 
             switch (spell.VitalDamageType)
@@ -584,7 +654,23 @@ namespace ACE.Server.WorldObjects
                     if (boost >= 0)
                         targetCreature.DamageHistory.OnHeal((uint)boost);
                     else
+                    {
                         targetCreature.DamageHistory.Add(this, DamageType.Health, (uint)-boost);
+
+                        // World Events measured boss damage scaling (TECH-DESIGN 2.16). Life magic resolved
+                        // without a projectile - Harm / drain health - reaches neither Player.TakeDamage nor
+                        // SpellProjectile.DamageTarget, so it needs its own call to the same hook. Crit is
+                        // false here: the life crit above is a FORK addition on the player-cast path only
+                        // (it is gated on `this is Player`), so a monster's Harm never crits.
+                        ACE.Server.WorldEvents.WorldEventBossDamageHook.NoteHit(this, targetCreature as Player, -boost, false);
+
+                        // summon damage feed ("/summondamage"): the third route a pet's damage can take to a
+                        // creature's health, alongside Creature.TakeDamage (melee, missile) and
+                        // SpellProjectile.DamageTarget (spell projectiles). A Harm / drain-health resolves
+                        // with no projectile at all and writes the vital right here, so it reaches neither.
+                        if (this is Pet damagingPet)
+                            damagingPet.NotifyOwnerOfDamage(targetCreature, -boost);
+                    }
 
                     //if (targetPlayer != null && targetPlayer.Fellowship != null)
                         //targetPlayer.Fellowship.OnVitalUpdate(targetPlayer);
@@ -1261,9 +1347,56 @@ namespace ACE.Server.WorldObjects
                     break;
                 default:   // Health
                     srcVital = "health";
+
+                    // Sanguine Ward (Blood Mage T3): the absorb pool eats the hit BEFORE it reaches Health.
+                    // A Drain Health never reaches Player.TakeDamage, where the ward used to be consumed
+                    // from, so it did nothing against a drain until this call was added. A REDUCTION applied
+                    // ahead of the vital write.
+                    //
+                    // ONLY THE VICTIM'S LOSS IS REDUCED. destVitalChange - what the caster gains - was
+                    // computed well upstream, before the fellowship surplus distribution, and is left at the
+                    // pre-ward amount on purpose: the drain still feeds the caster in full. Looks like a bug
+                    // and is not. Netting the ward out of the transfer would make a warded victim a debuff
+                    // on the caster, and would mean restructuring the surplus distribution to re-derive a
+                    // number that has already been capped, rescaled and split. Same accounting the Mana
+                    // Barrier call below uses, for the same reason.
+                    //
+                    // Unconditional for a player victim - no attacker filter, no class_abilities_enabled
+                    // gate - because the physical site calls the ward unconditionally and so absorbs PvP and
+                    // self-damage already.
+                    if (transferSource is Player sanguineWardTarget)
+                        srcVitalChange = sanguineWardTarget.AbsorbWithSanguineWard(this, srcVitalChange);
+
+                    // Mana Barrier (Archmage T2): a Drain Health writes the victim's Health straight to the
+                    // vital just below and never reaches Player.TakeDamage, so the incoming-damage dispatch
+                    // that used to carry the barrier on a melee/missile hit never runs here. Absorbed at
+                    // this point instead, in the ward's slot immediately above and with the identical
+                    // rewrite of srcVitalChange, so the vital write, DamageHistory, the summon damage feed
+                    // and HandleBoostTransferDeath at the end of the method all see the post-barrier number.
+                    //
+                    // IT USED TO SIT BELOW THE VITAL WRITE AS A REFUND, AND THAT WAS A BUG: UpdateVitalDelta
+                    // clamps at zero, so on a killing drain the barrier was handed the victim's remaining
+                    // health instead of the amount drained, refunded a share of that, and averted a death it
+                    // had not paid for.
+                    //
+                    // THE SAME ASYMMETRY THE WARD KEEPS, for the same reason: only the victim's loss is
+                    // reduced. destVitalChange - what the caster gains - is computed far upstream through
+                    // the fellowship surplus distribution and is deliberately left alone, so a
+                    // barrier-carrying victim is never a debuff on the caster who drained them.
+                    if (transferSource is Player manaBarrierTarget)
+                        srcVitalChange = manaBarrierTarget.AbsorbWithManaBarrier(this, srcVitalChange);
+
                     srcVitalChange = (uint)-transferSource.UpdateVitalDelta(transferSource.Health, -(int)srcVitalChange);
 
                     transferSource.DamageHistory.Add(this, DamageType.Health, srcVitalChange);
+
+                    // summon damage feed ("/summondamage"): the fourth and last route a pet's damage takes to
+                    // a creature's health. A Drain Health is a Transfer, not a Boost, so the hook in
+                    // HandleCastSpell_Boost does not cover it - the same reason Mana Barrier and Sanguine
+                    // Ward each need a call at both sites. Reports the post-ward, post-barrier loss the
+                    // victim actually took, which is what srcVitalChange holds by this point.
+                    if (this is Pet drainingPet)
+                        drainingPet.NotifyOwnerOfDamage(transferSource, (int)srcVitalChange);
 
                     //var sourcePlayer = source as Player;
                     //if (sourcePlayer != null && sourcePlayer.Fellowship != null)
@@ -1708,7 +1841,7 @@ namespace ACE.Server.WorldObjects
 
                     var tiePortal = GetPortal(targetDID.Value);
 
-                    if (tiePortal == null)
+                    if (tiePortal == null || tiePortal.Destination == null)
                     {
                         player.Session.Network.EnqueueSend(new GameEventWeenieError(player.Session, WeenieError.YouCannotLinkToThatPortal));
                         break;
@@ -1861,7 +1994,9 @@ namespace ACE.Server.WorldObjects
                 {
                     // portal recall
                     var portal = GetPortal(recallDID.Value);
-                    if (portal == null || portal.NoRecall)
+                    // A weenie with no Destination position row leaves Portal.Destination null;
+                    // new Position(null) below would throw. Refuse the recall instead of crashing.
+                    if (portal == null || portal.NoRecall || portal.Destination == null)
                     {
                         // You cannot recall that portal!
                         player.Session.Network.EnqueueSend(new GameEventWeenieError(player.Session, WeenieError.YouCannotRecallPortal));
@@ -1884,6 +2019,14 @@ namespace ACE.Server.WorldObjects
                     {
                         var teleportDest = new Position(portal.Destination);
                         AdjustDungeon(teleportDest);
+
+                        // The portal above was rebuilt from its weenie, and a weenie-derived position is
+                        // always instance 0 (Weenie.GetPosition hardcodes it), so recalling would land the
+                        // player in the base realm even for a realm-attuned portal. Route the destination
+                        // through the same resolution that walking through the portal uses - home-realm
+                        // default instance, overridden by an explicit PortalRealm. Must run AFTER
+                        // AdjustDungeon, which mutates the raw destination.
+                        teleportDest = Portal.ResolvePortalDestination(portal, targetPlayer, teleportDest);
 
                         targetPlayer.Teleport(teleportDest);
                     });
@@ -1989,7 +2132,9 @@ namespace ACE.Server.WorldObjects
         {
             var portal = GetPortal(portalId);
 
-            if (portal == null || location == null)
+            // A weenie with no Destination position row leaves Portal.Destination null;
+            // new Position(null) below would throw. Refuse the summon instead of crashing.
+            if (portal == null || location == null || portal.Destination == null)
                 return false;
 
             var gateway = WorldObjectFactory.CreateNewWorldObject("portalgateway") as Portal;
@@ -2014,6 +2159,13 @@ namespace ACE.Server.WorldObjects
             gateway.QuestRestriction = portal.QuestRestriction;
 
             gateway.Biota.PropertiesEmote = portal.Biota.PropertiesEmote;
+
+            // ApplyPortalRealm reads PortalRealm off the object the player actually walks through - the
+            // gateway - not the original portal, so without copying it a summoned realm-attuned portal
+            // would drop the player into the base realm (instance 0) instead of the realm copy.
+            var portalRealm = portal.GetProperty(PropertyInt.PortalRealm);
+            if (portalRealm != null)
+                gateway.SetProperty(PropertyInt.PortalRealm, portalRealm.Value);
 
             gateway.PortalRestrictions |= PortalBitmask.NoSummon; // all gateways are marked NoSummon but by default ruleset, the OriginalPortal is the one that is checked against
 

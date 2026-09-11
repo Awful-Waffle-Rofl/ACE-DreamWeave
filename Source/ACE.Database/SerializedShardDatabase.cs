@@ -105,6 +105,9 @@ namespace ACE.Database
 
         private Thread _workerThread;
 
+        /// <summary>Guards Stop against a second call. See Stop.</summary>
+        private int _stopped;
+
         internal SerializedShardDatabase(ShardDatabase shardDatabase)
         {
             BaseDatabase = shardDatabase;
@@ -117,8 +120,21 @@ namespace ACE.Database
             _workerThread.Start();
         }
 
+        /// <summary>
+        /// One-shot: the first caller stops the worker, every later caller is a no-op.
+        ///
+        /// Stop is now reachable twice on the same exit. The shutdown paths in ServerManager call it
+        /// explicitly, and Environment.Exit then re-enters Program.OnProcessExit, which calls
+        /// DatabaseManager.Stop() again. A second CompleteAdding + Join is believed harmless, but that
+        /// is unguarded framework behaviour rather than a documented guarantee, and the second call now
+        /// lands inside process exit where a throw has nowhere useful to go. Make it a no-op by
+        /// construction instead of relying on the belief.
+        /// </summary>
         public void Stop()
         {
+            if (Interlocked.CompareExchange(ref _stopped, 1, 0) != 0)
+                return;
+
             _queue.CompleteAdding();
             _workerThread.Join();
         }
@@ -244,9 +260,51 @@ namespace ACE.Database
             }
         }
 
+        /// <summary>
+        /// Invokes one queued item's callback, and never lets it escape.
+        ///
+        /// A callback belongs to somebody else's code, and one that throws must not take the rest of a
+        /// batch's callbacks with it - which is exactly what an unwrapped invocation inside the loops
+        /// below did, because the enclosing catch answered nobody at all.
+        /// </summary>
+        private static void Answer(Action<bool> callback, bool result)
+        {
+            if (callback == null)
+                return;
+
+            try
+            {
+                callback(result);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DATABASE] a queued database callback threw while being told {result}: {ex}");
+            }
+        }
+
+        private static void Report(Action<TimeSpan, TimeSpan> performanceResults, TimeSpan queued, TimeSpan executed)
+        {
+            if (performanceResults == null)
+                return;
+
+            try
+            {
+                performanceResults(queued, executed);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DATABASE] a queued database performance callback threw: {ex}");
+            }
+        }
+
         private void RunSaveBiotaBatch(List<SaveBiotaQueueItem> batch)
         {
             SaveBatchStats.RecordDrainBatch(batch.Count);
+
+            // Which items have already been told their outcome. A callback is a promise made EXACTLY
+            // once per queued save: telling an item false after it has already been told true would
+            // re-enqueue a retry for a biota that did persist.
+            var answered = new bool[batch.Count];
 
             try
             {
@@ -261,8 +319,9 @@ namespace ACE.Database
 
                     var executeEnd = DateTime.UtcNow;
 
-                    item.Callback?.Invoke(result);
-                    item.PerformanceResults?.Invoke(executeStart - item.InitialCallTime, executeEnd - executeStart);
+                    answered[0] = true;
+                    Answer(item.Callback, result);
+                    Report(item.PerformanceResults, executeStart - item.InitialCallTime, executeEnd - executeStart);
                 }
                 else
                 {
@@ -274,19 +333,44 @@ namespace ACE.Database
 
                     for (var i = 0; i < batch.Count; i++)
                     {
-                        batch[i].Callback?.Invoke(results[i]);
-                        batch[i].PerformanceResults?.Invoke(executeStart - batch[i].InitialCallTime, executeEnd - executeStart);
+                        answered[i] = true;
+                        Answer(batch[i].Callback, results[i]);
+                        Report(batch[i].PerformanceResults, executeStart - batch[i].InitialCallTime, executeEnd - executeStart);
                     }
                 }
             }
             catch (Exception ex)
             {
                 log.Error($"[DATABASE] DoWork batch of {batch.Count} SaveBiota item(s) failed with exception: {ex}");
+
+                // FAIL THE CALLBACKS, do not drop them (fix round 2, F2). BaseDatabase.SaveBiota can
+                // throw - StageBiota reaches GetBiotaCore, and the caching subclass has its own
+                // dereferences - and a save whose callback never fires is not "a save that failed", it
+                // is a save whose caller is still waiting. AccountVaultStore is the case that made this
+                // load-bearing: a deposit's retry is enrolled ONLY from this callback, eviction is
+                // declined only while that retry list is non-empty, and SaveAndWait blocks the world
+                // tick thread for its full timeout. A dropped callback there is a vault item whose
+                // biota row stays an orphan with nothing left to re-save it.
+                //
+                // Everything unanswered is told false, including a batch that threw part way: which
+                // members of a failed SaveBiotaBatch actually landed is not knowable from here, and the
+                // two errors are not symmetric. A false negative costs a re-save of an unchanged biota.
+                // A false positive costs the item.
+                for (var i = 0; i < batch.Count; i++)
+                {
+                    if (answered[i])
+                        continue;
+
+                    answered[i] = true;
+                    Answer(batch[i].Callback, false);
+                }
             }
         }
 
         private void RunRemoveBiotaBatch(List<RemoveBiotaQueueItem> batch)
         {
+            var answered = new bool[batch.Count];
+
             try
             {
                 if (batch.Count == 1)
@@ -301,8 +385,9 @@ namespace ACE.Database
 
                     var executeEnd = DateTime.UtcNow;
 
-                    item.Callback?.Invoke(result);
-                    item.PerformanceResults?.Invoke(executeStart - item.InitialCallTime, executeEnd - executeStart);
+                    answered[0] = true;
+                    Answer(item.Callback, result);
+                    Report(item.PerformanceResults, executeStart - item.InitialCallTime, executeEnd - executeStart);
                 }
                 else
                 {
@@ -314,14 +399,27 @@ namespace ACE.Database
 
                     for (var i = 0; i < batch.Count; i++)
                     {
-                        batch[i].Callback?.Invoke(results[i]);
-                        batch[i].PerformanceResults?.Invoke(executeStart - batch[i].InitialCallTime, executeEnd - executeStart);
+                        answered[i] = true;
+                        Answer(batch[i].Callback, results[i]);
+                        Report(batch[i].PerformanceResults, executeStart - batch[i].InitialCallTime, executeEnd - executeStart);
                     }
                 }
             }
             catch (Exception ex)
             {
                 log.Error($"[DATABASE] DoWork batch of {batch.Count} RemoveBiota item(s) failed with exception: {ex}");
+
+                // Same as the save path above, and this is the "perhaps add failure callbacks?" note
+                // RunStandalone still carries. A remove whose callback never fires leaves its caller
+                // believing the row is still there, or still waiting to be told either way.
+                for (var i = 0; i < batch.Count; i++)
+                {
+                    if (answered[i])
+                        continue;
+
+                    answered[i] = true;
+                    Answer(batch[i].Callback, false);
+                }
             }
         }
 
@@ -507,6 +605,132 @@ namespace ACE.Database
             _queue.Add(new QueueEntry(new Task(() =>
             {
                 var result = BaseDatabase.SaveCharacter(character, rwLock);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Proving Grounds: Speed - queues one completed run for insertion into `character_speed_run`.
+        /// <para/>
+        /// Deliberately on the generic Task path (like SaveCharacter and GetCharacter) rather than a
+        /// batchable queue-item type: a completion is a rare, one-off write, so there is nothing to
+        /// amortise and a new batchable kind would only add a held-over case to the worker loop.
+        /// </summary>
+        public void AddSpeedRun(CharacterSpeedRun row, Action<bool> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.AddSpeedRun(row);
+                callback?.Invoke(result);
+            })));
+        }
+
+        // Class Ability Point (CAP) audit ledger - `character_cap_ledger` / `character_cap_audit`.
+        //
+        // All four take the generic non-batched Task path, exactly like AddSpeedRun above and for the
+        // same reason: a CAP mutation is a rare, one-off write (a learn, a respec, a purchase), so
+        // there is nothing to amortise, and a new batchable queue-item kind would only add another
+        // held-over case to the worker loop for no measurable saving.
+        //
+        // THE TRADE THIS TAKES, stated so it is not rediscovered later. The write is QUEUED and
+        // fire-and-forget: the caller pays only an enqueue onto a BlockingCollection, so a CAP
+        // mutation can never stall a landblock tick on a MySQL round trip, and the worker's strict
+        // FIFO order means ledger rows land in the same order as the biota saves they describe.
+        // The cost is that a queued row can be LOST on an unclean shutdown - the worker drains the
+        // BlockingCollection and a Stop() mid-queue drops whatever is left. That is acceptable for a
+        // forensic log and is strictly better than the zero rows the shard records today. The
+        // synchronous alternative buys that last row back at the price of a simulation-thread stall
+        // on every learn, purchase and respec, which is a worse trade.
+        //
+        // Every callback is nullable and the DAO already logs and swallows, so a caller that does not
+        // care about the outcome passes null and nothing anywhere unwinds on a failed ledger write.
+
+        /// <summary>
+        /// Queues one CAP mutation for insertion into `character_cap_ledger`.
+        /// </summary>
+        public void AddCapLedgerRow(CharacterCapLedger row, Action<bool> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.AddCapLedgerRow(row);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues one character's CAP audit summary upsert into `character_cap_audit`.
+        /// </summary>
+        public void UpsertCapAudit(CharacterCapAudit row, Action<bool> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.UpsertCapAudit(row);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues a read of one character's most recent CAP ledger rows. The callback receives NULL
+        /// if the read FAILED and an empty list if the character has no recorded history - see
+        /// ShardDatabase_CapLedger.cs's read failure contract.
+        /// </summary>
+        public void GetCapLedger(uint characterId, int limit, Action<List<CharacterCapLedger>> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.GetCapLedger(characterId, limit);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Queues a single-row-by-id read of one character's CAP audit summary. THREE OUTCOMES - see
+        /// ShardDatabase_CapLedger.cs's GetCapAudit for the full contract: the callback's second
+        /// parameter (found) is true with a non-null row when the character has a recorded audit
+        /// (possibly balanced), true with a null row when the character has never been audited, and
+        /// false with a null row when the read FAILED.
+        /// </summary>
+        public void GetCapAudit(uint characterId, Action<CharacterCapAudit, bool> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.GetCapAudit(characterId, out var found);
+                callback?.Invoke(result, found);
+            })));
+        }
+
+        /// <summary>
+        /// Queues a read of every currently-unbalanced CAP audit summary row. The callback receives
+        /// NULL if the read FAILED and an empty list if no character is out of balance.
+        /// </summary>
+        public void GetCapAuditFailures(int limit, Action<List<CharacterCapAudit>> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.GetCapAuditFailures(limit);
+                callback?.Invoke(result);
+            })));
+        }
+
+        /// <summary>
+        /// Player Facets. Rare one-off reads and writes (a switch, not a hot path), so like
+        /// AddSpeedRun this takes the generic non-batched Task path rather than a batchable queue-item
+        /// type.
+        /// </summary>
+        public void GetCharacterFacets(uint characterId, Action<List<CharacterFacet>> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.GetCharacterFacets(characterId);
+                callback?.Invoke(result);
+            })));
+        }
+
+        public void SaveCharacterFacet(CharacterFacet row, Action<bool> callback)
+        {
+            _queue.Add(new QueueEntry(new Task(() =>
+            {
+                var result = BaseDatabase.SaveCharacterFacet(row);
                 callback?.Invoke(result);
             })));
         }

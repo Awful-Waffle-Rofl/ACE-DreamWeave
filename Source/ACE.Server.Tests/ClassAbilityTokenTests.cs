@@ -309,15 +309,88 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Catalog_HomedOfferings_AppearInCorrectTrainerCreateList()
         {
+            var (sql, trainerByClass) = LoadTrainerContent();
+            var stockedByTrainer = ParseStockedTokensByTrainer(sql);
+
+            Assert.IsTrue(stockedByTrainer.Count >= 8, "expected at least 8 trainers with stocked create_list rows");
+
+            var missing = new List<string>();
+            foreach (var offering in ClassAbilityTokenCatalog.AllOfferings())
+            {
+                var abilityClass = offering.Definition.AbilityClass;
+                if (!trainerByClass.TryGetValue(abilityClass, out var trainerId))
+                    continue; // unhomed, or homed to a class with no trainer NPC yet - not tokenable in a shop
+
+                if (!stockedByTrainer.TryGetValue(trainerId, out var stocked) || !stocked.Contains(offering.Wcid))
+                    missing.Add($"{offering.SkillId} tier {offering.Tier} (wcid {offering.Wcid}), expected in trainer {trainerId}'s create_list");
+            }
+
+            Assert.IsTrue(missing.Count == 0,
+                "abilities homed to a class but missing from that trainer's committed create_list:\n" + string.Join("\n", missing));
+        }
+
+        /// <summary>
+        /// PropertyString 9008 (ClassAbilityTrainerAbilities) is DEAD CODE for shop purposes on all 8 trainers
+        /// (all WeenieType.Vendor; Vendor.ActOnUse overrides Creature.ActOnUse without calling base, so
+        /// ClassAbilityTrainer.TryHandleUse - the code that reads 9008 - is unreachable). It is kept anyway as
+        /// documented design intent, which means nothing enforces that it stays in sync with create_list, the
+        /// property that actually drives the live shop. This asserts the two agree by ability name for every
+        /// trainer, so a future edit to one without the other is caught here instead of read live in-game as
+        /// stale doctrine.
+        /// </summary>
+        [TestMethod]
+        public void TrainerString9008_MatchesCreateListTokenSet_ByAbilityName()
+        {
+            var (sql, trainerByClass) = LoadTrainerContent();
+            var stockedByTrainer = ParseStockedTokensByTrainer(sql);
+            var nameStringByTrainer = ParseTrainerAbilityStrings(sql);
+
+            var offeringsBySkill = ClassAbilityTokenCatalog.AllOfferings()
+                .GroupBy(o => o.SkillId)
+                .ToDictionary(g => g.Key, g => g.First().Definition);
+
+            var mismatches = new List<string>();
+            foreach (var (abilityClass, trainerId) in trainerByClass)
+            {
+                Assert.IsTrue(nameStringByTrainer.TryGetValue(trainerId, out var nameString),
+                    $"trainer {trainerId} ({abilityClass}) has no PropertyString 9008 row");
+
+                var namesIn9008 = ClassAbilityTrainer.ParseTrainerAbilities(nameString)
+                    .Select(d => d.Name)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var stocked = stockedByTrainer.TryGetValue(trainerId, out var s) ? s : new HashSet<uint>();
+                var namesInCreateList = ClassAbilityTokenCatalog.AllOfferings()
+                    .Where(o => stocked.Contains(o.Wcid))
+                    .Select(o => o.Definition.Name)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var only9008 = namesIn9008.Except(namesInCreateList).ToList();
+                var onlyCreateList = namesInCreateList.Except(namesIn9008).ToList();
+
+                if (only9008.Count > 0)
+                    mismatches.Add($"trainer {trainerId} ({abilityClass}): 9008 lists {string.Join(",", only9008)} which create_list does not stock");
+                if (onlyCreateList.Count > 0)
+                    mismatches.Add($"trainer {trainerId} ({abilityClass}): create_list stocks {string.Join(",", onlyCreateList)} which 9008 does not list");
+            }
+
+            Assert.IsTrue(mismatches.Count == 0,
+                "trainer PropertyString 9008 disagrees with its committed create_list token stock:\n" + string.Join("\n", mismatches));
+        }
+
+        /// <summary>
+        /// Loads the combined SQL text for all 8 trainers (six inline in the realm file, two standalone) plus
+        /// the trainer wcid per class, shared by every test that needs to read committed trainer content.
+        /// </summary>
+        private static (string sql, Dictionary<ClassAbilityClass, uint> trainerByClass) LoadTrainerContent()
+        {
             // Same repo-root walk-up the token-content tests use, retargeted at the Drift Network realm file.
             var repoRoot = new DirectoryInfo(FindTokenSqlDir()).Parent.Parent.Parent;
 
             // TWO SOURCES, because the trainers are not all authored the same way. The original six
             // (1001000-1001005) have their create_list inline in the realm file; the two classes added later
-            // each ship a standalone trainer weenie instead. Scanning only the realm file is why Blood Mage
-            // went uncovered here - its offerings fell through the "no trainer NPC yet" skip below and the
-            // test kept passing. Both files use byte-identical create_list row syntax, so one regex covers
-            // both once the text is concatenated.
+            // each ship a standalone trainer weenie instead. Both files use byte-identical create_list row
+            // syntax, so one regex covers both once the text is concatenated.
             var sqlPath = Path.Combine(repoRoot.FullName, "Content", "realms", "driftnetwork_hub.sql");
             Assert.IsTrue(File.Exists(sqlPath), $"expected {sqlPath} to exist");
 
@@ -347,9 +420,16 @@ namespace ACE.Server.Tests
                 [ClassAbilityClass.Spellsword] = 1001960,
             };
 
-            // Only match weenie_properties_create_list token rows: (trainerId, wcid, 4, -1, 0, 0, 0). The
-            // outfit-equip create_list rows in the same file use destination_Type 2, not 4, so this shape is
-            // specific to token stock and does not collide with them.
+            return (sql, trainerByClass);
+        }
+
+        /// <summary>
+        /// Only matches weenie_properties_create_list token rows: (trainerId, wcid, 4, -1, 0, 0, 0). The
+        /// outfit-equip create_list rows in the same file use destination_Type 2, not 4, so this shape is
+        /// specific to token stock and does not collide with them.
+        /// </summary>
+        private static Dictionary<uint, HashSet<uint>> ParseStockedTokensByTrainer(string sql)
+        {
             var tokenRow = new Regex(@"\((\d{7}),\s*(\d+),\s*4,\s*-1,\s*0,\s*0,\s*0\)");
 
             var stockedByTrainer = new Dictionary<uint, HashSet<uint>>();
@@ -362,21 +442,22 @@ namespace ACE.Server.Tests
                 set.Add(wcid);
             }
 
-            Assert.IsTrue(stockedByTrainer.Count >= 8, "expected at least 8 trainers with stocked create_list rows");
+            return stockedByTrainer;
+        }
 
-            var missing = new List<string>();
-            foreach (var offering in ClassAbilityTokenCatalog.AllOfferings())
-            {
-                var abilityClass = offering.Definition.AbilityClass;
-                if (!trainerByClass.TryGetValue(abilityClass, out var trainerId))
-                    continue; // unhomed, or homed to a class with no trainer NPC yet - not tokenable in a shop
+        /// <summary>
+        /// Matches weenie_properties_string rows for PropertyString 9008 (ClassAbilityTrainerAbilities):
+        /// (trainerId, 9008, 'comma,separated,names').
+        /// </summary>
+        private static Dictionary<uint, string> ParseTrainerAbilityStrings(string sql)
+        {
+            var stringRow = new Regex(@"\((\d{7}),\s*9008,\s*'([^']*)'\)");
 
-                if (!stockedByTrainer.TryGetValue(trainerId, out var stocked) || !stocked.Contains(offering.Wcid))
-                    missing.Add($"{offering.SkillId} tier {offering.Tier} (wcid {offering.Wcid}), expected in trainer {trainerId}'s create_list");
-            }
+            var result = new Dictionary<uint, string>();
+            foreach (Match m in stringRow.Matches(sql))
+                result[uint.Parse(m.Groups[1].Value)] = m.Groups[2].Value;
 
-            Assert.IsTrue(missing.Count == 0,
-                "abilities homed to a class but missing from that trainer's committed create_list:\n" + string.Join("\n", missing));
+            return result;
         }
 
         private static string FindTokenSqlDir()
@@ -412,6 +493,51 @@ namespace ACE.Server.Tests
                 result[int.Parse(m.Groups[1].Value)] = int.Parse(m.Groups[2].Value);
 
             return result;
+        }
+
+        /// <summary>
+        /// The bundle-description drift test. A "Training" bundle's committed token LongDesc (PropertyString
+        /// 16) names the skills it raises in prose, separately from the BundleStatAbility.GenerateAll skill
+        /// array that actually grants them - nothing keeps the two in sync when a bundle's membership changes.
+        /// That drifted for real: the 2026-08-03 skill redistribution moved skills into and out of five of the
+        /// eight bundles (Archer, Rogue, Vanguard, Archmage, Void Training), but the committed SQL LongDesc rows
+        /// were never regenerated, so five bundles' token descriptions kept naming skills the ability no longer
+        /// raises (and omitted skills it now does). This walks the live registry - not a hardcoded skill table -
+        /// so a future bundle-membership change that similarly forgets to touch the SQL fails here instead of
+        /// shipping a stale description to players.
+        /// </summary>
+        [TestMethod]
+        public void CommittedTokenContent_BundleLongDesc_MatchesRegistryBundledSkills()
+        {
+            var sqlDir = FindTokenSqlDir();
+
+            var mismatches = new List<string>();
+
+            foreach (var bundle in ClassAbilityRegistry.StatBundleAbilities)
+            {
+                var expectedList = string.Join(", ", bundle.BundledSkills.Select(s => s.ToSentence()));
+                var expectedFragment = $"Raises all of these base skills at once: {expectedList}.";
+
+                foreach (var offering in ClassAbilityTokenCatalog.AllOfferings().Where(o => o.SkillId == bundle.Definition.Id))
+                {
+                    var files = Directory.GetFiles(sqlDir, $"{offering.Wcid}_*.sql");
+                    Assert.AreEqual(1, files.Length, $"expected exactly one committed token file for wcid {offering.Wcid} ({bundle.Definition.Name} tier {offering.Tier})");
+
+                    var name = Path.GetFileName(files[0]);
+                    var text = File.ReadAllText(files[0]);
+
+                    if (!text.Contains(expectedFragment))
+                    {
+                        var foundMatch = Regex.Match(text, @"Raises all of these base skills at once: ([^.]*)\.");
+                        var found = foundMatch.Success ? foundMatch.Groups[1].Value : "<no matching LongDesc fragment found>";
+
+                        mismatches.Add($"{name}: expected skill list [{expectedList}], found [{found}]");
+                    }
+                }
+            }
+
+            Assert.IsTrue(mismatches.Count == 0,
+                "bundle token LongDesc diverges from BundleStatAbility.GenerateAll's BundledSkills:\n" + string.Join("\n", mismatches));
         }
 
         [TestMethod]

@@ -30,8 +30,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "its summoning device can be used again immediately. Higher Loyalty increases the " +
                           "damage reduction.",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.Loyalty,
         };
 
         /// <summary>
@@ -63,7 +64,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Mirrors the terms fed into DamageReduction above (x100 for display, "pp" since it's a share of
+        /// Mirrors the terms fed into DamageReduction above (x100 for display, "%" since it's a share of
         /// damage) - the two must stay in step. Affinity carries the RAW (unclamped) Loyalty rider like
         /// AcidProc's affinity-cap pattern; Effective applies the same Math.Clamp(abilityReduction +
         /// gearBonus, 0.0, cap) DamageReduction uses. CapNote is set only when the clamp actually reduced
@@ -98,7 +99,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 Affinity = affinity,
                 Gear = gear,
                 Effective = clamped * 100.0,
-                Unit = "pp",
+                Unit = "%",
                 Label = "pet DR",
                 Per = null,
                 CapNote = clamped < uncapped - 0.0000001 ? "tether cap" : null,

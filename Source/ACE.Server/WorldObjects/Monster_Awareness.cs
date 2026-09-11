@@ -170,7 +170,7 @@ namespace ACE.Server.WorldObjects
                 SelectTargetingTactic();
                 SetNextTargetTime();
 
-                var visibleTargets = GetAttackTargets();
+                var visibleTargets = FilterTetheredTargets(GetAttackTargets());
 
                 // Taunt class ability - a still-valid forced target overrides tactic selection entirely.
                 // The hold requires direct line of sight: if the taunter breaks LoS (hides behind
@@ -271,6 +271,15 @@ namespace ACE.Server.WorldObjects
 
                 //Console.WriteLine($"{Name}.FindNextTarget = {AttackTarget.Name}");
 
+                // WaffleACE fork, World Events boss confinement. visibleTargets is already tether-filtered,
+                // so a target outside the tether can only have arrived here from a branch that does not read
+                // it: LastDamager/TopDamager pull straight from DamageHistory, and Focused/None leave the
+                // previous target in place. Snap those to the nearest in-tether candidate rather than letting
+                // the tactic hold a target the tether has ruled out - declining to retarget would leave the
+                // boss walking after the kiter, which is the whole behaviour this feature exists to stop.
+                if (IsTethered && !visibleTargets.Contains(AttackTarget as Creature))
+                    AttackTarget = BuildTargetDistance(visibleTargets)[0].Target;
+
                 if (AttackTarget != null && AttackTarget != prevAttackTarget)
                     EmoteManager.OnNewEnemy(AttackTarget);
 
@@ -324,6 +333,37 @@ namespace ACE.Server.WorldObjects
             }
 
             return visibleTargets;
+        }
+
+        /// <summary>
+        /// WaffleACE fork, World Events boss confinement (PropertyFloat 9009 TetherRadius). Drops every
+        /// candidate further than the tether radius from this creature's Home position, so a boss can only
+        /// ever acquire a player who is still at the event. Returns the input list unchanged - same
+        /// reference, no allocation - for any creature without a tether, which is every monster in the game
+        /// except a stamped world-event boss.
+        ///
+        /// Global coordinates, matching CheckMissHome's home-distance test rather than the physics
+        /// object-to-object distance GetAttackTargets uses: the tether is measured against a fixed Home
+        /// position, not against the creature, so there is no second physics object to measure to.
+        /// </summary>
+        public List<Creature> FilterTetheredTargets(List<Creature> targets)
+        {
+            var tetherRadius = TetherRadius;
+
+            if (tetherRadius == null || tetherRadius.Value <= 0.0)
+                return targets;
+
+            var globalHomePos = GetPosition(PositionType.Home).ToGlobal();
+
+            var filtered = new List<Creature>();
+
+            foreach (var target in targets)
+            {
+                if (IsWithinTether(globalHomePos, target.Location.ToGlobal(), tetherRadius))
+                    filtered.Add(target);
+            }
+
+            return filtered;
         }
 
         /// <summary>

@@ -2,10 +2,12 @@ using System;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
+using ACE.Server.Network.GameMessages.Messages;
 
 namespace ACE.Server.WorldObjects
 {
@@ -157,6 +159,17 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
+                // Threads: a Raw Fragment's TargetType carries ItemType.Creature so the client will
+                // offer the Fragment Press (an NpcLooksLikeObject Creature) as a target - which also makes
+                // every hostile a legal cursor target. Refuse here rather than inside the fragment's own
+                // handler, or clicking a monster walks the player into it first and only then says no.
+                if (sourceItem.GetProperty(PropertyString.DungeonGemSpec) != null && target.GetProperty(PropertyBool.DungeonGemPress) != true)
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat(ThreadDungeons.RawFragmentRules.RefuseNotAValidTarget, ChatMessageType.Broadcast));
+                    SendUseDoneEvent();
+                    return;
+                }
+
                 CreateMoveToChain(target, (success) =>
                 {
                     if (success)
@@ -271,6 +284,19 @@ namespace ACE.Server.WorldObjects
         /// paths are unaffected.
         /// </summary>
         public Pet SecondaryActivePet { get; set; }
+
+        /// <summary>
+        /// Per-character toggle for the summon damage feed - "/summondamage on|off". When true, this player
+        /// gets a chat line for every hit their OWN summoned pets land. It never reports anyone else's pets:
+        /// the message is only ever addressed to Pet.P_PetOwner, so that scope is structural rather than a
+        /// filter applied afterwards. Defaults to false (property absent), so existing characters are silent
+        /// until they opt in, and turning it off removes the property rather than storing a false.
+        /// </summary>
+        public bool SummonDamageMessages
+        {
+            get => GetProperty(PropertyBool.SummonDamageMessages) ?? false;
+            set { if (value) SetProperty(PropertyBool.SummonDamageMessages, true); else RemoveProperty(PropertyBool.SummonDamageMessages); }
+        }
 
         public void ApplyConsumable(MotionCommand useMotion, Action action, float animMod = 1.0f)
         {

@@ -1,3 +1,5 @@
+using System;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Server.Entity;
@@ -88,6 +90,184 @@ namespace ACE.Server.Tests
         {
             // a wildly misconfigured multiplier must not wrap the long
             Assert.AreEqual(long.MaxValue / 2, OfflineBonus.Apply(long.MaxValue / 2, remaining: 60, multiplier: 1e300));
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_FullyActive_WhenActiveUntilCoversWholeInterval()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 2000);
+
+            Assert.AreEqual(300, active);
+            Assert.AreEqual(0, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_FullyIdle_WhenActiveUntilBeforeIntervalStart()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 500);
+
+            Assert.AreEqual(0, active);
+            Assert.AreEqual(300, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_FullyIdle_WhenActiveUntilIsZero()
+        {
+            // activeUntil == 0 means "no qualifying XP recorded yet" - treated the same as already-idle
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 0);
+
+            Assert.AreEqual(0, active);
+            Assert.AreEqual(300, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_PartialSplit_ActivePrefixThenIdleTail()
+        {
+            // active for the first 120s of a 300s interval, idle for the remaining 180s
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 1120);
+
+            Assert.AreEqual(120, active);
+            Assert.AreEqual(180, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_ActiveUntilEqualsIntervalStart_IsFullyIdle()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 1000);
+
+            Assert.AreEqual(0, active);
+            Assert.AreEqual(300, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_ActiveUntilEqualsIntervalEnd_IsFullyActive()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1300, activeUntil: 1300);
+
+            Assert.AreEqual(300, active);
+            Assert.AreEqual(0, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_ZeroElapsed_ReturnsZeroForBoth()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1000, 1000, activeUntil: 2000);
+
+            Assert.AreEqual(0, active);
+            Assert.AreEqual(0, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_NegativeElapsed_ReturnsZeroForBoth()
+        {
+            var (active, idle) = OfflineBonus.SplitOnlineInterval(1300, 1000, activeUntil: 2000);
+
+            Assert.AreEqual(0, active);
+            Assert.AreEqual(0, idle);
+        }
+
+        [TestMethod]
+        public void SplitOnlineInterval_ActiveAndIdleAlwaysSumToElapsed()
+        {
+            var cases = new (double start, double end, double activeUntil)[]
+            {
+                (1000, 1300, 2000),
+                (1000, 1300, 500),
+                (1000, 1300, 0),
+                (1000, 1300, 1120),
+                (1000, 1300, 1000),
+                (1000, 1300, 1300),
+                (1000, 1000, 2000),
+                (1300, 1000, 2000),
+                (0, 86400, 43200),
+            };
+
+            foreach (var (start, end, activeUntil) in cases)
+            {
+                var (active, idle) = OfflineBonus.SplitOnlineInterval(start, end, activeUntil);
+                var elapsed = Math.Max(0, end - start);
+
+                Assert.IsTrue(active >= 0, $"active was negative for ({start}, {end}, {activeUntil})");
+                Assert.IsTrue(idle >= 0, $"idle was negative for ({start}, {end}, {activeUntil})");
+                Assert.AreEqual(elapsed, active + idle, $"active + idle did not equal elapsed for ({start}, {end}, {activeUntil})");
+            }
+        }
+
+        [TestMethod]
+        public void ClassifyTransition_Exhausted_WhenBankDrainsToZeroWhileStillActive()
+        {
+            // the bug the review caught: a kill that empties the bank while still inside the active window
+            // must report Exhausted, never Banking (nothing is banking - the window hasn't closed)
+            Assert.AreEqual(
+                OfflineBonus.OfflineBonusTransition.Exhausted,
+                OfflineBonus.ClassifyTransition(wasActive: true, isActive: true, wasBanked: true, isBanked: false));
+        }
+
+        [TestMethod]
+        public void ClassifyTransition_None_WhenStartingToFightWithAnEmptyBank()
+        {
+            // idle -> active edge, but the bank was already empty - no notice, there's nothing to spend
+            Assert.AreEqual(
+                OfflineBonus.OfflineBonusTransition.None,
+                OfflineBonus.ClassifyTransition(wasActive: false, isActive: true, wasBanked: false, isBanked: false));
+        }
+
+        [TestMethod]
+        public void ClassifyTransition_Banking_WhenGoingIdleWithAZeroBank()
+        {
+            // active -> idle edge fires unconditionally, even at a zero balance
+            Assert.AreEqual(
+                OfflineBonus.OfflineBonusTransition.Banking,
+                OfflineBonus.ClassifyTransition(wasActive: true, isActive: false, wasBanked: false, isBanked: false));
+        }
+
+        [TestMethod]
+        public void ClassifyTransition_Activated_WhenGoingActiveWithABankedNonEmptyBalance()
+        {
+            // ordinary idle -> active edge with something in the bank
+            Assert.AreEqual(
+                OfflineBonus.OfflineBonusTransition.Activated,
+                OfflineBonus.ClassifyTransition(wasActive: false, isActive: true, wasBanked: true, isBanked: true));
+        }
+
+        [TestMethod]
+        public void ClassifyTransition_AllSixteenCombinations()
+        {
+            // exhaustively covers every (wasActive, isActive, wasBanked, isBanked) combination, so any future
+            // change to the decision table shows up here rather than only in the four named scenarios above.
+            // Rule recap:
+            //  - the active state changing to true yields Activated only if isBanked, else None
+            //  - the active state changing to false yields Banking unconditionally
+            //  - the active state staying the same yields Exhausted only for (isActive=true, wasBanked=true, isBanked=false)
+            //  - everything else is None
+            foreach (var wasActive in new[] { false, true })
+            {
+                foreach (var isActive in new[] { false, true })
+                {
+                    foreach (var wasBanked in new[] { false, true })
+                    {
+                        foreach (var isBanked in new[] { false, true })
+                        {
+                            var expected = ExpectedTransition(wasActive, isActive, wasBanked, isBanked);
+                            var actual = OfflineBonus.ClassifyTransition(wasActive, isActive, wasBanked, isBanked);
+
+                            Assert.AreEqual(expected, actual,
+                                $"wasActive={wasActive}, isActive={isActive}, wasBanked={wasBanked}, isBanked={isBanked}");
+                        }
+                    }
+                }
+            }
+        }
+
+        private static OfflineBonus.OfflineBonusTransition ExpectedTransition(bool wasActive, bool isActive, bool wasBanked, bool isBanked)
+        {
+            if (wasActive != isActive)
+                return isActive ? (isBanked ? OfflineBonus.OfflineBonusTransition.Activated : OfflineBonus.OfflineBonusTransition.None) : OfflineBonus.OfflineBonusTransition.Banking;
+
+            if (isActive && wasBanked && !isBanked)
+                return OfflineBonus.OfflineBonusTransition.Exhausted;
+
+            return OfflineBonus.OfflineBonusTransition.None;
         }
     }
 }

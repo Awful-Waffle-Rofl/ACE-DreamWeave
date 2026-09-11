@@ -45,17 +45,32 @@ namespace ACE.Entity.Enum.Properties
            quest registry, not the quest rows themselves, are what record which quests have already been paid */
         QuestStampCount       = 9018,
 
-        /* Quest stamps (WaffleACE): sum of QuestStampCount across the account, computed at login and incremented
-           live; read by NPC InqInt64Stat emotes (stat 9019) */
+        /* Quest stamps (WaffleACE): count of distinct quest names stamped anywhere on the account, derived from
+           the union of the per-character QuestStampSeen_ ledger rows - so two characters completing the same
+           quest are worth one, not two. Computed at login and incremented live only for a quest no character on
+           the account has been stamped for before; read by NPC InqInt64Stat emotes (stat 9019) */
         [Ephemeral]
         AccountQuestStampCount = 9019,
 
         /* Survival challenge (WaffleACE): a player's best seconds-survived in the instanced survival arena run */
         BestSurvivalScore     = 9020,
 
-        /* Wave challenge (WaffleACE): a player's highest fully-cleared wave in the instanced wave gauntlet.
-           Persisted incrementally, on every wave clear, so a crash or a forfeit still keeps the waves that
-           were genuinely cleared */
+        /* Wave challenge (WaffleACE): LEGACY. Superseded by BestWaveScoreCenti (9022). Read-only fallback for
+           characters scored before fractional wave scoring shipped - never written any more. */
         BestWaveScore         = 9021,
+
+        /* Wave challenge (WaffleACE): a player's best wave-gauntlet score in HUNDREDTHS of a wave, i.e.
+           (fully-cleared waves * 100) + the whole-percent of the live wave's total health destroyed when the run
+           ended (capped at 99 so a partial wave can never tie a full clear). Persisted incrementally on every
+           wave clear and again at run end. GetBestWaveScoreCenti falls back to BestWaveScore * 100 for characters
+           who have never written this property, so older ladder entries are not lost. */
+        BestWaveScoreCenti    = 9022,
+
+        /* Proving Grounds: Speed (WaffleACE, DreamWeave, 2026-08-26): personal best for the season named by
+           PropertyInt.SpeedChallengeSeasonId, in CENTISECONDS (hundredths of a second), matching the
+           BestWaveScoreCenti convention. Cache for personal-best messaging only - derived from the
+           character_speed_run shard table, never the authority. LOWER IS BETTER, unlike every other
+           Proving Grounds board. */
+        BestSpeedRunCenti     = 9023,
     }
 }

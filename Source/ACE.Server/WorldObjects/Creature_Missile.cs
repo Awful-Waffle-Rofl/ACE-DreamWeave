@@ -68,33 +68,50 @@ namespace ACE.Server.WorldObjects
             return animLength + animLength2;
         }
 
-        public Vector3 GetDir2D(Vector3 source, Vector3 dest)
-        {
-            var diff = dest - source;
-            diff.Z = 0;
-            return Vector3.Normalize(diff);
-        }
-
         // PROTOTYPE: count/damage/spread-angle come from dedicated MultiShot* properties (WorldObject_Weapon.cs),
         // independent of melee's Cleaving. Range is intentionally NOT independently tunable - it always matches
         // the shooter's own current missile range (GetMaxMissileRange), same as the primary shot. The base width
         // stays code-level for now, not per-weapon tunable.
-        public const float MultiShotBaseWidth = 1.5f;      // flat half-width of the fan near the shooter, in units
+        public const float MultiShotBaseWidth = 1.5f;      // flat radius of the 3D cone near the shooter, in units
 
         // PROTOTYPE: extra targets must also be within this distance of the PRIMARY target (not just within the
-        // shooter's angular fan out to the weapon's own max range) - otherwise a point-blank primary shot could
+        // shooter's angular cone out to the weapon's own max range) - otherwise a point-blank primary shot could
         // still acquire a sibling clear out near the edge of the weapon's range, which read as a "high arc to the
         // end of range" from a shot that visually only travelled a few feet. This clusters extra hits near where
-        // the primary arrow actually lands, while the fan's forward/lateral checks (still measured from the
+        // the primary arrow actually lands, while the cone's forward/lateral checks (still measured from the
         // shooter) continue to enforce "never behind the shooter, never outside the weapon's own arc."
-        public const float MultiShotTargetProximityRange = 20.0f;   // max distance (units) from the primary target
+        public const float MultiShotTargetProximityRange = 20.0f;   // max distance (units) from the primary target, in full 3D
 
         /// <summary>
-        /// Acquires up to totalTargets additional creatures for a multi-shot missile attack, using a
-        /// trapezoid ("fan with a widened base") in front of the shooter, aimed at the original target's direction
-        /// rather than the shooter's facing. The flat base avoids the standard cone-apex problem where an enemy
-        /// standing close to the shooter but off to the side would otherwise register a large angular deviation
-        /// and get incorrectly excluded.
+        /// Returns true if a candidate's aim point (see GetAimVelocity for how that point is derived) falls
+        /// inside the 3D cone extending from origin along aimDir - the same test GetMultiShotTargets applies
+        /// per candidate, factored out so the pure geometry can be unit tested without constructing WorldObjects.
+        /// </summary>
+        public static bool IsInMultiShotCone(Vector3 origin, Vector3 aimDir, Vector3 candidateAimPoint, float maxRange, float spreadRate)
+        {
+            var toCandidate = candidateAimPoint - origin;
+
+            // maxRange comes from GetMaxMissileRange, a horizontal-range formula, but here it is compared
+            // against the projection onto a possibly tilted 3D aim line - deliberately slightly conservative
+            // for elevated candidates. MultiShotTargetProximityRange bounds the practical exposure.
+            var forwardDist = Vector3.Dot(toCandidate, aimDir);
+            if (forwardDist < 0 || forwardDist > maxRange)
+                return false;
+
+            var lateralDist = (toCandidate - forwardDist * aimDir).Length();
+            if (lateralDist > MultiShotBaseWidth + forwardDist * spreadRate)
+                return false;
+
+            return true;
+        }
+
+        /// <summary>
+        /// Acquires up to totalTargets additional creatures for a multi-shot missile attack, using a 3D cone
+        /// in front of the shooter, aimed along the real 3D aim line to the original target - the same line
+        /// GetAimVelocity computes for the cosmetic arrow - rather than the shooter's facing or a flattened
+        /// 2D direction. The widened base at the cone's apex avoids the standard cone-apex problem where an
+        /// enemy standing close to the shooter but off to the side would otherwise register a large angular
+        /// deviation and get incorrectly excluded.
         ///
         /// Unlike GetCleaveTarget, this does not spawn a real flying projectile per extra target - hits are
         /// resolved instantly (same as melee cleave calling DamageTarget directly), specifically so that one
@@ -110,14 +127,27 @@ namespace ACE.Server.WorldObjects
             var multiShotTargets = new List<Creature>();
 
             // the caller decides how many extra arrows there are (weapon count + Multishot class ability
-            // rank, stacking); the weapon still shapes the fan via MultiShotSpreadAngle
+            // rank, stacking); the weapon still shapes the cone via MultiShotSpreadAngle
             if (totalTargets <= 0)
                 return multiShotTargets;
 
             var player = this as Player;
 
-            var aimDir = GetDir2D(Location.Pos, target.Location.Pos);
-            var rightDir = new Vector3(-aimDir.Y, aimDir.X, 0);
+            // same aim origin/destination GetAimVelocity uses for the cosmetic arrow, so the acquisition cone
+            // follows the real 3D aim line instead of a flattened 2D direction (this is what let a target far
+            // above or below the shooter, with similar XY, slip into a "2D fan" and then visibly get shot
+            // straight up by the cosmetic arrow)
+            var origin = Location.Pos;
+            origin.Z += Height * ProjSpawnHeight;
+
+            var dest = target.Location.Pos;
+            dest.Z += target.Height / GetAimHeight(target);
+
+            var aimVector = dest - origin;
+            if (aimVector.LengthSquared() < float.Epsilon)
+                return multiShotTargets;
+
+            var aimDir = Vector3.Normalize(aimVector);
 
             var maxRange = GetMaxMissileRange();
             var spreadRate = (float)Math.Tan(weapon.MultiShotSpreadAngle * Math.PI / 180.0);
@@ -149,21 +179,16 @@ namespace ACE.Server.WorldObjects
                 if (creature is CombatPet && (player != null || this is CombatPet))
                     continue;
 
-                var toCandidate = creature.Location.Pos - Location.Pos;
-                toCandidate.Z = 0;
+                var candidateAimPoint = creature.Location.Pos;
+                candidateAimPoint.Z += creature.Height / GetAimHeight(creature);
 
-                var forwardDist = Vector3.Dot(toCandidate, aimDir);
-                if (forwardDist < 0 || forwardDist > maxRange)
+                if (!IsInMultiShotCone(origin, aimDir, candidateAimPoint, maxRange, spreadRate))
                     continue;
 
-                var lateralDist = Math.Abs(Vector3.Dot(toCandidate, rightDir));
-                if (lateralDist > MultiShotBaseWidth + forwardDist * spreadRate)
-                    continue;
-
-                // must also be near where the primary arrow actually lands, not just somewhere in the fan out
-                // to the weapon's full range - see MultiShotTargetProximityRange
+                // must also be near where the primary arrow actually lands, not just somewhere in the cone out
+                // to the weapon's full range - see MultiShotTargetProximityRange. Full 3D distance, so a target
+                // stacked directly above/below the primary target no longer slips past this check.
                 var toPrimaryTarget = creature.Location.Pos - target.Location.Pos;
-                toPrimaryTarget.Z = 0;
                 if (toPrimaryTarget.Length() > MultiShotTargetProximityRange)
                     continue;
 

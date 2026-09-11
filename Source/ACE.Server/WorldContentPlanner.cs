@@ -201,6 +201,23 @@ namespace ACE.Server
             return false;
         }
 
+        /// <summary> explain: sql/landblocks/ is where /createinst writes whole-landblock snapshots, DELETE then re-insert of whatever the DB held at export time; they are operator scratch, never versioned content, and applied last they silently override placements/ units - the 2026-09-02 marketplace_effigist stage incident. Whole-segment match like preview/. </summary>
+        internal static bool IsLandblockExport(string relativeKey)
+        {
+            if (string.IsNullOrEmpty(relativeKey))
+                return false;
+
+            var segments = relativeKey.Replace('\\', '/').Split('/');
+
+            foreach (var segment in segments)
+            {
+                if (string.Equals(segment, "landblocks", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
         /// <summary>Classifies a repo-relative path (forward slashes) into its folder-derived phase.</summary>
         internal static ContentPhase ClassifyByPath(string relativePath)
         {

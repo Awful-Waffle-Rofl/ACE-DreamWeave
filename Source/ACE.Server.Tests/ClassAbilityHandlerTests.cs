@@ -235,17 +235,17 @@ namespace ACE.Server.Tests
         {
             var percentPerRank = PropertyManager.GetDouble("class_ability_thorns_percent_per_rank").Item;
 
-            // spec: 10% of the shield's effective armor level per rank
-            Assert.AreEqual(0.10, percentPerRank, 1e-9);
+            // spec: 5% of the shield's effective armor level per rank (halved from 10% on 2026-08-05)
+            Assert.AreEqual(0.05, percentPerRank, 1e-9);
 
-            // rank 1 vs a 500-AL shield: 10% of 500 = 50 reflected
-            Assert.AreEqual(50u, ThornsAbility.ComputeReflectDamage(500, 1, percentPerRank));
+            // rank 1 vs a 500-AL shield: 5% of 500 = 25 reflected
+            Assert.AreEqual(25u, ThornsAbility.ComputeReflectDamage(500, 1, percentPerRank));
 
-            // scales with rank: rank 3 = 30% of 500 = 150
-            Assert.AreEqual(150u, ThornsAbility.ComputeReflectDamage(500, 3, percentPerRank));
+            // scales with rank: rank 3 = 15% of 500 = 75
+            Assert.AreEqual(75u, ThornsAbility.ComputeReflectDamage(500, 3, percentPerRank));
 
-            // rounds to nearest (33 * 0.30 = 9.9 -> 10)
-            Assert.AreEqual(10u, ThornsAbility.ComputeReflectDamage(33, 3, percentPerRank));
+            // rounds to nearest (33 * 0.15 = 4.95 -> 5)
+            Assert.AreEqual(5u, ThornsAbility.ComputeReflectDamage(33, 3, percentPerRank));
 
             // a brittlemail'd shield (negative effective AL) clamps to 0 - Thorns can never heal the attacker
             Assert.AreEqual(0u, ThornsAbility.ComputeReflectDamage(-200, 3, percentPerRank));
@@ -256,8 +256,8 @@ namespace ACE.Server.Tests
         {
             var percentPerRank = PropertyManager.GetDouble("class_ability_thorns_percent_per_rank").Item;
 
-            // rank 1 (10%) + a 0.05 (=+5%) Shield-skill rider = 15% of a 500-AL shield = 75
-            Assert.AreEqual(75u, ThornsAbility.ComputeReflectDamage(500, 1, percentPerRank, 0.05));
+            // rank 1 (5%) + a 0.05 (=+5%) Shield-skill rider = 10% of a 500-AL shield = 50
+            Assert.AreEqual(50u, ThornsAbility.ComputeReflectDamage(500, 1, percentPerRank, 0.05));
 
             // zero rider reproduces the un-scaled value (backwards compatible with the default overload)
             Assert.AreEqual(ThornsAbility.ComputeReflectDamage(500, 2, percentPerRank),
@@ -376,17 +376,50 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void SpellAoe_RadiatedDamageFraction_BaseHalf_CappedAtThreeQuarters()
+        public void SpellAoe_RadiatedDamageFraction_RankLadder_CappedAtThreeQuarters()
         {
-            var baseMult = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult").Item;
+            var r1 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r1").Item;
+            var r2 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r2").Item;
+            var r3 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r3").Item;
             var cap = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_cap").Item;
-            Assert.AreEqual(0.5, baseMult, 1e-9);
+
+            // spec: the 3-rank ladder radiates 15 / 30 / 50% of the triggering hit
+            Assert.AreEqual(0.15, r1, 1e-9);
+            Assert.AreEqual(0.30, r2, 1e-9);
+            Assert.AreEqual(0.50, r3, 1e-9);
             Assert.AreEqual(0.75, cap, 1e-9);
 
-            // no rider -> base fraction; a full rider clamps to the cap; base is the floor
-            Assert.AreEqual(0.5, Math.Clamp(baseMult + 0.0, baseMult, cap), 1e-9);
-            Assert.AreEqual(0.75, Math.Clamp(baseMult + 0.40, baseMult, cap), 1e-9);
-            Assert.AreEqual(0.5, Math.Clamp(baseMult - 0.10, baseMult, cap), 1e-9);
+            Assert.AreEqual(r1, SpellAoeAbility.BaseDamageMult(1, r1, r2, r3), 1e-9);
+            Assert.AreEqual(r2, SpellAoeAbility.BaseDamageMult(2, r1, r2, r3), 1e-9);
+            Assert.AreEqual(r3, SpellAoeAbility.BaseDamageMult(3, r1, r2, r3), 1e-9);
+
+            // rank is clamped, never rejected: above MaxRank behaves as max, 0/negative floors at rank 1
+            Assert.AreEqual(r3, SpellAoeAbility.BaseDamageMult(4, r1, r2, r3), 1e-9);
+            Assert.AreEqual(r1, SpellAoeAbility.BaseDamageMult(0, r1, r2, r3), 1e-9);
+            Assert.AreEqual(r1, SpellAoeAbility.BaseDamageMult(-1, r1, r2, r3), 1e-9);
+
+            // no rider -> the rank's fraction; a big rider clamps to the shared cap; the rank base is the floor
+            Assert.AreEqual(r1, Math.Clamp(r1 + 0.0, r1, cap), 1e-9);
+            Assert.AreEqual(0.75, Math.Clamp(r3 + 0.40, r3, cap), 1e-9);
+            Assert.AreEqual(r3, Math.Clamp(r3 - 0.10, r3, cap), 1e-9);
+        }
+
+        [TestMethod]
+        public void SpellAoe_ManaConversionRider_DivisorsAreDoubledAgainstTheRankLadder()
+        {
+            var perTrained = PropertyManager.GetDouble("class_ability_spellaoe_manaconv_per_trained").Item;
+            var perSpec = PropertyManager.GetDouble("class_ability_spellaoe_manaconv_per_spec").Item;
+
+            // spec (user, 2026-08-26): +1% radiated damage per 40 Mana Conversion, per 30 if specialized
+            Assert.AreEqual(40.0, perTrained, 1e-9);
+            Assert.AreEqual(30.0, perSpec, 1e-9);
+
+            // a specialized source is always the tighter (stronger) divisor
+            Assert.IsTrue(perSpec < perTrained);
+
+            // 400 effective Mana Conversion -> +10% trained, +13.3% specialized (on top of the rank base)
+            Assert.AreEqual(0.10, ClassAbilityScaling.Compute(400, false, perTrained, perSpec) * 0.01, 1e-9);
+            Assert.AreEqual(0.1333333, ClassAbilityScaling.Compute(400, true, perTrained, perSpec) * 0.01, 1e-6);
         }
 
         [TestMethod]
@@ -547,50 +580,113 @@ namespace ACE.Server.Tests
             Assert.AreEqual(20.0, TauntAbility.EffectiveDuration(baseDuration, 25.0, cap), 1e-9);
         }
 
+        /// <summary>
+        /// REWORKED 2026-08-17 (Berserker/Rogue balance pass): the chance is now flat and rank-invariant,
+        /// with no affinity rider at all - rank instead raises PoisonDamageBonus (see the tests below).
+        /// </summary>
         [TestMethod]
-        public void AcidProc_ChancePerRank_PlusItemTinkerRider()
+        public void AcidProc_Chance_FlatAndRankInvariant()
         {
             var chanceBase = PropertyManager.GetDouble("class_ability_acidproc_chance_base").Item;
-            var chanceStep = PropertyManager.GetDouble("class_ability_acidproc_chance_step").Item;
-            Assert.AreEqual(0.08, chanceBase, 1e-9);
-            Assert.AreEqual(0.06, chanceStep, 1e-9);
+            Assert.AreEqual(0.25, chanceBase, 1e-9);
 
-            // ranks 1-3 with no rider -> 8/14/20%
-            Assert.AreEqual(0.08f, AcidProcAbility.Chance(1, chanceBase, chanceStep, 0.0), 1e-5f);
-            Assert.AreEqual(0.14f, AcidProcAbility.Chance(2, chanceBase, chanceStep, 0.0), 1e-5f);
-            Assert.AreEqual(0.20f, AcidProcAbility.Chance(3, chanceBase, chanceStep, 0.0), 1e-5f);
-            // rank 2 + a 0.04 (=+4%) Item Tinkering rider -> 18%
-            Assert.AreEqual(0.18f, AcidProcAbility.Chance(2, chanceBase, chanceStep, 0.04), 1e-5f);
+            // ranks 1-3 are all the same flat 25% - rank does not raise the chance any more
+            Assert.AreEqual(0.25f, AcidProcAbility.Chance(1, chanceBase), 1e-5f);
+            Assert.AreEqual(0.25f, AcidProcAbility.Chance(2, chanceBase), 1e-5f);
+            Assert.AreEqual(0.25f, AcidProcAbility.Chance(3, chanceBase), 1e-5f);
+
             // unlearned -> no chance
-            Assert.AreEqual(0.0f, AcidProcAbility.Chance(0, chanceBase, chanceStep, 0.5), 1e-5f);
+            Assert.AreEqual(0.0f, AcidProcAbility.Chance(0, chanceBase), 1e-5f);
+
+            // the equipment-mod term still rides on top (EquipmentModId.AcidProc is unchanged)
+            Assert.AreEqual(0.30f, AcidProcAbility.Chance(2, chanceBase, 0.05), 1e-5f);
         }
 
         /// <summary>
-        /// REGRESSION, live bug 2026-08-04. GetClassAbilityScaling returns a raw quotient (skill / divisor)
-        /// with no bound of its own, so this rider is linear in a skill value the server does not
-        /// constrain. Measured on a character with Item Tinkering 5226: the rider came to +209 percentage
-        /// points and the proc fired on literally every swing. Found on the Spellsword war procs, which
-        /// share this exact shape - this ability had it too.
-        ///
-        /// The gear mod is deliberately NOT capped: it is a bounded equipment roll, not a skill quotient.
+        /// REGRESSION, live bug 2026-08-04, now exercised against PoisonDamageBonus rather than Chance since
+        /// the 2026-08-17 rework moved the Item Tinkering affinity there. GetClassAbilityScaling returns a
+        /// raw quotient (skill / divisor) with no bound of its own, so an uncapped rider is linear in a skill
+        /// value the server does not constrain.
         /// </summary>
         [TestMethod]
-        public void AcidProcChance_AffinityCap_BoundsAnAbsurdRider_ButNotTheGearMod()
+        public void AcidProc_PoisonDamageBonus_PerRankPlusClampedItemTinkerRider()
         {
-            // control: the real measured rider, uncapped, saturates the proc to certainty
-            Assert.IsTrue(AcidProcAbility.Chance(3, 0.08, 0.06, 2.09) >= 1.0f);
+            // ranks 0-3 with no rider -> 0/25/50/75%
+            Assert.AreEqual(0.0, AcidProcAbility.PoisonDamageBonus(0, 0.25, 0.25, 0.0), 1e-9);
+            Assert.AreEqual(0.25, AcidProcAbility.PoisonDamageBonus(1, 0.25, 0.25, 0.0), 1e-9);
+            Assert.AreEqual(0.50, AcidProcAbility.PoisonDamageBonus(2, 0.25, 0.25, 0.0), 1e-9);
+            Assert.AreEqual(0.75, AcidProcAbility.PoisonDamageBonus(3, 0.25, 0.25, 0.0), 1e-9);
 
-            // capped at 0.20: base 0.08 + step 0.12 + capped rider 0.20 = 0.40
-            Assert.AreEqual(0.40f, AcidProcAbility.Chance(3, 0.08, 0.06, 2.09, 0.0, 0.20), 1e-5f);
+            // control: an absurd rider (mirrors the live 2026-08-04 measurement), uncapped
+            Assert.AreEqual(2.09 + 0.75, AcidProcAbility.PoisonDamageBonus(3, 0.25, 0.25, 2.09), 1e-9);
+
+            // capped at 0.20: base+step 0.75 + capped rider 0.20 = 0.95
+            Assert.AreEqual(0.95, AcidProcAbility.PoisonDamageBonus(3, 0.25, 0.25, 2.09, 0.20), 1e-9);
+
+            // a legitimate rider under the cap is unchanged by it
+            Assert.AreEqual(0.91, AcidProcAbility.PoisonDamageBonus(3, 0.25, 0.25, 0.16, 0.20), 1e-9);
+
+            // cap 0 means uncapped
+            Assert.AreEqual(2.84, AcidProcAbility.PoisonDamageBonus(3, 0.25, 0.25, 2.09, 0.0), 1e-9);
+        }
+
+        /// <summary>
+        /// PoisonWeaponAbility.FlatBonus stays bit-identical for a player with zero Acid Proc ranks -
+        /// REGRESSION guard for the 2026-08-17 rework, which folded the Acid Proc bonus into this shared
+        /// method. A null attacker (used by the pure-math test above) can never own Acid Proc, so it must
+        /// take the unmultiplied path.
+        /// </summary>
+        [TestMethod]
+        public void PoisonWeapon_FlatBonus_UnaffectedWithoutAcidProc()
+        {
+            var perRank = PropertyManager.GetDouble("class_ability_poisonweapon_damage_per_rank").Item;
+
+            Assert.AreEqual(perRank, PoisonWeaponAbility.FlatBonus(null, 1), 1e-9);
+            Assert.AreEqual(3 * perRank, PoisonWeaponAbility.FlatBonus(null, 3), 1e-9);
+        }
+
+        [TestMethod]
+        public void BreakArmor_Chance_FlatAndRankInvariant_PlusRider()
+        {
+            var chanceBase = PropertyManager.GetDouble("class_ability_breakarmor_chance").Item;
+            Assert.AreEqual(0.15, chanceBase, 1e-9);
+
+            // ranks 1-3 are all the same flat 15% - rank buys the Imperil rung, not the proc odds
+            Assert.AreEqual(0.15f, BreakArmorAbility.Chance(1, chanceBase, 0.0), 1e-5f);
+            Assert.AreEqual(0.15f, BreakArmorAbility.Chance(2, chanceBase, 0.0), 1e-5f);
+            Assert.AreEqual(0.15f, BreakArmorAbility.Chance(3, chanceBase, 0.0), 1e-5f);
+
+            // unlearned -> no chance
+            Assert.AreEqual(0.0f, BreakArmorAbility.Chance(0, chanceBase, 0.0), 1e-5f);
+
+            // a Weapon Tinkering rider adds on top
+            Assert.AreEqual(0.20f, BreakArmorAbility.Chance(1, chanceBase, 0.05), 1e-5f);
+        }
+
+        [TestMethod]
+        public void BreakArmorChance_AffinityCap_BoundsAnAbsurdRider_ButNotTheGearMod()
+        {
+            // control: an absurd rider, uncapped, saturates the proc to certainty
+            Assert.IsTrue(BreakArmorAbility.Chance(1, 0.15, 2.09) >= 1.0f);
+
+            // capped at 0.20: base 0.15 + capped rider 0.20 = 0.35
+            Assert.AreEqual(0.35f, BreakArmorAbility.Chance(1, 0.15, 2.09, 0.20), 1e-5f);
 
             // the gear mod rides on top of the cap rather than inside it
-            Assert.AreEqual(0.45f, AcidProcAbility.Chance(3, 0.08, 0.06, 2.09, 0.05, 0.20), 1e-5f);
+            Assert.AreEqual(0.40f, BreakArmorAbility.Chance(1, 0.15, 2.09, 0.20, 0.05), 1e-5f);
 
-            // a legitimate endgame rider (400 skill / 2500 = 0.16) is under the cap and unchanged by it
-            Assert.AreEqual(0.36f, AcidProcAbility.Chance(3, 0.08, 0.06, 0.16, 0.0, 0.20), 1e-5f);
+            // cap 0 means uncapped
+            Assert.AreEqual(2.24f, BreakArmorAbility.Chance(1, 0.15, 2.09, 0.0), 1e-5f);
+        }
 
-            // cap 0 means uncapped - the pre-fix behavior, preserved for callers that want the raw sum
-            Assert.AreEqual(2.29f, AcidProcAbility.Chance(3, 0.08, 0.06, 2.09, 0.0, 0.0), 1e-5f);
+        [TestMethod]
+        public void BreakArmor_ImperilFor_MapsRankToTheRightRung()
+        {
+            Assert.AreEqual(SpellId.ImperilOther3, BreakArmorAbility.ImperilFor(1));
+            Assert.AreEqual(SpellId.ImperilOther5, BreakArmorAbility.ImperilFor(2));
+            Assert.AreEqual(SpellId.ImperilOther7, BreakArmorAbility.ImperilFor(3));
+            Assert.AreEqual(SpellId.Undef, BreakArmorAbility.ImperilFor(0));
+            Assert.AreEqual(SpellId.Undef, BreakArmorAbility.ImperilFor(4));
         }
 
         /// <summary>
@@ -699,16 +795,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0, LongDrawAbility.DistanceBonus(40, 0, 0.10, 15, 50), 1e-9);
         }
 
-        [TestMethod]
-        public void BloodFury_LowHealthRamp_ZeroHealthy_PeakAtLowHp()
-        {
-            // peak +30%, ramps from 75% HP (0) to 25% HP (full)
-            Assert.AreEqual(0.0, BloodFuryAbility.LowHealthBonus(1.00, 0.30, 0.75, 0.25), 1e-9); // full HP
-            Assert.AreEqual(0.0, BloodFuryAbility.LowHealthBonus(0.75, 0.30, 0.75, 0.25), 1e-9); // at start
-            Assert.AreEqual(0.30, BloodFuryAbility.LowHealthBonus(0.25, 0.30, 0.75, 0.25), 1e-9); // at peak
-            Assert.AreEqual(0.30, BloodFuryAbility.LowHealthBonus(0.05, 0.30, 0.75, 0.25), 1e-9); // below peak
-            Assert.AreEqual(0.15, BloodFuryAbility.LowHealthBonus(0.50, 0.30, 0.75, 0.25), 1e-9); // midpoint
-        }
+        // Blood Fury's low-health ramp test lived here until 2026-08-17. The ability was retired in the
+        // Berserker/Rogue balance pass and its handler deleted; what survives it is the
+        // RetiredClassAbilities["bloodfury"] refund coverage below.
 
         [TestMethod]
         public void ClassAbilityScaling_BelowThreshold_ContributesNothing()
@@ -721,15 +810,33 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void SpellAoe_SecondaryBlast_IsHalfDamageAndNeverAmplifies()
+        public void SpellAoe_SecondaryBlast_ClimbsByRankAndNeverAmplifies()
         {
-            var mult = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult").Item;
+            var r1 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r1").Item;
+            var r2 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r2").Item;
+            var r3 = PropertyManager.GetDouble("class_ability_spellaoe_damage_mult_r3").Item;
 
-            // spec: radiated secondary blasts land at 50% of normal spell damage
-            Assert.AreEqual(0.5, mult, 1e-9);
+            // spec: radiated secondary blasts land at 15 / 30 / 50% of normal spell damage by rank
+            Assert.AreEqual(0.15, r1, 1e-9);
+            Assert.AreEqual(0.30, r2, 1e-9);
+            Assert.AreEqual(0.50, r3, 1e-9);
 
-            // a blast must always deal positive damage and never exceed the primary hit
-            Assert.IsTrue(mult > 0.0 && mult <= 1.0, $"SpellAoe damage multiplier {mult} must be in (0, 1]");
+            // the ladder must be strictly increasing, and every rung must deal positive damage
+            // without ever exceeding the primary hit
+            Assert.IsTrue(r1 < r2 && r2 < r3, $"SpellAoe rank ladder {r1}/{r2}/{r3} must be strictly increasing");
+            foreach (var mult in new[] { r1, r2, r3 })
+                Assert.IsTrue(mult > 0.0 && mult <= 1.0, $"SpellAoe damage multiplier {mult} must be in (0, 1]");
+        }
+
+        [TestMethod]
+        public void SpellAoe_IsAThreeRankTierOneGameChanger_CostingOneTwoThree()
+        {
+            var def = ClassAbilityRegistry.Get(ClassAbilityId.SpellAoe);
+
+            Assert.AreEqual(1, def.Tier);
+            Assert.AreEqual(3, def.MaxRank);
+            CollectionAssert.AreEqual(new[] { 1, 2, 3 }, def.CostPerRank,
+                "Spell AOE is on the standard tier-1 game-changer 1/2/3 cost scale");
         }
 
         [TestMethod]
@@ -785,6 +892,81 @@ namespace ACE.Server.Tests
 
             Assert.IsTrue(RetiredClassAbilities.TryGetRefund("streaktoarc", 5, out var streakClamped, out _));
             Assert.AreEqual(3, streakClamped);
+
+            // bloodfury: retired 2026-08-17 at CostPerRank {3,3,3} / MaxRank 3, so a held rank 2 is worth 6
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund("bloodfury", 1, out var bfPoints1, out var bfName));
+            Assert.AreEqual(3, bfPoints1);
+            Assert.AreEqual("Blood Fury", bfName);
+
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund("bloodfury", 2, out var bfPoints2, out _));
+            Assert.AreEqual(6, bfPoints2);
+
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund("bloodfury", 3, out var bfPoints3, out _));
+            Assert.AreEqual(9, bfPoints3);
+
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund("bloodfury", 99, out var bfClamped, out _));
+            Assert.AreEqual(9, bfClamped);
+        }
+
+        /// <summary>
+        /// The id-keyed overload prices a single prepaid TOKEN, not a held rank, so it returns ONE rank's cost
+        /// where the string overload returns the cumulative cost. Player.RefundUnusedVoucher depends on that
+        /// difference: a token is one rank that was paid for once.
+        /// </summary>
+        [TestMethod]
+        public void RetiredClassAbilities_ById_RefundsOneRanksCost_NotTheCumulative()
+        {
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund(ClassAbilityId.BloodFury, 1, out var tier1, out var name));
+            Assert.AreEqual(3, tier1);
+            Assert.AreEqual("Blood Fury", name);
+
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund(ClassAbilityId.BloodFury, 3, out var tier3, out _));
+            Assert.AreEqual(3, tier3);   // NOT 9 - the string overload's rank-3 answer
+
+            // every retired id with a reserved token catalog slot must be refundable, or its unused tokens
+            // strand prepaid points forever
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund(ClassAbilityId.AdvancedWeaponry, 1, out var awPoints, out _));
+            Assert.AreEqual(1, awPoints);
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund(ClassAbilityId.QuestionableTactics, 3, out var qtPoints, out _));
+            Assert.AreEqual(1, qtPoints);
+            Assert.IsTrue(RetiredClassAbilities.TryGetRefund(ClassAbilityId.StreakToArc, 1, out var staPoints, out _));
+            Assert.AreEqual(3, staPoints);
+        }
+
+        [TestMethod]
+        public void RetiredClassAbilities_ById_RejectsLiveIdsAndOutOfRangeTiers()
+        {
+            // a LIVE ability must not resolve here - it is refunded from the live registry instead
+            Assert.IsFalse(RetiredClassAbilities.TryGetRefund(ClassAbilityId.Executioner, 1, out var livePoints, out var liveName));
+            Assert.AreEqual(0, livePoints);
+            Assert.IsNull(liveName);
+
+            // Streak-to-Arc was a one-rank unlock, so a tier-2 token for it never existed and is not priced
+            Assert.IsFalse(RetiredClassAbilities.TryGetRefund(ClassAbilityId.StreakToArc, 2, out var overTier, out _));
+            Assert.AreEqual(0, overTier);
+
+            Assert.IsFalse(RetiredClassAbilities.TryGetRefund(ClassAbilityId.BloodFury, 0, out var zeroTier, out _));
+            Assert.AreEqual(0, zeroTier);
+
+            Assert.IsFalse(RetiredClassAbilities.TryGetRefund(ClassAbilityId.BloodFury, 4, out var pastMax, out _));
+            Assert.AreEqual(0, pastMax);
+        }
+
+        /// <summary>
+        /// The three ids reserved in Phase 0 of the Berserker/Rogue balance pass. Their handlers land in
+        /// Phase 1; what must hold NOW is that the numeric values two parallel worktrees were told to build
+        /// against are exactly these, and that Blood Fury's id stays reserved rather than being reused.
+        /// </summary>
+        [TestMethod]
+        public void BalancePassIds_AreReservedAtTheirAgreedValues()
+        {
+            Assert.AreEqual(71, (int)ClassAbilityId.BreakArmor);
+            Assert.AreEqual(72, (int)ClassAbilityId.Surefooted);
+            Assert.AreEqual(73, (int)ClassAbilityId.PocketSand);
+
+            Assert.AreEqual(35, (int)ClassAbilityId.BloodFury);
+            Assert.IsFalse(ClassAbilityRegistry.Abilities.ContainsKey(ClassAbilityId.BloodFury),
+                "Blood Fury is retired - its id stays reserved but must not be registered");
         }
 
         [TestMethod]

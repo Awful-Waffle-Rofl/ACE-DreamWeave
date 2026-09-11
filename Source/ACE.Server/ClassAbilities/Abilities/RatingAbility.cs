@@ -49,10 +49,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             Definition = definition;
         }
 
-        private static readonly int[] RatingCost = { 2, 3, 4 };
-
         private static RatingAbility Make(ClassAbilityId id, ClassAbilityClass abilityClass, int tier, string name,
-            string displayName, string effect)
+            string displayName, string effect, int[] cost)
         {
             var definition = new ClassAbilityDefinition
             {
@@ -63,7 +61,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 DisplayName = displayName,
                 Description = $"Adds +3, then +6, then +10 at ranks 1-3 to your {effect}.",
                 MaxRank = EnhancedStatAbility.MaxTier,
-                CostPerRank = RatingCost,
+                CostPerRank = cost,
                 Implemented = true,
                 Category = "Rating",
             };
@@ -125,15 +123,15 @@ namespace ACE.Server.ClassAbilities.Abilities
             // for Heal Boost at rank 3, a healing kit used on yourself heals 10% more
             // (Healer.GetHealAmount -> target.GetHealingRatingMod).
             yield return Make(ClassAbilityId.CritRating, ClassAbilityClass.Archer, 3, "crit_rating", "Crit Rating",
-                "Critical Hit Rating (higher critical hit chance)");
+                "Critical Hit Rating (higher critical hit chance)", new[] { 1, 2, 3 });
             yield return Make(ClassAbilityId.CritDamageRating, ClassAbilityClass.Rogue, 2, "crit_damage_rating", "Crit Damage Rating",
-                "Critical Damage Rating (harder critical hits)");
+                "Critical Damage Rating (harder critical hits)", new[] { 1, 2, 3 });
             yield return Make(ClassAbilityId.DamageResistRating, ClassAbilityClass.Vanguard, 2, "damage_resist_rating", "Damage Resist Rating",
-                "Damage Resistance Rating (less damage taken)");
+                "Damage Resistance Rating (less damage taken)", new[] { 1, 2, 3 });
             yield return Make(ClassAbilityId.CritResistRating, ClassAbilityClass.Vanguard, 3, "crit_resist_rating", "Crit Resist Rating",
-                "Critical Resistance Rating (lower chance of being critically hit)");
+                "Critical Resistance Rating (lower chance of being critically hit)", new[] { 1, 1, 1 });
             yield return Make(ClassAbilityId.DamageRating, ClassAbilityClass.Berserker, 3, "damage_rating", "Damage Rating",
-                "Damage Rating (all damage you deal)");
+                "Damage Rating (all damage you deal)", new[] { 1, 2, 3 });
             // Blood Mage T2. The rating pool is HealingBoostRating, homed here from the unhomed pool - the
             // life/healing class is where DESIGN.md always meant it to go (BLOOD-MAGE-DESIGN.md sec 3).
             // Read at Creature.GetHealingBoostRating, like every other member of this family.
@@ -145,7 +143,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // heal-over-time tick multiplies by the enchanted creature's. So a rank makes healing the owner
             // RECEIVES stronger; it does not amplify heals they cast on someone else.
             yield return Make(ClassAbilityId.HealBoostRating, ClassAbilityClass.BloodMage, 2, "heal_boost_rating", "Heal Boost Rating",
-                "Healing Boost Rating (healing you receive is stronger)");
+                "Healing Boost Rating (healing you receive is stronger)", new[] { 1, 1, 1 });
         }
     }
 }

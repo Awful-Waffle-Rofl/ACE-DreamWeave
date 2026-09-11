@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 
 using log4net;
 
+using ACE.Server.Managers;
 using ACE.Server.Network.Managers;
 
 namespace ACE.Server.Network
@@ -91,11 +92,16 @@ namespace ACE.Server.Network
         private void OnDataReceive(IAsyncResult result)
         {
             EndPoint clientEndPoint = null;
+            int dataSize = 0;
 
             try
             {
                 clientEndPoint = new IPEndPoint(listeningHost, 0);
-                int dataSize = Socket.EndReceiveFrom(result, ref clientEndPoint);
+                dataSize = Socket.EndReceiveFrom(result, ref clientEndPoint);
+
+                ServerMetrics.BytesReceived.Add(dataSize);
+                ServerMetrics.PacketsReceived.Add(1);
+                NetworkStatistics.C2S_Bytes_Aggregate_Add(dataSize);
 
                 IPEndPoint ipEndpoint = (IPEndPoint)clientEndPoint;
 
@@ -115,7 +121,7 @@ namespace ACE.Server.Network
                 var packet = new ClientPacket();
 
                 if (packet.Unpack(buffer, dataSize))
-                    NetworkManager.ProcessPacket(this, packet, ipEndpoint);
+                    NetworkManager.ProcessPacket(this, packet, ipEndpoint, dataSize);
 
                 packet.ReleaseBuffer();
             }
@@ -132,15 +138,30 @@ namespace ACE.Server.Network
                 }
                 else
                 {
+                    // NOTE: this branch used to `return;` without re-arming the listener, which left the UDP
+                    // port permanently deaf. The re-arm now lives in the finally below, so control falls
+                    // through here instead.
                     log.FatalFormat("ConnectionListener({3}, {4}).OnDataReceieve() has thrown {0}: {1} from client {2}", socketException.SocketErrorCode, socketException.Message, clientEndPoint != null ? clientEndPoint.ToString() : "Unknown", listeningHost, listeningPort);
-                    return;
                 }
             }
-
-            if (result.CompletedSynchronously)
-                Task.Run(() => Listen());
-            else
-                Listen();
+            catch (Exception ex)
+            {
+                // This is an IOCP/threadpool callback: anything that escapes here (packet.Unpack,
+                // NetworkManager.ProcessPacket, the packetLog block) is an unhandled exception on a pool
+                // thread. One bad datagram must fail alone and be logged with the sender's identity, never
+                // take the listener - or the process - down. Dropping a datagram is a non-event on UDP, so
+                // this is the one intentional swallow in this pass, and even it logs at error.
+                log.Error($"ConnectionListener({listeningHost}, {listeningPort}).OnDataReceive() has thrown, dropping datagram from client {(clientEndPoint != null ? clientEndPoint.ToString() : "Unknown")} (dataSize: {dataSize})", ex);
+            }
+            finally
+            {
+                // ALWAYS re-arm, exactly once per callback, whatever happened above - otherwise the port
+                // goes deaf and the server silently stops accepting traffic while looking healthy.
+                if (result.CompletedSynchronously)
+                    Task.Run(() => Listen());
+                else
+                    Listen();
+            }
         }
     }
 }

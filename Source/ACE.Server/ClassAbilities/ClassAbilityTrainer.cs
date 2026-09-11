@@ -19,6 +19,8 @@ namespace ACE.Server.ClassAbilities
     ///    a TRAINER that, on use, sells the next learnable rank of each listed skill for CAP.
     ///  - <see cref="PropertyBool.ClassAbilityExchanger"/> = true -> the EXCHANGER that, on use, refunds a
     ///    player's unused prepaid vouchers.
+    ///  - <see cref="PropertyBool.ClassAbilityXpExchanger"/> = true -> the EXPERIENCE-for-CAP stone, the
+    ///    Luminance stone's sibling (XP-LANE-SPEC sec 3.7). Same statue model, different colour.
     ///  - <see cref="PropertyBool.ClassAbilityLumExchanger"/> = true -> the Luminance-for-CAP PEDESTAL that, on
     ///    use, prompts to buy one class ability point at the piecewise curve price (an object, not an NPC).
     ///
@@ -51,6 +53,12 @@ namespace ACE.Server.ClassAbilities
             if (npc.GetProperty(PropertyBool.ClassAbilityExchanger) ?? false)
             {
                 HandleExchanger(npc, player);
+                return true;
+            }
+
+            if (npc.GetProperty(PropertyBool.ClassAbilityXpExchanger) ?? false)
+            {
+                HandleXpExchange(npc, player);
                 return true;
             }
 
@@ -225,7 +233,7 @@ namespace ACE.Server.ClassAbilities
 
             var purchased = player.ClassAbilityPointsPurchasedWithLum;
             var cost = Player.LumCostForClassAbilityPoints(purchased, 1);
-            var totalLum = (player.AvailableLuminance ?? 0) + player.BankedLuminance;
+            var totalLum = player.GetSpendableLuminance();
 
             Send(player, $"{device.Name}: this weighs your Luminance and renders it as a class ability point. Each point costs more than the last; the only limit is the price.");
 
@@ -252,12 +260,70 @@ namespace ACE.Server.ClassAbilities
             if (!player.ConfirmationManager.EnqueueSend(confirmation, prompt))
                 player.SendWeenieError(WeenieError.ConfirmationInProgress);
         }
+        /// <summary>
+        /// The EXPERIENCE exchange stone: prompts the player to trade unassigned experience for one class
+        /// ability point at the xp curve price (Docs/ClassAbilities/XP-LANE-SPEC.md sec 3). The sibling of
+        /// <see cref="HandleLumExchange"/>, with three deliberate differences:
+        ///  - it is gated on character level, because below the gate this exchange would compete with skill
+        ///    and attribute training for the same experience pool,
+        ///  - there is no experience bank, so affordability is a single AvailableExperience check rather
+        ///    than available-plus-banked,
+        ///  - it spends through SpendXP, which touches AvailableExperience only, so buying a point never
+        ///    costs the character a level.
+        /// </summary>
+        private static void HandleXpExchange(WorldObject device, Player player)
+        {
+            if (!PropertyManager.GetBool("class_abilities_enabled").Item)
+            {
+                Send(player, "Class abilities are not currently enabled on this server.");
+                return;
+            }
+
+            var minLevel = Player.ClassAbilityXpMinLevel;
+            if ((player.Level ?? 1) < minLevel)
+            {
+                Send(player, $"{device.Name}: this weighs the experience of a finished climb. Return at level {minLevel:N0}; you are {player.Level ?? 1:N0}.");
+                return;
+            }
+
+            var purchased = player.ClassAbilityPointsPurchasedWithXp;
+            var cost = Player.XpCostForClassAbilityPoints(purchased, 1);
+            var available = player.AvailableExperience ?? 0;
+
+            Send(player, $"{device.Name}: this weighs your unassigned experience and renders it as a class ability point. Each point costs more than the last; the only limit is the price.");
+
+            if (available < cost)
+            {
+                Send(player, $"Your next point would cost {cost:N0} experience; you have {available:N0} unassigned.");
+                return;
+            }
+
+            var prompt = $"Exchange {cost:N0} experience for 1 class ability point?\n\nThis is point number {purchased + 1:N0}; the next will cost more. Only your UNASSIGNED experience is spent - your level and total experience are untouched.";
+
+            var confirmation = new Confirmation_ClassAbilityChoice(player.Guid, accepted =>
+            {
+                if (!accepted)
+                    return;
+
+                // TryBuyClassAbilityPointsWithXp re-checks the level gate and the price, spends through
+                // SpendXP, and messages the gain via GrantClassAbilityPoints - nothing to do here on success.
+                if (!player.TryBuyClassAbilityPointsWithXp(1, out var error))
+                    Send(player, error);
+            });
+
+            if (!player.ConfirmationManager.EnqueueSend(confirmation, prompt))
+                player.SendWeenieError(WeenieError.ConfirmationInProgress);
+        }
 
         /// <summary>
         /// The full class-ability respec NPC: charges a flat Luminance fee and unlearns EVERY class ability
         /// the player currently knows in one pass, refunding all spent points. This is the "start over"
         /// button, distinct from the per-ability /abilities unlearn respec (which stays available at its own
         /// per-ability Luminance fee).
+        ///
+        /// The flat fee is LEVEL-GATED - see <see cref="FullRespecFee"/>. Below
+        /// class_ability_full_respec_free_below_level (default 275) it is waived entirely and the respec is
+        /// free; at and above that level the flat fee applies. The per-ability unlearn fee is not gated.
         ///
         /// TIER ACCESS RESETS BY ITSELF - there is nothing here to preserve or to strip. DESIGN.md sec 4
         /// describes a PURCHASABLE tier unlock persisted as a ClassAbilityTier_&lt;class&gt; quest row; that
@@ -294,13 +360,18 @@ namespace ACE.Server.ClassAbilities
             }
 
             var totalRefund = owned.Sum(entry => entry.skill.CumulativeCost(entry.rank));
-            var fee = PropertyManager.GetLong("class_ability_full_respec_lum_cost").Item;
+            var fee = FullRespecFee(player.Level ?? 1);
 
             Send(player, $"{npc.Name}: I can unlearn every class ability you know at once. You currently know:");
             foreach (var (skill, rank) in owned)
                 Send(player, $"  {skill.DisplayName} - rank {rank}/{skill.MaxRank}");
 
-            var prompt = $"Unlearn all {owned.Count} class abilities and recover {totalRefund:N0} class ability point{(totalRefund == 1 ? "" : "s")} for {fee:N0} Luminance?\n\nTier 2 and Tier 3 skills will re-lock until you reinvest.";
+            if (fee <= 0)
+                Send(player, $"{npc.Name}: You are still finding your way, so I ask nothing for this. When you have come into your full strength, the unbinding will carry a price.");
+
+            var price = fee <= 0 ? "free of charge" : $"for {fee:N0} Luminance";
+
+            var prompt = $"Unlearn all {owned.Count} class abilities and recover {totalRefund:N0} class ability point{(totalRefund == 1 ? "" : "s")} {price}?\n\nTier 2 and Tier 3 skills will re-lock until you reinvest.";
 
             var confirmation = new Confirmation_ClassAbilityChoice(player.Guid, accepted =>
             {
@@ -320,7 +391,10 @@ namespace ACE.Server.ClassAbilities
                     return;
                 }
 
-                var currentFee = PropertyManager.GetLong("class_ability_full_respec_lum_cost").Item;
+                // Re-read the level as well as the tunables: the fee is level-gated, so a player who
+                // dinged the charging level while the confirmation was outstanding pays, and one who did not,
+                // does not. A zero fee passes straight through TrySpendLuminanceIncludingBank untouched.
+                var currentFee = FullRespecFee(player.Level ?? 1);
 
                 // All-or-nothing: TrySpendLuminanceIncludingBank checks the combined available+banked total
                 // BEFORE drawing from either pool, so a failed charge leaves every learned ability and every
@@ -331,12 +405,18 @@ namespace ACE.Server.ClassAbilities
                     return;
                 }
 
+                // One batch id shared by every row this loop emits, so a CAP incident read can tell "one
+                // respec that touched N abilities" from "N separate unlearns" - the whole reason
+                // character_cap_ledger.batch_Id exists. 32 chars, matching the char(32) column.
+                var batchId = System.Guid.NewGuid().ToString("N");
+
                 var refundedTotal = 0;
                 foreach (var (skill, _) in current)
                 {
                     // ignoreFee: true - the flat price already charged above covers every ability being
                     // unlearned, so UnlearnClassAbility's own per-ability Luminance fee must not ALSO apply.
-                    if (player.UnlearnClassAbility(skill, out var error, out var refunded, ignoreFee: true))
+                    if (player.UnlearnClassAbility(skill, out var error, out var refunded, ignoreFee: true,
+                            reason: CapLedgerReason.Respec, batchId: batchId))
                         refundedTotal += refunded;
                     else
                         Send(player, $"{skill.DisplayName}: {error}");
@@ -347,6 +427,28 @@ namespace ACE.Server.ClassAbilities
 
             if (!player.ConfirmationManager.EnqueueSend(confirmation, prompt))
                 player.SendWeenieError(WeenieError.ConfirmationInProgress);
+        }
+
+        /// <summary>
+        /// Luminance price of the full respec for a character at <paramref name="level"/>. The flat
+        /// class_ability_full_respec_lum_cost is WAIVED entirely below
+        /// class_ability_full_respec_free_below_level (default 275) and charged in full at and above it: a
+        /// character still levelling is expected to re-plan its build as it grows, while a maxed character
+        /// respeccing is an endgame decision that should cost something. The boundary matches
+        /// class_ability_xp_min_level - 275 is where skills are effectively maxed and the build is settled.
+        /// A free-below level of 0 disables the waiver and charges the flat fee at every level.
+        ///
+        /// A zero fee is safe to pass straight to TrySpendLuminanceIncludingBank, which returns true without
+        /// touching either Luminance pool for a non-positive amount.
+        /// </summary>
+        internal static long FullRespecFee(int level)
+        {
+            var freeBelowLevel = PropertyManager.GetLong("class_ability_full_respec_free_below_level").Item;
+
+            if (freeBelowLevel > 0 && level < freeBelowLevel)
+                return 0;
+
+            return PropertyManager.GetLong("class_ability_full_respec_lum_cost").Item;
         }
 
         private static bool HoldsVoucherFor(Player player, ClassAbilityId skillId) =>

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -21,7 +22,9 @@ namespace ACE.Server.Entity
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>
-        /// The retail maximum # of fellowship members, and the default for 'fellowship_max_members'.
+        /// The retail maximum # of fellowship members, kept as the reference point the XP share table is
+        /// pinned to (sizes 1-9 must reproduce retail exactly). This is NOT the default for
+        /// 'fellowship_max_members', which is 20 - see PropertyManager's default list.
         /// </summary>
         public const int RetailMaxFellows = 9;
 
@@ -88,6 +91,13 @@ namespace ACE.Server.Entity
         public Dictionary<uint, double> LeechBoots;
 
         /// <summary>
+        /// WaffleACE: per-member tightest 'fellowship_leech_warn_seconds' threshold already warned for the
+        /// member's CURRENT idle window. Cleared by StampContribution, since a contribution starts a fresh
+        /// idle window and the marks should re-arm for it.
+        /// </summary>
+        public Dictionary<uint, double> LeechWarned;
+
+        /// <summary>
         /// Called when a player first creates a Fellowship
         /// </summary>
         public Fellowship(Player leader, string fellowshipName, bool shareXP)
@@ -114,8 +124,73 @@ namespace ACE.Server.Entity
             LeechManagementEnabled = PropertyManager.GetBool("fellowship_leech_check_default").Item;
             LeechActivity = new Dictionary<uint, double>() { { leader.Guid.Full, Time.GetUnixTime() } };
             LeechBoots = new Dictionary<uint, double>();
+            LeechWarned = new Dictionary<uint, double>();
 
             FellowshipManager.Register(this);
+        }
+
+        /// <summary>
+        /// WaffleACE: last time (unix) a recruit rejection was sent for an (inviter, target) pair, gating
+        /// 'fellowship_recruit_reject_cooldown'. Guarded by <see cref="_recruitRejectLock"/> because recruit
+        /// actions arrive on per-session threads.
+        /// </summary>
+        private static readonly Dictionary<(uint Inviter, uint Target), double> _recruitRejectLastSent = new Dictionary<(uint, uint), double>();
+        private static readonly object _recruitRejectLock = new object();
+
+        /// <summary>
+        /// WaffleACE: send a recruit rejection to the recruiter, and terminate the recruit attempt on their
+        /// client.
+        ///
+        /// Both halves matter. Every rejection MUST carry a WeenieError game event, because that event is what
+        /// releases the client's outstanding recruit state - the same reason the Olthoi and mule branches of
+        /// <see cref="Player.FellowshipRecruit"/> send <see cref="WeenieError.None"/> even though they have
+        /// already printed a chat line. Branches that printed a chat string and nothing else left the attempt
+        /// unterminated, and a client-side auto-recruiter (the "xp" tell convention vtank implements) then
+        /// retried the doomed recruit forever, printing another line to the recruiter each time.
+        ///
+        /// Callers pass the SPECIFIC retail code where one exists (<see cref="WeenieError.FellowshipMember"/>,
+        /// <see cref="WeenieError.FellowshipRecruitBusy"/>), matching how this same function already answers the
+        /// roster-full and locked cases, and reserve <see cref="WeenieError.None"/> for WaffleACE-only concepts
+        /// with no retail counterpart. The specific code carries client-side text of its own, so the recruiter
+        /// still gets feedback on a repeat attempt whose chat line the cooldown below suppressed.
+        ///
+        /// The cooldown is the second layer: a client that ignores the terminator still cannot spam, because a
+        /// repeat rejection for the same (inviter, target) pair inside the window is dropped. The recruiter
+        /// keeps the first line, which is the one that carries the information.
+        /// </summary>
+        private static void SendRecruitRejection(Player inviter, Player target, string text, ChatMessageType chatType, WeenieError error)
+        {
+            // the session null-check must precede constructing the event: GameEventMessage's constructor
+            // dereferences session.Player, so building it at the call site would NRE before this guard ran
+            if (inviter?.Session == null)
+                return;
+
+            // the UI-releasing event is never throttled - a suppressed one would strand the recruiter's client
+            inviter.Session.Network.EnqueueSend(new GameEventWeenieError(inviter.Session, error));
+
+            var cooldown = PropertyManager.GetLong("fellowship_recruit_reject_cooldown").Item;
+            var now = Time.GetUnixTime();
+            var key = (inviter.Guid.Full, target?.Guid.Full ?? 0);
+
+            if (cooldown > 0)
+            {
+                lock (_recruitRejectLock)
+                {
+                    if (_recruitRejectLastSent.TryGetValue(key, out var lastSent) && now - lastSent < cooldown)
+                        return;
+
+                    // opportunistic prune, so a long-lived server does not accumulate a row per pair forever
+                    if (_recruitRejectLastSent.Count > 1000)
+                    {
+                        foreach (var stale in _recruitRejectLastSent.Where(kvp => now - kvp.Value >= cooldown).Select(kvp => kvp.Key).ToList())
+                            _recruitRejectLastSent.Remove(stale);
+                    }
+
+                    _recruitRejectLastSent[key] = now;
+                }
+            }
+
+            inviter.Session.Network.EnqueueSend(new GameMessageSystemChat(text, chatType));
         }
 
         /// <summary>
@@ -130,9 +205,9 @@ namespace ACE.Server.Entity
 
             if (lockoutRemaining > 0)
             {
-                inviter.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                SendRecruitRejection(inviter, newMember,
                     $"{newMember.Name} was removed from this fellowship for inactivity and cannot rejoin for another {LockoutMinutes(lockoutRemaining)} minute(s).",
-                    ChatMessageType.Fellowship));
+                    ChatMessageType.Fellowship, WeenieError.None);
                 return;
             }
 
@@ -165,13 +240,13 @@ namespace ACE.Server.Entity
 
             if (newMember.Fellowship != null || FellowshipMembers.ContainsKey(newMember.Guid.Full))
             {
-                inviter.Session.Network.EnqueueSend(new GameMessageSystemChat($"{newMember.Name} is already a member of a Fellowship.", ChatMessageType.Broadcast));
+                SendRecruitRejection(inviter, newMember, $"{newMember.Name} is already a member of a Fellowship.", ChatMessageType.Broadcast, WeenieError.FellowshipMember);
             }
             else
             {
                 if (PropertyManager.GetBool("fellow_busy_no_recruit").Item && newMember.IsBusy)
                 {
-                    inviter.Session.Network.EnqueueSend(new GameMessageSystemChat($"{newMember.Name} is busy.", ChatMessageType.Broadcast));
+                    SendRecruitRejection(inviter, newMember, $"{newMember.Name} is busy.", ChatMessageType.Broadcast, WeenieError.FellowshipRecruitBusy);
                     return;
                 }
 
@@ -183,7 +258,7 @@ namespace ACE.Server.Entity
                 {
                     if (!newMember.ConfirmationManager.EnqueueSend(new Confirmation_Fellowship(inviter.Guid, newMember.Guid), inviter.Name))
                     {
-                        inviter.Session.Network.EnqueueSend(new GameMessageSystemChat($"{newMember.Name} is busy.", ChatMessageType.Broadcast));
+                        SendRecruitRejection(inviter, newMember, $"{newMember.Name} is busy.", ChatMessageType.Broadcast, WeenieError.FellowshipRecruitBusy);
                     }
                 }
             }
@@ -203,6 +278,18 @@ namespace ACE.Server.Entity
                 // player clicked 'no' on the fellowship popup
                 inviter.Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} declines your invite", ChatMessageType.Fellowship));
                 inviter.Session.Network.EnqueueSend(new GameEventWeenieError(inviter.Session, WeenieError.FellowshipDeclined));
+                return;
+            }
+
+            // WaffleACE: re-check membership on accept. The confirmation dialog can sit open for up to 30
+            // seconds, during which the player may have joined a different fellowship (or, defensively, this
+            // one via another path). Without this check they would end up in both rosters.
+            if (player.Fellowship != null)
+            {
+                if (player.Fellowship == this)
+                    return;
+
+                SendRecruitRejection(inviter, player, $"{player.Name} is already a member of a Fellowship.", ChatMessageType.Broadcast, WeenieError.FellowshipMember);
                 return;
             }
 
@@ -259,7 +346,13 @@ namespace ACE.Server.Entity
                 inviter.SendMotionAsCommands(MotionCommand.BowDeep, MotionStance.NonCombat);
         }
 
-        public void RemoveFellowshipMember(Player player, Player leader)
+        /// <param name="dismissMessage">
+        /// WaffleACE: optional replacement for the default "dismissed from fellowship" line, used when the
+        /// removal was not a leader dismissal (e.g. leech auto-ejection) and the remaining members need to be
+        /// told what actually happened. When supplied, the removed player is skipped, because callers that
+        /// pass one have already sent them a notice written in the second person.
+        /// </param>
+        public void RemoveFellowshipMember(Player player, Player leader, string dismissMessage = null)
         {
             if (player == null) return;
 
@@ -288,7 +381,11 @@ namespace ACE.Server.Entity
             foreach (var member in fellowshipMembers.Values)
             {
                 member.Session.Network.EnqueueSend(new GameEventFellowshipDismiss(member.Session, player));
-                member.Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} dismissed from fellowship", ChatMessageType.Fellowship));
+
+                if (dismissMessage == null)
+                    member.Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} dismissed from fellowship", ChatMessageType.Fellowship));
+                else if (member.Guid.Full != player.Guid.Full)
+                    member.Session.Network.EnqueueSend(new GameMessageSystemChat(dismissMessage, ChatMessageType.Fellowship));
             }
 
             FellowshipMembers.Remove(player.Guid.Full);
@@ -539,7 +636,9 @@ namespace ACE.Server.Entity
             //
             // NOTE: with restrictions off, a low-level character sharing a high-level fellow's kills earns a
             // full even share. GetDistanceScalar still requires them to actually be present, and /fship noleech
-            // (see 'fellowship_leech_check_default') is the intended counter to passive carrying.
+            // (see 'fellowship_leech_check_default') is the intended counter to passive carrying. An absent
+            // fellow now neither receives nor dilutes (see GetPresentShareTotal), so noleech is only about
+            // present-but-idle members.
             if (!PropertyManager.GetBool("fellowship_level_restrictions").Item)
             {
                 ShareXP = DesiredShareXP;
@@ -547,52 +646,28 @@ namespace ACE.Server.Entity
                 return;
             }
 
-            // - If all members of the fellowship are level 50 or above, all members will share XP equally
-
-            // - If all members of the fellowship are within 5 levels of the founder, XP will be shared equally
-
-            // - If members are all within ten levels of the founder, XP will be shared proportionally.
+            // WaffleACE: simplified level-based sharing. If every present member is at or above
+            // 'fellowship_even_share_level', the fellowship shares evenly (the plateau branch of
+            // SplitXp/SplitLuminance). Otherwise the whole fellowship shares the weighted branch,
+            // proportioned by each present member's XP-to-next-level (GetLevelWeight) - retail's
+            // "more than 10 levels from the leader = no sharing" cutoff and "within 5 levels = even
+            // share" band are both dropped, so ShareXP always follows DesiredShareXP.
 
             var fellows = GetFellowshipMembers();
 
-            var allEvenShareLevel = PropertyManager.GetLong("fellowship_even_share_level").Item;
-            var allOverEvenShareLevel = !fellows.Values.Any(f => (f.Level ?? 1) < allEvenShareLevel);
+            var evenShareLevel = PropertyManager.GetLong("fellowship_even_share_level").Item;
 
-            if (allOverEvenShareLevel)
-            {
-                ShareXP = DesiredShareXP;
-                EvenShare = true;
-                return;
-            }
-
-            var leader = PlayerManager.GetOnlinePlayer(FellowshipLeaderGuid);
-            if (leader == null)
-                return;
-
-            var maxLevelDiff = fellows.Values.Max(f => Math.Abs((leader.Level ?? 1) - (f.Level ?? 1)));
-
-            if (maxLevelDiff <= 5)
-            {
-                ShareXP = DesiredShareXP;
-                EvenShare = true;
-            }
-            else if (maxLevelDiff <= 10)
-            {
-                ShareXP = DesiredShareXP;
-                EvenShare = false;
-            }
-            else
-            {
-                ShareXP = false;
-                EvenShare = false;
-            }
+            ShareXP = DesiredShareXP;
+            EvenShare = !fellows.Values.Any(f => (f.Level ?? 1) < evenShareLevel);
         }
 
         /// <summary>
-        /// Splits XP amongst fellowship members, depending on XP type and fellow settings
+        /// Splits XP amongst fellowship members, depending on XP type and fellow settings. Quest XP never
+        /// reaches this method - GrantXP excludes XpType.Quest from the fellowship split entirely, so a quest
+        /// turn-in always goes only to the earner.
         /// </summary>
         /// <param name="amount">The input amount of XP</param>
-        /// <param name="xpType">The type of XP (quest XP is handled differently)</param>
+        /// <param name="xpType">The type of XP</param>
         /// <param name="player">The fellowship member who originated the XP</param>
         public void SplitXp(ulong amount, XpType xpType, ShareType shareType, Player player)
         {
@@ -606,32 +681,21 @@ namespace ACE.Server.Entity
             StampContribution(player);
 
             // A kill is combat-sourced, so each receiving member's share (including a non-earner's, which is
-            // typed XpType.Fellowship and so indistinguishable from shared quest XP) is eligible for that
-            // member's own offline bonus. Quest XP shared into the fellowship is not.
+            // typed XpType.Fellowship) is eligible for that member's own offline bonus.
             var combatShare = xpType == XpType.Kill;
 
-            // quest turn-ins: flat share (retail default)
-            if (xpType == XpType.Quest && !PropertyManager.GetBool("fellow_quest_bonus").Item)
+            // divides XP evenly to all the sharable fellows within level range, but with a significant boost
+            // to the amount of xp, based on the number of PRESENT fellows (see GetPresentShareTotal) - an
+            // absent fellow neither receives nor dilutes.
+            if (EvenShare)
             {
-                var perAmount = (long)amount / fellowshipMembers.Count;
+                var scalars = fellowshipMembers.Values.ToDictionary(m => m.Guid.Full, m => GetDistanceScalar(player, m, xpType));
+
+                var totalAmount = GetPresentShareTotal(amount, scalars.Values, PropertyManager.GetDouble("fellowship_share_group_plateau").Item);
 
                 foreach (var member in fellowshipMembers.Values)
                 {
-                    var fellowXpType = player == member ? XpType.Quest : XpType.Fellowship;
-
-                    member.GrantXP(perAmount, fellowXpType, shareType, combatShare);
-                }
-            }
-
-            // divides XP evenly to all the sharable fellows within level range,
-            // but with a significant boost to the amount of xp, based on # of fellowship members
-            else if (EvenShare)
-            {
-                var totalAmount = (ulong)Math.Round(amount * GetMemberSharePercent());
-
-                foreach (var member in fellowshipMembers.Values)
-                {
-                    var scalar = GetDistanceScalar(player, member, xpType);
+                    var scalar = scalars[member.Guid.Full];
                     if (scalar <= 0)
                         continue;
 
@@ -645,34 +709,39 @@ namespace ACE.Server.Entity
                 return;
             }
 
-            // divides XP to all sharable fellows within level range
-            // based on each fellowship member's level
+            // divides XP amongst all sharable (present) fellows, weighted by each present member's
+            // XP-to-next-level - the same group total as the EvenShare branch (fellowship_share_group_plateau),
+            // just distributed unevenly instead of per-head
             else
             {
-                var levelXPSum = fellowshipMembers.Values.Select(p => p.GetXPToNextLevel(p.Level.Value)).Sum();
+                var scalars = fellowshipMembers.Values.ToDictionary(m => m.Guid.Full, m => GetDistanceScalar(player, m, xpType));
 
-                foreach (var member in fellowshipMembers.Values)
+                var totalAmount = GetPresentShareTotal(amount, scalars.Values, PropertyManager.GetDouble("fellowship_share_group_plateau").Item);
+
+                var present = fellowshipMembers.Values.Where(m => scalars[m.Guid.Full] > 0).ToList();
+                var levelXPSum = present.Aggregate(0ul, (sum, p) => sum + p.GetXPToNextLevel(p.Level ?? 1));
+
+                foreach (var member in present)
                 {
-                    var scalar = GetDistanceScalar(player, member, xpType);
-                    if (scalar <= 0)
-                        continue;
+                    var scalar = scalars[member.Guid.Full];
+                    var weight = GetLevelWeight(member.GetXPToNextLevel(member.Level ?? 1), levelXPSum, present.Count);
 
-                    var levelXPScale = (double)member.GetXPToNextLevel(member.Level.Value) / levelXPSum;
-
-                    var playerTotal = (ulong)Math.Round(amount * levelXPScale * scalar);
+                    var shareAmount = (ulong)Math.Round(totalAmount * weight * scalar);
 
                     var fellowXpType = player == member ? xpType : XpType.Fellowship;
 
-                    member.GrantXP((long)playerTotal, fellowXpType, shareType, combatShare);
+                    member.GrantXP((long)shareAmount, fellowXpType, shareType, combatShare);
                 }
             }
         }
 
         /// <summary>
-        /// Splits luminance amongst fellowship members, depending on XP type and fellow settings
+        /// Splits luminance amongst fellowship members, depending on XP type and fellow settings. Quest
+        /// luminance never reaches this method - GrantLuminance excludes XpType.Quest from the fellowship
+        /// split entirely, so a quest turn-in always goes only to the earner.
         /// </summary>
         /// <param name="amount">The input amount of luminance</param>
-        /// <param name="xpType">The type of lumaniance (quest luminance is handled differently)</param>
+        /// <param name="xpType">The type of luminance</param>
         /// <param name="player">The fellowship member who originated the luminance</param>
         public void SplitLuminance(ulong amount, XpType xpType, ShareType shareType, Player player)
         {
@@ -683,57 +752,51 @@ namespace ACE.Server.Entity
             // WaffleACE: the earner is contributing luminance to the fellowship — refresh their leech activity.
             StampContribution(player);
 
-            if (xpType == XpType.Quest)
+            // WaffleACE: mirrors SplitXp's EvenShare branch exactly - same group multiplier, same
+            // distance model. This is structural, not cosmetic: the previous implementation divided a
+            // *pot* (amount / total roster count) and then granted only to fellows in range, so any
+            // out-of-range member's slice was silently destroyed rather than redistributed.
+            //
+            // Computing each member's share independently removes that failure mode by construction -
+            // there is no pot to lose from. An out-of-range fellow simply scales to 0 and nobody else's
+            // share is affected, which is exactly why SplitXp never had the bug.
+            //
+            // It also picks up two things luminance was missing: the fellowship group multiplier (so
+            // luminance now benefits from fellowshipping the same way XP does), and GetDistanceScalar's
+            // graduated falloff in place of the binary WithinRange radar check.
+            //
+            // Luminance banks straight into the uncapped bank with no luminance flag required, so
+            // unflagged fellows share too (no MaximumLuminance != null gate).
+            var fellowshipMembers = GetFellowshipMembers();
+
+            if (fellowshipMembers.Count == 0)
+                return;
+
+            // a kill is combat-sourced, so each receiving member's share is eligible for their own offline bonus
+            var combatShare = xpType == XpType.Kill;
+
+            var scalars = fellowshipMembers.Values.ToDictionary(m => m.Guid.Full, m => GetDistanceScalar(player, m, xpType));
+
+            var totalAmount = GetPresentShareTotal(amount, scalars.Values, PropertyManager.GetDouble("fellowship_share_group_plateau").Item);
+
+            foreach (var member in fellowshipMembers.Values)
             {
-                // quest luminance is not shared. NOTE: this is the one place luminance still diverges from
-                // XP, whose quest branch flat-splits across the fellowship (gated by 'fellow_quest_bonus').
-                player.GrantLuminance((long)amount, XpType.Quest, shareType);
-            }
-            else
-            {
-                // WaffleACE: mirrors SplitXp's EvenShare branch exactly - same group multiplier, same
-                // distance model. This is structural, not cosmetic: the previous implementation divided a
-                // *pot* (amount / total roster count) and then granted only to fellows in range, so any
-                // out-of-range member's slice was silently destroyed rather than redistributed.
-                //
-                // Computing each member's share independently removes that failure mode by construction -
-                // there is no pot to lose from. An out-of-range fellow simply scales to 0 and nobody else's
-                // share is affected, which is exactly why SplitXp never had the bug.
-                //
-                // It also picks up two things luminance was missing: the fellowship group multiplier (so
-                // luminance now benefits from fellowshipping the same way XP does), and GetDistanceScalar's
-                // graduated falloff in place of the binary WithinRange radar check.
-                //
-                // Luminance banks straight into the uncapped bank with no luminance flag required, so
-                // unflagged fellows share too (no MaximumLuminance != null gate).
-                var fellowshipMembers = GetFellowshipMembers();
+                var scalar = scalars[member.Guid.Full];
+                if (scalar <= 0)
+                    continue;
 
-                if (fellowshipMembers.Count == 0)
-                    return;
+                var shareAmount = (ulong)Math.Round(totalAmount * scalar);
 
-                // a kill is combat-sourced, so each receiving member's share is eligible for their own offline
-                // bonus (this else branch is only reached for non-quest luminance)
-                var combatShare = xpType == XpType.Kill;
+                var fellowXpType = player == member ? xpType : XpType.Fellowship;
 
-                var totalAmount = (ulong)Math.Round(amount * GetMemberSharePercent());
-
-                foreach (var member in fellowshipMembers.Values)
-                {
-                    var scalar = GetDistanceScalar(player, member, xpType);
-                    if (scalar <= 0)
-                        continue;
-
-                    var shareAmount = (ulong)Math.Round(totalAmount * scalar);
-
-                    var fellowXpType = player == member ? xpType : XpType.Fellowship;
-
-                    member.GrantLuminance((long)shareAmount, fellowXpType, shareType, combatShare);
-                }
+                member.GrantLuminance((long)shareAmount, fellowXpType, shareType, combatShare);
             }
         }
 
         /// <summary>
-        /// Retail per-member EvenShare XP multiplier, indexed by fellowship size (index 0 unused).
+        /// Retail per-member EvenShare XP multiplier, indexed by fellowship size (index 0 unused). The
+        /// multiplier is by PRESENT fellows - see <see cref="GetPresentShareTotal"/> - not the whole roster,
+        /// so an absent member neither receives nor dilutes.
         ///
         /// Read it as total group throughput (size * share): 1.0, 1.5, 1.8, 2.2, 2.5, 2.7, 2.8, 2.8, 2.7.
         /// Retail deliberately *plateaus* the total around 2.8x at 7-8 fellows and eases back at 9 - adding
@@ -770,11 +833,39 @@ namespace ACE.Server.Entity
             return groupPlateau / memberCount;
         }
 
-        internal double GetMemberSharePercent()
+        /// <summary>
+        /// WaffleACE: total XP/luminance to distribute for one earner's kill. <paramref name="scalars"/> holds
+        /// GetDistanceScalar for every roster member INCLUDING the earner (whose scalar is always 1.0). Only
+        /// members with a positive scalar - those who would actually receive a share - count toward the
+        /// fellowship-size multiplier, so an absent fellow neither receives nor dilutes. Distance rules are
+        /// unchanged; only the denominator is.
+        /// </summary>
+        public static ulong GetPresentShareTotal(ulong amount, IReadOnlyCollection<double> scalars, double groupPlateau)
         {
-            var fellowshipMembers = GetFellowshipMembers();
+            var presentCount = scalars.Count(s => s > 0);
 
-            return GetMemberSharePercent(fellowshipMembers.Count, PropertyManager.GetDouble("fellowship_share_group_plateau").Item);
+            if (presentCount == 0)
+                presentCount = 1;
+
+            return (ulong)Math.Round(amount * GetMemberSharePercent(presentCount, groupPlateau));
+        }
+
+        /// <summary>
+        /// WaffleACE: per-member multiplier applied to GetPresentShareTotal in the level-weighted
+        /// (non-EvenShare) branch. Normalised so the weights of all present members sum to
+        /// <paramref name="presentCount"/> - which makes the weighted branch distribute exactly the same
+        /// group total as the EvenShare branch, and makes it collapse to the EvenShare branch (weight 1.0
+        /// each) when every present member is the same level.
+        /// </summary>
+        public static double GetLevelWeight(ulong memberXpToNextLevel, ulong presentXpToNextLevelSum, int presentCount)
+        {
+            if (presentCount <= 0)
+                return 1.0;
+
+            if (presentXpToNextLevelSum == 0)
+                return 1.0;
+
+            return presentCount * (double)memberXpToNextLevel / presentXpToNextLevelSum;
         }
 
         public const int MaxDistance = 600;
@@ -788,6 +879,9 @@ namespace ACE.Server.Entity
             if (earner == null || fellow == null)
                 return 0.0f;
 
+            // Quest XP/luminance is no longer routed through SplitXp/SplitLuminance (see their doc comments),
+            // so this branch is unreachable from either split path. Left in place because this method is
+            // public and used by a developer command outside the split.
             if (xpType == XpType.Quest)
                 return 1.0f;
 
@@ -969,6 +1063,72 @@ namespace ACE.Server.Entity
                 return;
 
             LeechActivity[player.Guid.Full] = Time.GetUnixTime();
+
+            LeechWarned?.Remove(player.Guid.Full);
+        }
+
+        /// <summary>
+        /// WaffleACE: parse 'fellowship_leech_warn_seconds' into a descending list of positive seconds-remaining
+        /// marks. Junk tokens are skipped rather than thrown on, since a malformed config value must never break
+        /// leech management itself. Returns descending (tightest mark last -> largest countdown first) so
+        /// SelectLeechWarnThreshold can find "the smallest threshold still >= remaining" without a second sort.
+        /// </summary>
+        public static List<double> ParseLeechWarnSeconds(string raw)
+        {
+            var result = new List<double>();
+
+            if (string.IsNullOrWhiteSpace(raw))
+                return result;
+
+            var seen = new HashSet<double>();
+
+            foreach (var token in raw.Split(','))
+            {
+                var trimmed = token.Trim();
+
+                if (!double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                    continue;
+
+                if (value <= 0)
+                    continue;
+
+                if (seen.Add(value))
+                    result.Add(value);
+            }
+
+            result.Sort((a, b) => b.CompareTo(a));
+
+            return result;
+        }
+
+        /// <summary>
+        /// WaffleACE: pick the warning threshold (if any) that should fire right now for a member with
+        /// 'remaining' seconds left before leech ejection. Only the TIGHTEST crossed mark is returned - if a
+        /// long gap between ticks jumps 'remaining' past several marks at once, that must still produce exactly
+        /// one message, not one per mark skipped over. 'alreadyWarned' suppresses re-firing the same mark (or
+        /// any looser mark) for the member's current idle window, while still allowing a tighter mark to fire
+        /// later as 'remaining' keeps falling.
+        /// </summary>
+        public static double? SelectLeechWarnThreshold(double remaining, double? alreadyWarned, IReadOnlyList<double> thresholds)
+        {
+            double? target = null;
+
+            foreach (var t in thresholds)
+            {
+                if (remaining > t)
+                    continue;
+
+                if (target == null || t < target)
+                    target = t;
+            }
+
+            if (target == null)
+                return null;
+
+            if (alreadyWarned.HasValue && alreadyWarned.Value <= target.Value)
+                return null;
+
+            return target;
         }
 
         /// <summary>
@@ -998,6 +1158,10 @@ namespace ACE.Server.Entity
             foreach (var staleGuid in LeechActivity.Keys.Where(k => !members.ContainsKey(k)).ToList())
                 LeechActivity.Remove(staleGuid);
 
+            // prune warning-state entries for members who have left
+            foreach (var staleGuid in LeechWarned.Keys.Where(k => !members.ContainsKey(k)).ToList())
+                LeechWarned.Remove(staleGuid);
+
             var rejoinLockout = PropertyManager.GetLong("fellowship_leech_rejoin_lockout").Item;
 
             // prune expired boot entries so the dictionary doesn't grow for the fellowship's lifetime
@@ -1009,6 +1173,12 @@ namespace ACE.Server.Entity
                 var timeout = PropertyManager.GetLong("fellowship_leech_timeout").Item;
                 var leader = PlayerManager.GetOnlinePlayer(FellowshipLeaderGuid);
 
+                // read and parse the warning marks once per tick, not once per member. A mark at or beyond the
+                // whole timeout window would fire the instant the window opens, so drop those.
+                var warnThresholds = ParseLeechWarnSeconds(PropertyManager.GetString("fellowship_leech_warn_seconds").Item)
+                    .Where(t => t < timeout)
+                    .ToList();
+
                 foreach (var member in members.Values.ToList())
                 {
                     if (member.Guid.Full == FellowshipLeaderGuid)   // never auto-eject the leader
@@ -1018,15 +1188,40 @@ namespace ACE.Server.Entity
                         continue;
 
                     if (now - lastActive <= timeout)
+                    {
+                        if (warnThresholds.Count == 0)
+                            continue;
+
+                        var remaining = timeout - (now - lastActive);
+
+                        var alreadyWarned = LeechWarned.TryGetValue(member.Guid.Full, out var warned) ? warned : (double?)null;
+
+                        var target = SelectLeechWarnThreshold(remaining, alreadyWarned, warnThresholds);
+
+                        if (target == null)
+                            continue;
+
+                        LeechWarned[member.Guid.Full] = target.Value;
+
+                        member.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                            $"Fellowship inactivity warning: contribute XP to the fellowship within {LockoutMinutes(target.Value)} minute(s) or you will be removed for inactivity.",
+                            ChatMessageType.Fellowship));
+
                         continue;
+                    }
 
                     LeechBoots[member.Guid.Full] = now;
+                    LeechWarned.Remove(member.Guid.Full);
 
                     member.Session.Network.EnqueueSend(new GameMessageSystemChat(
                         $"You have been removed from the fellowship for inactivity - no XP contribution to the fellowship for over {timeout / 60} minute(s). You may not rejoin this fellowship for {LockoutMinutes(rejoinLockout)} minute(s).",
                         ChatMessageType.Fellowship));
 
-                    RemoveFellowshipMember(member, leader);
+                    // WaffleACE: tell the rest of the fellowship why the member left, so an auto-ejection is
+                    // not mistaken for the leader dismissing them. This REPLACES the generic "dismissed from
+                    // fellowship" line rather than trailing it, so only one message describes the removal.
+                    RemoveFellowshipMember(member, leader,
+                        $"{member.Name} was removed from the fellowship for inactivity - no XP contribution to the fellowship for over {timeout / 60} minute(s).");
                 }
 
                 members = GetFellowshipMembers();

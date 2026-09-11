@@ -107,5 +107,56 @@ namespace ACE.Server.Tests
             Assert.IsTrue(ClassAbilityRegistry.TryGetByName("enhanced_health", out _));
             Assert.IsTrue(ClassAbilityRegistry.TryGetByName("enhanced_lifemagic", out _));
         }
+
+        // ---- GetReadout label selection + prefix ------------------------------------------------------
+        // GetReadout doesn't touch its Player argument (the bonus comes from BonusForRank alone), so these
+        // can call it with a null player the same way SpellswordReadoutTests does for its gear abilities -
+        // no live Player is needed to exercise the pure label-selection switch.
+
+        [TestMethod]
+        public void GetReadout_SkillKind_LabelsAsSkills()
+        {
+            var generated = EnhancedStatAbility.GenerateAll().ToList();
+            var heavy = generated.Single(s => s.Kind == EnhancedStatKind.Skill && s.TargetSkill == Skill.HeavyWeapons);
+
+            var readout = heavy.GetReadout(null, 2);
+
+            Assert.AreEqual("skills", readout.Label);
+        }
+
+        [TestMethod]
+        public void GetReadout_AttributeKind_LabelsAsAttr()
+        {
+            var generated = EnhancedStatAbility.GenerateAll().ToList();
+            var focus = generated.Single(s => s.Kind == EnhancedStatKind.Attribute && s.TargetAttribute == PropertyAttribute.Focus);
+
+            var readout = focus.GetReadout(null, 1);
+
+            Assert.AreEqual("attr", readout.Label);
+        }
+
+        [TestMethod]
+        public void GetReadout_VitalKind_LabelsAsVital()
+        {
+            var generated = EnhancedStatAbility.GenerateAll().ToList();
+            var health = generated.Single(s => s.Kind == EnhancedStatKind.Vital && s.TargetVital == PropertyAttribute2nd.MaxHealth);
+
+            var readout = health.GetReadout(null, 3);
+
+            Assert.AreEqual("vital", readout.Label);
+        }
+
+        [TestMethod]
+        public void GetReadout_AlwaysCarriesAPlusPrefix()
+        {
+            var generated = EnhancedStatAbility.GenerateAll().ToList();
+            var heavy = generated.Single(s => s.Kind == EnhancedStatKind.Skill && s.TargetSkill == Skill.HeavyWeapons);
+
+            var readout = heavy.GetReadout(null, 2);
+
+            Assert.AreEqual("+", readout.Prefix);
+            Assert.AreEqual(25.0, readout.Effective, 1e-9);
+            Assert.AreEqual("", readout.Unit);
+        }
     }
 }

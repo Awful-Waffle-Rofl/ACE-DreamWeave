@@ -12,7 +12,9 @@ namespace ACE.Server.Network.GameMessages.Messages
             Writer.Write(worldObject.Sequences.GetNextSequence(SequenceType.UpdatePropertyInt, PropertyInt.StackSize));
             Writer.WriteGuid(worldObject.Guid);
             Writer.Write((uint)(worldObject.StackSize ?? 0));
-            Writer.Write((uint)(worldObject.Value ?? 0));
+            // ClientValue, not Value: a stack split or merge re-sends the item's Value, and the raw 0 of a
+            // zero-value stackable would undo the sell-pane spoof (see WorldObject.ClientValue).
+            Writer.Write((uint)worldObject.ClientValue);
         }
     }
 }

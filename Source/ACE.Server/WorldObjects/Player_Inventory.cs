@@ -162,6 +162,12 @@ namespace ACE.Server.WorldObjects
 
             Session.Network.EnqueueSend(new GameMessageCreateObject(item));
 
+            // Deliberately NO VisualEffectManager.SendTo here. An item in a pack is known to the client
+            // but not drawn, so a script sent now has nothing to attach to - and because SendTo is
+            // once-per-lifetime, that wasted send would then suppress the real one at equip time.
+            // Effects are sent where the object becomes VISIBLE: equip, login-with-it-equipped, or
+            // entering view on the ground / on another player.
+
             if (item is Container itemAsContainer)
             {
                 Session.Network.EnqueueSend(new GameEventViewContents(Session, itemAsContainer));
@@ -435,6 +441,13 @@ namespace ACE.Server.WorldObjects
 
             if (item.GearMaxHealth != null)
                 HandleMaxHealthUpdate();
+
+            // Equipping is where an item first becomes DRAWN for its owner - in a pack it is known to
+            // the client but not rendered, and equipping only reparents it rather than re-creating it.
+            // This is the single choke point for every equip, which the earlier hook was not: that one
+            // sat inside the `wasEquipped` branch of DoHandleActionGetAndWieldItem, which only covers
+            // moving an already-equipped item between slots, so equipping from the pack skipped it.
+            VisualEffectManager.SendTo(Session, item);
 
             TryShuffleStance(wieldedLocation);
 
@@ -764,6 +777,9 @@ namespace ACE.Server.WorldObjects
             return null;
         }
 
+        // WaffleACE: GetPickupAnimationSpeed() moved to Player_PickupBoons.cs (composes the tunable with any
+        // claimed pick-up speed quest boons)
+
         /// <summary>
         /// This would be used if you need to pickup something without a MoveTo action.
         /// It will broadcast the pickup motion and add a delay for the animation length
@@ -775,16 +791,18 @@ namespace ACE.Server.WorldObjects
             ActionChain pickupChain = new ActionChain();
 
             // start picking up item animation
-            EnqueueBroadcast(new GameMessageUpdatePosition(this));
+            SendUpdatePosition();
 
-            var motion = new Motion(CurrentMotionState.Stance, MotionPickup);
+            var speed = GetPickupAnimationSpeed();
+
+            var motion = new Motion(CurrentMotionState.Stance, MotionPickup, speed);
 
             EnqueueBroadcastMotion(motion);
 
             // Wait for animation to progress
             var motionTable = DatManager.PortalDat.ReadFromDat<MotionTable>(MotionTableId);
             var pickupAnimationLength = motionTable.GetAnimationLength(CurrentMotionState.Stance, MotionPickup, MotionCommand.Ready);
-            pickupChain.AddDelaySeconds(pickupAnimationLength);
+            pickupChain.AddDelaySeconds(pickupAnimationLength / speed);
 
             return pickupChain;
         }
@@ -837,9 +855,11 @@ namespace ACE.Server.WorldObjects
                 return new ActionChain();
 
             // start picking up item animation
-            EnqueueBroadcast(new GameMessageUpdatePosition(this));
+            SendUpdatePosition();
 
-            var motion = new Motion(CurrentMotionState.Stance, pickupMotion);
+            var speed = GetPickupAnimationSpeed();
+
+            var motion = new Motion(CurrentMotionState.Stance, pickupMotion, speed);
 
             EnqueueBroadcastMotion(motion);
 
@@ -848,7 +868,7 @@ namespace ACE.Server.WorldObjects
             var pickupAnimationLength = motionTable.GetAnimationLength(CurrentMotionState.Stance, pickupMotion, MotionCommand.Ready);
 
             var pickupChain = new ActionChain();
-            pickupChain.AddDelaySeconds(pickupAnimationLength);
+            pickupChain.AddDelaySeconds(pickupAnimationLength / speed);
 
             return pickupChain;
         }
@@ -897,15 +917,21 @@ namespace ACE.Server.WorldObjects
         {
             PickupState = PickupState.Return;
 
-            var returnStance = new Motion(CurrentMotionState.Stance);
+            var speed = GetPickupAnimationSpeed();
+
+            var returnStance = new Motion(CurrentMotionState.Stance, MotionCommand.Ready, speed);
             EnqueueBroadcastMotion(returnStance);
 
             var animTime = DatManager.PortalDat.ReadFromDat<MotionTable>(MotionTableId).GetAnimationLength(pickupMotion);
 
             var actionChain = new ActionChain();
-            actionChain.AddDelaySeconds(animTime);
+            actionChain.AddDelaySeconds(animTime / speed);
             actionChain.AddAction(this, () =>
             {
+                // WaffleACE: undo the sped-up Ready broadcast so the idle cycle doesn't stay fast
+                if (speed != 1.0f)
+                    EnqueueBroadcastMotion(new Motion(CurrentMotionState.Stance));
+
                 PickupState = PickupState.None;
                 IsBusy = false;
 
@@ -1114,15 +1140,18 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Unconditional, matching the split and merge handlers. This direction happens to be closed
+            // today by the later container-ownership check, but that check exists for a different
+            // reason and could be changed without anyone noticing it was load-bearing here.
+            if (itemRootOwner is Vendor || containerRootOwner is Vendor || container is Vendor)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.NotAllTheItemsAreAvailable));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
+                return;
+            }
+
             if ((itemRootOwner == this && containerRootOwner != this) || (itemRootOwner != this && containerRootOwner == this)) // Movement is between the player and the world
             {
-                if (itemRootOwner is Vendor)
-                {
-                    Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.NotAllTheItemsAreAvailable));
-                    Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
-                    return;
-                }
-
                 var itemAsContainer = item as Container;
 
                 // Checking to see if item to pick is an container itself and IsOpen
@@ -1221,6 +1250,30 @@ namespace ACE.Server.WorldObjects
 
                                 item.EmoteManager.OnPickup(this);
                                 item.NotifyOfEvent(RegenerationType.PickUp);
+
+                                // speed challenge (WaffleACE): picking a season's objective item up off the
+                                // ground is a third way into the completion funnel, alongside using a goal
+                                // object (WorldObject_Use.cs) and killing a boss (Creature_Death.cs). The
+                                // instance check runs FIRST, not the item's flag, because it short-circuits on the
+                                // overwhelmingly common case: almost every pickup in the game is not a speed run,
+                                // so an ordinary pickup pays one property read and an instance compare rather than
+                                // two property reads. The funnel re-validates the run and gates on the season's
+                                // ObjectiveWcid itself, so this call site does not need to re-check that.
+                                if (IsInSpeedChallengeInstance && item.GetProperty(PropertyBool.SpeedChallengeGoal) == true)
+                                {
+                                    // A stackable objective item merges onto an existing stack through
+                                    // DoHandleActionStackableMerge instead of this path, so it would never reach
+                                    // OnPickup or the completion funnel, and the run could never be completed with
+                                    // no visible cause. MaxStackSize is what declares the item STACKABLE; StackSize
+                                    // is only how many are in this particular pile, and reads 1 for the first one
+                                    // ever dropped - so checking StackSize here would miss exactly the case that
+                                    // breaks later. Content authoring cannot make the item non-stackable from
+                                    // here, so log loudly rather than fail silently.
+                                    if (item.MaxStackSize.HasValue && item.MaxStackSize.Value > 1)
+                                        log.Error($"[SPEED] {item.Name} (0x{item.Guid}, wcid {item.WeenieClassId}) is flagged SpeedChallengeGoal but is STACKABLE (MaxStackSize {item.MaxStackSize.Value}); a merged pickup never reaches OnPickup, so this objective item can never finish a run. The objective item must not be stackable.");
+
+                                    TryFinishSpeedChallenge(item);
+                                }
 
                                 if (questSolve)
                                     item.EmoteManager.OnQuest(this);
@@ -1508,6 +1561,15 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Proving Grounds (WaffleACE): putting anything on the floor inside the survival arena ends the run -
+            // see Player_SurvivalChallenge.TryEndSurvivalChallengeOnDrop for why. The drop is refused rather than
+            // completed, so the item is not stranded in the instance the player is being pulled out of.
+            if (TryEndSurvivalChallengeOnDrop())
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
+                return;
+            }
+
             var item = FindObject(itemGuid, SearchLocations.MyInventory | SearchLocations.MyEquippedItems, out _, out _, out var wasEquipped);
 
             if (item == null)
@@ -1535,6 +1597,8 @@ namespace ACE.Server.WorldObjects
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full, WeenieError.TradeItemBeingTraded));
                 return;
             }
+
+            var speed = GetPickupAnimationSpeed();
 
             var actionChain = StartPickupChain();
 
@@ -1593,9 +1657,17 @@ namespace ACE.Server.WorldObjects
                         log.Warn($"0x{item.Guid}:{item.Name} for player {Name} lost from HandleActionDropItem failure.");
                 }
 
-                var returnStance = new Motion(CurrentMotionState.Stance);
+                var returnStance = new Motion(CurrentMotionState.Stance, MotionCommand.Ready, speed);
                 EnqueueBroadcastMotion(returnStance);
             });
+
+            // WaffleACE: undo the sped-up Ready broadcast so the idle cycle doesn't stay fast
+            if (speed != 1.0f)
+            {
+                var pickupAnimationLength = DatManager.PortalDat.ReadFromDat<MotionTable>(MotionTableId).GetAnimationLength(MotionPickup);
+                actionChain.AddDelaySeconds(pickupAnimationLength / speed);
+                actionChain.AddAction(this, () => EnqueueBroadcastMotion(new Motion(CurrentMotionState.Stance)));
+            }
 
             actionChain.EnqueueChain();
         }
@@ -1669,6 +1741,19 @@ namespace ACE.Server.WorldObjects
             if (item == null)
             {
                 Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "Item not found!")); // Custom error message
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
+                return;
+            }
+
+            // A vendor-rooted item is never wieldable directly. FindObject's LastUsedContainer branch resolves
+            // any guid through the vendor's TryGetItemForSale and reports the vendor as rootOwner, and for the
+            // account vault that stock is the real persisted biota rather than disposable vendor stock. Without
+            // this guard the item ends up wielded while its ContainerId still points at the vault container,
+            // which duplicates it on the next load and bypasses the vault's withdraw authorization entirely.
+            // Mirrors the identical refusal in HandleActionPutItemInContainer.
+            if (rootOwner is Vendor)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.NotAllTheItemsAreAvailable));
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
                 return;
             }
@@ -1756,6 +1841,30 @@ namespace ACE.Server.WorldObjects
 
                             item.EmoteManager.OnPickup(this);
                             item.NotifyOfEvent(RegenerationType.PickUp);
+
+                            // speed challenge (WaffleACE): picking a season's objective item up off the
+                            // ground is a third way into the completion funnel, alongside using a goal
+                            // object (WorldObject_Use.cs) and killing a boss (Creature_Death.cs). The
+                            // instance check runs FIRST, not the item's flag, because it short-circuits on the
+                            // overwhelmingly common case: almost every pickup in the game is not a speed run,
+                            // so an ordinary pickup pays one property read and an instance compare rather than
+                            // two property reads. The funnel re-validates the run and gates on the season's
+                            // ObjectiveWcid itself, so this call site does not need to re-check that.
+                            if (IsInSpeedChallengeInstance && item.GetProperty(PropertyBool.SpeedChallengeGoal) == true)
+                            {
+                                // A stackable objective item merges onto an existing stack through
+                                // DoHandleActionStackableMerge instead of this path, so it would never reach
+                                // OnPickup or the completion funnel, and the run could never be completed with
+                                // no visible cause. MaxStackSize is what declares the item STACKABLE; StackSize
+                                // is only how many are in this particular pile, and reads 1 for the first one
+                                // ever dropped - so checking StackSize here would miss exactly the case that
+                                // breaks later. Content authoring cannot make the item non-stackable from
+                                // here, so log loudly rather than fail silently.
+                                if (item.MaxStackSize.HasValue && item.MaxStackSize.Value > 1)
+                                    log.Error($"[SPEED] {item.Name} (0x{item.Guid}, wcid {item.WeenieClassId}) is flagged SpeedChallengeGoal but is STACKABLE (MaxStackSize {item.MaxStackSize.Value}); a merged pickup never reaches OnPickup, so this objective item can never finish a run. The objective item must not be stackable.");
+
+                                TryFinishSpeedChallenge(item);
+                            }
 
                             if (questSolve)
                                 item.EmoteManager.OnQuest(this);
@@ -1979,6 +2088,10 @@ namespace ACE.Server.WorldObjects
                 {
                     Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "TryRemoveFromInventory failed!")); // Custom error message
                     Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+
+                    // Fail closed. Equipping an item we failed to detach leaves it both wielded and still
+                    // parented to its old container, which is a duplication on the next load.
+                    return false;
                 }
             }
 
@@ -2400,6 +2513,23 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // A vendor-rooted object is never a valid endpoint for an inventory movement. This runs
+            // BEFORE the player-to-world classification below, not inside it: when neither endpoint is
+            // the player (vault stock to a landblock container, or one vault row to another) that
+            // branch is not taken and a nested guard is skipped entirely. PersonalVendor puts real,
+            // persisted player property and a durable ledger behind TryGetItemForSale, so a skipped
+            // refusal here mints items out of the panel.
+            //
+            // `container is Vendor` is needed in addition to `containerRootOwner is Vendor` because
+            // FindObject's Landblock arm returns without assigning rootOwner, so the vendor's own guid
+            // sent as the destination arrives with a null containerRootOwner.
+            if (stackRootOwner is Vendor || containerRootOwner is Vendor || container is Vendor)
+            {
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You cannot split that."));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
+                return;
+            }
+
             if (!stack.Guid.IsDynamic() || stack.Stuck)
             {
                 log.WarnFormat("Player 0x{0:X8}:{1} tried to move item 0x{2:X8}:{3}.", Guid.Full, Name, stack.Guid.Full, stack.Name);
@@ -2469,13 +2599,6 @@ namespace ACE.Server.WorldObjects
 
             if ((stackRootOwner == this && containerRootOwner != this)  || (stackRootOwner != this && containerRootOwner == this)) // Movement is between the player and the world
             {
-                if (stackRootOwner is Vendor)
-                {
-                    Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You cannot merge from vendor")); // Custom error message
-                    Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
-                    return;
-                }
-
                 WorldObject moveToObject;
 
                 if (stackRootOwner == this)
@@ -2635,6 +2758,15 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Proving Grounds (WaffleACE): putting anything on the floor inside the survival arena ends the run -
+            // see Player_SurvivalChallenge.TryEndSurvivalChallengeOnDrop for why. The drop is refused rather than
+            // completed, so the item is not stranded in the instance the player is being pulled out of.
+            if (TryEndSurvivalChallengeOnDrop())
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
+                return;
+            }
+
             if (amount <= 0)
             {
                 log.WarnFormat("Player 0x{0:X8}:{1} tried to split item with invalid amount ({3}) 0x{2:X8}.", Guid.Full, Name, stackId, amount);
@@ -2689,6 +2821,8 @@ namespace ACE.Server.WorldObjects
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId, WeenieError.TradeItemBeingTraded));
                 return;
             }
+
+            var speed = GetPickupAnimationSpeed();
 
             var actionChain = StartPickupChain();
 
@@ -2745,9 +2879,17 @@ namespace ACE.Server.WorldObjects
                     newStack.Destroy();
                 }
 
-                var returnStance = new Motion(CurrentMotionState.Stance);
+                var returnStance = new Motion(CurrentMotionState.Stance, MotionCommand.Ready, speed);
                 EnqueueBroadcastMotion(returnStance);
             });
+
+            // WaffleACE: undo the sped-up Ready broadcast so the idle cycle doesn't stay fast
+            if (speed != 1.0f)
+            {
+                var pickupAnimationLength = DatManager.PortalDat.ReadFromDat<MotionTable>(MotionTableId).GetAnimationLength(MotionPickup);
+                actionChain.AddDelaySeconds(pickupAnimationLength / speed);
+                actionChain.AddAction(this, () => EnqueueBroadcastMotion(new Motion(CurrentMotionState.Stance)));
+            }
 
             actionChain.EnqueueChain();
         }
@@ -3056,6 +3198,27 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Unconditional, and two-sided on BOTH the root owner and the direct object. Nested inside
+            // the player-to-world classification below, the root-owner half is skipped whenever BOTH
+            // stacks are vendor-rooted, and the partial-merge arm then credits a real stored vault biota
+            // from a disposable ledger display that costs the ledger nothing. The target test is equally
+            // load-bearing in the opposite direction: merging a player's own stack INTO a display object
+            // destroys those units on the next RebuildView.
+            //
+            // The two direct-object tests are what the split and put-item guards already carry as
+            // `container is Vendor`, for the same reason: FindObject's Landblock arm returns the object
+            // without assigning rootOwner, so a client naming the vendor's own guid arrives here with a
+            // null root owner and passes every root-owner test. Merge had no such disjunct, so that case
+            // was refused only eight checks later by `targetIsStackable` - a Vendor is a Creature and so
+            // a Container, never a Stackable - which is precisely the "closed by a check that exists for
+            // a different reason" shape this guard was hoisted to eliminate.
+            if (sourceStackRootOwner is Vendor || targetStackRootOwner is Vendor || sourceStack is Vendor || targetStack is Vendor)
+            {
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You cannot merge that."));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, sourceStack.Guid.Full));
+                return;
+            }
+
             if (!targetStack.Guid.IsDynamic() || targetStack.Stuck)
             {
                 log.WarnFormat("Player 0x{0:X8}:{1} tried to move item 0x{2:X8}:{3}.", Guid.Full, Name, targetStack.Guid.Full, targetStack.Name);
@@ -3149,13 +3312,6 @@ namespace ACE.Server.WorldObjects
 
             if ((sourceStackRootOwner == this && targetStackRootOwner != this)  || (sourceStackRootOwner != this && targetStackRootOwner == this)) // Movement is between the player and the world
             {
-                if (sourceStackRootOwner is Vendor)
-                {
-                    Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You cannot merge from vendor")); // Custom error message
-                    Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, sourceStack.Guid.Full));
-                    return;
-                }
-
                 WorldObject moveToObject;
 
                 if (sourceStackRootOwner == this)
@@ -3583,12 +3739,110 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // RefireStations attendants (2026-08-18): flavor-only NPCs standing beside each station that
+            // refuse ANY given item and hand it straight back. A data-only Give/Refuse emote row cannot
+            // express this - HasGiveOrRefuseEmoteForItem/EmoteManager.GetEmoteSet only ever match a row by
+            // the SPECIFIC given item's own wcid, never a wildcard - so this is a code intercept, same
+            // pattern as the three stations below, checked first since it never proceeds to any of them.
+            if (target.GetProperty(PropertyBool.RefireStationAttendant) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full, WeenieError.TradeAiRefuseEmote));
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You allow {target.Name} to examine your {item.NameWithMaterial}.", ChatMessageType.Broadcast));
+                RefireStations.RefireStationCommon.SendStationTell(this, target, "Not me - hand that to the station behind me.");
+                return;
+            }
+
+            // Refire stations (WaffleACE, DreamWeave): give an item to any RefireStations-marked NPC and it
+            // offers a paid property reroll instead of accepting the gift. Intercepted here, BEFORE the
+            // AiAcceptEverything/emote give logic below, because none of these stations actually take the
+            // item - it stays in the giving player's inventory throughout (confirmation, charge and reroll all
+            // happen in place). ONE intercept, dispatching on marker bool, over FIVE stations - see
+            // ACE.Server/RefireStations/.
+            if (target.GetProperty(PropertyBool.WorkmanshipRefireForge) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.WorkmanshipReforgeStation.HandleGive(this, target, item);
+                return;
+            }
+
+            if (target.GetProperty(PropertyBool.ArcaneAlignmentTable) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.ArcaneAlignmentStation.HandleGive(this, target, item);
+                return;
+            }
+
+            if (target.GetProperty(PropertyBool.DefenseRequirementReforge) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.DefenseReforgeStation.HandleGive(this, target, item);
+                return;
+            }
+
+            if (target.GetProperty(PropertyBool.CoverageLoom) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.CoverageLoomStation.HandleGive(this, target, item);
+                return;
+            }
+
+            if (target.GetProperty(PropertyBool.BrewersCauldron) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.BrewersCauldronStation.HandleGive(this, target, item);
+                return;
+            }
+
+            if (target.GetProperty(PropertyBool.SalvageForgeStation) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                RefireStations.SalvageForgeStation.HandleGive(this, target, item);
+                return;
+            }
+
+            // Threads Fragment Press (wcid 1003614): give it a Thread Gem and it takes the gem apart
+            // into a Raw Fragment. An unbound gem goes back for free and unconfirmed; the giver's OWN bound
+            // gem is taken too, and if the run it opened is still live the press ENDS that run after a
+            // confirmation (this is the only player-facing way out of a run). Someone else's bound gem is
+            // refused. Same shape as the stations above, and the ServerSaveFailed does the same job - it
+            // bounces the gem back into the pack first, which is exactly why the press can take an item where
+            // the refire stations cannot: HandleGive then consumes it from inventory normally. The other half
+            // of the press (use a fragment ON it) is a use-on, not a give, and lives in
+            // Gem.HandleActionUseOnTarget -> RawFragment.UseObjectOnTarget.
+            if (target.GetProperty(PropertyBool.DungeonGemPress) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                ThreadDungeons.FragmentPressStation.HandleGive(this, target, item);
+                return;
+            }
+
+            // Custom Dreamweave Augmentation brokers (WaffleACE, DreamWeave, 2026-09-05): Fi / Bo / Nacci
+            // trade Blank Augmentation Gems for an upgraded augmentation gem at a Fibonacci price. Same
+            // shape as the Fragment Press above - the ServerSaveFailed bounces the given gem back into the
+            // pack first, and CustomAugBroker then consumes the whole price from inventory by wcid after a
+            // confirmation. ONE intercept over all three brokers; which augmentation a given NPC sells
+            // comes from its own PropertyInt.AugmentationStat. A data-only Give emote cannot express a
+            // price that depends on how many the buyer already owns.
+            if (target.GetProperty(PropertyBool.CustomAugBroker) == true)
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full));
+                CustomAugBroker.HandleGive(this, target, item);
+                return;
+            }
+
             var acceptAll = target.AiAcceptEverything && !item.IsStickyAttunedOrContainsStickyAttuned;
 
             if (target.HasGiveOrRefuseEmoteForItem(item, out var emoteResult) || acceptAll)
             {
                 if (acceptAll || (emoteResult.Category == EmoteCategory.Give && target.AllowGive))
                 {
+                    // Reward pre-flight (WaffleACE): everything below this line CONSUMES the item before a
+                    // single emote row runs, so a player who cannot hold the reward loses both. Refuse up
+                    // front instead. Gated by emote_give_preflight, OFF by default - while it is off this
+                    // returns true without even building a forecast and the flow below is untouched.
+                    if (!PreflightEmoteGive(target, item, emoteResult, acceptAll ? amount : 1))
+                        return;
+
                     // for NPCs that accept items with EmoteCategory.Give,
                     // if stacked item, only give 1, ignoring amount indicated, unless they are AiAcceptEverything in which case, take full amount indicated
                     if (RemoveItemForGive(item, itemFoundInContainer, itemWasEquipped, itemRootOwner, acceptAll ? amount : 1, out WorldObject itemToGive))
@@ -3889,6 +4143,78 @@ namespace ACE.Server.WorldObjects
             Prev_PutItemInContainer[0] = new PutItemInContainerEvent(itemGuid, containerGuid, placement);
         }
         
+        /// <summary>
+        /// Reward pre-flight for an NPC turn-in (WaffleACE). GiveObjectToNPC consumes the given item and
+        /// runs the emote set afterwards, and the emote set is what stamps the quest and hands out the
+        /// reward - so an over-burdened or full player used to lose the turn-in AND the reward, silently.
+        /// This forecasts what <paramref name="emoteSet"/> could hand out, credits the space the outgoing
+        /// item itself frees, and returns false when any forecast path would not fit.
+        ///
+        /// Returning false means the caller must return WITHOUT consuming the item, running the emote set,
+        /// or destroying anything: nothing has been stamped and the item is still in the player's pack.
+        ///
+        /// Fails OPEN in every uncertain case - flag off, no emote set, a truncated forecast, a forecast with
+        /// no rewards in it, or the check itself throwing - because refusing a give that would have worked is
+        /// worse than the pre-existing behaviour this gate improves on. The exception boundary lives in
+        /// <see cref="EmoteGivePreflight.Decide"/>, which is where everything that can throw is called from:
+        /// this method runs inside a CreateMoveToChain callback that nothing else catches.
+        /// </summary>
+        private bool PreflightEmoteGive(WorldObject target, WorldObject item, PropertiesEmote emoteSet, int amountConsumed)
+        {
+            if (!EmoteGivePreflight.Enabled)
+                return true;
+
+            // acceptAll with no matching set: ExecuteEmoteSet(null) is a no-op, so nothing is handed out
+            if (emoteSet == null || target == null || item == null)
+                return true;
+
+            var context = $"{Name} (0x{Guid}) giving {item.Name} (wcid {item.WeenieClassId}) to {target.Name} (wcid {target.WeenieClassId})";
+
+            if (EmoteGivePreflight.Decide(emoteSet, target.Biota?.PropertiesEmote, path => CostRewardPath(path, item, amountConsumed), context, out var worst))
+                return true;
+
+            Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full, WeenieError.None));
+
+            var message = EmoteGivePreflight.RefusalMessage(worst, target.Name);
+
+            if (message != null)
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, message));
+
+            log.Warn($"[GIVE PREFLIGHT] {context}: refused ({amountConsumed} consumed) - worst forecast path needs {worst.RequiredInventorySlots} pack slot(s), {worst.RequiredContainerSlots} container slot(s), {worst.RequiredBurden} burden");
+
+            return false;
+        }
+
+        /// <summary>
+        /// Prices ONE forecasted reward path against this player's live free slots and burden, net of the
+        /// space the outgoing turn-in frees. Called once per path by <see cref="EmoteGivePreflight.Decide"/>,
+        /// inside its try/catch - the ItemsToReceive construction here walks the player's containers and
+        /// every <see cref="ItemsToReceive.Add"/> reaches the world database for the reward's weenie, so this
+        /// is the throwing half of the gate and must not be called outside that boundary.
+        /// </summary>
+        private PreflightPathCost CostRewardPath(IReadOnlyList<ForecastedReward> path, WorldObject item, int amountConsumed)
+        {
+            var itemsToReceive = new ItemsToReceive(this);
+
+            // the turn-in is consumed before any reward arrives, so its space is available to the reward
+            itemsToReceive.CreditOutgoing(item, amountConsumed);
+
+            var treasureRows = 0;
+
+            foreach (var reward in path)
+            {
+                if (reward.IsRandomTreasure)
+                    treasureRows++;
+                else
+                    itemsToReceive.Add(reward.WeenieClassId, reward.Amount);
+            }
+
+            if (treasureRows > 0)
+                itemsToReceive.AddUnknownItemSlots(treasureRows * EmoteGivePreflight.TreasureInventorySlots);
+
+            return PreflightPathCost.From(itemsToReceive);
+        }
+
         public void GiveFromEmote(WorldObject emoter, uint weenieClassId, int amount = 1, int palette = 0, float shade = 0)
         {
             if (emoter is null || weenieClassId == 0)

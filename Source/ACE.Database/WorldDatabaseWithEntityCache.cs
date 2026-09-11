@@ -16,6 +16,9 @@ namespace ACE.Database
 {
     public class WorldDatabaseWithEntityCache : WorldDatabase
     {
+        // WorldDatabase's own logger is private static, so the derived class needs its own.
+        private static readonly log4net.ILog cacheLog = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
         // =====================================
         // Weenie
         // =====================================
@@ -470,7 +473,11 @@ namespace ACE.Database
             return cachedEncounters.Count(r => r.Value != null);
         }
 
-        public List<Encounter> GetCachedEncountersByLandblock(ushort landblock)
+        /// <summary>
+        /// Base-world encounters for a landblock. Virtual so tests can stand this layer up
+        /// without a database; production callers get the cached query below.
+        /// </summary>
+        public virtual List<Encounter> GetCachedEncountersByLandblock(ushort landblock)
         {
             if (cachedEncounters.TryGetValue(landblock, out var value))
                 return value;
@@ -485,6 +492,28 @@ namespace ACE.Database
                 cachedEncounters.TryAdd(landblock, results);
                 return results;
             }
+        }
+
+        /// <summary>
+        /// Realms Phase 4: encounters for a landblock as seen from a realm. v1 is suppression
+        /// only - a realm either gets the base encounters or none at all - and it follows the
+        /// same precedence as the statics path: realm 0 short-circuits, then a per-block rule
+        /// row decides in both directions, then the realm's default_strip_encounters, then
+        /// inherit. Shipped as an overload so a future per-realm encounter table is a change to
+        /// this body rather than to every caller.
+        /// <para />
+        /// No version stamp is needed here because this method caches nothing of its own: the
+        /// decision is recomputed on every call from the rule and default caches.
+        /// </summary>
+        public List<Encounter> GetCachedEncountersByLandblock(ushort landblock, ushort realmId)
+        {
+            if (realmId == 0)
+                return GetCachedEncountersByLandblock(landblock);
+
+            if (ResolveStripEncounters(GetRealmContentSnapshot(), realmId, landblock))
+                return new List<Encounter>();
+
+            return GetCachedEncountersByLandblock(landblock);
         }
 
         public bool ClearCachedEncountersByLandblock(ushort landblock)
@@ -614,8 +643,12 @@ namespace ACE.Database
         /// Realms Phase 3: per-(realm, landblock) content. Keyed (realmId &lt;&lt; 16) | landblock.
         /// A cached entry may be the realm's override rows, or the base list when the
         /// realm has no override for that landblock.
+        /// <para />
+        /// Realms Phase 4: each entry also carries the realmLandblockRulesVersion it was
+        /// resolved against. An entry stamped with a superseded version is stale by
+        /// definition and is treated as a cache miss - see GetCachedInstancesByLandblock.
         /// </summary>
-        private readonly ConcurrentDictionary<uint /* (realmId << 16) | landblock */, List<LandblockInstance>> cachedRealmLandblockInstances = new ConcurrentDictionary<uint, List<LandblockInstance>>();
+        private readonly ConcurrentDictionary<uint /* (realmId << 16) | landblock */, (long Version, List<LandblockInstance> Results)> cachedRealmLandblockInstances = new ConcurrentDictionary<uint, (long, List<LandblockInstance>)>();
 
         /// <summary>
         /// Returns the number of LandblockInstances currently cached.
@@ -665,18 +698,33 @@ namespace ACE.Database
         }
 
         /// <summary>
-        /// Returns statics spawn map and their links for the landblock
+        /// Returns statics spawn map and their links for the landblock.
+        /// Virtual so tests can stand the realm resolution above this layer up without a
+        /// database; production callers get the cached query.
         /// </summary>
-        public List<LandblockInstance> GetCachedInstancesByLandblock(ushort landblock)
+        public virtual List<LandblockInstance> GetCachedInstancesByLandblock(ushort landblock)
         {
             using (var context = new WorldDbContext())
                 return GetCachedInstancesByLandblock(context, landblock);
         }
 
         /// <summary>
-        /// Realms Phase 3: content for a landblock as seen from a realm. If the realm
-        /// has override rows for this landblock they replace the base rows entirely;
-        /// otherwise the base content is returned.
+        /// Realms Phase 3/4: content for a landblock as seen from a realm, in this precedence:
+        /// 1. realm 0 is the base world and short-circuits before any data lookup at all;
+        /// 2. the realm has authored override rows for this landblock -> they replace the base rows;
+        /// 3. a realm_landblock_rule row EXISTS for the pair -> its strip_statics decides, in both
+        ///    directions: a row with strip_statics = 0 inherits retail on this block even when the
+        ///    realm's default is to strip;
+        /// 4. otherwise the realm's default_strip_statics;
+        /// 5. no realm row at all -> the base (retail) content, unchanged.
+        /// <para />
+        /// A live /reload-realms may land at any point inside this method, so each entry is
+        /// stamped with the strip-configuration version it was resolved against and a superseded
+        /// stamp counts as a miss. Without that, a resolver that had already read the old rules
+        /// or defaults could insert its answer after the reload cleared the cache, and the
+        /// landblock would serve wrongly stripped (or wrongly un-stripped) content until the next
+        /// reload or restart. There is deliberately no lock on this path: it runs on every
+        /// landblock activation, and locking it would serialize concurrent activation.
         /// </summary>
         public List<LandblockInstance> GetCachedInstancesByLandblock(ushort landblock, ushort realmId)
         {
@@ -685,16 +733,221 @@ namespace ACE.Database
 
             var key = ((uint)realmId << 16) | landblock;
 
-            if (cachedRealmLandblockInstances.TryGetValue(key, out var value))
-                return value;
+            // ONE snapshot reference for the whole resolution. Everything below reads only this
+            // object, so a reload landing mid-resolution cannot show us a rule from one
+            // generation next to a default from another.
+            var snapshot = GetRealmContentSnapshot();
+
+            if (cachedRealmLandblockInstances.TryGetValue(key, out var cached) && cached.Version == snapshot.Version)
+                return cached.Results;
 
             var realmRows = GetRealmInstancesByLandblock(landblock, realmId);
 
-            var results = realmRows.Count > 0 ? realmRows : GetCachedInstancesByLandblock(landblock);
+            List<LandblockInstance> results;
 
-            cachedRealmLandblockInstances.TryAdd(key, results);
+            if (realmRows.Count > 0)
+                results = realmRows;
+            else if (ResolveStripStatics(snapshot, realmId, landblock))
+                results = new List<LandblockInstance>();
+            else
+                results = GetCachedInstancesByLandblock(landblock);
 
-            return cachedRealmLandblockInstances[key];
+            // indexer rather than GetOrAdd: an entry left behind by an older rule version has
+            // to be replaced, not deferred to. If two resolvers race, the loser's stamp is
+            // simply older and the next read re-resolves - the cache is self-healing either way
+            cachedRealmLandblockInstances[key] = (snapshot.Version, results);
+
+            // what we resolved, not what is in the dictionary: those can differ under a race,
+            // and this result is the one consistent with the snapshot we resolved against
+            return results;
+        }
+
+
+        // =====================================
+        // RealmLandblockRule / realm strip defaults
+        // =====================================
+
+        /// <summary>
+        /// Realms Phase 4: ONE generation of the realm strip configuration - the per-block rules
+        /// and the per-realm defaults together, plus the version they were loaded under.
+        /// <para />
+        /// Immutable once constructed. Both maps are ordinary Dictionaries rather than concurrent
+        /// ones precisely because nothing ever writes to them after publication: a reload builds a
+        /// whole new instance instead of mutating this one.
+        /// </summary>
+        private sealed class RealmContentSnapshot
+        {
+            /// <summary>Keyed (realmId &lt;&lt; 16) | landblock. A missing key means the block has no rule of its own and the realm default decides.</summary>
+            public readonly Dictionary<uint, RealmLandblockRule> Rules;
+
+            /// <summary>Keyed by realm id. A missing key means the realm has no row, which means inherit.</summary>
+            public readonly Dictionary<ushort, (bool StripStatics, bool StripEncounters)> Defaults;
+
+            public readonly long Version;
+
+            public RealmContentSnapshot(Dictionary<uint, RealmLandblockRule> rules, Dictionary<ushort, (bool StripStatics, bool StripEncounters)> defaults, long version)
+            {
+                Rules = rules;
+                Defaults = defaults;
+                Version = version;
+            }
+        }
+
+        /// <summary>
+        /// The current strip configuration, or null before the first load.
+        /// <para />
+        /// INVARIANT: this reference is assigned exactly once per generation, after BOTH maps are
+        /// fully built, and readers take it ONCE at the top of a resolution and use only that
+        /// object. That is what makes the rules and the defaults a single atomic unit. Publishing
+        /// the two maps separately - even under this lock - lets a lock-free reader pair new rules
+        /// with old defaults, which resolves a landblock to content that is wrong under both
+        /// generations and, because realm-aware resolution runs once per landblock activation,
+        /// sticks until that landblock unloads. Never reintroduce an incremental publish here.
+        /// </summary>
+        private volatile RealmContentSnapshot realmContentSnapshot;
+
+        private readonly object realmLandblockRuleLoadLock = new object();
+
+        /// <summary>
+        /// Loads (or reloads) every realm landblock rule and every realm's strip defaults in one
+        /// pass, publishes them as a single new snapshot, and drops the per-realm instance cache,
+        /// whose entries were resolved against the configuration being replaced.
+        /// Returns the number of per-block rules cached.
+        /// </summary>
+        public int CacheAllRealmLandblockRules()
+        {
+            lock (realmLandblockRuleLoadLock)
+                return LoadRealmLandblockRules();
+        }
+
+        /// <summary>
+        /// Returns the number of realm landblock rules currently cached. Deliberately does NOT
+        /// force a load - it exists for the /serverstatus diagnostic, which must not be able to
+        /// trigger database work.
+        /// </summary>
+        public int GetRealmLandblockRuleCacheCount()
+        {
+            return realmContentSnapshot?.Rules.Count ?? 0;
+        }
+
+        /// <summary>
+        /// The current snapshot, loading it on first use. The whole (small) configuration is
+        /// loaded in one pass rather than per pair, so a rule can never arrive after a
+        /// (realm, landblock) pair has already been resolved and cached against its absence -
+        /// that would otherwise stick for the life of the process.
+        /// </summary>
+        private RealmContentSnapshot GetRealmContentSnapshot()
+        {
+            var snapshot = realmContentSnapshot;
+
+            if (snapshot != null)
+                return snapshot;
+
+            lock (realmLandblockRuleLoadLock)
+            {
+                if (realmContentSnapshot == null)
+                    LoadRealmLandblockRules();
+
+                return realmContentSnapshot;
+            }
+        }
+
+        /// <summary>
+        /// The rule for a (realm, landblock) pair, or null when the pair has no rule of its own
+        /// and the realm's defaults therefore decide. Realm 0 never has a rule.
+        /// </summary>
+        public RealmLandblockRule GetRealmLandblockRule(ushort realmId, ushort landblock)
+        {
+            if (realmId == 0)
+                return null;
+
+            GetRealmContentSnapshot().Rules.TryGetValue(((uint)realmId << 16) | landblock, out var rule);
+
+            return rule;
+        }
+
+        /// <summary>
+        /// A realm's default strip flags, or (false, false) when the realm has no row - which is
+        /// "inherit", the behaviour of every realm before these columns existed.
+        /// Realm 0 is the base world: it short-circuits here as well, so a stray defaults row on
+        /// realm 0 can never affect the base world.
+        /// </summary>
+        public (bool StripStatics, bool StripEncounters) GetRealmStripDefaults(ushort realmId)
+        {
+            if (realmId == 0)
+                return (false, false);
+
+            GetRealmContentSnapshot().Defaults.TryGetValue(realmId, out var defaults);
+
+            return defaults;
+        }
+
+        /// <summary>
+        /// The strip decision for one (realm, landblock) pair once authored content has been
+        /// ruled out: an existing per-block rule row decides in BOTH directions, and only in its
+        /// absence does the realm default apply. Statics and encounters share this shape
+        /// deliberately, so the two can never drift apart.
+        /// <para />
+        /// Takes the snapshot as an argument rather than fetching it, so that one resolution reads
+        /// exactly one generation - the caller's - and cannot silently pick up a newer one partway
+        /// through.
+        /// </summary>
+        private static bool ResolveStripStatics(RealmContentSnapshot snapshot, ushort realmId, ushort landblock)
+        {
+            if (snapshot.Rules.TryGetValue(((uint)realmId << 16) | landblock, out var rule))
+                return rule.StripStatics;
+
+            return snapshot.Defaults.TryGetValue(realmId, out var defaults) && defaults.StripStatics;
+        }
+
+        /// <summary>
+        /// The encounter half of ResolveStripStatics, with identical precedence.
+        /// </summary>
+        private static bool ResolveStripEncounters(RealmContentSnapshot snapshot, ushort realmId, ushort landblock)
+        {
+            if (snapshot.Rules.TryGetValue(((uint)realmId << 16) | landblock, out var rule))
+                return rule.StripEncounters;
+
+            return snapshot.Defaults.TryGetValue(realmId, out var defaults) && defaults.StripEncounters;
+        }
+
+        /// <summary>
+        /// Caller must hold realmLandblockRuleLoadLock.
+        /// </summary>
+        private int LoadRealmLandblockRules()
+        {
+            // both reads happen before anything is published, so a failure here leaves the
+            // previous snapshot in place rather than a half-replaced configuration
+            var rules = GetAllRealmLandblockRules();
+            var realms = GetAllRealms();
+
+            var ruleMap = new Dictionary<uint, RealmLandblockRule>();
+
+            foreach (var rule in rules)
+                ruleMap[((uint)rule.RealmId << 16) | rule.Landblock] = rule;
+
+            var defaultMap = new Dictionary<ushort, (bool StripStatics, bool StripEncounters)>();
+
+            // realm 0 is skipped on the way in as well as on the way out: the base world has no
+            // defaults, and a stray row for it must not be able to acquire any
+            foreach (var realm in realms)
+            {
+                if (realm.Id == 0)
+                    continue;
+
+                defaultMap[realm.Id] = (realm.DefaultStripStatics, realm.DefaultStripEncounters);
+            }
+
+            // THE publish: one reference assignment to a volatile field, after both maps are
+            // complete. Everything a reader needs arrives in that single store, so there is no
+            // window in which a reader can see half of this generation. See the field's invariant.
+            realmContentSnapshot = new RealmContentSnapshot(ruleMap, defaultMap, (realmContentSnapshot?.Version ?? 0) + 1);
+
+            // only to bound growth: staleness itself is handled by the per-entry version stamp,
+            // so an entry written after this clear by a resolver already in flight is harmless
+            cachedRealmLandblockInstances.Clear();
+
+            return ruleMap.Count;
         }
 
 
@@ -1204,6 +1457,87 @@ namespace ACE.Database
         public void ClearWieldedTreasureCache()
         {
             cachedWieldedTreasure.Clear();
+        }
+
+
+        // =====================================
+        // SkyDecorRegion (WaffleACE fork)
+        // =====================================
+
+        /// <summary>
+        /// Every ENABLED sky decor region, loaded in one pass the first time a landblock asks and held
+        /// until <see cref="ClearSkyDecorRegionCache"/>. The whole table is a handful of rows and every
+        /// outdoor landblock activation reads all of them (it has to test each for coverage), so there is
+        /// no per-landblock key worth having. The stored reference is swapped atomically, never mutated,
+        /// so a reader that got the old list keeps a consistent snapshot while a reload rebuilds it.
+        /// </summary>
+        private volatile List<SkyDecorRegion> cachedSkyDecorRegions;
+
+        private readonly object skyDecorRegionLock = new object();
+
+        /// <summary>
+        /// All enabled sky decor regions. Never null; an empty list when the table is empty, and also
+        /// when the table does not exist yet (a server running against a world DB that predates the
+        /// 2026-08-20 migration must load landblocks normally, not throw on every one of them).
+        /// </summary>
+        public List<SkyDecorRegion> GetCachedSkyDecorRegions()
+        {
+            var cached = cachedSkyDecorRegions;
+
+            if (cached != null)
+                return cached;
+
+            lock (skyDecorRegionLock)
+            {
+                // another thread may have populated it while this one waited
+                cached = cachedSkyDecorRegions;
+
+                if (cached != null)
+                    return cached;
+
+                List<SkyDecorRegion> results;
+
+                try
+                {
+                    using (var context = new WorldDbContext())
+                    {
+                        results = context.SkyDecorRegion
+                            .AsNoTracking()
+                            .Where(r => r.Enabled)
+                            .OrderBy(r => r.Id)
+                            .ToList();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    cacheLog.Warn($"GetCachedSkyDecorRegions: could not read sky_decor_region - no sky decor will spawn. Apply Database/Updates/World/2026-08-20-01-Add-Sky-Decor-Region.sql if this world database predates it.", ex);
+
+                    results = new List<SkyDecorRegion>();
+                }
+
+                cachedSkyDecorRegions = results;
+
+                return results;
+            }
+        }
+
+        /// <summary>
+        /// Returns the number of SkyDecorRegions currently cached (-1 = not loaded yet).
+        /// </summary>
+        public int GetSkyDecorRegionCacheCount()
+        {
+            var cached = cachedSkyDecorRegions;
+
+            return cached?.Count ?? -1;
+        }
+
+        /// <summary>
+        /// Drops the region cache. The next landblock activation (or /sky-decor reload) re-reads the table.
+        /// </summary>
+        public void ClearSkyDecorRegionCache()
+        {
+            lock (skyDecorRegionLock)
+                cachedSkyDecorRegions = null;
         }
     }
 }

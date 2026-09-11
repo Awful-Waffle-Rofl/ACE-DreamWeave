@@ -22,7 +22,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Flat Cast Speed",
             Description = "Permanently increases your war-magic cast speed by 5% per rank (+15% at rank 3).",
             MaxRank = 3,
-            CostPerRank = new[] { 3, 3, 3 },
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 

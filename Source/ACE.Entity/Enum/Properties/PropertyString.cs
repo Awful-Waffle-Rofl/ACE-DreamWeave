@@ -105,5 +105,50 @@ namespace ACE.Entity.Enum.Properties
         // every reroll and every swap, never appended - it describes the weapon's current state, never its
         // history. See ACE.Server.WeaponMods.WeaponModManager.
         WeaponModTinkerLog                  = 9009,
+        // World Events (WaffleACE, Docs/WorldEvents/TECH-DESIGN.md 2.13): the family id of a creature weenie
+        // flagged PropertyBool.WorldEventCreature, read by the catalog scan and grouped on. Must equal an id in
+        // Content/events/axes/families.json (lowercase [a-z0-9_]+).
+        WorldEventFamily                    = 9010,
+        // Objective Lock (ACE.Server.Entity.ObjectiveLock): the shared string name binding a gate to its
+        // contributors, e.g. "lca_pentagon". Carried by the gate AND every contributor object; a contribution
+        // is only routed to a gate whose ObjectiveLockKey matches the contributor's.
+        ObjectiveLockKey                    = 9011,
+        // Objective Lock: this contributor's token identity, passed as Contribute's tokenKey. When unset,
+        // defaults to the contributor's own guid - this is what makes "six creatures in a room" six distinct
+        // tokens with no per-creature authoring needed, since each creature's guid is already unique.
+        ObjectiveLockToken                  = 9012,
+        // Pick-up speed quest boon gems (Docs/Plans/pickup-boon-plan.md): on a Gem weenie (WeenieType 38),
+        // the boon key this gem claims when used, e.g. "Firecut" - must match PickupBoon_<Key>'s suffix
+        // exactly and satisfy Player.IsValidPickupBoonKey. See Gem.UsePickupBoonGem / Player_PickupBoons.cs.
+        PickupBoonKey                       = 9013,
+
+        /// <summary>
+        /// Threads (WaffleACE): the Thread Gem's generator inputs as one string, see
+        /// ACE.Server.ThreadDungeons.DungeonGemSpec. Presence on a Gem weenie routes Gem.UseGem to the
+        /// dungeon-gem handler.
+        /// </summary>
+        DungeonGemSpec                     = 9014,
+
+        /// <summary>
+        /// Monster combat effects (WaffleACE, Docs/MonsterEffects/DESIGN.md): every combat effect a monster
+        /// weenie carries, as one authored string. Records are separated by ';'; within a record the first
+        /// whitespace-separated token is the effect kind and every remaining token is key=value, e.g.
+        /// "flatdamage type=fire amount=30 chance=0.35; leech vital=health pct=0.12".
+        ///
+        /// Parsed by ACE.Server.MonsterEffects.MonsterEffectParser once per (wcid, string) and cached, so a
+        /// landblock full of one wcid parses once. Absence leaves Creature.MonsterEffects null, which is the
+        /// single null check every combat hot path makes.
+        /// </summary>
+        MonsterCombatEffects               = 9015,
+
+        /// <summary>
+        /// Threads (WaffleACE): the character's rolling ring of the GEM LEVELS of their last
+        /// SurveyLevelRing.Depth filed daily surveys, newest first,
+        /// as "v1|lv=275,185,...". Written by ThreadDungeonManager.RecordSurvey at file time and read by
+        /// SurveyArchivistStation, which scales the daily-survey reward to the average level of the surveys
+        /// the tier being paid actually covers. Absent or unparseable reads as an EMPTY ring, which pays the
+        /// unscaled (ratio 1.0) reward - the grandfather clause for characters who filed before this shipped.
+        /// </summary>
+        DungeonSurveyLevels                = 9016,
     }
 }

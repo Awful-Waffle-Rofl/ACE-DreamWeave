@@ -38,13 +38,19 @@ namespace ACE.Server.Managers
         private static readonly Dictionary<ulong, Landblock> landblocks = new Dictionary<ulong, Landblock>();
 
         /// <summary>
-        /// Live ephemeral instances, keyed by their full 32-bit instance id.
-        /// An entry exists exactly while its landblock is loaded.
+        /// Live ephemeral instances, keyed by their full 32-bit instance id. An entry exists exactly while
+        /// its landblock is loaded.
+        ///
+        /// <para/>
+        /// Deliberately NOT protected by <see cref="landblockLock"/>. It used to be a plain Dictionary
+        /// written under that lock's write lock and read with no lock at all by
+        /// <see cref="GetEphemeralLandblock"/>, which could miss a key that was present while another thread
+        /// resized it - and a miss silently relocated the player out of their private instance (see
+        /// <see cref="EphemeralInstanceRegistry{T}"/> for the full history). The registry is internally
+        /// concurrent, so it may be read and written from any thread with no lock held and no acquisition
+        /// order to honour against <see cref="landblockLock"/>.
         /// </summary>
-        private static readonly Dictionary<uint, Landblock> ephemeralInstanceLandblocks = new Dictionary<uint, Landblock>();
-        private static readonly HashSet<uint> pendingInstanceIds = new HashSet<uint>();
-        private static readonly object ephemeralInstanceMutex = new object();
-        private static readonly Random ephemeralRandom = new Random();
+        private static readonly EphemeralInstanceRegistry<Landblock> ephemeralInstances = new EphemeralInstanceRegistry<Landblock>();
 
         /// <summary>
         /// Composes the 64-bit landblock dictionary key: (instance &lt;&lt; 32) | (landblock | 0xFFFF).
@@ -173,8 +179,13 @@ namespace ACE.Server.Managers
         private static void PreloadLandblock(uint landblock, PreloadedLandblocks preloadLandblock)
         {
             var landblockID = new LandblockId(landblock);
-            GetLandblock(landblockID, 0, preloadLandblock.IncludeAdjacents, preloadLandblock.Permaload);
-            log.DebugFormat("Landblock {0:X4}, ({1}) preloaded. IncludeAdjacents = {2}, Permaload = {3}", landblockID.Landblock, preloadLandblock.Description, preloadLandblock.IncludeAdjacents, preloadLandblock.Permaload);
+
+            // Realms: the config's default Realm of 0 resolves to instance 0, so every
+            // pre-existing entry preloads the base world exactly as it did before
+            var instance = ACE.Entity.Position.InstanceIDFromVars(preloadLandblock.Realm, 0, false);
+
+            GetLandblock(landblockID, instance, preloadLandblock.IncludeAdjacents, preloadLandblock.Permaload);
+            log.DebugFormat("Landblock {0:X4}, ({1}) preloaded in realm {2} (instance 0x{3:X8}). IncludeAdjacents = {4}, Permaload = {5}", landblockID.Landblock, preloadLandblock.Description, preloadLandblock.Realm, instance, preloadLandblock.IncludeAdjacents, preloadLandblock.Permaload);
         }
 
         private static readonly uint[] apartmentLandblocks =
@@ -350,45 +361,89 @@ namespace ACE.Server.Managers
             {
                 CurrentlyTickingLandblockGroupsMultiThreaded = true;
 
-                var partitioner = Partitioner.Create(landblockGroups.OrderByDescending(r => r.Count).ThenByDescending(r => r.TickPhysicsTracker.AverageAmount));
-
-                var sw = new Stopwatch();
-                sw.Start();
-
-                Parallel.ForEach(partitioner, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions, landblockGroup =>
+                try
                 {
-                    CurrentMultiThreadedTickingLandblockGroup.Value = landblockGroup;
+                    var partitioner = Partitioner.Create(landblockGroups.OrderByDescending(r => r.Count).ThenByDescending(r => r.TickPhysicsTracker.AverageAmount));
 
-                    var swInner = new Stopwatch();
-                    swInner.Start();
+                    var sw = new Stopwatch();
+                    sw.Start();
 
-                    foreach (var landblock in landblockGroup)
-                        landblock.TickPhysics(portalYearTicks, movedObjects);
+                    Parallel.ForEach(partitioner, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions, landblockGroup =>
+                    {
+                        CurrentMultiThreadedTickingLandblockGroup.Value = landblockGroup;
 
-                    swInner.Stop();
-                    landblockGroup.TickPhysicsTracker.RegisterAmount(swInner.Elapsed.TotalSeconds);
+                        try
+                        {
+                            var swInner = new Stopwatch();
+                            swInner.Start();
 
-                    CurrentMultiThreadedTickingLandblockGroup.Value = null;
-                });
+                            foreach (var landblock in landblockGroup)
+                            {
+                                // Coarse safety net, intentionally redundant with the finer per-object catches
+                                // inside Landblock: one bad landblock must degrade loudly instead of an
+                                // AggregateException escaping to WorldManager's fatal handler and stopping the
+                                // world for everyone.
+                                try
+                                {
+                                    landblock.TickPhysics(portalYearTicks, movedObjects);
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.Error($"LandblockManager.TickPhysics(): landblock 0x{landblock.Id} threw and was skipped this tick", ex);
+                                }
+                            }
 
-                sw.Stop();
-                // Calculate Tick Efficiency
-                if (landblockGroups.Count > 0)
-                {
-                    var totalSecondsUsedInParallel = landblockGroups.Sum(r => r.TickPhysicsTracker.LastAmount);
-                    var totalThreadsUsed = Math.Min(landblockGroups.Count, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions.MaxDegreeOfParallelism);
-                    var efficiency = (totalSecondsUsedInParallel / (sw.Elapsed.TotalSeconds * totalThreadsUsed)) * 100;
-                    TickPhysicsEfficiencyTracker.RegisterAmount(efficiency);
+                            swInner.Stop();
+                            landblockGroup.TickPhysicsTracker.RegisterAmount(swInner.Elapsed.TotalSeconds);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Covers the per-group bookkeeping AFTER the landblock foreach (RegisterAmount and
+                            // the stopwatch), which the per-landblock catch above does not - a throw here would
+                            // otherwise surface as an AggregateException out of Parallel.ForEach and defeat the
+                            // "one bad landblock degrades loudly" goal for the whole group.
+                            log.Error($"LandblockManager.TickPhysics(): landblock group tick bookkeeping threw and was skipped this tick", ex);
+                        }
+                        finally
+                        {
+                            // this is a ThreadLocal on a pooled thread - a stranded value would be read by
+                            // whatever runs on that thread next
+                            CurrentMultiThreadedTickingLandblockGroup.Value = null;
+                        }
+                    });
+
+                    sw.Stop();
+                    // Calculate Tick Efficiency
+                    if (landblockGroups.Count > 0)
+                    {
+                        var totalSecondsUsedInParallel = landblockGroups.Sum(r => r.TickPhysicsTracker.LastAmount);
+                        var totalThreadsUsed = Math.Min(landblockGroups.Count, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions.MaxDegreeOfParallelism);
+                        var efficiency = (totalSecondsUsedInParallel / (sw.Elapsed.TotalSeconds * totalThreadsUsed)) * 100;
+                        TickPhysicsEfficiencyTracker.RegisterAmount(efficiency);
+                    }
                 }
-
-                CurrentlyTickingLandblockGroupsMultiThreaded = false;
+                finally
+                {
+                    // must be cleared even if the parallel loop throws, or every later reader of this flag
+                    // sees a multi-threaded tick that is not running
+                    CurrentlyTickingLandblockGroupsMultiThreaded = false;
+                }
             }
             else
             {
                 foreach (var landblockGroup in landblockGroups)
                 {
                     foreach (var landblock in landblockGroup)
-                        landblock.TickPhysics(portalYearTicks, movedObjects);
+                    {
+                        try
+                        {
+                            landblock.TickPhysics(portalYearTicks, movedObjects);
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"LandblockManager.TickPhysics(): landblock 0x{landblock.Id} threw and was skipped this tick", ex);
+                        }
+                    }
                 }
             }
 
@@ -412,45 +467,89 @@ namespace ACE.Server.Managers
             {
                 CurrentlyTickingLandblockGroupsMultiThreaded = true;
 
-                var partitioner = Partitioner.Create(landblockGroups.OrderByDescending(r => r.Count).ThenByDescending(r => r.TickMultiThreadedWorkTracker.AverageAmount));
-
-                var sw = new Stopwatch();
-                sw.Start();
-
-                Parallel.ForEach(partitioner, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions, landblockGroup =>
+                try
                 {
-                    CurrentMultiThreadedTickingLandblockGroup.Value = landblockGroup;
+                    var partitioner = Partitioner.Create(landblockGroups.OrderByDescending(r => r.Count).ThenByDescending(r => r.TickMultiThreadedWorkTracker.AverageAmount));
 
-                    var swInner = new Stopwatch();
-                    swInner.Start();
+                    var sw = new Stopwatch();
+                    sw.Start();
 
-                    foreach (var landblock in landblockGroup)
-                        landblock.TickMultiThreadedWork(Time.GetUnixTime());
+                    Parallel.ForEach(partitioner, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions, landblockGroup =>
+                    {
+                        CurrentMultiThreadedTickingLandblockGroup.Value = landblockGroup;
 
-                    swInner.Stop();
-                    landblockGroup.TickMultiThreadedWorkTracker.RegisterAmount(swInner.Elapsed.TotalSeconds);
+                        try
+                        {
+                            var swInner = new Stopwatch();
+                            swInner.Start();
 
-                    CurrentMultiThreadedTickingLandblockGroup.Value = null;
-                });
+                            foreach (var landblock in landblockGroup)
+                            {
+                                // Coarse safety net, intentionally redundant with the finer per-object catches
+                                // inside Landblock: one bad landblock must degrade loudly instead of an
+                                // AggregateException escaping to WorldManager's fatal handler and stopping the
+                                // world for everyone.
+                                try
+                                {
+                                    landblock.TickMultiThreadedWork(Time.GetUnixTime());
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.Error($"LandblockManager.TickMultiThreadedWork(): landblock 0x{landblock.Id} threw and was skipped this tick", ex);
+                                }
+                            }
 
-                sw.Stop();
-                // Calculate Tick Efficiency
-                if (landblockGroups.Count > 0)
-                {
-                    var totalSecondsUsedInParallel = landblockGroups.Sum(r => r.TickMultiThreadedWorkTracker.LastAmount);
-                    var totalThreadsUsed = Math.Min(landblockGroups.Count, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions.MaxDegreeOfParallelism);
-                    var efficiency = (totalSecondsUsedInParallel / (sw.Elapsed.TotalSeconds * totalThreadsUsed)) * 100;
-                    TickMultiThreadedWorkEfficiencyTracker.RegisterAmount(efficiency);
+                            swInner.Stop();
+                            landblockGroup.TickMultiThreadedWorkTracker.RegisterAmount(swInner.Elapsed.TotalSeconds);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Covers the per-group bookkeeping AFTER the landblock foreach (RegisterAmount and
+                            // the stopwatch), which the per-landblock catch above does not - a throw here would
+                            // otherwise surface as an AggregateException out of Parallel.ForEach and defeat the
+                            // "one bad landblock degrades loudly" goal for the whole group.
+                            log.Error($"LandblockManager.TickMultiThreadedWork(): landblock group tick bookkeeping threw and was skipped this tick", ex);
+                        }
+                        finally
+                        {
+                            // this is a ThreadLocal on a pooled thread - a stranded value would be read by
+                            // whatever runs on that thread next
+                            CurrentMultiThreadedTickingLandblockGroup.Value = null;
+                        }
+                    });
+
+                    sw.Stop();
+                    // Calculate Tick Efficiency
+                    if (landblockGroups.Count > 0)
+                    {
+                        var totalSecondsUsedInParallel = landblockGroups.Sum(r => r.TickMultiThreadedWorkTracker.LastAmount);
+                        var totalThreadsUsed = Math.Min(landblockGroups.Count, ConfigManager.Config.Server.Threading.LandblockManagerParallelOptions.MaxDegreeOfParallelism);
+                        var efficiency = (totalSecondsUsedInParallel / (sw.Elapsed.TotalSeconds * totalThreadsUsed)) * 100;
+                        TickMultiThreadedWorkEfficiencyTracker.RegisterAmount(efficiency);
+                    }
                 }
-
-                CurrentlyTickingLandblockGroupsMultiThreaded = false;
+                finally
+                {
+                    // must be cleared even if the parallel loop throws, or every later reader of this flag
+                    // sees a multi-threaded tick that is not running
+                    CurrentlyTickingLandblockGroupsMultiThreaded = false;
+                }
             }
             else
             {
                 foreach (var landblockGroup in landblockGroups)
                 {
                     foreach (var landblock in landblockGroup)
-                        landblock.TickMultiThreadedWork(Time.GetUnixTime());
+                    {
+                        try
+                        {
+                            landblock.TickMultiThreadedWork(Time.GetUnixTime());
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"LandblockManager.TickMultiThreadedWork(): landblock 0x{landblock.Id} threw and was skipped this tick", ex);
+                        }
+                    }
                 }
             }
         }
@@ -462,7 +561,18 @@ namespace ACE.Server.Managers
             foreach (var landblockGroup in landblockGroups)
             {
                 foreach (var landblock in landblockGroup)
-                    landblock.TickSingleThreadedWork(Time.GetUnixTime());
+                {
+                    // Coarse safety net, as in the two tick methods above: this runs directly on the world
+                    // thread, so an escaping throw stops the world for every landblock, not just this one.
+                    try
+                    {
+                        landblock.TickSingleThreadedWork(Time.GetUnixTime());
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"LandblockManager.TickSingleThreadedWork(): landblock 0x{landblock.Id} threw and was skipped this tick", ex);
+                    }
+                }
             }
         }
 
@@ -544,7 +654,7 @@ namespace ACE.Server.Managers
                         {
                             landblock.InnerRealmInfo = ephemeralRealm;
 
-                            if (!ephemeralInstanceLandblocks.TryAdd(instance, landblock))
+                            if (!ephemeralInstances.TryRegister(instance, landblock))
                                 log.Error($"LandblockManager: failed to add ephemeral instance {instance:X8} to ephemeral landblocks!");
                         }
 
@@ -583,7 +693,9 @@ namespace ACE.Server.Managers
                 if (setAdjacents)
                     SetAdjacents(landblock, true, true);
 
-                pendingInstanceIds.Remove(instance);
+                // the id is now backed by a registered landblock (or was already loaded), so it no longer
+                // needs to be reserved against a colliding allocation. Lock free - see the registry.
+                ephemeralInstances.ClearPending(instance);
             }
             finally
             {
@@ -750,6 +862,16 @@ namespace ACE.Server.Managers
             {
                 if (destructionQueue.TryTake(out Landblock landblock))
                 {
+                    // A landblock is queued by its own heartbeat, but arrivals keep happening after that
+                    // decision and before this drain: a recall or an admin teleport resolves on the
+                    // player's action queue, which TickSingleThreadedWork pumps after the heartbeat ran.
+                    // Re-check at the last moment and put the landblock back into service if someone is
+                    // standing on it, rather than tearing it down under them. Shutdown is exempt: it has
+                    // already logged every player off and waited for the count to reach zero, and it then
+                    // blocks until every landblock is gone, so a refusal there would hang the shutdown.
+                    if (!unloadingForShutdown && !landblock.TryClaimForDestruction())
+                        continue;
+
                     landblock.Unload();
 
                     bool unloadFailed = false;
@@ -763,7 +885,7 @@ namespace ACE.Server.Managers
                             LandblockDictCommit(landblock.Id.Raw, landblock.Instance, null);
 
                             if (landblock.InnerRealmInfo != null)
-                                ephemeralInstanceLandblocks.Remove(landblock.Instance);
+                                ephemeralInstances.TryUnregister(landblock.Instance);
 
                             // remove from landblock group
                             for (int i = landblockGroups.Count - 1; i >= 0 ; i--)
@@ -832,10 +954,19 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
+        /// Set once, by the shutdown teardown below, and never cleared - the world does not come back.
+        /// It is what exempts shutdown from the arrived-since-queued refusal in UnloadLandblocks, which
+        /// would otherwise be able to hang ServerManager's "wait for all landblocks to unload" loop.
+        /// </summary>
+        private static volatile bool unloadingForShutdown;
+
+        /// <summary>
         /// Used on server shutdown
         /// </summary>
         public static void AddAllActiveLandblocksToDestructionQueue()
         {
+            unloadingForShutdown = true;
+
             landblockLock.EnterWriteLock();
             try
             {
@@ -875,12 +1006,19 @@ namespace ACE.Server.Managers
 
         /// <summary>
         /// Returns the live landblock for an ephemeral instance, or null if it isn't loaded.
-        /// Not synchronized with load/unload - treat the result as a snapshot.
+        ///
+        /// <para/>
+        /// This was <c>GetEphemeralLandblockUnsafe</c>, and the name was accurate: the read was an
+        /// unsynchronized <c>Dictionary.TryGetValue</c> racing structural modifications made under
+        /// <see cref="landblockLock"/>, so it could return null for an instance that was in fact live. The
+        /// backing store is a concurrent registry now, so a null result means the instance really was not
+        /// registered at the moment of the read. It is still only a point-in-time snapshot - the landblock
+        /// can unload the instant after this returns - so callers that act on a non-null result must
+        /// tolerate that, but they no longer have to treat a null as possibly bogus.
         /// </summary>
-        public static Landblock GetEphemeralLandblockUnsafe(uint instance)
+        public static Landblock GetEphemeralLandblock(uint instance)
         {
-            ephemeralInstanceLandblocks.TryGetValue(instance, out var landblock);
-            return landblock;
+            return ephemeralInstances.Get(instance);
         }
 
         /// <summary>
@@ -890,23 +1028,7 @@ namespace ACE.Server.Managers
         /// </summary>
         public static uint RequestNewEphemeralInstanceIDv1(ushort homeRealmId)
         {
-            lock (ephemeralInstanceMutex)
-            {
-                uint iid;
-                do
-                {
-                    iid = GetRandomEphemeralInstanceIDv1(homeRealmId);
-                }
-                while (ephemeralInstanceLandblocks.ContainsKey(iid) || pendingInstanceIds.Contains(iid));
-                pendingInstanceIds.Add(iid);
-                return iid;
-            }
-        }
-
-        private static uint GetRandomEphemeralInstanceIDv1(ushort homeRealmId)
-        {
-            var shortInstanceId = (ushort)ephemeralRandom.Next(1, 0xFFFE);
-            return ACE.Entity.Position.InstanceIDFromVars(homeRealmId, shortInstanceId, isTemporaryRuleset: true);
+            return ephemeralInstances.RequestNewInstanceId(homeRealmId);
         }
 
         public static void DoEnvironChange(EnvironChangeType environChangeType)

@@ -23,7 +23,10 @@ namespace ACE.Server.WorldObjects
     // on a stall (no damage dealt to the live wave for StallTimeout seconds), on the live wave outlasting its
     // absolute WaveTimeLimit, or on forfeit (exit portal, any other teleport out of the instance, or a mid-run
     // logout caught at next login).
-    // Score = the highest wave FULLY cleared, persisted incrementally on every clear.
+    // Score = (waves FULLY cleared * 100) + the whole-percent of the live wave's total health destroyed when the
+    // run ended (0 if the run ended exactly on a clear boundary), stored in hundredths of a wave ("centi-waves")
+    // so a death mid-wave still credits partial progress. Persisted incrementally: every clear banks
+    // clearedWaves*100 immediately, and run end additionally banks the partial-wave fraction if it beats that.
     //
     // Waves are content, not code: the portal names a roster base wcid, and the roster weenie for wave N is
     // (base + N - 1). A roster weenie is inert - the engine reads its generator table as the wave's spawn list
@@ -84,18 +87,37 @@ namespace ACE.Server.WorldObjects
         // DamageHistory without ever scanning the landblock (landblock scans miss pendingAdditions).
         private readonly List<Creature> waveChallengeLiveCreatures = new List<Creature>();
 
+        // Each live-wave creature's max health at spawn, keyed by guid, captured once so a partial-wave fraction
+        // at run end can be computed against the wave's ORIGINAL total rather than whatever is left standing.
+        private readonly Dictionary<uint, uint> waveChallengeSpawnMaxHealth = new Dictionary<uint, uint>();
+
         // Stall watchdog state: the last observed damage total across the live wave, and when it last changed.
         private double waveChallengeLastDamageTotal;
         private double waveChallengeLastDamageChangeTime;
 
         /// <summary>
-        /// The highest wave the player has ever fully cleared in the wave gauntlet. Persisted on the character biota.
+        /// This player's best wave-gauntlet score in hundredths of a wave. Persisted on the character biota.
         /// </summary>
-        public long BestWaveScore
+        public long BestWaveScoreCenti
         {
-            get => GetProperty(PropertyInt64.BestWaveScore) ?? 0;
-            set => SetProperty(PropertyInt64.BestWaveScore, value);
+            get => GetBestWaveScoreCenti(this);
+            set => SetProperty(PropertyInt64.BestWaveScoreCenti, value);
         }
+
+        /// <summary>
+        /// Reads a player's best wave-gauntlet score in hundredths of a wave, falling back to the legacy
+        /// whole-wave BestWaveScore (9021) scaled by 100 for a character who has never written the new property.
+        /// Static (rather than an instance member) so /top and the admin reset can read it off any IPlayer.
+        /// </summary>
+        public static long GetBestWaveScoreCenti(IPlayer p)
+        {
+            return p.GetProperty(PropertyInt64.BestWaveScoreCenti) ?? (p.GetProperty(PropertyInt64.BestWaveScore) ?? 0) * 100;
+        }
+
+        /// <summary>
+        /// Formats a centi-wave score (e.g. 1237) as "Wave 12.37".
+        /// </summary>
+        public static string FormatWaveScore(long centi) => $"Wave {centi / 100}.{centi % 100:D2}";
 
         /// <summary>
         /// True while a wave-challenge run is armed/in progress. Persisted so a mid-run logout can be caught at
@@ -165,6 +187,7 @@ namespace ACE.Server.WorldObjects
             waveChallengeClearedWaves = 0;
             waveChallengeAliveGuids.Clear();
             waveChallengeLiveCreatures.Clear();
+            waveChallengeSpawnMaxHealth.Clear();
             WaveChallengeActive = true;
             RushNextPlayerSave(5);
 
@@ -172,12 +195,16 @@ namespace ACE.Server.WorldObjects
             // /top command uses). This is what lets the reigning record-holder beat their own record: their stored
             // best is still the old value here, and the per-wave incremental persist during the run cannot poison
             // the comparison.
+            // Staff (WaffleACE): exempt players are excluded from the record bar real players are measured
+            // against, so a staff run cannot poison the snapshot this run's own new-record check reads at the end.
+            var startExemptNames = LeaderboardExemptionManager.GetExemptAccountNames();
             waveChallengeServerMaxAtRunStart = PlayerManager.GetAllPlayers()
-                .Select(p => p.GetProperty(PropertyInt64.BestWaveScore) ?? 0)
+                .Where(p => !LeaderboardExemptionManager.IsExempt(p, startExemptNames))
+                .Select(GetBestWaveScoreCenti)
                 .DefaultIfEmpty(0)
                 .Max();
 
-            waveChallengePersonalBestAtRunStart = BestWaveScore;
+            waveChallengePersonalBestAtRunStart = BestWaveScoreCenti;
 
             WaveChallengeMsg($"The gauntlet begins! {totalWaves} waves stand between you and the end.");
 
@@ -239,6 +266,7 @@ namespace ACE.Server.WorldObjects
             waveChallengeWave = waveNumber;
             waveChallengeAliveGuids.Clear();
             waveChallengeLiveCreatures.Clear();
+            waveChallengeSpawnMaxHealth.Clear();
 
             // READ-ONLY pass over the roster weenie's generator rows. These collections come straight out of the
             // world weenie cache and are SHARED by every consumer of that weenie - mutating a row here would
@@ -310,6 +338,7 @@ namespace ACE.Server.WorldObjects
 
                     creature.P_WaveOwner = this;
                     waveChallengeLiveCreatures.Add(creature);
+                    waveChallengeSpawnMaxHealth[creature.Guid.Full] = creature.Health.MaxValue;
 
                     // without the flag the creature's death never reports back, so the wave can only ever end
                     // via a watchdog - a content bug worth shouting about
@@ -431,13 +460,15 @@ namespace ACE.Server.WorldObjects
 
             waveChallengeClearedWaves = Math.Max(waveChallengeClearedWaves, waveNumber);
             waveChallengeLiveCreatures.Clear();
+            waveChallengeSpawnMaxHealth.Clear();
 
             // Bank the cleared wave IMMEDIATELY rather than only at run end, so a crash, a forfeit or a logout
             // still keeps the waves that were genuinely cleared. RushNextPlayerSave is self-throttling, so calling
             // it on every clear does not need batching.
-            if (waveChallengeClearedWaves > BestWaveScore)
+            var clearedCenti = waveChallengeClearedWaves * 100L;
+            if (clearedCenti > BestWaveScoreCenti)
             {
-                BestWaveScore = waveChallengeClearedWaves;
+                BestWaveScoreCenti = clearedCenti;
                 RushNextPlayerSave(5);
             }
 
@@ -521,6 +552,53 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Fraction (0..1) of the live wave's total spawn health that has been destroyed, for the partial-wave
+        /// score credited at run end. A dead creature counts its full spawn max (it cannot deal any more damage
+        /// to raise DamageHistory further); a living one counts net effective damage taken, clamped to its own
+        /// max so a last-hit overkill cannot push the wave's total past 100%. Must be read BEFORE
+        /// ClearRemainingWaveCreatures runs, and returns 0 once the wave itself is empty (nothing live to credit).
+        /// </summary>
+        private double GetLiveWaveFraction()
+        {
+            if (waveChallengeLiveCreatures.Count == 0)
+                return 0;
+
+            double sumMax = 0;
+            double sumDealt = 0;
+
+            foreach (var creature in waveChallengeLiveCreatures)
+            {
+                if (creature == null || !waveChallengeSpawnMaxHealth.TryGetValue(creature.Guid.Full, out var max) || max == 0)
+                    continue;
+
+                sumMax += max;
+
+                double dealt;
+
+                if (!waveChallengeAliveGuids.Contains(creature.Guid.Full))
+                {
+                    // dead: counts as fully destroyed regardless of what DamageHistory happens to total
+                    dealt = max;
+                }
+                else if (creature.DamageHistory == null)
+                {
+                    dealt = 0;
+                }
+                else
+                {
+                    dealt = creature.DamageHistory.TotalDamage.Values.Sum(info => info.TotalDamage);
+                }
+
+                sumDealt += Math.Min(max, Math.Max(0, dealt));
+            }
+
+            if (sumMax <= 0)
+                return 0;
+
+            return Math.Min(1.0, Math.Max(0.0, sumDealt / sumMax));
+        }
+
+        /// <summary>
         /// The single run-end path, shared by death, victory, stall and every forfeit. Reports the score, does the
         /// one-and-only server-record evaluation (against the snapshot taken at run start), clears the arena, and
         /// consumes the run so nothing can re-score or re-advance it. BestWaveScore itself was already persisted
@@ -535,26 +613,47 @@ namespace ACE.Server.WorldObjects
             if (waveChallengeRunInstance == 0)
                 return;
 
-            var score = (long)waveChallengeClearedWaves;
+            // Partial credit only applies to a wave still in flight when the run ended - a run that just cleared
+            // its last wave via OnWaveCleared has already set waveChallengeClearedWaves == waveChallengeWave, so
+            // this is skipped and GetLiveWaveFraction (which needs the now-cleared live-creature list) is never
+            // called. Capped at 99 so a partial wave can never tie or beat a full clear on the centi scale. Must
+            // run BEFORE ClearRemainingWaveCreatures, which destroys the very creatures it reads.
+            var partial = 0L;
+            if (waveChallengeWave > waveChallengeClearedWaves)
+                partial = Math.Min(99, (long)Math.Floor(GetLiveWaveFraction() * 100));
+
+            var score = waveChallengeClearedWaves * 100L + partial;
+
+            if (score > BestWaveScoreCenti)
+                BestWaveScoreCenti = score;
 
             if (message != null)
                 WaveChallengeMsg(message);
 
-            WaveChallengeMsg(score > 0
-                ? $"You cleared {score:N0} of {waveChallengeTotalWaves:N0} waves."
-                : "You cleared no waves.");
+            if (score == 0)
+            {
+                WaveChallengeMsg("You cleared no waves.");
+            }
+            else
+            {
+                var suffix = partial > 0 ? $", and {partial}% of wave {waveChallengeWave}." : ".";
+                WaveChallengeMsg($"You cleared {waveChallengeClearedWaves:N0} of {waveChallengeTotalWaves:N0} waves{suffix}");
+            }
 
             // Server-record check, evaluated exactly ONCE per run against the run-start snapshot. A fresh scan here
             // would read this player's own incrementally-persisted best and could never be beaten.
-            if (score > 0 && score > waveChallengeServerMaxAtRunStart)
+            // Staff (WaffleACE): an exempt player's run does not trigger the world broadcast, even if it would
+            // beat the (already staff-filtered) snapshot taken at run start. Read fresh here rather than reusing
+            // the run-start snapshot's set, since a run can span long enough for the config to change mid-run.
+            if (score > 0 && score > waveChallengeServerMaxAtRunStart && !LeaderboardExemptionManager.IsExempt(this))
             {
                 PlayerManager.BroadcastToAll(new GameMessageSystemChat(
-                    $"[The Proving Grounds] {Name} has fought through wave {score:N0} of the gauntlet - a new record!",
+                    $"[The Proving Grounds] {Name} has fought through wave {score / 100}.{score % 100:D2} of the gauntlet - a new record!",
                     ChatMessageType.WorldBroadcast));
             }
 
             if (score > 0 && score > waveChallengePersonalBestAtRunStart)
-                WaveChallengeMsg($"New personal best: wave {score:N0}!");
+                WaveChallengeMsg($"New personal best: {FormatWaveScore(score)}!");
 
             ClearRemainingWaveCreatures();
 
@@ -579,6 +678,7 @@ namespace ACE.Server.WorldObjects
             waveChallengeWave = 0;
             waveChallengeAliveGuids.Clear();
             waveChallengeLiveCreatures.Clear();
+            waveChallengeSpawnMaxHealth.Clear();
             WaveChallengeActive = false;
             RushNextPlayerSave(5);
 

@@ -22,6 +22,28 @@ namespace ACE.Database.Models.Shard
             {
                 entity.Property(e => e.Instance).HasColumnName("instance");
             });
+
+            ConfigureCharacterSpeedRun(modelBuilder);
+
+            ConfigureAccountVault(modelBuilder);
+            ConfigureAccountVaultStack(modelBuilder);
+            ConfigureAccountVaultGrant(modelBuilder);
+            ConfigureAccountVaultLog(modelBuilder);
+            ConfigureAccountVaultBarrel(modelBuilder);
+
+            ConfigureMarketListing(modelBuilder);
+            ConfigureMarketTransaction(modelBuilder);
+            ConfigureMarketRejectedAttempt(modelBuilder);
+            ConfigureMarketBuyOrder(modelBuilder);
+            ConfigureAccountBank(modelBuilder);
+            ConfigureAccountBankFold(modelBuilder);
+
+            ConfigureAccountMuleForm(modelBuilder);
+
+            ConfigureCharacterFacet(modelBuilder);
+
+            ConfigureCharacterCapLedger(modelBuilder);
+            ConfigureCharacterCapAudit(modelBuilder);
         }
     }
 }
