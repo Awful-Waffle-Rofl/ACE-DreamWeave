@@ -24,9 +24,9 @@ namespace ACE.Server.Tests.ThreadDungeons
     {
         // ---- fixtures ------------------------------------------------------------------------------------
 
-        private static DungeonStatProfile Profile(int level, uint health = 0, uint damage = 0, uint armor = 0,
+        private static DungeonStatProfile Profile(int level, uint health = 0, uint damage = 0, uint armor = 0, int spellTier = 0,
             params (Skill, uint)[] skills)
-            => new DungeonStatProfile(level, health, skills.ToDictionary(s => s.Item1, s => s.Item2), damage, armor);
+            => new DungeonStatProfile(level, health, skills.ToDictionary(s => s.Item1, s => s.Item2), damage, armor, spellTier);
 
         private static Dictionary<string, SpeciesTableDef> TablesOf(params (string Id, uint[] Wcids)[] families)
             => families.ToDictionary(f => f.Id, f => new SpeciesTableDef
@@ -199,6 +199,44 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void SpellTier_is_the_lower_median_of_positive_MaxSpellTier_values_and_zero_when_none_carry_one()
+        {
+            // Three casters carry a tierable spell (tiers 2, 4, 6 -> lower median 4); two more carry none
+            // (spellTier 0) and must be EXCLUDED from the axis rather than dragging the median toward 0 - the
+            // same "0 means no data" convention MaxBodyDamage and MaxBaseArmor already use.
+            var profiles = new Dictionary<uint, DungeonStatProfile>
+            {
+                [880] = Profile(205, damage: 10, spellTier: 2),
+                [881] = Profile(205, damage: 10, spellTier: 4),
+                [882] = Profile(205, damage: 10, spellTier: 6),
+                [883] = Profile(205, damage: 10, spellTier: 0),
+                [884] = Profile(205, damage: 10, spellTier: 0),
+            };
+
+            var tables = TablesOf(("a", new uint[] { 880, 881, 882, 883, 884 }));
+            var standard = DungeonBandStandard.Compute(tables, 200, w => profiles[w], DungeonRosterBand.Default, 0.60);
+
+            Assert.AreEqual(4, standard.SpellTier, "lower median of {2, 4, 6}, the two spell-tier-0 members excluded");
+            // The other axes must be untouched by the new axis existing at all.
+            Assert.AreEqual(10u, standard.MaxBodyDamage);
+        }
+
+        [TestMethod]
+        public void SpellTier_is_zero_when_no_sample_member_carries_a_tierable_spell()
+        {
+            var profiles = new Dictionary<uint, DungeonStatProfile>
+            {
+                [885] = Profile(205, damage: 10, spellTier: 0),
+                [886] = Profile(205, damage: 20, spellTier: 0),
+            };
+
+            var tables = TablesOf(("a", new uint[] { 885, 886 }));
+            var standard = DungeonBandStandard.Compute(tables, 200, w => profiles[w], DungeonRosterBand.Default, 0.60, minSample: 2);
+
+            Assert.AreEqual(0, standard.SpellTier);
+        }
+
+        [TestMethod]
         public void A_thin_natural_sample_widens_the_sample_bands_low_edge_and_never_its_high_edge()
         {
             // Level-200 gem, natural band [200, 230]. Only two members sit there; six more sit at 170, which
@@ -251,6 +289,8 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(dataless.IsEmpty);
             Assert.AreEqual(0u, dataless.MaxBodyDamage);
             Assert.AreEqual(0u, dataless.MedianFor(Skill.MeleeDefense));
+            Assert.AreEqual(0, dataless.SpellTier);
+            Assert.AreEqual(0, DungeonBandStandard.Empty.SpellTier);
 
             // No member anywhere near the band at any width.
             var farProfiles = new Dictionary<uint, DungeonStatProfile> { [860] = Profile(20, damage: 5) };

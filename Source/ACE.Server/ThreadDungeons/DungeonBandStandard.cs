@@ -54,6 +54,15 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>Median of each sample member's MAXIMUM body-part BaseArmor.</summary>
         public uint MaxBaseArmor { get; }
 
+        /// <summary>
+        /// Median of each sample member's <see cref="DungeonStatProfile.MaxSpellTier"/>, over only the
+        /// members that carry at least one tierable spell (the same "0 excluded" convention MaxBodyDamage and
+        /// MaxBaseArmor use above). 0 means no sample member carried a tierable spell, and is read by
+        /// <see cref="ThreadDungeonSpawner"/> as "raise nothing" - the same no-op convention every other axis
+        /// here uses for an absent standard.
+        /// </summary>
+        public int SpellTier { get; }
+
         /// <summary>How many distinct wcids with usable data the sample held. 0 means "no standard".</summary>
         public int SampleCount { get; }
 
@@ -66,11 +75,12 @@ namespace ACE.Server.ThreadDungeons
         public double SampleLowRatio { get; }
 
         private DungeonBandStandard(IReadOnlyDictionary<Skill, uint> skillMedians, uint maxBodyDamage, uint maxBaseArmor,
-            int sampleCount, double sampleLowRatio)
+            int spellTier, int sampleCount, double sampleLowRatio)
         {
             SkillMedians = skillMedians ?? new Dictionary<Skill, uint>();
             MaxBodyDamage = maxBodyDamage;
             MaxBaseArmor = maxBaseArmor;
+            SpellTier = spellTier;
             SampleCount = sampleCount;
             SampleLowRatio = sampleLowRatio;
         }
@@ -80,7 +90,7 @@ namespace ACE.Server.ThreadDungeons
         /// the sample is empty, and used as the plan's default so a run that never widens its band carries a
         /// standard that is provably a no-op rather than a null nobody checks.
         /// </summary>
-        public static readonly DungeonBandStandard Empty = new DungeonBandStandard(null, 0, 0, 0, 0.0);
+        public static readonly DungeonBandStandard Empty = new DungeonBandStandard(null, 0, 0, 0, 0, 0.0);
 
         /// <summary>True when this standard can raise nothing.</summary>
         public bool IsEmpty => SampleCount == 0;
@@ -139,6 +149,7 @@ namespace ACE.Server.ThreadDungeons
             return new DungeonBandStandard(SkillMediansOf(sample),
                 DungeonRosterSelector.LowerMedian(sample.Select(p => p.MaxBodyDamage).Where(v => v > 0)),
                 DungeonRosterSelector.LowerMedian(sample.Select(p => p.MaxBaseArmor).Where(v => v > 0)),
+                (int)DungeonRosterSelector.LowerMedian(sample.Select(p => (uint)p.MaxSpellTier).Where(v => v > 0)),
                 sample.Count, lowRatio);
         }
 

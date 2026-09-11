@@ -1,0 +1,1536 @@
+# Prod content manifest - the single source of truth for what content is live on prod.
+#
+# GENERATED FILE - do not hand-edit. Produced by tools/generate-manifest.sh, which reads
+# the content tree at a fixed ref (never the working tree) and applies implicit-include,
+# explicit-exclude policy: every content unit ships unless it - or a matching glob - is
+# listed in Content/prod-manifest-exclude.txt. To regenerate:
+#   tools/generate-manifest.sh --ref <ref> --exclude Content/prod-manifest-exclude.txt --out Content/prod-manifest.txt
+#
+# Each line: <git-sha>  <path>
+# Apply order = line order; every unit is listed after everything it @depends-on (see
+# tools/generate-manifest.sh's topological ordering, mirroring order_units() in
+# tools/apply-content.sh). Promotion: regenerate against the newer ref (or hand-add/bump
+# a line for a one-off). Rollback: bump the SHA backward, or regenerate against an older ref.
+# Apply with: tools/apply-content.sh --manifest Content/prod-manifest.txt
+# The tool reads each unit at its pinned SHA (git show), never the working tree.
+# Pins are verified against drift with: tools/manifest-pins.sh --check Content/prod-manifest.txt
+# See Docs/Deployment.md.
+#
+# Generated from ref: e45afff47dfdeb9745df86b895a33b17435a4b22
+# Unit count: 1499 (1494 content unit(s) + 5 migration unit(s))
+#
+# Units by folder:
+#   Content/dungeons               3
+#   Content/outdoor                2
+#   Content/placements             65
+#   Content/realms                 52
+#   Content/sql/patches            26
+#   Content/sql/quests             152
+#   Content/sql/recipes            4
+#   Content/sql/weenies            1190
+#
+# Line order below is @depends-on topological order, NOT path order, so folders
+# interleave. That is deliberate - apply order is this file's only contract, and
+# grouping by folder would break it.
+
+1c1beb20f  Content/dungeons/abandoned_mines_strip.sql
+2f1fac959  Content/sql/weenies/1001930 Withered.sql
+2f1fac959  Content/sql/weenies/1001931 Valley of Death.sql
+e0eddf7a6  Content/dungeons/abandoned_mines_portals.sql
+b11b6bffc  Content/dungeons/the_iron_sill.sql
+9b3ce0dd7  Content/outdoor/assay_row_bay5_geode_field.sql
+6dd128307  Content/outdoor/wayless_rookery.sql
+88ad25eff  Content/placements/abandoned_mines_garbage_barrel.sql
+268080f31  Content/placements/assay_row_bay3_open_cut.sql
+268080f31  Content/placements/assay_row_bay5_geode_field.sql
+8af42f1c9  Content/realms/realm1_registry.sql
+2515dc2c1  Content/placements/bluespire_c1_placements.sql
+bd28b36d6  Content/placements/bluespire_c4_headland_camps.sql
+00652d9a6  Content/placements/bluespire_c5_greenspire.sql
+a692f1665  Content/placements/bluespire_laboratory_portal.sql
+03967196a  Content/sql/weenies/1003263 The Long Drum's Echo.sql
+03967196a  Content/sql/weenies/1003265 Menhir Drummer Generator.sql
+bd28b36d6  Content/placements/bluespire_menhir_ring_20b9.sql
+f7df6031d  Content/sql/weenies/1003860 The Plateau Lift (Bluespire).sql
+f7df6031d  Content/sql/weenies/1003861 The Plateau Lift Return (Bluespire).sql
+f7df6031d  Content/placements/bluespire_plateau_lift.sql
+2515dc2c1  Content/sql/weenies/1003365 The Plateau Road (Bluespire).sql
+82a7ae593  Content/sql/weenies/1003366 The Plateau Road Return (Bluespire).sql
+2515dc2c1  Content/placements/bluespire_plateau_road.sql
+00652d9a6  Content/placements/bluespire_q1_cairns.sql
+88d79ba20  Content/placements/bluespire_q1_scout_camps.sql
+3176e27a9  Content/placements/bluespire_q5_scout.sql
+2515dc2c1  Content/placements/bluespire_q6_skymarks.sql
+00652d9a6  Content/sql/weenies/1003214 The Ahurenga Ruin.sql
+bd28b36d6  Content/sql/weenies/1003299 Aun Papileona's Shrine to Raeta (Bluespire).sql
+a692f1665  Content/placements/bluespire_q7_surface.sql
+00652d9a6  Content/sql/weenies/1003226 Stone of Nukurenga.sql
+07284bae0  Content/sql/weenies/1003249 Aun Manaua.sql
+2515dc2c1  Content/sql/weenies/1003250 Ruatapu the Stair-Keeper.sql
+00652d9a6  Content/sql/weenies/1003280 Nukurenga Ambient Generator.sql
+bd28b36d6  Content/sql/weenies/1003281 Nukurenga, the Deep Hold.sql
+2515dc2c1  Content/sql/weenies/1003292 Nukurenga Warden Generator.sql
+bd28b36d6  Content/sql/weenies/1003293 Nukurenga Ramp Door.sql
+8192bd109  Content/sql/weenies/1003361 Surface.sql
+8192bd109  Content/sql/weenies/1003362 Aun Warrior of Nukurenga.sql
+00652d9a6  Content/sql/weenies/1003363 Nukurenga Stone Generator.sql
+00652d9a6  Content/placements/bluespire_q8_dark_lair.sql
+82a7ae593  Content/sql/weenies/1003222 Barred Ramp Door.sql
+03967196a  Content/sql/weenies/1003264 Aun Priest of Raeta Generator.sql
+03967196a  Content/sql/weenies/1003275 Shrine Congregation Generator.sql
+03967196a  Content/sql/weenies/1003276 Shrine Guard Generator.sql
+03967196a  Content/sql/weenies/1003283 Ritual-Keeper Generator.sql
+2515dc2c1  Content/sql/weenies/1003290 Aun Papileona's Reliquary.sql
+03967196a  Content/sql/weenies/1003291 Sanctum Ramp Door.sql
+bd28b36d6  Content/sql/weenies/1003298 Surface.sql
+f7debb700  Content/placements/bluespire_shrine_0287.sql
+4d8085768  Content/placements/bluespire_tavern_shelf.sql
+2515dc2c1  Content/placements/bluespire_town_npcs.sql
+fc01bcaaf  Content/placements/facility_hub_npcs.sql
+4e063984d  Content/placements/facility_hub_portals.sql
+05030a322  Content/placements/holtburg_unbidden_door_surface.sql
+c7321cb69  Content/placements/marketplace_abandoned_mines_portal.sql
+fde9f4acc  Content/sql/weenies/1002751 Arcane Alignment Table.sql
+50d297c23  Content/placements/marketplace_arcane_alignment_table.sql
+88ad25eff  Content/placements/marketplace_barber_ealdred.sql
+554e312c4  Content/sql/weenies/1002759 Brewer's Cauldron.sql
+028cec66c  Content/placements/marketplace_brewers_cauldron.sql
+554e312c4  Content/sql/weenies/1002760 Brew-Keeper Hadil ibn Qasir.sql
+028cec66c  Content/placements/marketplace_brewers_cauldron_attendant.sql
+028cec66c  Content/sql/weenies/1002763 Keg Table.sql
+ec3f48c38  Content/sql/weenies/1002764 Tapped Keg.sql
+831d52f29  Content/placements/marketplace_brewers_cauldron_decor.sql
+92929cbe0  Content/sql/weenies/1002765 Brewer's Cauldron Steam.sql
+92929cbe0  Content/sql/weenies/1002766 Brewer's Cauldron Ember.sql
+6a993e264  Content/placements/marketplace_brewers_cauldron_steam.sql
+79b7cb390  Content/sql/weenies/1002767 Brewer's Stein.sql
+e0c76f432  Content/placements/marketplace_brewers_cauldron_steins.sql
+27b8df8fe  Content/sql/weenies/1002768 Brewer's Tap Foam.sql
+d74210769  Content/placements/marketplace_brewers_cauldron_tap.sql
+ab61fe2c2  Content/sql/weenies/1002769 Brewer's Cauldron Wisp.sql
+27b8df8fe  Content/placements/marketplace_brewers_cauldron_wisp.sql
+ec462fa60  Content/sql/weenies/1002757 Weaver's Loom.sql
+d5a2ff550  Content/placements/marketplace_coverage_loom.sql
+712c2ac2c  Content/sql/weenies/1002758 Loom-Keeper Mei Anshu.sql
+712c2ac2c  Content/placements/marketplace_coverage_loom_attendant.sql
+88ad25eff  Content/placements/marketplace_currency_exchange.sql
+fde9f4acc  Content/sql/weenies/1002752 Defense Requirement Reforge.sql
+50d297c23  Content/placements/marketplace_defense_reforge.sql
+7ef9d22eb  Content/sql/weenies/1003150 Mule Vendor.sql
+bf5a2ca9b  Content/sql/weenies/1003152 Beast Effigy.sql
+fc6f9b670  Content/sql/weenies/1003153 Vardo the Effigist.sql
+53c5dd27b  Content/placements/marketplace_effigist.sql
+b697a6ce4  Content/placements/marketplace_garbage_barrels.sql
+8a38b36e0  Content/sql/weenies/1001850 Yamira bint Sabra the Apothecary.sql
+8a38b36e0  Content/placements/marketplace_healer_vendor.sql
+56912b22f  Content/sql/weenies/1002829 Sundries-Broker Rashid al-Munzir.sql
+8da785933  Content/placements/marketplace_mmd_sundries.sql
+b58b76353  Content/sql/weenies/1001940 Porter-Master Ozawa Nen.sql
+cc257ba35  Content/placements/marketplace_mule_conversion.sql
+c07a1b163  Content/sql/weenies/1001810 Ostravan the Pack Seller.sql
+efa2a8e8a  Content/placements/marketplace_pack_vendor.sql
+5fb3537c8  Content/sql/weenies/1001700 Stone Pillar.sql
+9412a16b5  Content/placements/marketplace_portal_frames.sql
+5b0fde8f1  Content/sql/weenies/1002753 Reforge-Warden Tobias Grell.sql
+74983d074  Content/sql/weenies/1002754 Alignment-Scribe Ysolde Varr.sql
+74983d074  Content/sql/weenies/1002755 Reforge-Warden Thulak.sql
+50d297c23  Content/placements/marketplace_refire_attendants.sql
+9b6844e1e  Content/sql/weenies/1002756 Refire Station Fire.sql
+6c03f4839  Content/placements/marketplace_refire_fires.sql
+5b0fde8f1  Content/sql/weenies/1002750 Workmanship Reforge.sql
+518053d2c  Content/placements/marketplace_refire_forge.sql
+500afe977  Content/sql/weenies/1001860 Ilseriane the Recollector.sql
+02023f797  Content/placements/marketplace_respec_vendor.sql
+50f7defe1  Content/sql/weenies/1002652 Salvage Forge.sql
+50f7defe1  Content/sql/weenies/1002653 Salvage Forge Fire.sql
+50f7defe1  Content/sql/weenies/1002654 Salvage Forge Smoke.sql
+50f7defe1  Content/sql/weenies/1002656 Forge-Warden Nadira Sahl.sql
+f220f7d94  Content/sql/weenies/1002761 Tinkerer's Inspiration.sql
+50f7defe1  Content/placements/marketplace_tinkerers_inspiration.sql
+50f7defe1  Content/placements/marketplace_salvage_forge.sql
+ab679d7f0  Content/sql/weenies/1002800 Vaelith the Omni-School Professor.sql
+ab679d7f0  Content/placements/marketplace_spell_tutor.sql
+88ad25eff  Content/placements/marketplace_stall_vendors.sql
+179115811  Content/sql/weenies/1003950 Token-Steward Ilsaneth.sql
+179115811  Content/placements/nalicana_token_vendor.sql
+283abe631  Content/placements/proving_grounds_attack_surface.sql
+7613f1d72  Content/placements/proving_grounds_defense_surface.sql
+feb0e98a4  Content/sql/weenies/1003000 Proving Grounds (Speed).sql
+283abe631  Content/sql/weenies/1003002 Pace-Master Odda Cray.sql
+9c863d6e1  Content/placements/proving_grounds_speed_surface.sql
+7613f1d72  Content/placements/proving_grounds_wave_surface.sql
+89f2bd1dc  Content/placements/quest_stamps_marketplace.sql
+33d784b4d  Content/placements/sanamar_unbidden_door_surface.sql
+6dd128307  Content/placements/shard_of_first_light_surface.sql
+33d784b4d  Content/placements/shoushi_unbidden_door_surface.sql
+418df52ab  Content/placements/town_network_extra_portals.sql
+a2ab8ef0b  Content/placements/town_network_garbage_barrels.sql
+530e3933a  Content/sql/weenies/1001920 Crater Portal.sql
+418df52ab  Content/placements/town_network_lower_portals.sql
+6dd128307  Content/placements/wayless_rookery_props.sql
+33d784b4d  Content/placements/yaraq_unbidden_door_surface.sql
+2f713e028  Content/realms/assay_row_bay1_warehouse_annex.sql
+56039b68d  Content/realms/assay_row_bay2_crystal_mine.sql
+f7f14b955  Content/realms/assay_row_bay4_lugian_quarry.sql
+77f339fe6  Content/realms/assay_row_bay6_dark_tree_mine.sql
+64fed6b3c  Content/realms/assay_row_bay7_firecut_arena.sql
+64fed6b3c  Content/realms/assay_row_bay_portals.sql
+feb0e98a4  Content/realms/driftnetwork_hub.sql
+22265b307  Content/sql/weenies/1002510 Grainwright Alys Fenn.sql
+80a832a38  Content/sql/weenies/1002534 Lampstone Phial.sql
+a66c0a044  Content/sql/weenies/1001918 Tiger Eye Hammer.sql
+1a849979b  Content/sql/weenies/1002511 Platewright Odell Marsh.sql
+22265b307  Content/sql/weenies/1002512 Edgewright Kenji Ashida.sql
+f7f14b955  Content/sql/weenies/1002513 Ulgrath the Grain-Reader.sql
+097d4973f  Content/sql/weenies/1002514 Slotwright Yusra Tannim.sql
+2a1327071  Content/sql/weenies/1001407 Meridian Commendation.sql
+c21ac6fcc  Content/sql/weenies/1003400 Quickhand Gem.sql
+22bd9e068  Content/sql/weenies/1002515 Assay-Warden Vittorio Sarra.sql
+eb0f4ea23  Content/sql/weenies/1002556 Raw Obsidian Glass.sql
+a66c0a044  Content/sql/weenies/1001912 Obsidian Hammer.sql
+dd3eaa29d  Content/sql/weenies/1002516 Glasswright Rin Kuroda.sql
+9eb5646e1  Content/realms/assay_row_npcs.sql
+2515dc2c1  Content/realms/bluespire_laboratory.sql
+8af42f1c9  Content/realms/driftmaw_hive.sql
+08dcb2cf3  Content/realms/driftnetwork_alcove_doors.sql
+095947749  Content/realms/driftnetwork_aug_brokers.sql
+5fb3537c8  Content/sql/weenies/1001077 Stone Arch 0x04001382.sql
+5fb3537c8  Content/sql/weenies/1001078 Stone Arch 0x04000B70.sql
+5fb3537c8  Content/sql/weenies/1001079 Stone Arch 0x04001879.sql
+5fb3537c8  Content/sql/weenies/1001080 Stone Arch 0x04000D57.sql
+5fb3537c8  Content/sql/weenies/1001081 Stone Arch 0x04000D4F.sql
+5fb3537c8  Content/sql/weenies/1001082 Stone Arch 0x04000D82.sql
+5fb3537c8  Content/sql/weenies/1001083 Stone Arch 0x040014CF.sql
+5fb3537c8  Content/sql/weenies/1001084 Stone Arch 0x04000F68.sql
+d158b3f74  Content/sql/weenies/1001085 Stone Arch Diamond 0x0500190C.sql
+08f3e51aa  Content/realms/driftnetwork_decor.sql
+9d5f1083c  Content/realms/driftnetwork_entry.sql
+b98b2f6a2  Content/realms/driftnetwork_fragments.sql
+aec6293a1  Content/realms/driftnetwork_garbage_barrel.sql
+727194127  Content/realms/driftnetwork_hub_seals.sql
+8805fb1b9  Content/sql/weenies/1001086 Meridian Lamp.sql
+9ab719cc2  Content/realms/driftnetwork_lamps.sql
+66670b145  Content/realms/driftnetwork_reagents.sql
+88a381bb3  Content/realms/driftnetwork_respec.sql
+6dd128307  Content/realms/driftnetwork_soldiers.sql
+8af42f1c9  Content/realms/held_door_arena.sql
+8af42f1c9  Content/realms/held_door_arena_tumerok.sql
+8af42f1c9  Content/realms/holtburg_unbidden_door.sql
+8af42f1c9  Content/realms/iron_sill_drift_door.sql
+d0dee945f  Content/realms/loom.sql
+2515dc2c1  Content/realms/marae_lassel_bestiary_placements.sql
+0637ff828  Content/realms/marae_lassel_city_doors.sql
+69cfdfdbb  Content/realms/marae_lassel_gate_portals.sql
+0240bb768  Content/realms/marae_lassel_lifestone.sql
+e52fc9d8e  Content/sql/weenies/1002642 Sky Rift (Purple).sql
+e52fc9d8e  Content/sql/weenies/1002646 Sky Rift (Orange).sql
+e52fc9d8e  Content/sql/weenies/1002647 Sky Rift (Red).sql
+aed79dee1  Content/realms/marae_lassel_sky_decor.sql
+e52fc9d8e  Content/sql/weenies/1002643 Sky Rift (Blue).sql
+e52fc9d8e  Content/sql/weenies/1002644 Sky Rift (Yellow).sql
+e52fc9d8e  Content/sql/weenies/1002645 Sky Rift (Green).sql
+252ce9d71  Content/sql/weenies/1002648 Sky Rift (White).sql
+e52fc9d8e  Content/sql/weenies/1002649 Sky Rift (Grey).sql
+654836764  Content/realms/marae_lassel_sky_rift_probe.sql
+9e8db9d44  Content/realms/marae_lassel_strip.sql
+8af42f1c9  Content/realms/meridian_south_d1.sql
+8af42f1c9  Content/realms/meridian_south_d2_rusting_door.sql
+af4405254  Content/sql/weenies/1001259 Door She Held.sql
+407a4d508  Content/sql/weenies/1001253 Line-Captain Isaure Vellamy.sql
+aa6a0da7c  Content/sql/weenies/1001261 Vellamy Anchor Generator.sql
+8af42f1c9  Content/realms/meridian_south_d3.sql
+8af42f1c9  Content/realms/meridian_south_d4.sql
+8af42f1c9  Content/realms/meridian_south_d5.sql
+8af42f1c9  Content/realms/meridian_south_d6_first_pin.sql
+8af42f1c9  Content/realms/proving_grounds_attack.sql
+d7b26a81c  Content/realms/proving_grounds_defense.sql
+628e6b9e0  Content/sql/weenies/1003001 Trial Focus.sql
+628e6b9e0  Content/realms/proving_grounds_speed_test.sql
+8af42f1c9  Content/realms/proving_grounds_wave.sql
+d5694c948  Content/realms/realm1_strip_default.sql
+8af42f1c9  Content/realms/sanamar_unbidden_door.sql
+8af42f1c9  Content/realms/shoushi_unbidden_door.sql
+86881bcab  Content/realms/speedrun_lost_coastal_archive.sql
+e0cf6bc1d  Content/sql/weenies/1003500 Palisade Wall.sql
+d48c5530c  Content/sql/weenies/1003501 Watchtower.sql
+5b8ba7db5  Content/sql/weenies/1003554 Aun Stormcaller.sql
+194fabc63  Content/sql/weenies/1003550 Warspeaker's Gate.sql
+5b8ba7db5  Content/sql/weenies/1003551 Aun Skyhurler.sql
+194fabc63  Content/sql/weenies/1003552 Siege Barrier.sql
+a44370981  Content/realms/warspeaker_gate.sql
+4807360b7  Content/realms/warspeaker_gate_bonfires.sql
+be2edefce  Content/realms/wayless_rookery_portal.sql
+8af42f1c9  Content/realms/yaraq_unbidden_door.sql
+1619a4033  Content/sql/patches/augmentation_realm_permanent_access.sql
+9d5f1083c  Content/sql/patches/aun_mana_scarab.sql
+54390f35e  Content/sql/patches/aun_massive_mana_charge.sql
+f84054272  Content/sql/weenies/1002700 Foolproof White Quartz.sql
+f84054272  Content/sql/patches/colosseum_foolproof_white_quartz.sql
+a66c0a044  Content/sql/patches/equipment_mods_salvage_bag_description.sql
+0714cc801  Content/sql/patches/equipment_mods_salvage_bag_targettype.sql
+f95a202a8  Content/sql/patches/equipment_mods_salvage_bag_itemuseable.sql
+13d791ba8  Content/sql/patches/harm_damage_retune.sql
+e3ab16027  Content/sql/patches/hecatomb_arc.sql
+f84054272  Content/sql/patches/life_rending_white_quartz_salvage.sql
+6dd128307  Content/sql/patches/pathwarden_driftwarden_hint.sql
+6dd128307  Content/sql/patches/prismatic_taper_stack_10000.sql
+e79aaed98  Content/sql/patches/proving_grounds_speed_test_season.sql
+930c148b8  Content/sql/patches/quest_luminance_4000_to_1.sql
+0570f921d  Content/sql/patches/raven_fury_damage_ratio.sql
+02023f797  Content/sql/patches/respec_gem_values.sql
+ad96ccace  Content/sql/patches/retail_luminance_l185_plus.sql
+50f7defe1  Content/sql/patches/salvage_forge_hollow_hammer_retire.sql
+f8c1c3940  Content/sql/patches/serpentine_salvage_bag_description.sql
+f8c1c3940  Content/sql/patches/serpentine_salvage_bag_usable.sql
+aca014368  Content/sql/patches/speedrun_lost_coastal_archive_retire_keys.sql
+dc9e1c2c9  Content/sql/weenies/1003065 The Untranslated Song of Grael.sql
+be4145a08  Content/sql/patches/speedrun_lost_coastal_archive_season.sql
+c25fb1e80  Content/sql/patches/trade_notes_stack_1000.sql
+db8f65219  Content/sql/patches/weapon_mods_salvage_bag_description.sql
+61d1822ec  Content/sql/patches/weapon_mods_salvage_bag_usable.sql
+24290cde1  Content/sql/patches/withered_olthoi_nonprojectile_magic_immunity.sql
+9fbbbf7e3  Content/sql/quests/AssayRowAlysAccepted.sql
+9fbbbf7e3  Content/sql/quests/AssayRowAmethystTaught.sql
+dd3eaa29d  Content/sql/quests/AssayRowExarchSlain.sql
+9fbbbf7e3  Content/sql/quests/AssayRowFirstIronRead.sql
+9fbbbf7e3  Content/sql/quests/AssayRowKenjiAccepted.sql
+9fbbbf7e3  Content/sql/quests/AssayRowObsidianTaught.sql
+9fbbbf7e3  Content/sql/quests/AssayRowOdellAccepted.sql
+9fbbbf7e3  Content/sql/quests/AssayRowPrismaticTaught.sql
+9fbbbf7e3  Content/sql/quests/AssayRowRinAccepted.sql
+9fbbbf7e3  Content/sql/quests/AssayRowSerpentineTaught.sql
+dd3eaa29d  Content/sql/quests/AssayRowSuzerainSlain.sql
+9fbbbf7e3  Content/sql/quests/AssayRowTigerEyeTaught.sql
+9fbbbf7e3  Content/sql/quests/AssayRowTourmalineTaught.sql
+9fbbbf7e3  Content/sql/quests/AssayRowUlgrathAccepted.sql
+abece4ea7  Content/sql/quests/AssayRowVesselFull.sql
+9fbbbf7e3  Content/sql/quests/AssayRowVittorioAccepted.sql
+9fbbbf7e3  Content/sql/quests/AssayRowYusraAccepted.sql
+2515dc2c1  Content/sql/quests/BluespireLaboratoryStrongbox.sql
+82a7ae593  Content/sql/quests/BluespireSkyMarkTally.sql
+f76b4acfe  Content/sql/quests/BreathingDoorAccepted.sql
+f76b4acfe  Content/sql/quests/BreathingDoorCaptainKill.sql
+f76b4acfe  Content/sql/quests/BreathingDoorComplete.sql
+f76b4acfe  Content/sql/quests/BreathingDoorReward.sql
+9e8ab7948  Content/sql/quests/BusyDoorAccepted.sql
+6748e46d9  Content/sql/quests/BusyDoorComplete.sql
+6748e46d9  Content/sql/quests/BusyDoorKillCount.sql
+9e8ab7948  Content/sql/quests/BusyDoorReward.sql
+9018ccac2  Content/sql/quests/DarkLairAccepted.sql
+9018ccac2  Content/sql/quests/DarkLairNamed.sql
+9018ccac2  Content/sql/quests/DarkLairReward.sql
+6dd128307  Content/sql/quests/DriftmawGlandPickup.sql
+6dd128307  Content/sql/quests/DriftmawHiveAccepted.sql
+ce355cc36  Content/sql/quests/DynDungeonGuide.sql
+f1b288b09  Content/sql/quests/DynDungeonSurvey1.sql
+f1b288b09  Content/sql/quests/DynDungeonSurvey10.sql
+f1b288b09  Content/sql/quests/DynDungeonSurvey5.sql
+f1b288b09  Content/sql/quests/DynDungeonSurveyCount.sql
+f1b288b09  Content/sql/quests/DynDungeonSurveyTotal.sql
+f1b288b09  Content/sql/quests/DynDungeonSurveyWindow.sql
+9e8ab7948  Content/sql/quests/FirstPinAbilityPoint.sql
+9e8ab7948  Content/sql/quests/FirstPinAccepted.sql
+9e8ab7948  Content/sql/quests/FirstPinBossKill.sql
+9e8ab7948  Content/sql/quests/FirstPinComplete.sql
+9e8ab7948  Content/sql/quests/FirstPinReward.sql
+9e8ab7948  Content/sql/quests/HeldDoorAccepted.sql
+6748e46d9  Content/sql/quests/HeldDoorBossKill.sql
+6748e46d9  Content/sql/quests/HeldDoorComplete.sql
+9e8ab7948  Content/sql/quests/HeldDoorReward.sql
+50360708e  Content/sql/quests/HeldDoorSealed.sql
+6dd128307  Content/sql/quests/HoltburgUnbiddenDoor.sql
+6dd128307  Content/sql/quests/HoltburgUnbiddenDoorAccepted.sql
+6dd128307  Content/sql/quests/IronSillBoss.sql
+6dd128307  Content/sql/quests/IronSillBossKills.sql
+6dd128307  Content/sql/quests/IronSillHeavy.sql
+6dd128307  Content/sql/quests/IronSillHeavyKills.sql
+6dd128307  Content/sql/quests/IronSillLight.sql
+6dd128307  Content/sql/quests/IronSillLightKills.sql
+6dd128307  Content/sql/quests/IronSillMedium.sql
+6dd128307  Content/sql/quests/IronSillMediumKills.sql
+9e8ab7948  Content/sql/quests/MiscountedDoorAccepted.sql
+6748e46d9  Content/sql/quests/MiscountedDoorComplete.sql
+6748e46d9  Content/sql/quests/MiscountedDoorMarkedKill.sql
+9e8ab7948  Content/sql/quests/MiscountedDoorReward.sql
+a291d75ed  Content/sql/quests/MiscountedDoorTally.sql
+a291d75ed  Content/sql/quests/MiscountedDoorTallyStoneVisited.sql
+22bd9e068  Content/sql/quests/PickupBoon_Firecut.sql
+c5ad37fb8  Content/sql/quests/ProvingGroundsAttackTier1.sql
+c5ad37fb8  Content/sql/quests/ProvingGroundsAttackTier2.sql
+c5ad37fb8  Content/sql/quests/ProvingGroundsAttackTier3.sql
+0d2987c38  Content/sql/quests/ProvingGroundsAttackTier4.sql
+d8b7a00dc  Content/sql/quests/ProvingGroundsDefenseTier1.sql
+d8b7a00dc  Content/sql/quests/ProvingGroundsDefenseTier2.sql
+d8b7a00dc  Content/sql/quests/ProvingGroundsDefenseTier3.sql
+d8b7a00dc  Content/sql/quests/ProvingGroundsDefenseTier4.sql
+9c863d6e1  Content/sql/quests/ProvingGroundsSpeedTier1.sql
+9c863d6e1  Content/sql/quests/ProvingGroundsSpeedTier2.sql
+9c863d6e1  Content/sql/quests/ProvingGroundsSpeedTier3.sql
+283abe631  Content/sql/quests/ProvingGroundsWaveTier1.sql
+283abe631  Content/sql/quests/ProvingGroundsWaveTier2.sql
+283abe631  Content/sql/quests/ProvingGroundsWaveTier3.sql
+95cf5be31  Content/sql/quests/ProvingGroundsWaveTier4.sql
+3de2e1dfd  Content/sql/quests/QuestStampTier1.sql
+3de2e1dfd  Content/sql/quests/QuestStampTier2.sql
+3de2e1dfd  Content/sql/quests/QuestStampTier3.sql
+f76b4acfe  Content/sql/quests/RustingDoorAccepted.sql
+6748e46d9  Content/sql/quests/RustingDoorComplete.sql
+f76b4acfe  Content/sql/quests/RustingDoorReward.sql
+6748e46d9  Content/sql/quests/RustingDoorTurnIn.sql
+d9e2caf30  Content/sql/quests/RustingDoorValveA.sql
+d9e2caf30  Content/sql/quests/RustingDoorValveB.sql
+d9e2caf30  Content/sql/quests/RustingDoorValveC.sql
+d9e2caf30  Content/sql/quests/RustingDoorValveD.sql
+6dd128307  Content/sql/quests/SanamarDriftTrophy.sql
+6dd128307  Content/sql/quests/SanamarUnbiddenDoor.sql
+6dd128307  Content/sql/quests/SanamarUnbiddenDoorAccepted.sql
+6dd128307  Content/sql/quests/SanamarUnbiddenDoorKills.sql
+6dd128307  Content/sql/quests/ShoushiDriftTrophy.sql
+6dd128307  Content/sql/quests/ShoushiUnbiddenDoor.sql
+6dd128307  Content/sql/quests/ShoushiUnbiddenDoorAccepted.sql
+6dd128307  Content/sql/quests/ShoushiUnbiddenDoorKills.sql
+62591427b  Content/sql/quests/UnansweredRookery.sql
+62591427b  Content/sql/quests/UnansweredRookeryAccepted.sql
+62591427b  Content/sql/quests/UnansweredRookeryComplete.sql
+62591427b  Content/sql/quests/UnansweredRookeryEggs.sql
+6dd128307  Content/sql/quests/YaraqUnbiddenDoor.sql
+6dd128307  Content/sql/quests/YaraqUnbiddenDoorAccepted.sql
+a692f1665  Content/sql/quests/c1_complete.sql
+a692f1665  Content/sql/quests/c1_marks.sql
+a692f1665  Content/sql/quests/c2_billets.sql
+a692f1665  Content/sql/quests/c2_complete.sql
+a692f1665  Content/sql/quests/c2_cord.sql
+a692f1665  Content/sql/quests/c2_hide.sql
+a692f1665  Content/sql/quests/c2_hide_order.sql
+a692f1665  Content/sql/quests/c4_complete.sql
+00652d9a6  Content/sql/quests/c4_kills.sql
+a692f1665  Content/sql/quests/c5_accept.sql
+a692f1665  Content/sql/quests/c5_complete.sql
+a692f1665  Content/sql/quests/c5_drum_active.sql
+a692f1665  Content/sql/quests/c5_rack.sql
+a692f1665  Content/sql/quests/q1_cairns.sql
+a692f1665  Content/sql/quests/q1_complete.sql
+00652d9a6  Content/sql/quests/q1_kills.sql
+a692f1665  Content/sql/quests/q2_terms.sql
+a692f1665  Content/sql/quests/q2_turnins.sql
+a692f1665  Content/sql/quests/q3_accept.sql
+a692f1665  Content/sql/quests/q3_turnins.sql
+a692f1665  Content/sql/quests/q4_ahurenga.sql
+a692f1665  Content/sql/quests/q4_hikirenga.sql
+160ecf982  Content/sql/quests/q4_holdstone_count.sql
+a692f1665  Content/sql/quests/q4_iwarenga.sql
+a692f1665  Content/sql/quests/q4_kaurenga.sql
+a692f1665  Content/sql/quests/q4_motuenga.sql
+a692f1665  Content/sql/quests/q4_nukurenga.sql
+a692f1665  Content/sql/quests/q4_oterenga.sql
+a692f1665  Content/sql/quests/q4_paid.sql
+a692f1665  Content/sql/quests/q4_shelf.sql
+a692f1665  Content/sql/quests/q4_turaenga.sql
+a692f1665  Content/sql/quests/q4_wharenga.sql
+00652d9a6  Content/sql/quests/q5_accretion.sql
+a692f1665  Content/sql/quests/q5_done.sql
+a692f1665  Content/sql/quests/q5_door.sql
+a692f1665  Content/sql/quests/q5_hook.sql
+a692f1665  Content/sql/quests/q6_complete.sql
+a692f1665  Content/sql/quests/q6_marks.sql
+a692f1665  Content/sql/quests/q7_accept.sql
+a692f1665  Content/sql/quests/q7_done.sql
+00652d9a6  Content/sql/quests/q7_drummer_kill.sql
+00652d9a6  Content/sql/quests/q7_priest_kill.sql
+a692f1665  Content/sql/quests/q7_ring.sql
+a692f1665  Content/sql/quests/q7_ring_accept.sql
+a692f1665  Content/sql/quests/q7_ruin.sql
+a692f1665  Content/sql/quests/q7_shrine.sql
+bee186cbe  Content/sql/recipes/AssayRowObsidianSeam.sql
+f7f14b955  Content/sql/recipes/AssayRowSerpentineSeam.sql
+eb6aa7beb  Content/sql/recipes/AssayRowTourmalineSeam.sql
+5987b949f  Content/sql/recipes/LifeRendingImbue.sql
+6dd128307  Content/sql/weenies/1000045 Driftmaw Legionary.sql
+6dd128307  Content/sql/weenies/1000046 Driftmaw Spitter.sql
+8cfe5fa98  Content/sql/weenies/1000047 Driftmaw Matron.sql
+6dd128307  Content/sql/weenies/1000048 Matron's Rift-Gland.sql
+6dd128307  Content/sql/weenies/1000049 Ellswyth the Hive-Warden.sql
+6dd128307  Content/sql/weenies/1000050 Driftmaw Hive.sql
+8cfe5fa98  Content/sql/weenies/1000051 Driftmaw Brood Generator.sql
+6dd128307  Content/sql/weenies/1000062 Driftwarden's Mark.sql
+493667feb  Content/sql/weenies/1000063 Driftwarden Provisioner.sql
+6dd128307  Content/sql/weenies/1000064 Provisioner's Tally Slate.sql
+89f2bd1dc  Content/sql/weenies/1000080 Edda Coleward.sql
+fece63fdf  Content/sql/weenies/1000081 Drift-Touched Banderling.sql
+fece63fdf  Content/sql/weenies/1000082 Drift-Touched Raver.sql
+379ae1ee6  Content/sql/weenies/1000083 Grulsk the Doorwright.sql
+6dd128307  Content/sql/weenies/1000084 The Doorwright's Hand.sql
+8cfe5fa98  Content/sql/weenies/1000085 Drift-Touched Brood Generator.sql
+46cf3ff49  Content/sql/weenies/1000086 Unbidden Door of Holtburg.sql
+6dd128307  Content/sql/weenies/1000087 Surface.sql
+8cfe5fa98  Content/sql/weenies/1000088 Grulsk Generator.sql
+fece63fdf  Content/sql/weenies/1000100 Drift-Touched Reedshark.sql
+fece63fdf  Content/sql/weenies/1000101 Drift-Touched Elder Reedshark.sql
+6dd128307  Content/sql/weenies/1000102 Kaede the Kinbinder.sql
+89f2bd1dc  Content/sql/weenies/1000103 Ando Shiraiwa.sql
+8cfe5fa98  Content/sql/weenies/1000104 Drift-Touched Shoal Generator.sql
+46cf3ff49  Content/sql/weenies/1000105 Unbidden Door of Shoushi.sql
+6dd128307  Content/sql/weenies/1000106 Surface.sql
+6dd128307  Content/sql/weenies/1000107 Kaede's Calling-Horn.sql
+8cfe5fa98  Content/sql/weenies/1000108 Kaede Generator.sql
+89f2bd1dc  Content/sql/weenies/1000130 Nadir ibn Hakam.sql
+46cf3ff49  Content/sql/weenies/1000131 Unbidden Door of Yaraq.sql
+6dd128307  Content/sql/weenies/1000132 Surface.sql
+fece63fdf  Content/sql/weenies/1000133 Drift-Touched Scavenger.sql
+fece63fdf  Content/sql/weenies/1000134 Drift-Touched Pretender.sql
+6dd128307  Content/sql/weenies/1000135 The Gilded Shell.sql
+6dd128307  Content/sql/weenies/1000136 The Shell's Tenant.sql
+6dd128307  Content/sql/weenies/1000137 Shard of the Shell.sql
+8cfe5fa98  Content/sql/weenies/1000138 Drift-Touched Barrow Generator.sql
+8cfe5fa98  Content/sql/weenies/1000139 Gilded Shell Generator.sql
+fece63fdf  Content/sql/weenies/1000160 Drift-Touched Moarsman.sql
+fece63fdf  Content/sql/weenies/1000161 Drift-Touched Elder Moarsman.sql
+6dd128307  Content/sql/weenies/1000162 Ghorrun the Twice-Made.sql
+fece63fdf  Content/sql/weenies/1000163 Ghorrun's Twin.sql
+89f2bd1dc  Content/sql/weenies/1000164 Ottavia Renzi.sql
+8cfe5fa98  Content/sql/weenies/1000165 Drift-Touched Mire Generator.sql
+46cf3ff49  Content/sql/weenies/1000166 Unbidden Door of Sanamar.sql
+6dd128307  Content/sql/weenies/1000167 Surface.sql
+6dd128307  Content/sql/weenies/1000168 Ghorrun's Borrowed Arm.sql
+8cfe5fa98  Content/sql/weenies/1000169 Ghorrun Generator.sql
+6dd128307  Content/sql/weenies/1000224 Driftwarden Mystic Gorget.sql
+6dd128307  Content/sql/weenies/1000225 Driftwarden Sixfold Bracelet.sql
+6dd128307  Content/sql/weenies/1000226 Driftwarden Bracelet of Wards.sql
+6dd128307  Content/sql/weenies/1000227 Driftwarden Bulwark Ring.sql
+6dd128307  Content/sql/weenies/1000228 Driftwarden Ring of Quiet Work.sql
+05030a322  Content/sql/weenies/1000229 Driftwarden Gauntlets.sql
+6dd128307  Content/sql/weenies/1000230 Driftwarden Robe.sql
+6dd128307  Content/sql/weenies/1000231 Driftwarden Knife.sql
+6dd128307  Content/sql/weenies/1000232 Driftwarden Blade.sql
+6dd128307  Content/sql/weenies/1000233 Driftwarden Trident.sql
+6dd128307  Content/sql/weenies/1000234 Driftwarden Greataxe.sql
+6dd128307  Content/sql/weenies/1000235 Driftwarden Bow.sql
+6dd128307  Content/sql/weenies/1000236 Driftwarden Fire Baton.sql
+6dd128307  Content/sql/weenies/1000237 Driftwarden Nether Staff.sql
+6dd128307  Content/sql/weenies/1000238 Driftwarden Shield.sql
+6dd128307  Content/sql/weenies/1000239 The Gilded Cleaver.sql
+6dd128307  Content/sql/weenies/1000240 Shard of First Light.sql
+423a7079f  Content/sql/weenies/1000241 Driftwarden Blood Wand.sql
+6852084da  Content/sql/weenies/1000242 Sanguine Sceptre.sql
+6852084da  Content/sql/weenies/1000243 Sanguine Orb.sql
+6852084da  Content/sql/weenies/1000244 Sanguine Staff.sql
+66a3ef065  Content/sql/weenies/1000245 Heartsbane.sql
+08f84c3bb  Content/sql/weenies/1000246 The Last Transfusion.sql
+6852084da  Content/sql/weenies/1000247 Sanguine Baton.sql
+0a32599d5  Content/sql/weenies/1000300 Ironhide Target Drudge.sql
+efc15d6a3  Content/sql/weenies/1000301 Proving Grounds (Attack).sql
+c5ad37fb8  Content/sql/weenies/1000302 Surface.sql
+bbafd2e84  Content/sql/weenies/1000303 Master-at-Arms Ordwin Cray.sql
+a2ef0a65a  Content/sql/weenies/1000304 Proving Grounds Commendation.sql
+efc15d6a3  Content/sql/weenies/1000305 Proving Grounds (Defense).sql
+bbafd2e84  Content/sql/weenies/1000306 Ward-Master Osric Cray.sql
+4423608df  Content/sql/weenies/1000307 Squallbound Zefir.sql
+4423608df  Content/sql/weenies/1000308 Squallbound Wisp.sql
+d7b26a81c  Content/sql/weenies/1000309 Stormcell Canopy.sql
+a6832a496  Content/sql/weenies/1000310 Deed-Counter Watari Jun.sql
+aa8609393  Content/sql/weenies/1000311 Stamped Marketplace Gem.sql
+3de2e1dfd  Content/sql/weenies/1000312 Stamped Town Network Gem.sql
+aa8609393  Content/sql/weenies/1000313 Stamped Drift Gem.sql
+9d5f1083c  Content/sql/weenies/1000314 Stamped Mines Gem.sql
+5ee2aff17  Content/sql/weenies/1000500_classskilltoken_multishot_t1.sql
+5ee2aff17  Content/sql/weenies/1000501_classskilltoken_multishot_t2.sql
+5ee2aff17  Content/sql/weenies/1000502_classskilltoken_multishot_t3.sql
+5ee2aff17  Content/sql/weenies/1000506_classskilltoken_thorns_t1.sql
+5ee2aff17  Content/sql/weenies/1000507_classskilltoken_thorns_t2.sql
+5ee2aff17  Content/sql/weenies/1000508_classskilltoken_thorns_t3.sql
+5ee2aff17  Content/sql/weenies/1000512_classskilltoken_taunt_t1.sql
+5ee2aff17  Content/sql/weenies/1000518_classskilltoken_poisonweapon_t1.sql
+5ee2aff17  Content/sql/weenies/1000519_classskilltoken_poisonweapon_t2.sql
+5ee2aff17  Content/sql/weenies/1000520_classskilltoken_poisonweapon_t3.sql
+d8fa1678c  Content/sql/weenies/1000524_classskilltoken_spellaoe_t1.sql
+d8fa1678c  Content/sql/weenies/1000525_classskilltoken_spellaoe_t2.sql
+d8fa1678c  Content/sql/weenies/1000526_classskilltoken_spellaoe_t3.sql
+585b62be6  Content/sql/weenies/1000530_classskilltoken_battlehardened_t1.sql
+5ee2aff17  Content/sql/weenies/1000536_classskilltoken_frenzy_t1.sql
+5ee2aff17  Content/sql/weenies/1000537_classskilltoken_frenzy_t2.sql
+5ee2aff17  Content/sql/weenies/1000538_classskilltoken_frenzy_t3.sql
+5ee2aff17  Content/sql/weenies/1000542_classskilltoken_netherrush_t1.sql
+5ee2aff17  Content/sql/weenies/1000543_classskilltoken_netherrush_t2.sql
+5ee2aff17  Content/sql/weenies/1000544_classskilltoken_netherrush_t3.sql
+e4de84a32  Content/sql/weenies/1000548_classskilltoken_archer_training_t1.sql
+e4de84a32  Content/sql/weenies/1000549_classskilltoken_archer_training_t2.sql
+e4de84a32  Content/sql/weenies/1000550_classskilltoken_archer_training_t3.sql
+5ee2aff17  Content/sql/weenies/1000554_classskilltoken_enhanced_missileweapons_t1.sql
+3e060f368  Content/sql/weenies/1000555_classskilltoken_enhanced_missileweapons_t2.sql
+3e060f368  Content/sql/weenies/1000556_classskilltoken_enhanced_missileweapons_t3.sql
+3e060f368  Content/sql/weenies/1000560_classskilltoken_enhanced_coordination_t1.sql
+3e060f368  Content/sql/weenies/1000561_classskilltoken_enhanced_coordination_t2.sql
+3e060f368  Content/sql/weenies/1000562_classskilltoken_enhanced_coordination_t3.sql
+585b62be6  Content/sql/weenies/1000566_classskilltoken_deadeye_t1.sql
+585b62be6  Content/sql/weenies/1000567_classskilltoken_deadeye_t2.sql
+585b62be6  Content/sql/weenies/1000568_classskilltoken_deadeye_t3.sql
+585b62be6  Content/sql/weenies/1000572_classskilltoken_eagleeye_t1.sql
+585b62be6  Content/sql/weenies/1000573_classskilltoken_eagleeye_t2.sql
+585b62be6  Content/sql/weenies/1000574_classskilltoken_eagleeye_t3.sql
+585b62be6  Content/sql/weenies/1000578_classskilltoken_heavydraw_t1.sql
+585b62be6  Content/sql/weenies/1000579_classskilltoken_heavydraw_t2.sql
+585b62be6  Content/sql/weenies/1000580_classskilltoken_heavydraw_t3.sql
+5ee2aff17  Content/sql/weenies/1000584_classskilltoken_enhanced_missiledefense_t1.sql
+3e060f368  Content/sql/weenies/1000585_classskilltoken_enhanced_missiledefense_t2.sql
+3e060f368  Content/sql/weenies/1000586_classskilltoken_enhanced_missiledefense_t3.sql
+585b62be6  Content/sql/weenies/1000590_classskilltoken_crit_rating_t1.sql
+585b62be6  Content/sql/weenies/1000591_classskilltoken_crit_rating_t2.sql
+585b62be6  Content/sql/weenies/1000592_classskilltoken_crit_rating_t3.sql
+585b62be6  Content/sql/weenies/1000596_classskilltoken_doublevolley_t1.sql
+585b62be6  Content/sql/weenies/1000597_classskilltoken_doublevolley_t2.sql
+585b62be6  Content/sql/weenies/1000598_classskilltoken_doublevolley_t3.sql
+585b62be6  Content/sql/weenies/1000602_classskilltoken_longdraw_t1.sql
+585b62be6  Content/sql/weenies/1000603_classskilltoken_longdraw_t2.sql
+585b62be6  Content/sql/weenies/1000604_classskilltoken_longdraw_t3.sql
+e4de84a32  Content/sql/weenies/1000608_classskilltoken_rogue_training_t1.sql
+e4de84a32  Content/sql/weenies/1000609_classskilltoken_rogue_training_t2.sql
+e4de84a32  Content/sql/weenies/1000610_classskilltoken_rogue_training_t3.sql
+5ee2aff17  Content/sql/weenies/1000614_classskilltoken_enhanced_finesseweapons_t1.sql
+3e060f368  Content/sql/weenies/1000615_classskilltoken_enhanced_finesseweapons_t2.sql
+3e060f368  Content/sql/weenies/1000616_classskilltoken_enhanced_finesseweapons_t3.sql
+3e060f368  Content/sql/weenies/1000620_classskilltoken_enhanced_quickness_t1.sql
+3e060f368  Content/sql/weenies/1000621_classskilltoken_enhanced_quickness_t2.sql
+3e060f368  Content/sql/weenies/1000622_classskilltoken_enhanced_quickness_t3.sql
+585b62be6  Content/sql/weenies/1000632_classskilltoken_parry_t1.sql
+585b62be6  Content/sql/weenies/1000633_classskilltoken_parry_t2.sql
+5ee2aff17  Content/sql/weenies/1000634_classskilltoken_parry_t3.sql
+585b62be6  Content/sql/weenies/1000638_classskilltoken_riposte_t1.sql
+585b62be6  Content/sql/weenies/1000639_classskilltoken_riposte_t2.sql
+585b62be6  Content/sql/weenies/1000640_classskilltoken_riposte_t3.sql
+5ee2aff17  Content/sql/weenies/1000644_classskilltoken_enhanced_meleedefense_t1.sql
+3e060f368  Content/sql/weenies/1000645_classskilltoken_enhanced_meleedefense_t2.sql
+3e060f368  Content/sql/weenies/1000646_classskilltoken_enhanced_meleedefense_t3.sql
+585b62be6  Content/sql/weenies/1000650_classskilltoken_crit_damage_rating_t1.sql
+585b62be6  Content/sql/weenies/1000651_classskilltoken_crit_damage_rating_t2.sql
+585b62be6  Content/sql/weenies/1000652_classskilltoken_crit_damage_rating_t3.sql
+585b62be6  Content/sql/weenies/1000656_classskilltoken_attackspeed_t1.sql
+585b62be6  Content/sql/weenies/1000657_classskilltoken_attackspeed_t2.sql
+585b62be6  Content/sql/weenies/1000658_classskilltoken_attackspeed_t3.sql
+585b62be6  Content/sql/weenies/1000662_classskilltoken_acidproc_t1.sql
+585b62be6  Content/sql/weenies/1000663_classskilltoken_acidproc_t2.sql
+5ee2aff17  Content/sql/weenies/1000664_classskilltoken_acidproc_t3.sql
+e4de84a32  Content/sql/weenies/1000668_classskilltoken_vanguard_training_t1.sql
+e4de84a32  Content/sql/weenies/1000669_classskilltoken_vanguard_training_t2.sql
+e4de84a32  Content/sql/weenies/1000670_classskilltoken_vanguard_training_t3.sql
+3e060f368  Content/sql/weenies/1000680_classskilltoken_enhanced_endurance_t1.sql
+3e060f368  Content/sql/weenies/1000681_classskilltoken_enhanced_endurance_t2.sql
+3e060f368  Content/sql/weenies/1000682_classskilltoken_enhanced_endurance_t3.sql
+585b62be6  Content/sql/weenies/1000686_classskilltoken_damage_resist_rating_t1.sql
+585b62be6  Content/sql/weenies/1000687_classskilltoken_damage_resist_rating_t2.sql
+585b62be6  Content/sql/weenies/1000688_classskilltoken_damage_resist_rating_t3.sql
+585b62be6  Content/sql/weenies/1000692_classskilltoken_shieldblock_t1.sql
+585b62be6  Content/sql/weenies/1000693_classskilltoken_shieldblock_t2.sql
+5ee2aff17  Content/sql/weenies/1000694_classskilltoken_shieldblock_t3.sql
+5ee2aff17  Content/sql/weenies/1000698_classskilltoken_shieldcheck_t1.sql
+5ee2aff17  Content/sql/weenies/1000699_classskilltoken_shieldcheck_t2.sql
+5ee2aff17  Content/sql/weenies/1000700_classskilltoken_shieldcheck_t3.sql
+585b62be6  Content/sql/weenies/1000704_classskilltoken_crit_resist_rating_t1.sql
+585b62be6  Content/sql/weenies/1000705_classskilltoken_crit_resist_rating_t2.sql
+585b62be6  Content/sql/weenies/1000706_classskilltoken_crit_resist_rating_t3.sql
+3e060f368  Content/sql/weenies/1000710_classskilltoken_enhanced_health_t1.sql
+3e060f368  Content/sql/weenies/1000711_classskilltoken_enhanced_health_t2.sql
+3e060f368  Content/sql/weenies/1000712_classskilltoken_enhanced_health_t3.sql
+3e060f368  Content/sql/weenies/1000716_classskilltoken_berserker_training_t1.sql
+3e060f368  Content/sql/weenies/1000717_classskilltoken_berserker_training_t2.sql
+3e060f368  Content/sql/weenies/1000718_classskilltoken_berserker_training_t3.sql
+5ee2aff17  Content/sql/weenies/1000722_classskilltoken_enhanced_twohandedcombat_t1.sql
+3e060f368  Content/sql/weenies/1000723_classskilltoken_enhanced_twohandedcombat_t2.sql
+3e060f368  Content/sql/weenies/1000724_classskilltoken_enhanced_twohandedcombat_t3.sql
+3e060f368  Content/sql/weenies/1000728_classskilltoken_enhanced_strength_t1.sql
+3e060f368  Content/sql/weenies/1000729_classskilltoken_enhanced_strength_t2.sql
+3e060f368  Content/sql/weenies/1000730_classskilltoken_enhanced_strength_t3.sql
+585b62be6  Content/sql/weenies/1000734_classskilltoken_savageblows_t1.sql
+585b62be6  Content/sql/weenies/1000735_classskilltoken_savageblows_t2.sql
+585b62be6  Content/sql/weenies/1000736_classskilltoken_savageblows_t3.sql
+585b62be6  Content/sql/weenies/1000746_classskilltoken_executioner_t1.sql
+585b62be6  Content/sql/weenies/1000747_classskilltoken_executioner_t2.sql
+585b62be6  Content/sql/weenies/1000748_classskilltoken_executioner_t3.sql
+3e060f368  Content/sql/weenies/1000752_classskilltoken_enhanced_stamina_t1.sql
+3e060f368  Content/sql/weenies/1000753_classskilltoken_enhanced_stamina_t2.sql
+3e060f368  Content/sql/weenies/1000754_classskilltoken_enhanced_stamina_t3.sql
+585b62be6  Content/sql/weenies/1000758_classskilltoken_damage_rating_t1.sql
+585b62be6  Content/sql/weenies/1000759_classskilltoken_damage_rating_t2.sql
+585b62be6  Content/sql/weenies/1000760_classskilltoken_damage_rating_t3.sql
+585b62be6  Content/sql/weenies/1000764_classskilltoken_whirlwind_t1.sql
+585b62be6  Content/sql/weenies/1000770_classskilltoken_bloodlust_t1.sql
+585b62be6  Content/sql/weenies/1000771_classskilltoken_bloodlust_t2.sql
+5ee2aff17  Content/sql/weenies/1000772_classskilltoken_bloodlust_t3.sql
+e4de84a32  Content/sql/weenies/1000776_classskilltoken_archmage_training_t1.sql
+e4de84a32  Content/sql/weenies/1000777_classskilltoken_archmage_training_t2.sql
+e4de84a32  Content/sql/weenies/1000778_classskilltoken_archmage_training_t3.sql
+5ee2aff17  Content/sql/weenies/1000782_classskilltoken_enhanced_warmagic_t1.sql
+3e060f368  Content/sql/weenies/1000783_classskilltoken_enhanced_warmagic_t2.sql
+3e060f368  Content/sql/weenies/1000784_classskilltoken_enhanced_warmagic_t3.sql
+3e060f368  Content/sql/weenies/1000788_classskilltoken_enhanced_focus_t1.sql
+3e060f368  Content/sql/weenies/1000789_classskilltoken_enhanced_focus_t2.sql
+3e060f368  Content/sql/weenies/1000790_classskilltoken_enhanced_focus_t3.sql
+585b62be6  Content/sql/weenies/1000794_classskilltoken_flatcastspeed_t1.sql
+585b62be6  Content/sql/weenies/1000795_classskilltoken_flatcastspeed_t2.sql
+585b62be6  Content/sql/weenies/1000796_classskilltoken_flatcastspeed_t3.sql
+585b62be6  Content/sql/weenies/1000800_classskilltoken_overchannel_t1.sql
+585b62be6  Content/sql/weenies/1000801_classskilltoken_overchannel_t2.sql
+585b62be6  Content/sql/weenies/1000802_classskilltoken_overchannel_t3.sql
+3e060f368  Content/sql/weenies/1000806_classskilltoken_enhanced_mana_t1.sql
+3e060f368  Content/sql/weenies/1000807_classskilltoken_enhanced_mana_t2.sql
+3e060f368  Content/sql/weenies/1000808_classskilltoken_enhanced_mana_t3.sql
+585b62be6  Content/sql/weenies/1000812_classskilltoken_echocast_t1.sql
+585b62be6  Content/sql/weenies/1000813_classskilltoken_echocast_t2.sql
+585b62be6  Content/sql/weenies/1000814_classskilltoken_echocast_t3.sql
+585b62be6  Content/sql/weenies/1000818_classskilltoken_elementalrend_t1.sql
+585b62be6  Content/sql/weenies/1000819_classskilltoken_elementalrend_t2.sql
+5ee2aff17  Content/sql/weenies/1000820_classskilltoken_elementalrend_t3.sql
+2ef69e00a  Content/sql/weenies/1000824_classskilltoken_enhanced_lifemagic_t1.sql
+293bd9cd2  Content/sql/weenies/1000825_classskilltoken_enhanced_lifemagic_t2.sql
+293bd9cd2  Content/sql/weenies/1000826_classskilltoken_enhanced_lifemagic_t3.sql
+e4de84a32  Content/sql/weenies/1000830_classskilltoken_void_training_t1.sql
+e4de84a32  Content/sql/weenies/1000831_classskilltoken_void_training_t2.sql
+e4de84a32  Content/sql/weenies/1000832_classskilltoken_void_training_t3.sql
+5ee2aff17  Content/sql/weenies/1000836_classskilltoken_enhanced_voidmagic_t1.sql
+3e060f368  Content/sql/weenies/1000837_classskilltoken_enhanced_voidmagic_t2.sql
+3e060f368  Content/sql/weenies/1000838_classskilltoken_enhanced_voidmagic_t3.sql
+3e060f368  Content/sql/weenies/1000842_classskilltoken_enhanced_self_t1.sql
+3e060f368  Content/sql/weenies/1000843_classskilltoken_enhanced_self_t2.sql
+3e060f368  Content/sql/weenies/1000844_classskilltoken_enhanced_self_t3.sql
+585b62be6  Content/sql/weenies/1000854_classskilltoken_empoweredsummons_t1.sql
+585b62be6  Content/sql/weenies/1000855_classskilltoken_empoweredsummons_t2.sql
+585b62be6  Content/sql/weenies/1000856_classskilltoken_empoweredsummons_t3.sql
+5ee2aff17  Content/sql/weenies/1000860_classskilltoken_enhanced_summoning_t1.sql
+3e060f368  Content/sql/weenies/1000861_classskilltoken_enhanced_summoning_t2.sql
+3e060f368  Content/sql/weenies/1000862_classskilltoken_enhanced_summoning_t3.sql
+585b62be6  Content/sql/weenies/1000866_classskilltoken_summon2x_t1.sql
+585b62be6  Content/sql/weenies/1000872_classskilltoken_voiddamage_t1.sql
+585b62be6  Content/sql/weenies/1000873_classskilltoken_voiddamage_t2.sql
+585b62be6  Content/sql/weenies/1000874_classskilltoken_voiddamage_t3.sql
+585b62be6  Content/sql/weenies/1000878_classskilltoken_withering_t1.sql
+585b62be6  Content/sql/weenies/1000879_classskilltoken_withering_t2.sql
+585b62be6  Content/sql/weenies/1000880_classskilltoken_withering_t3.sql
+585b62be6  Content/sql/weenies/1000884_classskilltoken_manabarrier_t1.sql
+585b62be6  Content/sql/weenies/1000885_classskilltoken_manabarrier_t2.sql
+e89d06401  Content/sql/weenies/1000886_classskilltoken_manabarrier_t3.sql
+585b62be6  Content/sql/weenies/1000890_classskilltoken_netherbloom_t1.sql
+585b62be6  Content/sql/weenies/1000891_classskilltoken_netherbloom_t2.sql
+585b62be6  Content/sql/weenies/1000892_classskilltoken_netherbloom_t3.sql
+585b62be6  Content/sql/weenies/1000896_classskilltoken_soultether_t1.sql
+585b62be6  Content/sql/weenies/1000897_classskilltoken_soultether_t2.sql
+585b62be6  Content/sql/weenies/1000898_classskilltoken_soultether_t3.sql
+c587f2d82  Content/sql/weenies/1000902_classskilltoken_enhanced_heavyweapons_t1.sql
+3e060f368  Content/sql/weenies/1000903_classskilltoken_enhanced_heavyweapons_t2.sql
+3e060f368  Content/sql/weenies/1000904_classskilltoken_enhanced_heavyweapons_t3.sql
+c587f2d82  Content/sql/weenies/1000908_classskilltoken_enhanced_magicdefense_t1.sql
+3e060f368  Content/sql/weenies/1000909_classskilltoken_enhanced_magicdefense_t2.sql
+3e060f368  Content/sql/weenies/1000910_classskilltoken_enhanced_magicdefense_t3.sql
+858072fc9  Content/sql/weenies/1000914_classskilltoken_sanguine_reserve_t1.sql
+858072fc9  Content/sql/weenies/1000915_classskilltoken_sanguine_reserve_t2.sql
+858072fc9  Content/sql/weenies/1000916_classskilltoken_sanguine_reserve_t3.sql
+e0a62e475  Content/sql/weenies/1000920_classskilltoken_transfusion_t1.sql
+e0a62e475  Content/sql/weenies/1000921_classskilltoken_transfusion_t2.sql
+e0a62e475  Content/sql/weenies/1000922_classskilltoken_transfusion_t3.sql
+858072fc9  Content/sql/weenies/1000926_classskilltoken_bloodmage_training_t1.sql
+858072fc9  Content/sql/weenies/1000927_classskilltoken_bloodmage_training_t2.sql
+858072fc9  Content/sql/weenies/1000928_classskilltoken_bloodmage_training_t3.sql
+585b62be6  Content/sql/weenies/1000932_classskilltoken_weakened_blood_t1.sql
+585b62be6  Content/sql/weenies/1000933_classskilltoken_weakened_blood_t2.sql
+858072fc9  Content/sql/weenies/1000934_classskilltoken_weakened_blood_t3.sql
+858072fc9  Content/sql/weenies/1000938_classskilltoken_malediction_t1.sql
+858072fc9  Content/sql/weenies/1000939_classskilltoken_malediction_t2.sql
+858072fc9  Content/sql/weenies/1000940_classskilltoken_malediction_t3.sql
+585b62be6  Content/sql/weenies/1000944_classskilltoken_crimson_harvest_t1.sql
+585b62be6  Content/sql/weenies/1000950_classskilltoken_heal_boost_rating_t1.sql
+585b62be6  Content/sql/weenies/1000951_classskilltoken_heal_boost_rating_t2.sql
+585b62be6  Content/sql/weenies/1000952_classskilltoken_heal_boost_rating_t3.sql
+585b62be6  Content/sql/weenies/1000956_classskilltoken_exsanguinate_t1.sql
+585b62be6  Content/sql/weenies/1000962_classskilltoken_blood_price_t1.sql
+585b62be6  Content/sql/weenies/1000963_classskilltoken_blood_price_t2.sql
+585b62be6  Content/sql/weenies/1000964_classskilltoken_blood_price_t3.sql
+858072fc9  Content/sql/weenies/1000968_classskilltoken_sanguine_ward_t1.sql
+858072fc9  Content/sql/weenies/1000969_classskilltoken_sanguine_ward_t2.sql
+858072fc9  Content/sql/weenies/1000970_classskilltoken_sanguine_ward_t3.sql
+6dd128307  Content/sql/weenies/1001010_classabilitypoint_currency.sql
+fece63fdf  Content/sql/weenies/1001030 Wayless Siraluun.sql
+8cfe5fa98  Content/sql/weenies/1001031 Wayless Siraluun Brood.sql
+8cfe5fa98  Content/sql/weenies/1001032 Whetu the Unanswered.sql
+fd1298757  Content/sql/weenies/1001033 Aun Tehaura the Drumspeaker.sql
+5fb3537c8  Content/sql/weenies/1001034 Rookery Mound.sql
+eb0f4ea23  Content/sql/weenies/1001035 Wayless Siraluun Egg.sql
+4eda77251  Content/sql/weenies/1001036 Unanswered Rookery.sql
+8cfe5fa98  Content/sql/weenies/1001037 Wayless Siraluun Watcher.sql
+f32d3bc84  Content/sql/weenies/1001050.sql
+f32d3bc84  Content/sql/weenies/1001051.sql
+f32d3bc84  Content/sql/weenies/1001052.sql
+f32d3bc84  Content/sql/weenies/1001053.sql
+f32d3bc84  Content/sql/weenies/1001054.sql
+f32d3bc84  Content/sql/weenies/1001055.sql
+fece63fdf  Content/sql/weenies/1001056.sql
+fece63fdf  Content/sql/weenies/1001057.sql
+fece63fdf  Content/sql/weenies/1001058.sql
+2e18f93c5  Content/sql/weenies/1001060.sql
+d99b9af6e  Content/sql/weenies/1001061.sql
+8b20ea0b5  Content/sql/weenies/1001062.sql
+6dd128307  Content/sql/weenies/1001063.sql
+8cfe5fa98  Content/sql/weenies/1001066.sql
+8cfe5fa98  Content/sql/weenies/1001067.sql
+8cfe5fa98  Content/sql/weenies/1001068.sql
+62591427b  Content/sql/weenies/1001075 Gold Siraluun Egg.sql
+9412a16b5  Content/sql/weenies/1001076 Stone Arch.sql
+22e3e0d15  Content/sql/weenies/1001090_reckoning_statue.sql
+9654b0960  Content/sql/weenies/1001091_reckoning_statue.sql
+22e3e0d15  Content/sql/weenies/1001092_reckoning_statue.sql
+b11b6bffc  Content/sql/weenies/1001093 The Anchor-Gorged Generator.sql
+8cfe5fa98  Content/sql/weenies/1001100 Meridian Sigil of the Six.sql
+8cfe5fa98  Content/sql/weenies/1001101 Meridian Bulwark Signet.sql
+8cfe5fa98  Content/sql/weenies/1001102 Meridian Warder's Band.sql
+8cfe5fa98  Content/sql/weenies/1001103 Meridian Ring of the Line.sql
+8cfe5fa98  Content/sql/weenies/1001104 Meridian Collar of Seven Arts.sql
+05030a322  Content/sql/weenies/1001105 Meridian Keystone.sql
+2d039a918  Content/sql/weenies/1001106 Dispatcher Corwen Hale.sql
+95d081c22  Content/sql/weenies/1001107 Busy Door.sql
+95d081c22  Content/sql/weenies/1001108 Rusting Door.sql
+95d081c22  Content/sql/weenies/1001109 Held Door.sql
+95d081c22  Content/sql/weenies/1001110 Breathing Door.sql
+95d081c22  Content/sql/weenies/1001111 Miscounted Door.sql
+95d081c22  Content/sql/weenies/1001112 First Pin.sql
+fece63fdf  Content/sql/weenies/1001150 Drift-Touched Tusker.sql
+fece63fdf  Content/sql/weenies/1001151 Drift-Touched Tusker Bull.sql
+8cfe5fa98  Content/sql/weenies/1001152 Drift-Touched Tusker Generator.sql
+8cfe5fa98  Content/sql/weenies/1001153 Drift-Touched Tusker Bull Generator.sql
+6dd128307  Content/sql/weenies/1001154 Surface.sql
+d9e2caf30  Content/sql/weenies/1001200 Anchor-Iron Bur.sql
+fece63fdf  Content/sql/weenies/1001201 Rust-Grown Burun.sql
+fece63fdf  Content/sql/weenies/1001202 Rust-Grown Burun Elder.sql
+8cfe5fa98  Content/sql/weenies/1001203 Rust-Grown Burun Nest.sql
+8cfe5fa98  Content/sql/weenies/1001204 Rust-Grown Burun Elder Warren.sql
+fece63fdf  Content/sql/weenies/1001206 Rust-Drowned Linesman.sql
+fece63fdf  Content/sql/weenies/1001207 Mooring-Hauler.sql
+fece63fdf  Content/sql/weenies/1001208 Line-Overseer.sql
+079f73925  Content/sql/weenies/1001210 Rust-Seized Valve A.sql
+079f73925  Content/sql/weenies/1001211 Rust-Seized Valve B.sql
+079f73925  Content/sql/weenies/1001212 Rust-Seized Valve C.sql
+079f73925  Content/sql/weenies/1001213 Rust-Seized Valve D.sql
+fece63fdf  Content/sql/weenies/1001250 Doorheld Escort.sql
+fece63fdf  Content/sql/weenies/1001251 Doorheld Gauger.sql
+fece63fdf  Content/sql/weenies/1001252 Doorheld Surveyor.sql
+8cfe5fa98  Content/sql/weenies/1001254 Doorheld Escort Spawner.sql
+8cfe5fa98  Content/sql/weenies/1001255 Doorheld Gauger Spawner.sql
+8cfe5fa98  Content/sql/weenies/1001256 Doorheld Surveyor Spawner.sql
+6dd128307  Content/sql/weenies/1001257 Surface.sql
+aa56c0861  Content/sql/weenies/1001258 The Other Shoulder.sql
+72aba1b9f  Content/sql/weenies/1001260 Surface.sql
+89e9a576c  Content/sql/weenies/1001300 Matron of the Long Breath.sql
+89e9a576c  Content/sql/weenies/1001301 Drift-Touched Olthoi Drone.sql
+89e9a576c  Content/sql/weenies/1001302 Drift-Touched Olthoi Soldier.sql
+9f418d618  Content/sql/weenies/1001303 Surface.sql
+6dd128307  Content/sql/weenies/1001304 Drift-Touched Drone Pulse Generator.sql
+6dd128307  Content/sql/weenies/1001305 Drift-Touched Soldier Pulse Generator.sql
+9f418d618  Content/sql/weenies/1001306 Matron Anchor Generator.sql
+b2f38c1f9  Content/sql/weenies/1001320 Spiracle Node.sql
+fece63fdf  Content/sql/weenies/1001350 Lattice-Bent Wisp.sql
+fece63fdf  Content/sql/weenies/1001351 Lattice-Bent Zephyr.sql
+407a4d508  Content/sql/weenies/1001352 The Miscount.sql
+8cfe5fa98  Content/sql/weenies/1001353 Lattice Warren Generator.sql
+8cfe5fa98  Content/sql/weenies/1001354 Miscounted Warren Generator.sql
+6dd128307  Content/sql/weenies/1001355 Surface.sql
+f81eedb27  Content/sql/weenies/1001356 Tally Stone.sql
+fece63fdf  Content/sql/weenies/1001400 Drift-Touched Tusker.sql
+fece63fdf  Content/sql/weenies/1001401 Rust-Grown Burun.sql
+fece63fdf  Content/sql/weenies/1001402 Doorheld Surveyor.sql
+fece63fdf  Content/sql/weenies/1001403 Drift-Touched Olthoi Reaver.sql
+fece63fdf  Content/sql/weenies/1001404 Lattice-Shorn Wisp.sql
+407a4d508  Content/sql/weenies/1001405 The Anchorheld.sql
+407a4d508  Content/sql/weenies/1001406 The Unpinned.sql
+8cfe5fa98  Content/sql/weenies/1001410 Drift-Touched Tusker Generator.sql
+8cfe5fa98  Content/sql/weenies/1001411 Rust-Grown Burun Generator.sql
+8cfe5fa98  Content/sql/weenies/1001412 Doorheld Surveyor Generator.sql
+8cfe5fa98  Content/sql/weenies/1001413 Drift-Touched Olthoi Generator.sql
+f76b4acfe  Content/sql/weenies/1001414 Lattice-Shorn Wisp Generator.sql
+6dd128307  Content/sql/weenies/1001420 Surface.sql
+89f2bd1dc  Content/sql/weenies/1001430 Gatewright Tomiya Sen.sql
+89f2bd1dc  Content/sql/weenies/1001431 Line-Greaser Tobbin Mott.sql
+89f2bd1dc  Content/sql/weenies/1001432 Relief-Bearer Ysanne Loret.sql
+89f2bd1dc  Content/sql/weenies/1001433 Vent-Warden Callum Dreese.sql
+89f2bd1dc  Content/sql/weenies/1001434 Census-Warden Hakim al-Sabri.sql
+89f2bd1dc  Content/sql/weenies/1001435 Pinwright Ashina Yoi.sql
+14b63c3c1  Content/sql/weenies/1001513 Cogwrought Voltbound Armiger.sql
+4cc607660  Content/sql/weenies/1001550 Proving Grounds (Wave).sql
+4ef9100f3  Content/sql/weenies/1001551 Field-Marshal Oswyn Cray.sql
+0a7d4ad8d  Content/sql/weenies/1001552 Sedgewrack the Drowned.sql
+0a7d4ad8d  Content/sql/weenies/1001553 Blightmarrow the Fenwarden.sql
+0a7d4ad8d  Content/sql/weenies/1001554 Quagmarch the Slow Green.sql
+0a7d4ad8d  Content/sql/weenies/1001555 Harrowmoss the Green Silence.sql
+0a7d4ad8d  Content/sql/weenies/1001556 Mirebound Scavenger.sql
+0a7d4ad8d  Content/sql/weenies/1001557 Mirebound Reedshark.sql
+0a7d4ad8d  Content/sql/weenies/1001558 Mirebound Raver.sql
+0a7d4ad8d  Content/sql/weenies/1001559 Mirebound Banderling.sql
+0a7d4ad8d  Content/sql/weenies/1001560 Mirebound Chanter.sql
+0a7d4ad8d  Content/sql/weenies/1001561 Mirebound Tusker.sql
+0a7d4ad8d  Content/sql/weenies/1001562 Rot-Grown Burun.sql
+0a7d4ad8d  Content/sql/weenies/1001563 Mirebound Siraluun.sql
+0a7d4ad8d  Content/sql/weenies/1001564 Mirebound Reaver.sql
+0a7d4ad8d  Content/sql/weenies/1001565 Mire-Bent Zephyr.sql
+0a7d4ad8d  Content/sql/weenies/1001566 Mirebound Rotlord.sql
+0a7d4ad8d  Content/sql/weenies/1001567 Mire-Sworn Ravener.sql
+0a7d4ad8d  Content/sql/weenies/1001568 Mirefen Archon.sql
+0a7d4ad8d  Content/sql/weenies/1001569 Mire-Marshal Vanguard.sql
+49c670599  Content/sql/weenies/1001570 Wave 01 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001571 Wave 02 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001572 Wave 03 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001573 Wave 04 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001574 Wave 05 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001575 Wave 06 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001576 Wave 07 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001577 Wave 08 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001578 Wave 09 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001579 Wave 10 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001580 Wave 11 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001581 Wave 12 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001582 Wave 13 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001583 Wave 14 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001584 Wave 15 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001585 Wave 16 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001586 Wave 17 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001587 Wave 18 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001588 Wave 19 Roster - The Proving Grounds.sql
+49c670599  Content/sql/weenies/1001589 Wave 20 Roster - The Proving Grounds.sql
+05bceedc4  Content/sql/weenies/1001600 Prismatic Drift Stone.sql
+50f7defe1  Content/sql/weenies/1001750 Salvage-Broker Bevan Tolliver.sql
+a66c0a044  Content/sql/weenies/1001751 Full Bag of Tiger Eye Salvage.sql
+a66c0a044  Content/sql/weenies/1001752 Full Bag of Obsidian Salvage.sql
+44809f32b  Content/sql/weenies/1001753 Sealed Bag of Tiger Eye Salvage.sql
+107ee7ac3  Content/sql/weenies/1001754 Sealed Bag of Obsidian Salvage.sql
+83f5f8f00  Content/sql/weenies/1001755 Full Bag of Tourmaline Salvage.sql
+83f5f8f00  Content/sql/weenies/1001756 Full Bag of Amethyst Salvage.sql
+83f5f8f00  Content/sql/weenies/1001757 Sealed Bag of Tourmaline Salvage.sql
+83f5f8f00  Content/sql/weenies/1001758 Sealed Bag of Amethyst Salvage.sql
+702a8a8be  Content/sql/weenies/1001759 Full Bag of Serpentine Salvage.sql
+702a8a8be  Content/sql/weenies/1001760 Sealed Bag of Serpentine Salvage.sql
+efa2a8e8a  Content/sql/weenies/1001800 Caravaneer's Pack.sql
+1e7aae673  Content/sql/weenies/1001870 Awfully OP Gear.sql
+28557bd95  Content/sql/weenies/1001871 Awfully OP Helm.sql
+28557bd95  Content/sql/weenies/1001872 Awfully OP Breastplate.sql
+28557bd95  Content/sql/weenies/1001873 Awfully OP Pauldrons.sql
+28557bd95  Content/sql/weenies/1001874 Awfully OP Bracers.sql
+28557bd95  Content/sql/weenies/1001875 Awfully OP Gauntlets.sql
+28557bd95  Content/sql/weenies/1001876 Awfully OP Girth.sql
+28557bd95  Content/sql/weenies/1001877 Awfully OP Tassets.sql
+28557bd95  Content/sql/weenies/1001878 Awfully OP Greaves.sql
+28557bd95  Content/sql/weenies/1001879 Awfully OP Sollerets.sql
+28557bd95  Content/sql/weenies/1001880 Awfully OP Shirt.sql
+28557bd95  Content/sql/weenies/1001881 Awfully OP Trousers.sql
+dee627b61  Content/sql/weenies/1001882 Awfully OP Ring.sql
+5402147b2  Content/sql/weenies/1001883 Awfully OP Heavy Axe.sql
+5402147b2  Content/sql/weenies/1001884 Awfully OP Light Axe.sql
+5402147b2  Content/sql/weenies/1001885 Awfully OP Finesse Dagger.sql
+5402147b2  Content/sql/weenies/1001886 Awfully OP Two Handed Spear.sql
+5402147b2  Content/sql/weenies/1001887 Awfully OP Bow.sql
+5402147b2  Content/sql/weenies/1001888 Awfully OP Crossbow.sql
+5402147b2  Content/sql/weenies/1001889 Awfully OP Atlatl.sql
+5402147b2  Content/sql/weenies/1001890 Awfully OP Slashing Wand.sql
+5402147b2  Content/sql/weenies/1001891 Awfully OP Piercing Wand.sql
+5402147b2  Content/sql/weenies/1001892 Awfully OP Bludgeoning Wand.sql
+5402147b2  Content/sql/weenies/1001893 Awfully OP Frost Wand.sql
+5402147b2  Content/sql/weenies/1001894 Awfully OP Flame Wand.sql
+5402147b2  Content/sql/weenies/1001895 Awfully OP Acid Wand.sql
+5402147b2  Content/sql/weenies/1001896 Awfully OP Lightning Wand.sql
+5402147b2  Content/sql/weenies/1001897 Awfully OP Nether Wand.sql
+5402147b2  Content/sql/weenies/1001898 Awfully OP Flaming Heavy Axe.sql
+5402147b2  Content/sql/weenies/1001899 Awfully OP Flaming Light Axe.sql
+5402147b2  Content/sql/weenies/1001900 Awfully OP Flaming Finesse Dagger.sql
+5402147b2  Content/sql/weenies/1001901 Awfully OP Flaming Two Handed Spear.sql
+5402147b2  Content/sql/weenies/1001902 Awfully OP Flaming Bow.sql
+5402147b2  Content/sql/weenies/1001903 Awfully OP Flaming Crossbow.sql
+5402147b2  Content/sql/weenies/1001904 Awfully OP Flaming Atlatl.sql
+59828e437  Content/sql/weenies/1001905 Awfully OP Orb.sql
+28557bd95  Content/sql/weenies/1001906 Awfully OP Shield.sql
+5402147b2  Content/sql/weenies/1001907 Awfully OP Cloak.sql
+2d2400148  Content/sql/weenies/1001908 Awfully OP Necklace.sql
+a66c0a044  Content/sql/weenies/1001909 Awfully OP Mod Hammer.sql
+b9d8b8c63  Content/sql/weenies/1001910 Tourmaline Hammer.sql
+b9d8b8c63  Content/sql/weenies/1001911 Amethyst Hammer.sql
+b9d8b8c63  Content/sql/weenies/1001913 Sealed Tourmaline Hammer.sql
+b9d8b8c63  Content/sql/weenies/1001914 Sealed Amethyst Hammer.sql
+a66c0a044  Content/sql/weenies/1001915 Sealed Obsidian Hammer.sql
+702a8a8be  Content/sql/weenies/1001916 Serpentine Hammer.sql
+702a8a8be  Content/sql/weenies/1001917 Sealed Serpentine Hammer.sql
+a66c0a044  Content/sql/weenies/1001919 Sealed Tiger Eye Hammer.sql
+05030a322  Content/sql/weenies/1001941 Bearer's Pack.sql
+4e5c8262c  Content/sql/weenies/1001950_npc_bloodmage_trainer.sql
+22a0d9940  Content/sql/weenies/1001960_npc_spellsword_trainer.sql
+ec4535ea0  Content/sql/weenies/1001961 Driftwarden Cinderblade.sql
+888748f48  Content/sql/weenies/1001962 Driftwarden Stormblade.sql
+ec4535ea0  Content/sql/weenies/1002000_classskilltoken_spellblade_t1.sql
+ec4535ea0  Content/sql/weenies/1002001_classskilltoken_spellblade_t2.sql
+ec4535ea0  Content/sql/weenies/1002002_classskilltoken_spellblade_t3.sql
+585b62be6  Content/sql/weenies/1002006_classskilltoken_resonance_t1.sql
+585b62be6  Content/sql/weenies/1002007_classskilltoken_resonance_t2.sql
+585b62be6  Content/sql/weenies/1002008_classskilltoken_resonance_t3.sql
+ec4535ea0  Content/sql/weenies/1002012_classskilltoken_spellsword_training_t1.sql
+ec4535ea0  Content/sql/weenies/1002013_classskilltoken_spellsword_training_t2.sql
+ec4535ea0  Content/sql/weenies/1002014_classskilltoken_spellsword_training_t3.sql
+ec4535ea0  Content/sql/weenies/1002018_classskilltoken_enhanced_lightweapons_t1.sql
+ec4535ea0  Content/sql/weenies/1002019_classskilltoken_enhanced_lightweapons_t2.sql
+ec4535ea0  Content/sql/weenies/1002020_classskilltoken_enhanced_lightweapons_t3.sql
+ec4535ea0  Content/sql/weenies/1002024_classskilltoken_runeblade_t1.sql
+585b62be6  Content/sql/weenies/1002025_classskilltoken_runeblade_t2.sql
+585b62be6  Content/sql/weenies/1002026_classskilltoken_runeblade_t3.sql
+585b62be6  Content/sql/weenies/1002030_classskilltoken_sundermark_t1.sql
+585b62be6  Content/sql/weenies/1002031_classskilltoken_sundermark_t2.sql
+585b62be6  Content/sql/weenies/1002032_classskilltoken_sundermark_t3.sql
+585b62be6  Content/sql/weenies/1002036_classskilltoken_spellsurge_t1.sql
+585b62be6  Content/sql/weenies/1002042_classskilltoken_spellstorm_t1.sql
+585b62be6  Content/sql/weenies/1002048_classskilltoken_cascade_t1.sql
+585b62be6  Content/sql/weenies/1002054_classskilltoken_dispellingedge_t1.sql
+585b62be6  Content/sql/weenies/1002055_classskilltoken_dispellingedge_t2.sql
+585b62be6  Content/sql/weenies/1002056_classskilltoken_dispellingedge_t3.sql
+764901bff  Content/sql/weenies/1002060_classskilltoken_breakarmor_t1.sql
+764901bff  Content/sql/weenies/1002061_classskilltoken_breakarmor_t2.sql
+764901bff  Content/sql/weenies/1002062_classskilltoken_breakarmor_t3.sql
+764901bff  Content/sql/weenies/1002066_classskilltoken_surefooted_t1.sql
+764901bff  Content/sql/weenies/1002067_classskilltoken_surefooted_t2.sql
+764901bff  Content/sql/weenies/1002068_classskilltoken_surefooted_t3.sql
+764901bff  Content/sql/weenies/1002072_classskilltoken_pocketsand_t1.sql
+764901bff  Content/sql/weenies/1002073_classskilltoken_pocketsand_t2.sql
+764901bff  Content/sql/weenies/1002074_classskilltoken_pocketsand_t3.sql
+a66c0a044  Content/sql/weenies/1002500 Sealed Awfully OP Mod Hammer.sql
+2f713e028  Content/sql/weenies/1002520 Peculiar Stone.sql
+95d081c22  Content/sql/weenies/1002521 Banded Adit.sql
+268080f31  Content/sql/weenies/1002522 Open Cut.sql
+95d081c22  Content/sql/weenies/1002523 Grain Quarry.sql
+268080f31  Content/sql/weenies/1002524 Geode Field.sql
+95d081c22  Content/sql/weenies/1002525 Glass Shaft.sql
+95d081c22  Content/sql/weenies/1002526 Firecut.sql
+f270ed5ea  Content/sql/weenies/1002527 Assay Pick.sql
+e9baa1b34  Content/sql/weenies/1002528 Diamond Spall.sql
+e9baa1b34  Content/sql/weenies/1002529 Diamond Spall.sql
+e9baa1b34  Content/sql/weenies/1002530 Diamond Spall.sql
+eb0f4ea23  Content/sql/weenies/1002531 Raw Drift Crystal.sql
+530b4c7fd  Content/sql/weenies/1002532 Surface.sql
+6cb02fa0e  Content/sql/weenies/1002533 Lampstone Golem.sql
+f270ed5ea  Content/sql/weenies/1002535 Surface.sql
+e9baa1b34  Content/sql/weenies/1002536 Greenseam Quarrier.sql
+e9baa1b34  Content/sql/weenies/1002537 Greenseam Hewer.sql
+faad1b4f0  Content/sql/weenies/1002538 Serpentine Seam.sql
+268080f31  Content/sql/weenies/1002539 Serpentine Seam Generator.sql
+f7f14b955  Content/sql/weenies/1002540 Pure Serpentine Ore.sql
+f270ed5ea  Content/sql/weenies/1002541 Surface.sql
+0fa9a0dd6  Content/sql/weenies/1002542 Amethyst Spire.sql
+6673ec6a3  Content/sql/weenies/1002543 Amethyst Seedling.sql
+ac7154df8  Content/sql/weenies/1002544 Serpentine Colossus.sql
+f7f14b955  Content/sql/weenies/1002545 Serpentine Heartstone.sql
+eb6aa7beb  Content/sql/weenies/1002562 Tourmaline Seam Generator.sql
+eb6aa7beb  Content/sql/weenies/1002546 Tourmaline Ambush Marker.sql
+5c004a1e9  Content/sql/weenies/1002547 Amethyst Archon.sql
+097d4973f  Content/sql/weenies/1002548 Raw Amethyst Geode.sql
+e9baa1b34  Content/sql/weenies/1002552 Blackglass Hewer.sql
+faad1b4f0  Content/sql/weenies/1002553 Obsidian Seam.sql
+bee186cbe  Content/sql/weenies/1002554 Obsidian Seam Generator.sql
+5c004a1e9  Content/sql/weenies/1002555 Weeping Blackglass.sql
+f270ed5ea  Content/sql/weenies/1002557 Surface.sql
+f270ed5ea  Content/sql/weenies/1002558 Verdelite Gear Trooper.sql
+e9baa1b34  Content/sql/weenies/1002559 Rubellite Gear Guardian.sql
+e9baa1b34  Content/sql/weenies/1002560 Siberite Gear Lesser Lord.sql
+faad1b4f0  Content/sql/weenies/1002561 Tourmaline Seam.sql
+eb0f4ea23  Content/sql/weenies/1002563 Raw Tourmaline.sql
+268080f31  Content/sql/weenies/1002564 Drift Network.sql
+097d4973f  Content/sql/weenies/1002568 Amethyst Warden.sql
+6673ec6a3  Content/sql/weenies/1002569 Amethyst Cluster.sql
+097d4973f  Content/sql/weenies/1002570 Raw Amethyst Shard.sql
+268080f31  Content/sql/weenies/1002571 Drift Network.sql
+6673ec6a3  Content/sql/weenies/1002578 Bloomfire Exarch.sql
+6673ec6a3  Content/sql/weenies/1002579 Clarity Suzerain.sql
+472ae5e7a  Content/sql/weenies/1002580 Sealed Flow.sql
+d2c5e6906  Content/sql/weenies/1002581 Surface.sql
+29847f8ad  Content/sql/weenies/1002600 Hammer Crate.sql
+29847f8ad  Content/sql/weenies/1002601 Salvage Crate.sql
+ee38cc963  Content/sql/weenies/1002602 Weave Cache.sql
+2c9efbd7d  Content/sql/weenies/1002603 Rift.sql
+2e18f93c5  Content/sql/weenies/1002619 Vhaleth, Matron of the Black Clutch.sql
+2e18f93c5  Content/sql/weenies/1002620 The Pale Idol of Bak't.sql
+19f9c8609  Content/sql/weenies/1002669 Dynamo Edge.sql
+38c9b7786  Content/sql/weenies/1002621 Aurex, the Gilded Dynamo.sql
+2e18f93c5  Content/sql/weenies/1002622 The Red Reaping.sql
+19f9c8609  Content/sql/weenies/1002670 Legates Tachi.sql
+19f9c8609  Content/sql/weenies/1002623 Legate Vessaryn of the Violet Ranks.sql
+19f9c8609  Content/sql/weenies/1002671 Correction Arrow.sql
+0fd6d1575  Content/sql/weenies/1002624 Ssethaun, Pale Hierophant of the Correction.sql
+2e18f93c5  Content/sql/weenies/1002625 Ghurrak Bonehide.sql
+2e18f93c5  Content/sql/weenies/1002626 The Black Draught.sql
+2e18f93c5  Content/sql/weenies/1002627 The Violet Wake.sql
+2e18f93c5  Content/sql/weenies/1002628 The Blackwing Eclipse.sql
+fa237adfd  Content/sql/weenies/1002629 Weave Cache (Falatacot).sql
+2ca81eae9  Content/sql/weenies/1002630 Weave Spoil.sql
+2ca81eae9  Content/sql/weenies/1002631 Weave Spoil.sql
+2ca81eae9  Content/sql/weenies/1002632 Weave Shard.sql
+fa237adfd  Content/sql/weenies/1002633 Weave Cache (Noble).sql
+fa237adfd  Content/sql/weenies/1002634 Weave Cache (Coral).sql
+fa237adfd  Content/sql/weenies/1002635 Weave Cache (Legendary).sql
+fa237adfd  Content/sql/weenies/1002636 Weave Cache (Reliquary).sql
+bcd6f2880  Content/sql/weenies/1002637 Weave Cache (Casino).sql
+3001090ab  Content/sql/weenies/1002638 Weave Spiral.sql
+3001090ab  Content/sql/weenies/1002639 Vyr Loz.sql
+3001090ab  Content/sql/weenies/1002640 Sev Loz.sql
+3001090ab  Content/sql/weenies/1002641 Aur Loz.sql
+0aa6bafcc  Content/sql/weenies/1002650 Hollow Hammer.sql
+0aa6bafcc  Content/sql/weenies/1002651 Sealed Hollow Hammer.sql
+2c9efbd7d  Content/sql/weenies/1002660 Emberbound Pillar.sql
+b1bebeba8  Content/sql/weenies/1002661 Corrosive Pillar.sql
+2c9efbd7d  Content/sql/weenies/1002662 Rimebound Pillar.sql
+2c9efbd7d  Content/sql/weenies/1002663 Stormbound Pillar.sql
+2c9efbd7d  Content/sql/weenies/1002664 Earthbound Pillar.sql
+2c9efbd7d  Content/sql/weenies/1002665 Pillar of Fire.sql
+2c9efbd7d  Content/sql/weenies/1002666 Pillar of Acid.sql
+2c9efbd7d  Content/sql/weenies/1002667 Pillar of Frost.sql
+2c9efbd7d  Content/sql/weenies/1002668 Pillar of Lightning.sql
+8a56f315b  Content/sql/weenies/1002710 Champion's Crest Helm.sql
+8a56f315b  Content/sql/weenies/1002711 Champion's Winged Cuirass.sql
+8a56f315b  Content/sql/weenies/1002712 Champion's Aegis.sql
+56912b22f  Content/sql/weenies/1002823 Black Market Gem of Dispelling.sql
+56912b22f  Content/sql/weenies/1002824 Burning Coal.sql
+56912b22f  Content/sql/weenies/1002825 Plentiful Healing Kit.sql
+56912b22f  Content/sql/weenies/1002826 Black Market Health Elixir.sql
+56912b22f  Content/sql/weenies/1002827 Draught of Revitalization.sql
+56912b22f  Content/sql/weenies/1002828 Black Market Mana Elixir.sql
+56a2cb6b2  Content/sql/weenies/1002830 Box of 50 Encapsulated Spirits.sql
+528aaa78f  Content/sql/weenies/1002835 Salvage-Broker Devan Tolliver.sql
+ffb7aef6e  Content/sql/weenies/1002840 Drumtaken Littoral Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002841 Drumtaken Marsh Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002842 Drumtaken Carenzi Trampler.sql
+ffb7aef6e  Content/sql/weenies/1002843 Drumtaken Carenzi Sentry.sql
+ffb7aef6e  Content/sql/weenies/1002844 Drumtaken Carenzi Stalker.sql
+ffb7aef6e  Content/sql/weenies/1002845 Siberite Fragment.sql
+ffb7aef6e  Content/sql/weenies/1002846 Drumtaken Sable Gromnie.sql
+ffb7aef6e  Content/sql/weenies/1002847 Olthoi Drone.sql
+ffb7aef6e  Content/sql/weenies/1002848 Drumtaken Strand Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002849 Drumtaken Sand Golem.sql
+ffb7aef6e  Content/sql/weenies/1002850 Drumtaken Coral Golem.sql
+ffb7aef6e  Content/sql/weenies/1002851 Drumtaken Marae Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1002852 Olthoi Servant.sql
+ffb7aef6e  Content/sql/weenies/1002853 Rauhea the Longwing.sql
+ffb7aef6e  Content/sql/weenies/1002854 Tanepo the Nine-Scarred.sql
+ffb7aef6e  Content/sql/weenies/1002855 Rangi of the Drowned Rank.sql
+ffb7aef6e  Content/sql/weenies/1002856 Drumtaken Kithless Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002857 Drumtaken Timber Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002858 Drumtaken Rabid Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1002859 Drumtaken Feral Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1002860 Siberite Shard.sql
+ffb7aef6e  Content/sql/weenies/1002861 Drumtaken Azael Zefir.sql
+ffb7aef6e  Content/sql/weenies/1002862 Drumtaken Ebon Gromnie.sql
+ffb7aef6e  Content/sql/weenies/1002863 Drumtaken Copper Gromnie.sql
+ffb7aef6e  Content/sql/weenies/1002864 Drumtaken Canescent Mattekar.sql
+ffb7aef6e  Content/sql/weenies/1002865 Olthoi Piercer.sql
+ffb7aef6e  Content/sql/weenies/1002866 Drumtaken Elariwood Golem.sql
+ffb7aef6e  Content/sql/weenies/1002867 Drumtaken Basalt Golem.sql
+ffb7aef6e  Content/sql/weenies/1002868 Drumtaken Ironstone Golem.sql
+ffb7aef6e  Content/sql/weenies/1002869 Drumtaken Ferocious Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1002870 Drumtaken Woodland Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1002871 Drumtaken Armored Tusker.sql
+ffb7aef6e  Content/sql/weenies/1002872 Olthoi Soldier.sql
+ffb7aef6e  Content/sql/weenies/1002873 Olthoi Eviscerator.sql
+ffb7aef6e  Content/sql/weenies/1002874 Olthoi Legionary.sql
+ffb7aef6e  Content/sql/weenies/1002875 Whakaruru the Hivekeeper.sql
+ffb7aef6e  Content/sql/weenies/1002876 Drumtaken Untamed Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002877 Drumtaken Badlands Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1002878 Drumtaken Savage Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1002879 Drumtaken Carnivorous Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1002880 Drumtaken Enku Zefir.sql
+ffb7aef6e  Content/sql/weenies/1002881 Drumtaken Brass Gromnie.sql
+ffb7aef6e  Content/sql/weenies/1002882 Virindi Observer.sql
+ffb7aef6e  Content/sql/weenies/1002883 Olthoi Lancer.sql
+ffb7aef6e  Content/sql/weenies/1002884 Drumtaken Verdigris Golem.sql
+ffb7aef6e  Content/sql/weenies/1002885 Drumtaken Granite Golem.sql
+ffb7aef6e  Content/sql/weenies/1002886 Drumtaken Ursuin Slicer.sql
+ffb7aef6e  Content/sql/weenies/1002887 Drumtaken Raging Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1002888 Virindi Executor.sql
+ffb7aef6e  Content/sql/weenies/1002889 Olthoi Warrior.sql
+ffb7aef6e  Content/sql/weenies/1002890 Olthoi Hive Mutilator.sql
+ffb7aef6e  Content/sql/weenies/1002891 Hauwhenua the Sky-Torn.sql
+ffb7aef6e  Content/sql/weenies/1002892 Aun Runner.sql
+ffb7aef6e  Content/sql/weenies/1002893 Aun Hunter.sql
+ffb7aef6e  Content/sql/weenies/1002894 Aun Nualuan.sql
+ffb7aef6e  Content/sql/weenies/1002895 Aun Itealuan.sql
+ffb7aef6e  Content/sql/weenies/1002896 Aun Warrior.sql
+ffb7aef6e  Content/sql/weenies/1002897 Aun Windreave.sql
+ffb7aef6e  Content/sql/weenies/1002898 Aun Shaman.sql
+ffb7aef6e  Content/sql/weenies/1002899 Aun Elder Shaman.sql
+ffb7aef6e  Content/sql/weenies/1002900 Aun Drumspeaker.sql
+ffb7aef6e  Content/sql/weenies/1002901 Aun Champion.sql
+ffb7aef6e  Content/sql/weenies/1002902 Aun Drumspeaker of Greenspire.sql
+ffb7aef6e  Content/sql/weenies/1002903 Aun Drumspeaker of Redspire.sql
+ffb7aef6e  Content/sql/weenies/1002904 Aun Drumspeaker of Ahurenga.sql
+ffb7aef6e  Content/sql/weenies/1002905 Aun Drumspeaker of the Hive Line.sql
+6ef7c5cdc  Content/sql/weenies/1002906 Buadren.sql
+bbb5362f7  Content/sql/weenies/1002920 Marae Coast Generator.sql
+bbb5362f7  Content/sql/weenies/1002921 Marae Plains Generator.sql
+bbb5362f7  Content/sql/weenies/1002922 Marae Downs Generator.sql
+bbb5362f7  Content/sql/weenies/1002923 Marae Mid Forest Generator.sql
+bbb5362f7  Content/sql/weenies/1002924 Marae Mid Marsh Generator.sql
+bbb5362f7  Content/sql/weenies/1002925 Marae High Plains Generator.sql
+bbb5362f7  Content/sql/weenies/1002926 Marae Hive Line Generator.sql
+bbb5362f7  Content/sql/weenies/1002927 Marae Plateau North Generator.sql
+bbb5362f7  Content/sql/weenies/1002928 Marae Plateau Northeast Generator.sql
+bbb5362f7  Content/sql/weenies/1002929 Marae Plateau Northwest Generator.sql
+bbb5362f7  Content/sql/weenies/1002930 Marae Plateau Southeast Generator.sql
+bbb5362f7  Content/sql/weenies/1002931 Marae Plateau Southwest Generator.sql
+773cada73  Content/sql/weenies/1002932 Drumtaken Littoral Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002933 Drumtaken Marsh Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002934 Drumtaken Strand Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002935 Olthoi Drone Camp.sql
+773cada73  Content/sql/weenies/1002936 Drumtaken Coral Golem Camp.sql
+773cada73  Content/sql/weenies/1002937 Drumtaken Sand Golem Camp.sql
+e86af5521  Content/sql/weenies/1002938 Drumtaken Carenzi Trampler Camp.sql
+773cada73  Content/sql/weenies/1002939 Drumtaken Carenzi Sentry Camp.sql
+773cada73  Content/sql/weenies/1002940 Drumtaken Carenzi Stalker Camp.sql
+773cada73  Content/sql/weenies/1002941 Drumtaken Sable Gromnie Camp.sql
+773cada73  Content/sql/weenies/1002942 Drumtaken Marae Ursuin Camp.sql
+773cada73  Content/sql/weenies/1002943 Olthoi Servant Camp.sql
+773cada73  Content/sql/weenies/1002944 Drumtaken Timber Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002945 Drumtaken Feral Carenzi Camp.sql
+773cada73  Content/sql/weenies/1002946 Drumtaken Ebon Gromnie Camp.sql
+773cada73  Content/sql/weenies/1002947 Drumtaken Woodland Ursuin Camp.sql
+773cada73  Content/sql/weenies/1002948 Drumtaken Elariwood Golem Camp.sql
+773cada73  Content/sql/weenies/1002949 Drumtaken Azael Zefir Camp.sql
+773cada73  Content/sql/weenies/1002950 Drumtaken Kithless Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002951 Drumtaken Rabid Carenzi Camp.sql
+773cada73  Content/sql/weenies/1002952 Drumtaken Copper Gromnie Camp.sql
+773cada73  Content/sql/weenies/1002953 Drumtaken Ferocious Ursuin Camp.sql
+773cada73  Content/sql/weenies/1002954 Drumtaken Basalt Golem Camp.sql
+773cada73  Content/sql/weenies/1002955 Olthoi Piercer Camp.sql
+773cada73  Content/sql/weenies/1002956 Drumtaken Armored Tusker Camp.sql
+e86af5521  Content/sql/weenies/1002957 Drumtaken Ironstone Golem Camp.sql
+773cada73  Content/sql/weenies/1002958 Olthoi Soldier Camp.sql
+773cada73  Content/sql/weenies/1002959 Olthoi Legionary Camp.sql
+773cada73  Content/sql/weenies/1002960 Olthoi Eviscerator Camp.sql
+bbb5362f7  Content/sql/weenies/1002961 Olthoi Warrior Camp.sql
+bbb5362f7  Content/sql/weenies/1002962 Olthoi Hive Mutilator Camp.sql
+bbb5362f7  Content/sql/weenies/1002963 Olthoi Lancer Camp.sql
+773cada73  Content/sql/weenies/1002964 Drumtaken Granite Golem Camp.sql
+773cada73  Content/sql/weenies/1002965 Virindi Observer Camp.sql
+773cada73  Content/sql/weenies/1002966 Virindi Executor Camp.sql
+773cada73  Content/sql/weenies/1002967 Drumtaken Verdigris Golem Camp.sql
+773cada73  Content/sql/weenies/1002968 Drumtaken Untamed Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002969 Drumtaken Enku Zefir Camp.sql
+773cada73  Content/sql/weenies/1002970 Drumtaken Brass Gromnie Camp.sql
+773cada73  Content/sql/weenies/1002971 Drumtaken Badlands Siraluun Camp.sql
+773cada73  Content/sql/weenies/1002972 Drumtaken Savage Carenzi Camp.sql
+773cada73  Content/sql/weenies/1002973 Drumtaken Carnivorous Carenzi Camp.sql
+773cada73  Content/sql/weenies/1002974 Drumtaken Ursuin Slicer Camp.sql
+773cada73  Content/sql/weenies/1002975 Drumtaken Raging Ursuin Camp.sql
+bbb5362f7  Content/sql/weenies/1002976 Drumtaken Lesser Littoral Siraluun Camp.sql
+bbb5362f7  Content/sql/weenies/1002977 Drumtaken Lesser Marsh Siraluun Camp.sql
+bbb5362f7  Content/sql/weenies/1002978 Drumtaken Lesser Strand Siraluun Camp.sql
+bbb5362f7  Content/sql/weenies/1002979 Drumtaken Lesser Sable Gromnie Camp.sql
+0a0e6b59d  Content/sql/weenies/1002980 Aun Scout Camp.sql
+0a0e6b59d  Content/sql/weenies/1002981 Aun Spear Camp.sql
+0a0e6b59d  Content/sql/weenies/1002982 Aun Hunt Camp.sql
+0a0e6b59d  Content/sql/weenies/1002983 Aun War Camp.sql
+0a0e6b59d  Content/sql/weenies/1002984 Aun Command Camp - Greenspire.sql
+0a0e6b59d  Content/sql/weenies/1002985 Aun Command Camp - Redspire.sql
+0a0e6b59d  Content/sql/weenies/1002986 Aun Command Camp - Ahurenga.sql
+0a0e6b59d  Content/sql/weenies/1002987 Aun Command Camp - the Hive Line.sql
+bbb5362f7  Content/sql/weenies/1002988 Aun Hivebound Camp.sql
+bbb5362f7  Content/sql/weenies/1002989 Aun Hivebound Command Camp.sql
+a6ea1b3c6  Content/sql/weenies/1003050 Drowned Chorister.sql
+a6ea1b3c6  Content/sql/weenies/1003051 Brine-Swollen Bearer.sql
+a6ea1b3c6  Content/sql/weenies/1003052 Ink-Drowned Cantor.sql
+a6ea1b3c6  Content/sql/weenies/1003053 Drowned Chorister Pentagon.sql
+a6ea1b3c6  Content/sql/weenies/1003054 Brine-Swollen Bearer Pentagon.sql
+a6ea1b3c6  Content/sql/weenies/1003055 Ink-Drowned Cantor Pentagon.sql
+a6ea1b3c6  Content/sql/weenies/1003056 The Verger.sql
+a6ea1b3c6  Content/sql/weenies/1003057 The Archivist's Shade.sql
+a6ea1b3c6  Content/sql/weenies/1003058 The Warden of the Tide.sql
+a6ea1b3c6  Content/sql/weenies/1003059 The Cantor.sql
+a6ea1b3c6  Content/sql/weenies/1003060 The Precentor.sql
+a6ea1b3c6  Content/sql/weenies/1003061 The Sexton.sql
+86881bcab  Content/sql/weenies/1003062 Grael, the Unsung.sql
+a6ea1b3c6  Content/sql/weenies/1003076 The Warded Stair.sql
+a6ea1b3c6  Content/sql/weenies/1003077 The Purge Lock.sql
+a6ea1b3c6  Content/sql/weenies/1003078 The Reliquary Gate.sql
+a6ea1b3c6  Content/sql/weenies/1003079 The Verger's Bar.sql
+a6ea1b3c6  Content/sql/weenies/1003080 The Bell Gate.sql
+a6ea1b3c6  Content/sql/weenies/1003081 The Choir Lock.sql
+a6ea1b3c6  Content/sql/weenies/1003082 The Ossuary Gate.sql
+aca014368  Content/sql/weenies/1003083 The Archive Door.sql
+aca014368  Content/sql/weenies/1003086 Reliquary Lever.sql
+aca014368  Content/sql/weenies/1003087 Ossuary Lever.sql
+bdef3df84  Content/sql/weenies/1003088 Chant Bell.sql
+bdef3df84  Content/sql/weenies/1003089 Discord Bell.sql
+dc9e1c2c9  Content/sql/weenies/1003092 The Undertow.sql
+dc9e1c2c9  Content/sql/weenies/1003094 The Archive Gate.sql
+123fa3a5c  Content/sql/weenies/1003151 Vendor Contract.sql
+bf5a2ca9b  Content/sql/weenies/1003154 Beast Effigy of the Bokrok Lugian.sql
+bf5a2ca9b  Content/sql/weenies/1003155 Beast Effigy of the Drudge Prowler.sql
+bf5a2ca9b  Content/sql/weenies/1003156 Beast Effigy of the Outcast Monouga.sql
+00652d9a6  Content/sql/weenies/1003200 Hea Toneawa the Runner.sql
+00652d9a6  Content/sql/weenies/1003201 Hea Temenua the Elder.sql
+2515dc2c1  Content/sql/weenies/1003202 Hea Kanokeh the Drum-Keeper.sql
+82a7ae593  Content/sql/weenies/1003203 Hea Mutuona the Windreave.sql
+2515dc2c1  Content/sql/weenies/1003204 Hea Riketura the Quartermaster.sql
+6ef7c5cdc  Content/sql/weenies/1003205 Hea Kiriona the Shopkeep.sql
+307cd94a6  Content/sql/weenies/1003206 Hea Karenua the Mourner.sql
+efa242eab  Content/sql/weenies/1003207 Hea Rangaua the Elder Shaman.sql
+2515dc2c1  Content/sql/weenies/1003208 Hea Nyrinua the Armorer.sql
+2515dc2c1  Content/sql/weenies/1003209 Hea Timitea the Bowyer.sql
+00652d9a6  Content/sql/weenies/1003210 Hea Nyrenauri the Healer.sql
+2515dc2c1  Content/sql/weenies/1003211 Hea Camauri the Barkeep.sql
+6ef7c5cdc  Content/sql/weenies/1003212 Bluespire Road Cairn.sql
+00652d9a6  Content/sql/weenies/1003213 Mutuona's Sky-Mark.sql
+a692f1665  Content/sql/weenies/1003215 Runner's Mark.sql
+a692f1665  Content/sql/weenies/1003216 The Drum of Greenspire.sql
+82a7ae593  Content/sql/weenies/1003217 Sluice Lever.sql
+2515dc2c1  Content/sql/weenies/1003218 Laboratory Strongbox.sql
+82a7ae593  Content/sql/weenies/1003219 Shrine Bar-Lift.sql
+6ef7c5cdc  Content/sql/weenies/1003220 Key of the Inner Shrine.sql
+6ef7c5cdc  Content/sql/weenies/1003221 Nukurenga Hold Key.sql
+88d79ba20  Content/sql/weenies/1003223 Aun Scout Camp (Bluespire Ring).sql
+2515dc2c1  Content/sql/weenies/1003224 Stone of Wharenga.sql
+2515dc2c1  Content/sql/weenies/1003225 Stone of Turaenga.sql
+00652d9a6  Content/sql/weenies/1003227 Stone of Hikirenga.sql
+00652d9a6  Content/sql/weenies/1003228 Stone of Oterenga.sql
+00652d9a6  Content/sql/weenies/1003229 Stone of Iwarenga.sql
+00652d9a6  Content/sql/weenies/1003230 Stone of Motuenga.sql
+00652d9a6  Content/sql/weenies/1003231 Stone of Kaurenga.sql
+00652d9a6  Content/sql/weenies/1003232 Stone of Ahurenga.sql
+6ef7c5cdc  Content/sql/weenies/1003233 Aun Cord.sql
+6ef7c5cdc  Content/sql/weenies/1003234 Aun Weapon-Fittings.sql
+6ef7c5cdc  Content/sql/weenies/1003235 Aun Drum-Hide.sql
+6ef7c5cdc  Content/sql/weenies/1003236 Cured Shield Hide.sql
+03967196a  Content/sql/weenies/1003237 Drumtaken Sinew.sql
+03967196a  Content/sql/weenies/1003238 Drumtaken Hide.sql
+03967196a  Content/sql/weenies/1003239 Sable Gromnie Horn.sql
+6ef7c5cdc  Content/sql/weenies/1003240 The East Drum.sql
+03967196a  Content/sql/weenies/1003241 Full Bag of Tourmaline Salvage (Hea).sql
+6ef7c5cdc  Content/sql/weenies/1003242 War-Cord Bundle.sql
+6ef7c5cdc  Content/sql/weenies/1003243 Arrowhead Billets.sql
+07284bae0  Content/sql/weenies/1003244 Hea Metauri the Scout.sql
+2515dc2c1  Content/sql/weenies/1003245 Siberite Accretion.sql
+2515dc2c1  Content/sql/weenies/1003246 Keeper of the Sluice.sql
+07284bae0  Content/sql/weenies/1003247 Aun Priest of Raeta.sql
+07284bae0  Content/sql/weenies/1003248 Aun Ritual-Keeper.sql
+2515dc2c1  Content/sql/weenies/1003251 Drumspeaker of Greenspire (Wounded).sql
+07284bae0  Content/sql/weenies/1003252 Hea Warrior (Greenspire).sql
+07284bae0  Content/sql/weenies/1003253 Hea Windreave (Greenspire).sql
+07284bae0  Content/sql/weenies/1003254 Hea Elder Shaman (Greenspire).sql
+07284bae0  Content/sql/weenies/1003255 Drumspeaker of Greenspire.sql
+07284bae0  Content/sql/weenies/1003256 Aun Runner (Greenspire).sql
+07284bae0  Content/sql/weenies/1003257 Aun Hunter (Greenspire).sql
+07284bae0  Content/sql/weenies/1003258 Aun Nualuan (Greenspire).sql
+07284bae0  Content/sql/weenies/1003259 Aun Itealuan (Greenspire).sql
+07284bae0  Content/sql/weenies/1003260 Aun Warrior (Greenspire).sql
+07284bae0  Content/sql/weenies/1003261 Aun Shaman (Greenspire).sql
+07284bae0  Content/sql/weenies/1003262 Menhir Drummer.sql
+00652d9a6  Content/sql/weenies/1003266 Siberite Accretion Generator.sql
+03967196a  Content/sql/weenies/1003267 Surface.sql
+07284bae0  Content/sql/weenies/1003269 Aun Platform Watcher (Greenspire).sql
+03967196a  Content/sql/weenies/1003270 Aun Scout Camp - Greenspire.sql
+03967196a  Content/sql/weenies/1003271 Aun Spear Camp - Greenspire.sql
+03967196a  Content/sql/weenies/1003272 Aun Command Camp - Greenspire (Headland).sql
+82a7ae593  Content/sql/weenies/1003277 Laboratory Siberite Generator.sql
+82a7ae593  Content/sql/weenies/1003278 Laboratory Golem Generator.sql
+03967196a  Content/sql/weenies/1003284 Drumspeaker of Greenspire Generator.sql
+03967196a  Content/sql/weenies/1003285 A Weathered Hold-Stone.sql
+03967196a  Content/sql/weenies/1003286 The Sluice Gate.sql
+a692f1665  Content/sql/weenies/1003287 The Sealed Stair.sql
+2515dc2c1  Content/sql/weenies/1003294 Greenspire Portal (Bluespire).sql
+2049d2b0e  Content/sql/weenies/1003295 Hea Onatua the Armory Clerk.sql
+2049d2b0e  Content/sql/weenies/1003296 Hea Rewitea the Fletcher.sql
+6ef7c5cdc  Content/sql/weenies/1003297 Hea Taukiri the Tapster.sql
+ffb7aef6e  Content/sql/weenies/1003300 Aun Skycaller.sql
+a692f1665  Content/sql/weenies/1003350 Bluespire Road Cairn (West Road).sql
+a692f1665  Content/sql/weenies/1003351 - Bluespire Road Cairn (North Road).sql
+a692f1665  Content/sql/weenies/1003352 - Bluespire Road Cairn (Northwest Road).sql
+00652d9a6  Content/sql/weenies/1003353 - Mutuona's Sky-Mark (West Ridge).sql
+00652d9a6  Content/sql/weenies/1003354 - Mutuona's Sky-Mark (Southwest Headland).sql
+00652d9a6  Content/sql/weenies/1003355 - Mutuona's Sky-Mark (East Treeline).sql
+00652d9a6  Content/sql/weenies/1003356 - Mutuona's Sky-Mark (North Bluff).sql
+00652d9a6  Content/sql/weenies/1003357 - Mutuona's Sky-Mark (Menhir Ring).sql
+a692f1665  Content/sql/weenies/1003358 Runner's Mark (Saddle).sql
+f7debb700  Content/sql/weenies/1003359 Runner's Mark (Spire Base).sql
+a692f1665  Content/sql/weenies/1003360 Runner's Mark (Headland Rise).sql
+6ef7c5cdc  Content/sql/weenies/1003364 Hea Paretea the Apothecary.sql
+efa242eab  Content/sql/weenies/1003367 Hea Rautana the Component-Keeper.sql
+307cd94a6  Content/sql/weenies/1003368 Key of Papileona's Reliquary.sql
+14ae0d1ba  Content/sql/weenies/1003369 Manifest of the Third Landing.sql
+14ae0d1ba  Content/sql/weenies/1003370 Bluespire Watch Roster.sql
+14ae0d1ba  Content/sql/weenies/1003371 Letter, Unposted.sql
+14ae0d1ba  Content/sql/weenies/1003372 The Physician's Daybook.sql
+14ae0d1ba  Content/sql/weenies/1003373 Survey of the Spire Sites.sql
+14ae0d1ba  Content/sql/weenies/1003374 Chapel Inventory.sql
+14ae0d1ba  Content/sql/weenies/1003375 Bond of Indenture, Unsigned.sql
+14ae0d1ba  Content/sql/weenies/1003376 A Child's Copybook.sql
+6ef7c5cdc  Content/sql/weenies/1003377 Dyer's Colour Chart.sql
+14ae0d1ba  Content/sql/weenies/1003378 Requisition, Laboratory Stair.sql
+14ae0d1ba  Content/sql/weenies/1003379 Instrument Log.sql
+6ef7c5cdc  Content/sql/weenies/1003380 The Sealed Order.sql
+14ae0d1ba  Content/sql/weenies/1003381 Last Page.sql
+2515dc2c1  Content/sql/weenies/1003382 Key of the Laboratory Strongbox.sql
+2515dc2c1  Content/sql/weenies/1003383 Keeper of the Sluice Generator.sql
+2515dc2c1  Content/sql/weenies/1003384 Hammer Crate (Laboratory).sql
+7b27dfa88  Content/sql/weenies/1003450 Aun Hareltah the Warspeaker.sql
+194fabc63  Content/sql/weenies/1003553 Warspeaker's Landing.sql
+fa68d9ce1  Content/sql/weenies/1003600 Thread Gem.sql
+fa68d9ce1  Content/sql/weenies/1003601 Thread Exit Portal.sql
+710794486  Content/sql/weenies/1003602 Reagent-Steward Aya Torimaru.sql
+dae4a4a36  Content/sql/weenies/1003603 Thread Cache.sql
+dae4a4a36  Content/sql/weenies/1003604 Thread Exit (Summoned).sql
+420c525c2  Content/sql/weenies/1003612 Fragment-Clerk Maren Idswold.sql
+fa68d9ce1  Content/sql/weenies/1003613 Survey-Archivist Teodor Brannock.sql
+148d8b59c  Content/sql/weenies/1003614 Fragment Press.sql
+4fa2e5152  Content/sql/weenies/1003615 Raw Fragment Level 185.sql
+4fa2e5152  Content/sql/weenies/1003616 Raw Fragment Level 195.sql
+4fa2e5152  Content/sql/weenies/1003617 Raw Fragment Level 205.sql
+4fa2e5152  Content/sql/weenies/1003618 Raw Fragment Level 215.sql
+4fa2e5152  Content/sql/weenies/1003619 Raw Fragment Level 225.sql
+4fa2e5152  Content/sql/weenies/1003620 Raw Fragment Level 235.sql
+ce355cc36  Content/sql/weenies/1003621 Raw Fragment Level 245.sql
+ce355cc36  Content/sql/weenies/1003622 Raw Fragment Level 255.sql
+ce355cc36  Content/sql/weenies/1003623 Raw Fragment Level 265.sql
+ce355cc36  Content/sql/weenies/1003624 Raw Fragment Level 275.sql
+148d8b59c  Content/sql/weenies/1003625 Thread Gems What We Know.sql
+420c525c2  Content/sql/weenies/1003626 Raw Fragment Level 300.sql
+420c525c2  Content/sql/weenies/1003627 Raw Fragment Level 325.sql
+420c525c2  Content/sql/weenies/1003628 Raw Fragment Level 350.sql
+420c525c2  Content/sql/weenies/1003629 Raw Fragment Level 375.sql
+ffb7aef6e  Content/sql/weenies/1003650 Drumtaken Lesser Littoral Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1003651 Drumtaken Lesser Marsh Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1003652 Drumtaken Lesser Sable Gromnie.sql
+ffb7aef6e  Content/sql/weenies/1003653 Drumtaken Lesser Strand Siraluun.sql
+ffb7aef6e  Content/sql/weenies/1003654 Drumtaken Kirit Zefir.sql
+ffb7aef6e  Content/sql/weenies/1003655 Drumtaken Greater Canescent Mattekar.sql
+ffb7aef6e  Content/sql/weenies/1003656 Drumtaken Greater Rabid Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1003657 Drumtaken Greater Feral Carenzi.sql
+ffb7aef6e  Content/sql/weenies/1003658 Drumtaken Greater Elariwood Golem.sql
+ffb7aef6e  Content/sql/weenies/1003659 Drumtaken Greater Ferocious Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1003660 Drumtaken Greater Woodland Ursuin.sql
+ffb7aef6e  Content/sql/weenies/1003661 Olthoi Hive Crawler.sql
+ffb7aef6e  Content/sql/weenies/1003662 Hive Maggot.sql
+ffb7aef6e  Content/sql/weenies/1003663 Olthoi Hive Warrior.sql
+ffb7aef6e  Content/sql/weenies/1003664 Virindi Sentry.sql
+ffb7aef6e  Content/sql/weenies/1003665 Aun Hivebound Spear.sql
+ffb7aef6e  Content/sql/weenies/1003666 Aun Hivebound Shaman.sql
+ffb7aef6e  Content/sql/weenies/1003667 Hive Maggot Giant.sql
+ffb7aef6e  Content/sql/weenies/1003668 Olthoi Hive Guardian.sql
+ffb7aef6e  Content/sql/weenies/1003669 Virindi Keeper.sql
+ffb7aef6e  Content/sql/weenies/1003670 Aun Hivebound Hurler.sql
+ffb7aef6e  Content/sql/weenies/1003671 Aun Hivebound Elder.sql
+ffb7aef6e  Content/sql/weenies/1003672 Tureia the Underbeat.sql
+bbb5362f7  Content/sql/weenies/1003680 Drumtaken Kirit Zefir Camp.sql
+0240bb768  Content/sql/weenies/1003681 Drumtaken Greater Feral Carenzi Camp.sql
+0240bb768  Content/sql/weenies/1003682 Drumtaken Greater Woodland Ursuin Camp.sql
+0240bb768  Content/sql/weenies/1003683 Drumtaken Greater Elariwood Golem Camp.sql
+0240bb768  Content/sql/weenies/1003684 Drumtaken Greater Rabid Carenzi Camp.sql
+0240bb768  Content/sql/weenies/1003685 Drumtaken Greater Ferocious Ursuin Camp.sql
+bbb5362f7  Content/sql/weenies/1003686 Olthoi Hive Warrior Camp.sql
+bbb5362f7  Content/sql/weenies/1003687 Olthoi Hive Guardian Camp.sql
+bbb5362f7  Content/sql/weenies/1003688 Virindi Sentry Camp.sql
+bbb5362f7  Content/sql/weenies/1003689 Virindi Keeper Camp.sql
+bbb5362f7  Content/sql/weenies/1003690 Olthoi Hive Crawler Camp.sql
+129f63138  Content/sql/weenies/1003750 Fi Amashiro.sql
+129f63138  Content/sql/weenies/1003751 Bo Winterholt.sql
+129f63138  Content/sql/weenies/1003752 Nacci Vellatore.sql
+095947749  Content/sql/weenies/1003753 Nacci's Vault Expansion.sql
+095947749  Content/sql/weenies/1003754 Bo's Quickened Grasp.sql
+095947749  Content/sql/weenies/1003755 Fi's Lingering Casting.sql
+504169cda  Content/sql/weenies/1003850 Non Participation Award.sql
+22ba3fcb8  Content/sql/weenies/1004000 A'nekshen Storm Warden.sql
+22ba3fcb8  Content/sql/weenies/1004001 A'nekshen Thorn Adept.sql
+22ba3fcb8  Content/sql/weenies/1004002 A'nekshen Bramble Dancer.sql
+22ba3fcb8  Content/sql/weenies/1004003 A'nekshen Gale Reaver.sql
+22ba3fcb8  Content/sql/weenies/1004004 A'nekshen Tempest Caller.sql
+22ba3fcb8  Content/sql/weenies/1004005 A'nekshen Thorn Sovereign.sql
+22ba3fcb8  Content/sql/weenies/1004006 A'nekshen Stormcrown.sql
+22ba3fcb8  Content/sql/weenies/1004007 A'nekshen Thornmarch.sql
+22ba3fcb8  Content/sql/weenies/1004008 Jade Custodian.sql
+22ba3fcb8  Content/sql/weenies/1004009 Wailing Revenant.sql
+22ba3fcb8  Content/sql/weenies/1004010 Hollow Choirmaster.sql
+22ba3fcb8  Content/sql/weenies/1004011 Sepulchre Warden.sql
+22ba3fcb8  Content/sql/weenies/1004012 Drowned Magistrate.sql
+22ba3fcb8  Content/sql/weenies/1004013 Mire-Tide Herald.sql
+22ba3fcb8  Content/sql/weenies/1004014 Fathom Vigil.sql
+22ba3fcb8  Content/sql/weenies/1004015 Sorrowbound Shogun.sql
+22ba3fcb8  Content/sql/weenies/1004016 Duskstone Golem.sql
+22ba3fcb8  Content/sql/weenies/1004017 Verdigris Golem.sql
+22ba3fcb8  Content/sql/weenies/1004018 Cinderslate Golem.sql
+22ba3fcb8  Content/sql/weenies/1004019 Copperslag Golem.sql
+22ba3fcb8  Content/sql/weenies/1004020 Azurite Golem.sql
+22ba3fcb8  Content/sql/weenies/1004021 Cragshard Golem.sql
+22ba3fcb8  Content/sql/weenies/1004022 Deepshell Colossus.sql
+22ba3fcb8  Content/sql/weenies/1004023 Slag Colossus.sql
+22ba3fcb8  Content/sql/weenies/1004024 Barbed Thorn Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004025 Keen Hunting Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004026 Spinecrest Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004027 Warscale Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004028 Ridgeback Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004029 Serrated Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004030 Elder Thorn Gromnie.sql
+22ba3fcb8  Content/sql/weenies/1004031 Gromnie Tyrant.sql
+22ba3fcb8  Content/sql/weenies/1004032 Mukkir Ravener.sql
+22ba3fcb8  Content/sql/weenies/1004033 Mukkir Vorak.sql
+22ba3fcb8  Content/sql/weenies/1004034 Mukkir Gorehide.sql
+22ba3fcb8  Content/sql/weenies/1004035 Umbral Mukkir Stalker.sql
+22ba3fcb8  Content/sql/weenies/1004036 Mukkir Dreadmaw.sql
+22ba3fcb8  Content/sql/weenies/1004037 Mukkir Sundershade.sql
+22ba3fcb8  Content/sql/weenies/1004038 Mukkir Apex.sql
+22ba3fcb8  Content/sql/weenies/1004039 Mukkir Ruinmaw.sql
+1fdecf839  Content/sql/weenies/1004040 Olthoi Bulwark.sql
+1fdecf839  Content/sql/weenies/1004041 Olthoi Ravener.sql
+1fdecf839  Content/sql/weenies/1004042 Olthoi Gloom Guard.sql
+1fdecf839  Content/sql/weenies/1004043 Olthoi Hive Ravager.sql
+1fdecf839  Content/sql/weenies/1004044 Olthoi Broodmarshal.sql
+1fdecf839  Content/sql/weenies/1004045 Olthoi Chitin Tyrant.sql
+4907fa287  Content/sql/weenies/1004046 Olthoi Deepmother.sql
+1fdecf839  Content/sql/weenies/1004047 Olthoi Sovereign.sql
+22ba3fcb8  Content/sql/weenies/1004048 Shadow Excruciator.sql
+22ba3fcb8  Content/sql/weenies/1004049 Umbral Stalker.sql
+22ba3fcb8  Content/sql/weenies/1004050 Penumbral Reaver.sql
+22ba3fcb8  Content/sql/weenies/1004051 Shadow Vizier.sql
+22ba3fcb8  Content/sql/weenies/1004052 Shadow Archon.sql
+22ba3fcb8  Content/sql/weenies/1004053 Umbral Tormentor.sql
+22ba3fcb8  Content/sql/weenies/1004054 Nightfall Sovereign.sql
+22ba3fcb8  Content/sql/weenies/1004055 Shadow Tyrant.sql
+22ba3fcb8  Content/sql/weenies/1004056 Bone Chanter.sql
+22ba3fcb8  Content/sql/weenies/1004057 Rotwake Thrall.sql
+22ba3fcb8  Content/sql/weenies/1004058 Grave-Iron Knight.sql
+22ba3fcb8  Content/sql/weenies/1004059 Miasma Prelate.sql
+22ba3fcb8  Content/sql/weenies/1004060 Plaguebound Marshal.sql
+22ba3fcb8  Content/sql/weenies/1004061 Sepulchral Archon.sql
+22ba3fcb8  Content/sql/weenies/1004062 Carrion Sovereign.sql
+22ba3fcb8  Content/sql/weenies/1004063 Ninth Ward Lich.sql
+22ba3fcb8  Content/sql/weenies/1004064 Virindi Anathema.sql
+22ba3fcb8  Content/sql/weenies/1004065 Virindi Excisor.sql
+22ba3fcb8  Content/sql/weenies/1004066 Virindi Nullifier.sql
+22ba3fcb8  Content/sql/weenies/1004067 Virindi Tesseract.sql
+22ba3fcb8  Content/sql/weenies/1004068 Virindi Obviator.sql
+22ba3fcb8  Content/sql/weenies/1004069 Virindi Recursor.sql
+22ba3fcb8  Content/sql/weenies/1004070 Virindi Axiom.sql
+22ba3fcb8  Content/sql/weenies/1004071 Virindi Cipher.sql
+4907fa287  Content/sql/weenies/1004072 Zefir Snarestalker.sql
+22ba3fcb8  Content/sql/weenies/1004073 Zefir Thorn Lancer.sql
+22ba3fcb8  Content/sql/weenies/1004074 Zefir Barb Reaver.sql
+22ba3fcb8  Content/sql/weenies/1004075 Zefir Hedge Warden.sql
+4907fa287  Content/sql/weenies/1004076 Zefir Knotbinder.sql
+22ba3fcb8  Content/sql/weenies/1004077 Zefir Spire Sovereign.sql
+4907fa287  Content/sql/weenies/1004078 Zefir Grove Guardian.sql
+4907fa287  Content/sql/weenies/1004079 Zefir Thorn Tyrant.sql
+1fdecf839  Content/sql/weenies/1004080 Shadowsteel Longsword.sql
+1fdecf839  Content/sql/weenies/1004081 Shadowsteel Greataxe.sql
+1fdecf839  Content/sql/weenies/1004082 Shadowsteel Mace.sql
+1fdecf839  Content/sql/weenies/1004083 Shadowsteel Warstaff.sql
+1fdecf839  Content/sql/weenies/1004084 Shadowsteel Warblade.sql
+1fdecf839  Content/sql/weenies/1004085 Shadowsteel Dirk.sql
+1fdecf839  Content/sql/weenies/1004086 Shadowsteel Spear.sql
+1fdecf839  Content/sql/weenies/1004087 Shadowsteel Greatsword.sql
+fe6d89b3e  Content/sql/weenies/1004088 Shadowsteel Longbow.sql
+1fdecf839  Content/sql/weenies/1004089 Shadowsteel Arrow.sql
+fe6d89b3e  Content/sql/weenies/1004090 Shadowbound Breastplate.sql
+fe6d89b3e  Content/sql/weenies/1004091 Shadowbound Pauldrons.sql
+fe6d89b3e  Content/sql/weenies/1004092 Shadowbound Gauntlets.sql
+fe6d89b3e  Content/sql/weenies/1004093 Shadowbound Greaves.sql
+fe6d89b3e  Content/sql/weenies/1004094 Shadowbound Sollerets.sql
+fe6d89b3e  Content/sql/weenies/1004095 Shadowbound Bracers.sql
+fe6d89b3e  Content/sql/weenies/1004096 Shadowbound Mask.sql
+fe6d89b3e  Content/sql/weenies/1004097 Shadowbound Coif.sql
+
+# --- Content/migrations (5 units; delete-only, one-shot, kept last) ---
+6dd128307  Content/migrations/2026-07-14_renumber_classskill_tokens.sql
+8aa0db794  Content/migrations/2026-07-23_vacate_preview_squatters.sql
+dc78eb3ca  Content/migrations/2026-08-02_retire_the_gym.sql
+66a3ef065  Content/migrations/2026-08-08_remove_attuned_drift_prisms.sql
+88d79ba20  Content/migrations/2026-09-03_retire_q3_timitea_haspaid.sql

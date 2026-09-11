@@ -58,13 +58,23 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public uint MaxBaseArmor { get; }
 
-        public DungeonStatProfile(int level, uint health, IReadOnlyDictionary<Skill, uint> skills, uint maxBodyDamage, uint maxBaseArmor)
+        /// <summary>
+        /// The highest <see cref="DungeonSpellTier.TierOf"/> across the weenie's spell book - the tier a
+        /// band-standard uplift raises a caster's spells TOWARD (see <see cref="DungeonBandStandard.SpellTier"/>).
+        /// 0 means "no tierable spell" - either the weenie carries no spell book at all, or every spell it
+        /// carries is untierable (a non-standard progression, e.g. a cantrip).
+        /// </summary>
+        public int MaxSpellTier { get; }
+
+        public DungeonStatProfile(int level, uint health, IReadOnlyDictionary<Skill, uint> skills, uint maxBodyDamage, uint maxBaseArmor,
+            int maxSpellTier = 0)
         {
             Level = level;
             Health = health;
             Skills = skills ?? EmptySkills;
             MaxBodyDamage = maxBodyDamage;
             MaxBaseArmor = maxBaseArmor;
+            MaxSpellTier = maxSpellTier;
         }
 
         private static readonly IReadOnlyDictionary<Skill, uint> EmptySkills = new Dictionary<Skill, uint>();

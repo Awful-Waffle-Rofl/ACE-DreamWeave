@@ -797,10 +797,23 @@ namespace ACE.Server.ThreadDungeons
                 }
             }
 
+            var maxSpellTier = 0;
+
+            if (weenie.PropertiesSpellBook != null)
+            {
+                foreach (var id in weenie.PropertiesSpellBook.Keys)
+                {
+                    var tier = DungeonSpellTier.TierOf(id);
+
+                    if (tier > maxSpellTier)
+                        maxSpellTier = tier;
+                }
+            }
+
             // Clamped at 0: a negative authored DVal or BaseArmor would be nonsense data, and a negative
             // reaching a uint cast wraps to something enormous rather than failing.
             return new DungeonStatProfile(level, HealthOfWeenie(weenie), skills,
-                (uint)Math.Max(0, maxDamage), (uint)Math.Max(0, maxArmor));
+                (uint)Math.Max(0, maxDamage), (uint)Math.Max(0, maxArmor), maxSpellTier);
         }
 
         /// <summary>
@@ -947,10 +960,11 @@ namespace ACE.Server.ThreadDungeons
         /// creature to the band's cross-family median health before the gem's multiplier, and it applies to an
         /// uplifted entry unchanged. A second health path here would double-apply.
         ///
-        /// SPELLS are also absent, and that is a known and accepted limitation of this change rather than an
-        /// oversight: an uplifted caster throws the spell tier its weenie was authored with, so its melee and
-        /// its skills reach the band standard while its nukes do not. Substituting spell tiers is a separate
-        /// piece of design.
+        /// SPELLS are a fifth axis, but scaled EARLIER than the four above: DungeonSpellTier.Raise runs
+        /// before the AoE/drain spell strip (see the call site's comment), because a raised id can land on a
+        /// banned id or gain projectiles and the strip must see the final book. By the time this method runs
+        /// the book is already at the band's spell tier; <paramref name="spellsRaised"/> is only the count,
+        /// carried through for the diagnostic line.
         /// </summary>
         /// <param name="authoredLevel">
         /// The creature's OWN weenie level, captured by the caller BEFORE anything was stamped on it. It is
@@ -960,8 +974,12 @@ namespace ACE.Server.ThreadDungeons
         /// the diagnostic ONLY; the level floor below reads the creature's CURRENT level, because that is what
         /// makes the floor upward-only when the boss stamp has already raised it.
         /// </param>
+        /// <param name="spellsRaised">
+        /// How many spell-book entries DungeonSpellTier.Raise already raised, at the call site, before the
+        /// AoE/drain strip ran. Diagnostic only - this method does not touch the spell book itself.
+        /// </param>
         private static void ApplyUplift(ThreadDungeonRun run, Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan,
-            int authoredLevel)
+            int authoredLevel, int spellsRaised)
         {
             if (entry.UpliftLevel > (creature.Level ?? 0))
                 creature.Level = entry.UpliftLevel;
@@ -973,7 +991,7 @@ namespace ACE.Server.ThreadDungeons
                 // The band had nothing to measure - no profile delegate, or no in-band member with usable
                 // data at any width. The level floor above still stands (it needs no sample); the rest is
                 // skipped rather than guessed at.
-                log.Info($"[DYNDUNGEON] {run} {UpliftLogLine(entry.Wcid, entry.UpliftLevel, authoredLevel, 0, 0, null)}");
+                log.Info($"[DYNDUNGEON] {run} {UpliftLogLine(entry.Wcid, entry.UpliftLevel, authoredLevel, 0, 0, 0, null)}");
                 return;
             }
 
@@ -996,7 +1014,7 @@ namespace ACE.Server.ThreadDungeons
 
             var partsScaled = ApplyBodyPartUplift(creature.Biota, standard.MaxBodyDamage, standard.MaxBaseArmor);
 
-            log.Info($"[DYNDUNGEON] {run} {UpliftLogLine(entry.Wcid, entry.UpliftLevel, authoredLevel, skillsRaised, partsScaled, standard)}");
+            log.Info($"[DYNDUNGEON] {run} {UpliftLogLine(entry.Wcid, entry.UpliftLevel, authoredLevel, skillsRaised, partsScaled, spellsRaised, standard)}");
         }
 
         /// <summary>
@@ -1010,7 +1028,7 @@ namespace ACE.Server.ThreadDungeons
         /// "no band standard available" form.
         /// </summary>
         internal static string UpliftLogLine(uint wcid, int upliftLevel, int authoredLevel, int skillsRaised, int partsScaled,
-            DungeonBandStandard standard)
+            int spellsRaised, DungeonBandStandard standard)
         {
             var head = $"wcid {wcid} uplifted to level {upliftLevel} (authored {authoredLevel}); ";
 
@@ -1018,7 +1036,7 @@ namespace ACE.Server.ThreadDungeons
                 return head + "no band standard available, stats untouched";
 
             return head + $"{skillsRaised} skill(s) raised, {partsScaled} body part(s) scaled toward " +
-                   $"dmg {standard.MaxBodyDamage} / armor {standard.MaxBaseArmor}";
+                   $"dmg {standard.MaxBodyDamage} / armor {standard.MaxBaseArmor}, {spellsRaised} spell(s) raised to tier {standard.SpellTier}";
         }
 
         /// <summary>
@@ -1273,6 +1291,19 @@ namespace ACE.Server.ThreadDungeons
             // attackable, non-NPC monster, so there is no objective prop or friendly to exempt.
             SpawnedCreatureHostility.MakeHostileToPlayers(creature);
 
+            // Band-standard spell-tier uplift. Only for an entry the adaptive band reached below its natural
+            // low edge (entry.UpliftLevel > 0), same gate as the level/skills/melee/armour axes below - and
+            // MUST run before step 5's AoE/drain strip, never after: a raised id can land on a banned id, or
+            // change NumProjectiles, and the strip has to see the FINAL book to make that call correctly.
+            // Safe to mutate in place for the exact same reason step 5 documents immediately below:
+            // PropertiesSpellBook is a fresh Dictionary copy out of WeenieConverter.ConvertToBiota
+            // (WeenieConverter.cs:46-47), never one of the collections shared by reference with the cached
+            // weenie.
+            var spellsRaised = 0;
+
+            if (entry.UpliftLevel > 0 && plan.BandStandard != null && !plan.BandStandard.IsEmpty && plan.BandStandard.SpellTier > 0)
+                spellsRaised = DungeonSpellTier.Raise(creature.Biota.PropertiesSpellBook, plan.BandStandard.SpellTier);
+
             // 5. Room-blanketing and named-drain spells are removed from the spell book (owner ruling
             // 2026-09-08). See DungeonSpellFilter for the exact rule (NumProjectiles > 1, or a banned id)
             // and its safety guard (never empty a book on a creature with no damaging body part). This is
@@ -1280,7 +1311,9 @@ namespace ACE.Server.ThreadDungeons
             // WeenieConverter.ConvertToBiota (WeenieConverter.cs:46-47) - unlike PropertiesCreateList,
             // PropertiesEmote, PropertiesEventFilter, PropertiesGenerator and PropertiesBodyPart above, it is
             // never one of the collections shared by reference with the cached weenie, so nothing here can
-            // reach a retail landblock's copy of this weenie.
+            // reach a retail landblock's copy of this weenie. The spell-tier uplift immediately above already
+            // ran, so this strip sees the FINAL book - a raised id that lands on a banned id or gains
+            // projectiles is still caught here.
             if (PropertyManager.GetBool("dynamic_dungeons_strip_aoe_spells", DungeonSpellFilter.DefaultStripAoeSpellsEnabled).Item)
             {
                 var book = creature.Biota.PropertiesSpellBook;
@@ -1442,7 +1475,7 @@ namespace ACE.Server.ThreadDungeons
             // diagnostic-only argument - the level floor inside still reads the creature's current level, so
             // it stays upward-only.
             if (entry.UpliftLevel > 0)
-                ApplyUplift(run, creature, entry, plan, ownLevel);
+                ApplyUplift(run, creature, entry, plan, ownLevel, spellsRaised);
 
             // ---- rewards ----
             // The luminance gate reads the level the creature ACTUALLY carries, which for a boss is the

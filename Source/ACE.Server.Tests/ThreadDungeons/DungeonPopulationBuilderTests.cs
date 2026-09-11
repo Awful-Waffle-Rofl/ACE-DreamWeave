@@ -1219,7 +1219,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var authored = WideLevelOf(boss.Wcid);
             Assert.AreNotEqual(authored, plan.BossLevel, "the fixture must make the two values tell apart");
 
-            var line = ThreadDungeonSpawner.UpliftLogLine(boss.Wcid, boss.UpliftLevel, authored, 1, 2, plan.BandStandard);
+            var line = ThreadDungeonSpawner.UpliftLogLine(boss.Wcid, boss.UpliftLevel, authored, 1, 2, 0, plan.BandStandard);
 
             StringAssert.Contains(line, "(authored " + authored + ")");
             Assert.IsFalse(line.Contains("(authored " + plan.BossLevel + ")"),
@@ -1234,18 +1234,20 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.IsFalse(withStandard.IsEmpty);
 
-            var full = ThreadDungeonSpawner.UpliftLogLine(910u, 200, 160, 3, 4, withStandard);
+            var full = ThreadDungeonSpawner.UpliftLogLine(910u, 200, 160, 3, 4, 2, withStandard);
             StringAssert.Contains(full, "wcid 910 uplifted to level 200 (authored 160)");
             StringAssert.Contains(full, "3 skill(s) raised, 4 body part(s) scaled toward");
+            StringAssert.Contains(full, $"2 spell(s) raised to tier {withStandard.SpellTier}");
 
             // No standard: the level floor still happened, so the line still reports it, but nothing claims a
             // stat was touched.
             foreach (var none in new[] { null, DungeonBandStandard.Empty })
             {
-                var bare = ThreadDungeonSpawner.UpliftLogLine(910u, 200, 160, 0, 0, none);
+                var bare = ThreadDungeonSpawner.UpliftLogLine(910u, 200, 160, 0, 0, 0, none);
                 StringAssert.Contains(bare, "wcid 910 uplifted to level 200 (authored 160)");
                 StringAssert.Contains(bare, "no band standard available, stats untouched");
                 Assert.IsFalse(bare.Contains("skill(s) raised"));
+                Assert.IsFalse(bare.Contains("spell(s) raised"));
             }
         }
 
