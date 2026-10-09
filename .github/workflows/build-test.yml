@@ -1,0 +1,340 @@
+name: build and test
+
+on:
+  # Every push to master builds, unfiltered: the stage and prod image deploy gates read this
+  # job's conclusion on the SHA they deploy and fail on "no run found", so master must always
+  # carry a result.
+  push:
+    branches:
+      - 'master'
+  # Pull requests skip the build when they touch nothing the build can see. Content units, the
+  # prod manifest, docs and markdown are applied by tools/apply-content.sh or read by people,
+  # never compiled; content-lint.yml covers Content/. A PR mixing code and content still builds.
+  # The one thing this defers: a handful of tests walk up to Content/ and could fail on a
+  # content-only change - they now surface on the master push after merge instead of on the PR.
+  #
+  # Also skips on tools/** (except tools/ca-planner/** and tools/salvage-sim/**, whose catalogs are
+  # read directly by ClassAbilityCapQuestTests.cs, ClassAbilityPlannerCatalogTests.cs and
+  # SalvageSimCatalogTests.cs), .claude/** and any workflow file other than this one - none of
+  # those are read by the build or the test suites (verified by grepping every Source/*Tests*/**
+  # project, the path-walker tests, csproj Content/None includes and Directory.Build.*; the only
+  # repo-root-relative literals found outside Content/Docs were deploy/prod|stage/Config.js.template
+  # in StartupDatabaseStepsTests.cs, which live under deploy/ and stay in scope). GitHub forbids
+  # combining `paths` and `paths-ignore` on one event, so this is one `paths:` list: '**' followed
+  # by '!exclude' entries, with the ca-planner/salvage-sim/build-test.yml exceptions re-included
+  # after their broader exclusion - order matters, later patterns win. `.github/actions/**` is
+  # deliberately NOT excluded: build-test's own "Launch world import in the background" and
+  # "Verify world-db release pin" steps read .github/actions/import-world-db/import.sh and
+  # action.yml directly, so a change there must still build.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**'
+      - '!Content/**'
+      - '!Docs/**'
+      - '!**.md'
+      - '!tools/**'
+      - 'tools/ca-planner/**'
+      - 'tools/salvage-sim/**'
+      - '!.claude/**'
+      - '!.github/workflows/**'
+      - '.github/workflows/build-test.yml'
+
+concurrency:
+  # One in-flight run per pull request: pushing a fixup cancels the superseded run instead of
+  # queueing behind it. Master pushes are deliberately NEVER cancelled - the stage and prod
+  # deploy gates read this job's conclusion on the SHA they deploy (deploy-prod.yml hard-fails
+  # with no bypass), and a cancelled run fails that gate exactly as an absent one does - the
+  # gate tests `conclusion = success`, and "cancelled" is not success.
+  group: build-test-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-test:
+    # Pinned rather than ubuntu-latest: this job runs the runner's own preinstalled MySQL (see
+    # "Start MySQL" below) instead of a `services: mysql` container, to match prod's
+    # `image: mysql:8.0` (deploy/prod/docker-compose.yml:12) and to avoid a container cold-start.
+    # ubuntu-latest can move to a newer image with a different bundled MySQL version without
+    # notice; ubuntu-24.04 is the version this was verified against (see "Verify MySQL is 8.0.x",
+    # which fails the job outright if that ever drifts).
+    runs-on: ubuntu-24.04
+    # 3x the max observed job duration over 39 recent runs (317s / 5.3min), rounded up.
+    timeout-minutes: 20
+    # Single source of truth for this job's world-db release pin - referenced by every step below
+    # that needs it, instead of the same literal spelled out three separate times. This job does
+    # NOT call the import-world-db action (see "Launch world import in the background" below for
+    # why), so it cannot just read the action's own input defaults; the "Verify world-db release
+    # pin" step instead reads THOSE defaults at runtime and fails the job if the two disagree, so a
+    # pin bump in only one place is caught here rather than silently drifting.
+    # Skip this heavy job on a draft PR unless it carries the 'ci' label - the job-level
+    # condition makes the check conclude "skipped", which the merge guard and merge train
+    # treat as NOT passed (a step-level skip would still report the job as passing). Push,
+    # schedule and workflow_dispatch runs are unaffected - only github.event_name ==
+    # 'pull_request' triggers the draft/label check at all.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci')
+    # contents: read for checkout; actions: read for the verified-tree lookup below, which lists
+    # artifacts and reads the producing run through the REST API.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      WORLD_DB_RELEASE_TAG: v0.9.294
+      WORLD_DB_RELEASE_ASSET: ACE-World-Database-v0.9.294.sql.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Verified-tree short-circuit (.github/actions/verified-tree). The key is the checked-out
+      # commit's TREE id: a pull_request run checks out refs/pull/<n>/merge, and when master has
+      # not moved before the squash-merge, the resulting master commit has the byte-identical tree
+      # - same sources, same tests, same workflow file, same verified-tree action. A master push
+      # whose tree a successful same-repo pull_request run of THIS workflow already recorded skips
+      # the heavy steps below (each is gated on steps.verified.outputs.verified != 'true') and
+      # still concludes success under the same job name, which is what the deploy gates read.
+      # Only push runs look up; schedule/workflow_dispatch and pull_request runs never do. Any
+      # lookup doubt (API error, no match, a non-success or fork producer) runs everything.
+      - name: Compute the verified-tree key
+        id: vt-key
+        shell: bash
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "name=verified-build-test-$tree" >> "$GITHUB_OUTPUT"
+          echo "verified-tree key: verified-build-test-$tree (tree of $GITHUB_SHA)"
+
+      - name: Verified-tree lookup (master push only)
+        id: verified
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: lookup
+          names: ${{ steps.vt-key.outputs.name }}
+          workflow-path: .github/workflows/build-test.yml
+          token: ${{ github.token }}
+      # The image Dockerfile copies each project's .csproj as its own layer and then restores the
+      # whole solution, so a project added to Source/ACE.sln without a matching COPY line fails
+      # `dotnet restore` inside the image build - and only there, at deploy time, long after this
+      # workflow went green. That has broken the image four times (ACE.Content.Tools +
+      # ACE.Database.LoadTest, ACE.Dashboard, ACE.Database.LoadTest.Tests, ACE.Content.Tools.Tests).
+      # This step moves the failure onto the PR that causes it. The reverse direction (a COPY line
+      # whose directory is gone, which breaks the COPY itself) is only a warning, deliberately:
+      # this workflow and the Dockerfile are both published to the public ACE-DreamWeave mirror
+      # (tools/publish/public-allowlist.txt), and that mirror strips the ACE.Content.Tools* project
+      # family from Source/ACE.sln and omits its directories while copying the Dockerfile verbatim,
+      # so a hard failure there would break the mirror's CI on every push.
+      - name: Dockerfile covers every ACE.sln project
+        run: |
+          rc=0
+          sln_dirs=$(grep -oE '[^"]+\.csproj' Source/ACE.sln | tr -d '\r' | sed 's#\\.*##' | sort -u)
+          copy_dirs=$(grep -oE '^COPY \./Source/[^/]+/\*\.csproj' Dockerfile | sed 's#^COPY \./Source/##; s#/\*\.csproj$##' | sort -u)
+          for d in $sln_dirs; do
+            if ! printf '%s\n' "$copy_dirs" | grep -qxF "$d"; then
+              echo "::error file=Dockerfile::Source/ACE.sln contains $d but Dockerfile has no 'COPY ./Source/$d/*.csproj' line - the image build will fail at 'dotnet restore'."
+              rc=1
+            fi
+          done
+          for d in $copy_dirs; do
+            if [ ! -d "Source/$d" ]; then
+              echo "::warning file=Dockerfile::Dockerfile copies Source/$d/*.csproj but that directory does not exist here - an image build from this checkout would fail at that COPY."
+            fi
+          done
+          if [ "$rc" -eq 0 ]; then echo "Dockerfile COPY list matches Source/ACE.sln ($(printf '%s\n' "$sln_dirs" | wc -l) projects)."; fi
+          exit $rc
+      - name: Setup .NET
+        if: steps.verified.outputs.verified != 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Start MySQL 8.0 (preinstalled) and set root credentials
+        if: steps.verified.outputs.verified != 'true'
+        # ubuntu-24.04 ships MySQL 8.0.x preinstalled but stopped, with 'root'@'localhost' already
+        # requiring a password (verified live: `sudo mysql -e ...` with no password failed
+        # "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)" on
+        # run 35932055366 before this was fixed) - so this connects as -uroot -proot, the
+        # documented GitHub-runner-image default, rather than relying on unix-socket auth. Root is
+        # then repointed at mysql_native_password (not the 8.0 default caching_sha2_password) so a
+        # plain TCP connection over MySqlConnector never has to negotiate full authentication
+        # without TLS, with an EMPTY password - matching what MYSQL_ALLOW_EMPTY_PASSWORD gave the
+        # service container, since the tests below connect via the Config.js.example fallback
+        # (root/no password/127.0.0.1:3306) and changing that default is out of scope here.
+        shell: bash
+        run: |
+          sudo systemctl start mysql.service
+          for i in $(seq 1 30); do
+            mysqladmin ping -h 127.0.0.1 -uroot -proot --silent 2>/dev/null && break
+            sleep 1
+          done
+          mysql -h 127.0.0.1 -uroot -proot -e "
+            ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '';
+            CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED WITH mysql_native_password BY '';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          "
+
+      - name: Verify MySQL is 8.0.x
+        if: steps.verified.outputs.verified != 'true'
+        shell: bash
+        run: |
+          version=$(mysql -h 127.0.0.1 -P 3306 -uroot -N -e "SELECT VERSION();")
+          echo "MySQL VERSION(): $version"
+          case "$version" in
+            8.0.*) ;;
+            *) echo "::error::expected MySQL 8.0.x (to match prod's image: mysql:8.0), got '$version' - the runner image's preinstalled MySQL has drifted from the pin. Re-pin runs-on to a matching ubuntu-* version or add an explicit MySQL install step." ; exit 1 ;;
+          esac
+
+      # This job's WORLD_DB_RELEASE_TAG/ASSET (job env, above) must stay equal to
+      # .github/actions/import-world-db/action.yml's own world-db-release-tag/asset input
+      # defaults - this job does not call that action (see "Launch world import in the
+      # background" below), so nothing else keeps the two in sync. Read the action's actual
+      # defaults at runtime rather than re-hardcoding them a second time: a bump to only one side
+      # then fails loudly here instead of silently shipping two different world-db pins.
+      - name: Verify world-db release pin matches the import-world-db action
+        shell: bash
+        run: |
+          read -r action_tag action_asset < <(python3 -c "import yaml; i = yaml.safe_load(open('.github/actions/import-world-db/action.yml'))['inputs']; print(i['world-db-release-tag']['default'], i['world-db-release-asset']['default'])")
+          echo "action.yml defaults:   tag=$action_tag asset=$action_asset"
+          echo "build-test.yml job env: tag=$WORLD_DB_RELEASE_TAG asset=$WORLD_DB_RELEASE_ASSET"
+          if [ "$action_tag" != "$WORLD_DB_RELEASE_TAG" ] || [ "$action_asset" != "$WORLD_DB_RELEASE_ASSET" ]; then
+            echo "::error::world-db release pin drifted: build-test.yml's job env has tag=$WORLD_DB_RELEASE_TAG asset=$WORLD_DB_RELEASE_ASSET, but .github/actions/import-world-db/action.yml's own input defaults are tag=$action_tag asset=$action_asset. Bump both together."
+            exit 1
+          fi
+
+      # Cache/download stay foreground (actions/cache is a JS action and cannot run inside a
+      # backgrounded shell process); only the actual mysql import work - the part that used to be
+      # this job's separate "Import world database" step, ~34s on run 35925192252 - is backgrounded
+      # below so it overlaps the ~140s Build step instead of running before it. content-apply-ci.yml
+      # keeps calling the import-world-db action normally (foreground) and both callers run the
+      # identical import.sh (see that action's own comment for why this cannot just be one shared
+      # composite step).
+      - name: Compute the unzipped world database dump filename
+        id: dump-name
+        shell: bash
+        run: |
+          echo "sql-file=${WORLD_DB_RELEASE_ASSET%.zip}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the unzipped world database dump
+        id: cache-world-dump
+        if: steps.verified.outputs.verified != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.dump-name.outputs.sql-file }}
+          key: world-db-dump-${{ env.WORLD_DB_RELEASE_TAG }}-${{ env.WORLD_DB_RELEASE_ASSET }}
+
+      - name: Download and unzip the world database dump
+        if: steps.verified.outputs.verified != 'true' && steps.cache-world-dump.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fL -o "$WORLD_DB_RELEASE_ASSET" \
+            "https://github.com/ACEmulator/ACE-World-16PY-Patches/releases/download/$WORLD_DB_RELEASE_TAG/$WORLD_DB_RELEASE_ASSET"
+          unzip -o "$WORLD_DB_RELEASE_ASSET"
+
+      # A `run:` step cannot itself be a `uses:` composite step, and the composite action's own
+      # steps cannot be backgrounded, so this launches its shared import.sh directly. `wait` for a
+      # PID recorded here would not work from a LATER step - each `run:` step is a fresh shell
+      # process, not a child of this one - so completion is instead detected by having the
+      # backgrounded command write its own exit code to a file once it finishes; "Wait for world
+      # import" below polls for that file. An import failure MUST fail the job: this was proven by
+      # temporarily breaking the import on a throwaway commit (see the PR description for the run
+      # that went red at the "Wait for world import" step) and then reverted.
+      - name: Launch world import in the background
+        if: steps.verified.outputs.verified != 'true'
+        shell: bash
+        run: |
+          rm -f /tmp/world-import.log /tmp/world-import.exit
+          nohup bash -c '
+            bash .github/actions/import-world-db/import.sh > /tmp/world-import.log 2>&1
+            echo $? > /tmp/world-import.exit
+          ' >/dev/null 2>&1 &
+          disown
+          echo "world import launched in the background"
+
+      - name: Build
+        if: steps.verified.outputs.verified != 'true'
+        run: dotnet build Source/ACE.sln -c Release -p:Platform=x64
+
+      - name: Wait for world import
+        if: steps.verified.outputs.verified != 'true'
+        shell: bash
+        run: |
+          echo "waiting for the background world import to finish..."
+          for i in $(seq 1 300); do
+            [ -f /tmp/world-import.exit ] && break
+            sleep 1
+          done
+          echo "----- world import log -----"
+          cat /tmp/world-import.log 2>/dev/null || echo "(no log written)"
+          echo "-----------------------------"
+          if [ ! -f /tmp/world-import.exit ]; then
+            echo "::error::background world database import never finished (timed out after 300s) - see the log above."
+            exit 1
+          fi
+          rc=$(cat /tmp/world-import.exit)
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::background world database import failed (exit $rc) - see the log above."
+            exit 1
+          fi
+          echo "world import finished OK (exit $rc)"
+      # MySQL-gated tests (AccountTests, StartupTests, WeenieSearchTests) now run against the
+      # runner's own preinstalled MySQL (started above) and the imported world database release,
+      # via the Config.js.example fallback (root/no password/127.0.0.1:3306) that TestEnvironment
+      # copies in when no real Config.js exists. Tests that need client .dat files still skip themselves
+      # (Inconclusive) - that's a separate, unrelated dependency this job doesn't provide.
+      # --no-build is what keeps the whole solution from being compiled TWICE. `dotnet build` on
+      # the .sln above uses the solution's own configuration mapping, which sends the AnyCPU
+      # projects to bin/Release; `dotnet test` on a .csproj instead applies -p:Platform=x64 as a
+      # global property down the whole project-to-project graph, sending those same projects to
+      # bin/x64/Release. That moves ACE.Server's inputs, so it and everything above it rebuilt
+      # inside the first test step - 54s of a 4:54 run, against 15s of actual test execution.
+      # The sln build already emits every TEST project to bin/x64/Release/net10.0, which is
+      # exactly where --no-build -p:Platform=x64 looks, so nothing is missing. Keep -p:Platform=x64
+      # on these lines: without it --no-build looks in bin/Release/net10.0 and either errors or
+      # (locally) runs a stale AnyCPU assembly - see CLAUDE.md's Test section.
+      - name: Test ACE.Server.Tests
+        if: steps.verified.outputs.verified != 'true'
+        run: dotnet test Source/ACE.Server.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+      # ACE.Content.Tools.Tests is excluded from the public ACE-DreamWeave publish alongside ACE.Content.Tools, so no-op if the project is absent
+      - name: Test ACE.Content.Tools.Tests
+        if: steps.verified.outputs.verified != 'true' && hashFiles('Source/ACE.Content.Tools.Tests/ACE.Content.Tools.Tests.csproj') != ''
+        run: dotnet test Source/ACE.Content.Tools.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+      # ACE_REQUIRE_WORLD_DB=1 makes the bulk weenie loader's tests (WeenieBulkLoaderTests) FAIL instead of
+      # reporting Inconclusive if this job's world database is ever unreachable - a blocking gate must not be
+      # able to turn itself off quietly.
+      # The exhaustive BulkMatchesPerId_AllWeenies fidelity test is EXCLUDED here. It took 9m24s of this job on
+      # master dba7a9876 (run 35732107183) and runs in content-apply-ci.yml instead, against retail plus the
+      # full fork manifest (a strict superset of this job's retail-only import), whenever the weenie reader or
+      # any content changes. Remove the filter only if that job stops covering it.
+      - name: Test ACE.Database.Tests
+        if: steps.verified.outputs.verified != 'true'
+        env:
+          ACE_REQUIRE_WORLD_DB: '1'
+        run: dotnet test Source/ACE.Database.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings --filter "FullyQualifiedName!~BulkMatchesPerId"
+      - name: Test ACE.DatLoader.Tests
+        if: steps.verified.outputs.verified != 'true'
+        run: dotnet test Source/ACE.DatLoader.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+      # pure comparison logic for the benchmark harness - no MySQL, no dat files, nothing to skip
+      - name: Test ACE.Database.LoadTest.Tests
+        if: steps.verified.outputs.verified != 'true'
+        run: dotnet test Source/ACE.Database.LoadTest.Tests -c Release -p:Platform=x64 --no-build --test-adapter-path:. --settings Source/test.runsettings
+
+      # Last step: record this tree as verified, so the master push that squash-merges it can skip
+      # the steps above. Only a successful same-repo pull_request run records (the default
+      # success() condition means every step above passed, and no pull_request run ever looks up,
+      # so a recording run always EXECUTED the full step set). continue-on-error: a failed upload
+      # only costs the reuse, never the check.
+      - name: Record the verified tree (pull_request only)
+        if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: ./.github/actions/verified-tree
+        with:
+          mode: record
+          names: ${{ steps.vt-key.outputs.name }}
+
+      - name: Report the verified-tree short-circuit
+        if: steps.verified.outputs.verified == 'true'
+        shell: bash
+        env:
+          VT_RUN_URL: ${{ steps.verified.outputs.run-url }}
+        run: |
+          echo "Short-circuited: this tree was verified by $VT_RUN_URL; build and tests were skipped."
+          echo "### build-test short-circuited" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tree already verified by $VT_RUN_URL (artifact \`${{ steps.vt-key.outputs.name }}\`); build and test steps skipped." >> "$GITHUB_STEP_SUMMARY"

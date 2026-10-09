@@ -1,0 +1,95 @@
+name: Verified-tree record / lookup
+description: >
+  Lets a master push run skip heavy verification a pull_request run, or an earlier master push
+  run, already performed on byte-identical inputs. `record` (pull_request runs, and master push
+  runs, last step, only after the heavy steps actually ran and passed on THIS run - never on a
+  run that itself short-circuited) uploads a tiny marker artifact whose NAME is the verification
+  key. `lookup` (push runs, first step) searches the REST API for that exact artifact name and
+  returns verified=true only when every producing run is a completed, successful, same-workflow,
+  same-repository (non-fork) pull_request run, or a push run on this repository's master branch -
+  see lookup.py for the full rule. Every error fails closed to verified=false, which means "run
+  the heavy steps in full". The key the caller passes must cover every input of the job it
+  guards, including the workflow file and this action.
+
+inputs:
+  mode:
+    description: "'record' or 'lookup'."
+    required: true
+  names:
+    description: >-
+      record: the single artifact name to upload. lookup: newline-separated candidate names in
+      preference order; the first acceptable one wins.
+    required: true
+  workflow-path:
+    description: "lookup: the calling workflow's file, e.g. .github/workflows/build-test.yml."
+    required: false
+    default: ''
+  token:
+    description: "lookup: a token with actions:read."
+    required: false
+    default: ''
+  retention-days:
+    description: "record: marker artifact retention."
+    required: false
+    default: '5'
+
+outputs:
+  verified:
+    description: "lookup: 'true' when a valid producer was found, otherwise 'false'."
+    value: ${{ steps.lookup.outputs.verified }}
+  run-url:
+    description: "lookup: html_url of the pull_request or master-push run being reused (empty when not verified)."
+    value: ${{ steps.lookup.outputs.run-url }}
+  matched-name:
+    description: "lookup: the candidate name that was accepted (empty when not verified)."
+    value: ${{ steps.lookup.outputs.matched-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate mode
+      shell: bash
+      env:
+        VT_MODE: ${{ inputs.mode }}
+      run: |
+        case "$VT_MODE" in
+          record|lookup) ;;
+          *) echo "::error::verified-tree: unknown mode '$VT_MODE' (expected record or lookup)"; exit 1 ;;
+        esac
+
+    - name: Look up a verifying pull_request run
+      id: lookup
+      if: inputs.mode == 'lookup'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        VT_NAMES: ${{ inputs.names }}
+        VT_WORKFLOW_PATH: ${{ inputs.workflow-path }}
+      run: python3 "$GITHUB_ACTION_PATH/lookup.py"
+
+    - name: Write the verification marker
+      if: inputs.mode == 'record'
+      shell: bash
+      env:
+        VT_NAME: ${{ inputs.names }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/verified-tree"
+        {
+          echo "name=$VT_NAME"
+          echo "run_id=$GITHUB_RUN_ID"
+          echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "sha=$GITHUB_SHA"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')"
+        } > "$RUNNER_TEMP/verified-tree/marker.txt"
+        cat "$RUNNER_TEMP/verified-tree/marker.txt"
+
+    - name: Upload the verification marker
+      if: inputs.mode == 'record'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.names }}
+        path: ${{ runner.temp }}/verified-tree/marker.txt
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error
+        overwrite: true

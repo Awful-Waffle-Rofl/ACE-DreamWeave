@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>disable</Nullable>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <Platforms>AnyCPU</Platforms>
+        <Version>1.0.0</Version>
+        <Authors>ACEmulator Contributors</Authors>
+        <Company>ACEmulator</Company>
+        <Description>Asheron's Call server emulator</Description>
+        <Copyright>© 2017-2026 ACEmulator Team and Contributors</Copyright>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageProjectUrl>https://emulator.ac</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/ACEmulator/ACE</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\ACE.Database\ACE.Database.csproj" />
+      <ProjectReference Include="..\ACE.Entity\ACE.Entity.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Reference Include="Lifestoned.DataModel">
+        <HintPath>..\lib\Lifestoned.DataModel.dll</HintPath>
+      </Reference>
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Include="..\..\LICENSE">
+        <Pack>True</Pack>
+        <PackagePath></PackagePath>
+      </None>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="MySqlConnector" Version="2.6.2" />
+      <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-4f7c-pmjv-c25w" />
+    </ItemGroup>
+
+</Project>

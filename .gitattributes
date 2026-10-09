@@ -1,0 +1,36 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts must stay LF everywhere (CRLF breaks bash, including Git Bash on Windows)
+*.sh     text eol=lf
+
+# Workflow scripts are inlined into harness permission dialogs; CRLF reads as hidden control characters and blocks invocation
+.claude/workflows/*.js text eol=lf
+
+# Custom for Visual Studio
+*.cs     diff=csharp
+*.sln    merge=union
+*.csproj merge=union
+*.vbproj merge=union
+*.fsproj merge=union
+*.dbproj merge=union
+
+# Standard to msysgit
+*.doc    diff=astextplain
+*.DOC    diff=astextplain
+*.docx   diff=astextplain
+*.DOCX   diff=astextplain
+*.dot    diff=astextplain
+*.DOT    diff=astextplain
+*.pdf    diff=astextplain
+*.PDF    diff=astextplain
+*.rtf    diff=astextplain
+*.RTF    diff=astextplain
+
+# Generated catalog the market app serves: LF on every platform (publish.ps1 also normalizes)
+tools/suit-catalog/suit-catalog.json text eol=lf
+
+# Generated catalog for the web loot profile editor: LF on every platform
+tools/loot-catalog/loot-catalog.json text eol=lf
+tools/loot-catalog/item-names.tsv text eol=lf
+tools/loot-catalog/material-names.tsv text eol=lf

@@ -1,0 +1,438 @@
+command	handler	bucket	basis	capture	flags	note
+MoveTo	ACE.Server.Command.Handlers.DeveloperCommands.MoveTo	in_game_character	requires_world	captured	-	
+abilities	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleSkills	in_game_character	requires_world	captured	-	
+accountcreate	ACE.Server.Command.Handlers.AccountCommands.HandleAccountCreate	web	scan_safe	captured	-	
+accountget	ACE.Server.Command.Handlers.AccountCommands.HandleAccountGet	web	console_invoke	uncaptured	-	
+acecommands	ACE.Server.Command.Handlers.HelpCommands.HandleACECommands	in_game_character	scan_unsafe	partial	-	
+acehelp	ACE.Server.Command.Handlers.HelpCommands.HandleACEHelp	in_game_character	scan_unsafe	partial	-	
+aceversion	ACE.Server.Command.Handlers.PlayerCommands.HandleACEversion	in_game_character	requires_world	captured	-	
+addallspells	ACE.Server.Command.Handlers.DeveloperCommands.HandleAddAllSpells	in_game_character	requires_world	captured	-	
+addalltitles	ACE.Server.Command.Handlers.DeveloperCommands.HandleAddAllTitles	in_game_character	requires_world	captured	-	
+addenc	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleAddEncounter	in_game_character	requires_world	captured	-	
+additemspell	ACE.Server.Command.Handlers.DeveloperCommands.HandleAddItemSpell	in_game_character	requires_world	captured	-	
+addluminance	ACE.Server.Command.Handlers.DeveloperCommands.HandleAddLuminance	in_game_character	requires_world	captured	-	
+addspell	ACE.Server.Command.Handlers.AdminCommands.HandleAddSpell	in_game_character	requires_world	captured	-	
+addtitle	ACE.Server.Command.Handlers.DeveloperCommands.HandleAddTitle	in_game_character	requires_world	captured	-	
+adminhouse	ACE.Server.Command.Handlers.AdminCommands.HandleAdminhouse	in_game_character	requires_world	partial	-	
+adminui	ACE.Server.Command.Handlers.AdminCommands.HandleAdminui	in_game_character	requires_world	captured	-	
+adminvision	ACE.Server.Command.Handlers.AdminCommands.HandleAdminvision	in_game_character	requires_world	captured	-	
+allstats	ACE.Server.Command.Handlers.AdminStatCommands.HandleAllStats	web	scan_safe	captured	-	
+altbonus	ACE.Server.Command.Handlers.PlayerCommands.HandleAltBonus	in_game_character	requires_world	captured	-	
+animation	ACE.Server.Command.Handlers.DeveloperCommands.Animation	in_game_character	requires_world	captured	-	
+appraiseprobe	ACE.Server.Command.Handlers.AppraiseProbeCommands.HandleAppraiseProbe	in_game_character	requires_world	captured	-	
+arena	ACE.Server.Command.Handlers.PvpArenaCommands.HandleArena	in_game_character	requires_world	captured	-	
+arenaadmin	ACE.Server.Command.Handlers.PvpArenaAdminCommands.HandleArenaAdmin	in_game_character	requires_world	captured	-	
+attackable	ACE.Server.Command.Handlers.AdvocateCommands.HandleAttackable	in_game_character	requires_world	captured	-	
+auditobjectmaint	ACE.Server.Command.Handlers.DeveloperCommands.HandleAuditObjectMaint	web	scan_safe	captured	-	
+aug	ACE.Server.Command.Handlers.AugmentationCommands.HandleAug	in_game_character	requires_world	captured	-	
+augs	ACE.Server.Command.Handlers.AugmentationCommands.HandleAugs	in_game_character	requires_world	captured	-	
+b	ACE.Server.Command.Handlers.PlayerCommands.HandleBankShort	in_game_character	requires_world	captured	-	
+ban	ACE.Server.Command.Handlers.SentinelCommands.HandleBanAccount	web	scan_safe	captured	-	
+bank	ACE.Server.Command.Handlers.PlayerCommands.HandleBank	in_game_character	requires_world	captured	-	
+banlist	ACE.Server.Command.Handlers.SentinelCommands.HandleBanlist	web	scan_safe	captured	-	
+barbershop	ACE.Server.Command.Handlers.DeveloperCommands.BarberShop	in_game_character	requires_world	captured	-	
+barrier-test	ACE.Server.Command.Handlers.DeveloperCommands.HandleBarrierTest	in_game_character	requires_world	uncaptured	-	
+bestow	ACE.Server.Command.Handlers.AdvocateCommands.HandleBestow	in_game_character	requires_world	captured	-	
+bonus	ACE.Server.Command.Handlers.PlayerCommands.HandleBonus	in_game_character	requires_world	captured	-	
+boot	ACE.Server.Command.Handlers.SentinelCommands.HandleBoot	web	scan_safe	captured	-	
+bornagain	ACE.Server.Command.Handlers.AdminCommands.HandleBornAgain	in_game_character	requires_world	captured	-	
+buff	ACE.Server.Command.Handlers.SentinelCommands.HandleBuff	in_game_character	requires_world	captured	-	
+bumpvelocity	ACE.Server.Command.Handlers.DeveloperCommands.HandleBumpVelocity	in_game_character	requires_world	captured	-	
+caaudit	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleCapAudit	in_game_character	requires_world	captured	-	
+cancel-shutdown	ACE.Server.Command.Handlers.AdminShardCommands.HandleCancelShutdown	web	override	captured	-	O5: prevents an outage rather than causing one, and a web admin must be able to stop a pending shutdown someone else started. Reviewed null-session-safe: (session == null) ? "CONSOLE" : session.Player.Name and BroadcastToAuditChannel(session?.Player, ...) both tolerate a null session; only the nullable-local rule marked it unsafe. From the web its message still reads CONSOLE; the Audit sender is the web label.
+capadjust	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleCapAdjust	in_game_character	requires_world	captured	-	
+castmeter	ACE.Server.Command.Handlers.PlayerCommands.HandleCastMeter	in_game_character	requires_world	captured	-	
+castspell	ACE.Server.Command.Handlers.DeveloperCommands.HandleCastSpell	in_game_character	requires_world	captured	-	
+cavoucher	ACE.Server.Command.Handlers.ClassAbilityTrainerCommands.HandleCsVoucher	in_game_character	requires_world	captured	-	
+cell-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportCellDatContents	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+charsheet	ACE.Server.Command.Handlers.CharacterSheetCommands.HandleCharSheet	in_game_character	requires_world	captured	-	
+chatcolors	ACE.Server.Command.Handlers.DeveloperCommands.HandleChatColors	in_game_character	requires_world	captured	-	
+chatdump	ACE.Server.Command.Handlers.DeveloperCommands.ChatDump	in_game_character	requires_world	captured	-	
+check-collision	ACE.Server.Command.Handlers.DeveloperCommands.HandleCheckEthereal	in_game_character	requires_world	captured	-	
+ci	ACE.Server.Command.Handlers.AdminCommands.HandleCI	in_game_character	requires_world	captured	-	
+ciaetheria	ACE.Server.Command.Handlers.DeveloperCommands.HandleCIAetheria	in_game_character	requires_world	captured	-	
+ciloot	ACE.Server.Command.Handlers.DeveloperCommands.HandleCILoot	in_game_character	requires_world	captured	-	
+cirand	ACE.Server.Command.Handlers.DeveloperCommands.HandleCIRandom	in_game_character	requires_world	captured	-	
+cisalvage	ACE.Server.Command.Handlers.AdminCommands.HandleCISalvage	in_game_character	requires_world	captured	-	
+clearcache	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleClearCache	web	scan_safe	captured	-	
+clearphysicscaches	ACE.Server.Command.Handlers.DeveloperCommands.HandleClearPhysicsCaches	web	scan_safe	captured	-	
+cloak	ACE.Server.Command.Handlers.SentinelCommands.HandleCloak	in_game_character	requires_world	captured	-	
+cm	ACE.Server.Command.Handlers.AdminCommands.HandleCM	in_game_character	requires_world	captured	-	
+comps	ACE.Server.Command.Handlers.DeveloperCommands.HandleComps	in_game_character	requires_world	captured	-	
+config	ACE.Server.Command.Handlers.PlayerCommands.HandleConfig	in_game_character	requires_world	captured	-	
+contract	ACE.Server.Command.Handlers.DeveloperCommands.HandleContract	in_game_character	requires_world	captured	-	
+copychar	ACE.Server.Command.Handlers.AdminCommands.HandleCopychar	in_game_character	requires_world	captured	-	
+crack	ACE.Server.Command.Handlers.AdminCommands.HandleCrack	in_game_character	requires_world	captured	-	
+create	ACE.Server.Command.Handlers.AdminCommands.HandleCreate	in_game_character	requires_world	captured	-	
+createinst	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleCreateInst	in_game_character	requires_world	captured	-	
+createliveops	ACE.Server.Command.Handlers.AdminCommands.HandleCreateLiveOps	in_game_character	requires_world	captured	-	
+createnamed	ACE.Server.Command.Handlers.AdminCommands.HandleCreateNamed	in_game_character	requires_world	captured	-	
+csdiag	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleCsDiag	in_game_character	requires_world	captured	-	
+currency	ACE.Server.Command.Handlers.DeveloperCommands.HandleCurrency	in_game_character	requires_world	captured	-	
+customaugs	ACE.Server.Command.Handlers.AugmentationCommands.HandleCustomAugs	in_game_character	requires_world	captured	-	
+damagehistory	ACE.Server.Command.Handlers.DeveloperCommands.HandleDamageHistory	in_game_character	requires_world	captured	-	
+database-shard-cache-npbrt	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleDatabaseShardCacheNPBRT	web	scan_safe	captured	-	
+database-shard-cache-pbrt	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleDatabaseShardCachePBRT	web	scan_safe	captured	-	
+databaseperftest	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleDatabasePerfTest	in_game_character	scan_unsafe	captured	-	
+databasequeueinfo	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleDatabaseQueueInfo	web	scan_safe	captured	-	
+dd	ACE.Server.Command.Handlers.ThreadDungeonCommands.HandleDd	in_game_character	requires_world	captured	-	
+de_n	ACE.Server.Command.Handlers.AdminCommands.Handlede_n	in_game_character	requires_world	captured	-	
+de_s	ACE.Server.Command.Handlers.AdminCommands.Handlede_s	in_game_character	requires_world	captured	-	
+deaf	ACE.Server.Command.Handlers.SentinelCommands.HandleDeaf	in_game_character	requires_world	captured	-	
+deaf	ACE.Server.Command.Handlers.SentinelCommands.HandleDeafHearOrMute	in_game_character	requires_world	captured	-	
+deathxp	ACE.Server.Command.Handlers.AdminCommands.HandleDeathxp	in_game_character	requires_world	captured	-	
+debugboard	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugBoard	in_game_character	requires_world	captured	-	
+debugcast	ACE.Server.Command.Handlers.PlayerCommands.HandleDebugCast	in_game_character	requires_world	captured	-	
+debugchess	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugChess	in_game_character	requires_world	captured	-	
+debugdamage	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugDamage	in_game_character	requires_world	captured	-	
+debugemote	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugEmote	in_game_character	requires_world	uncaptured	-	
+debugmove	ACE.Server.Command.Handlers.DeveloperCommands.ToggleMovementDebug	in_game_character	requires_world	captured	-	
+debugspell	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugSpell	in_game_character	requires_world	captured	-	
+debugspellbook	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugSpellbook	in_game_character	requires_world	captured	-	
+delete	ACE.Server.Command.Handlers.AdminCommands.HandleDeleteSelected	in_game_character	requires_world	captured	-	
+deletecharacter	ACE.Server.Command.Handlers.CharacterCommands.HandleCharacterForcedDelete	web	scan_safe	partial	-	
+delevel	ACE.Server.Command.Handlers.DeveloperCommands.HandleDelevel	in_game_character	requires_world	captured	-	
+destructionqueue	ACE.Server.Command.Handlers.DeveloperCommands.HandleDestructionQueue	in_game_character	requires_world	uncaptured	-	
+digsite	ACE.Server.Command.Handlers.MlDigsiteCommands.HandleDigsite	in_game_character	requires_world	captured	-	
+direct_emote_name	ACE.Server.Command.Handlers.AdminCommands.Handledirect_emote_name	in_game_character	requires_world	captured	-	
+direct_emote_select	ACE.Server.Command.Handlers.AdminCommands.Handledirect_emote_select	in_game_character	requires_world	captured	-	
+dispel	ACE.Server.Command.Handlers.AdminCommands.HandleDispel	in_game_character	requires_world	captured	-	
+dist	ACE.Server.Command.Handlers.DeveloperCommands.HandleDist	in_game_character	requires_world	captured	-	
+dn	ACE.Server.Command.Handlers.PlayerCommands.HandleDriftNetworkRecall	in_game_character	requires_world	captured	-	
+dotdamage	ACE.Server.Command.Handlers.PlayerCommands.HandleDotDamage	in_game_character	requires_world	captured	-	
+draw	ACE.Server.Command.Handlers.AdminCommands.HandleDraw	in_game_character	requires_world	captured	-	
+dumpattackers	ACE.Server.Command.Handlers.AdminCommands.Handledumpattackers	in_game_character	requires_world	captured	-	
+dungeonname	ACE.Server.Command.Handlers.DeveloperCommands.HandleDungeonName	in_game_character	requires_world	captured	-	
+echo	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugEcho	in_game_character	requires_world	captured	-	
+echoflags	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugEchoFlags	web	scan_safe	captured	-	
+effect	ACE.Server.Command.Handlers.DeveloperCommands.HandlePlayEffect	in_game_character	requires_world	captured	-	
+enable-aetheria	ACE.Server.Command.Handlers.DeveloperCommands.HandleEnableAetheria	in_game_character	requires_world	captured	-	
+enter-instance	ACE.Server.Command.Handlers.InstanceCommands.HandleEnterInstance	in_game_character	requires_world	captured	-	
+equiptest	ACE.Server.Command.Handlers.DeveloperCommands.EquipTest	in_game_character	requires_world	captured	-	
+event	ACE.Server.Command.Handlers.AdminCommands.HandleEvent	in_game_character	scan_unsafe	captured	-	
+exit	ACE.Server.Command.Handlers.ConsoleCommands.Exit	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
+exitinst	ACE.Server.Command.Handlers.InstanceCommands.HandleExitInst	in_game_character	requires_world	captured	-	
+exitinstance	ACE.Server.Command.Handlers.InstanceCommands.HandleExitInstance	in_game_character	requires_world	captured	-	
+export-json	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleExportJson	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+export-json-folders	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleExportJsonFolder	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+export-sql	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleExportSql	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+export-sql-folders	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleExportSqlFolder	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+export-sql-realm	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleExportSqlRealm	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+facet	ACE.Server.Command.Handlers.FacetCommands.HandleFacet	in_game_character	requires_world	captured	-	
+faction	ACE.Server.Command.Handlers.DeveloperCommands.HandleFaction	in_game_character	requires_world	captured	-	
+fast	ACE.Server.Command.Handlers.DeveloperCommands.HandleFast	in_game_character	requires_world	captured	-	
+fasttick	ACE.Server.Command.Handlers.PlayerCommands.HandleFastTick	in_game_character	requires_world	captured	-	
+fellow-dist	ACE.Server.Command.Handlers.DeveloperCommands.HandleFellowDist	in_game_character	requires_world	captured	-	
+fellow-info	ACE.Server.Command.Handlers.DeveloperCommands.HandleFellowInfo	in_game_character	requires_world	captured	-	
+fellowbuff	ACE.Server.Command.Handlers.SentinelCommands.HandleFellowBuff	in_game_character	requires_world	captured	-	
+fetchbool	ACE.Server.Command.Handlers.AdminCommands.HandleFetchServerBoolProperty	web	scan_safe	captured	-	
+fetchdouble	ACE.Server.Command.Handlers.AdminCommands.HandleFetchServerFloatProperty	web	scan_safe	captured	-	
+fetchlong	ACE.Server.Command.Handlers.AdminCommands.HandleFetchServerLongProperty	web	scan_safe	captured	-	
+fetchstring	ACE.Server.Command.Handlers.AdminCommands.HandleFetchServerStringProperty	web	scan_safe	captured	-	
+fi	ACE.Server.Command.Handlers.PlayerCommands.HandleFixInvisible	in_game_character	requires_world	captured	-	
+finger	ACE.Server.Command.Handlers.AdminCommands.HandleFinger	web	scan_safe	captured	-	
+fix-allegiances	ACE.Server.Command.Handlers.AdminCommands.HandleFixAllegiances	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+fix-biota-emote-delay	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleFixBiotaEmoteDelay	web	console_invoke	captured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+fix-gear-plating	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleFixGearPlating	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+fix-shortcut-bars	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleFixShortcutBars	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+fix-spell-bars	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleFixSpellBars	in_game_only	console_read	uncaptured	long_running	Blocks on Console.ReadLine; bulk shard scan (O4).
+fixbusy	ACE.Server.Command.Handlers.DeveloperCommands.HandleFixBusy	in_game_character	requires_world	captured	-	
+fixcast	ACE.Server.Command.Handlers.PlayerCommands.HandleFixCast	in_game_character	requires_world	captured	-	
+fixinvisible	ACE.Server.Command.Handlers.PlayerCommands.HandleFixInvisible	in_game_character	requires_world	captured	-	
+food	ACE.Server.Command.Handlers.DeveloperCommands.HandleFood	in_game_character	requires_world	captured	-	
+forcegc	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceGC	web	scan_safe	captured	-	
+forcegc2	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceGC2	web	scan_safe	captured	-	
+forcelogoff	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceLogoff	in_game_character	requires_world	captured	-	
+forcelogout	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceLogout	in_game_character	requires_world	captured	-	
+forceobjdescprobe	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceObjDescProbe	in_game_character	requires_world	captured	-	
+freeze	ACE.Server.Command.Handlers.AdminCommands.HandleFreeze	in_game_character	requires_world	captured	-	
+fship	ACE.Server.Command.Handlers.FellowshipCommands.HandleFship	in_game_character	requires_world	captured	-	
+fumble	ACE.Server.Command.Handlers.AdminCommands.HandleFumble	in_game_character	requires_world	captured	-	
+gag	ACE.Server.Command.Handlers.AdminCommands.HandleGag	in_game_character	requires_world	captured	-	
+gamecast	ACE.Server.Command.Handlers.AdminCommands.HandleGamecast	in_game_character	scan_unsafe	captured	-	
+gamecastemote	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastEmote	web	scan_safe	captured	-	
+gamecastlocal	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastLocal	in_game_character	scan_unsafe	captured	-	
+gamecastlocalemote	ACE.Server.Command.Handlers.AdminCommands.HandleGameCastLocalEmote	web	scan_safe	captured	-	
+gcstatus	ACE.Server.Command.Handlers.AdminStatCommands.HandleGCStatus	web	scan_safe	captured	-	
+generate-classnames	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleGenerateClassNames	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+generatordump	ACE.Server.Command.Handlers.DeveloperCommands.HandleGeneratorDump	in_game_character	requires_world	captured	-	
+get-home-realm	ACE.Server.Command.Handlers.RealmCommands.HandleGetHomeRealm	web	scan_safe	captured	-	
+getallspellformula	ACE.Server.Command.Handlers.DeveloperCommands.GetAllSpellFormula	web	console_invoke	uncaptured	-	
+getenchantments	ACE.Server.Command.Handlers.AdminCommands.HandleGetEnchantments	in_game_character	requires_world	captured	-	
+getinfo	ACE.Server.Command.Handlers.DeveloperCommands.HandleGetInfo	in_game_character	requires_world	captured	-	
+getproperty	ACE.Server.Command.Handlers.DeveloperCommands.HandleGetProperty	in_game_character	requires_world	captured	-	
+getspellformula	ACE.Server.Command.Handlers.DeveloperCommands.GetSpellFormula	web	console_invoke	uncaptured	-	
+givemana	ACE.Server.Command.Handlers.DeveloperCommands.HandleGiveMana	in_game_character	requires_world	captured	-	
+god	ACE.Server.Command.Handlers.AdminCommands.HandleGod	in_game_character	requires_world	captured	-	
+gps	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugGPS	in_game_character	requires_world	captured	-	
+grantabilitypoints	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleGrantSkillPoints	in_game_character	requires_world	captured	-	
+grantitemxp	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantItemXp	in_game_character	requires_world	captured	-	
+grantluminance	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantLuminance	in_game_character	requires_world	captured	-	
+grantxp	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantXp	in_game_character	requires_world	captured	-	
+harmself	ACE.Server.Command.Handlers.DeveloperCommands.HarmSelf	in_game_character	requires_world	captured	-	
+heal	ACE.Server.Command.Handlers.AdminCommands.HandleHeal	in_game_character	requires_world	captured	-	
+healself	ACE.Server.Command.Handlers.AdminCommands.HandleHealSelf	in_game_character	requires_world	captured	-	
+highres-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportHighresDatContents	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+home	ACE.Server.Command.Handlers.AdminCommands.HandleHome	in_game_character	requires_world	captured	-	
+house-select	ACE.Server.Command.Handlers.PlayerCommands.HandleHouseSelect	in_game_character	requires_world	captured	-	
+housekeep	ACE.Server.Command.Handlers.AdminCommands.HandleHousekeep	in_game_character	requires_world	captured	-	
+idlist	ACE.Server.Command.Handlers.AdminCommands.HandleIDlist	in_game_character	requires_world	captured	-	
+image-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportImageFile	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+import-json	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleImportJson	in_game_character	scan_unsafe	captured	-	
+import-sql	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleImportSQL	in_game_character	scan_unsafe	captured	-	
+import-sql-folders	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleImportSQLFolders	in_game_character	scan_unsafe	captured	-	
+inv	ACE.Server.Command.Handlers.DeveloperCommands.HandleInv	in_game_character	requires_world	captured	-	
+iplimit	ACE.Server.Command.Handlers.IpLimitCommands.HandleIpLimit	web	scan_safe	captured	-	
+iplimitwho	ACE.Server.Command.Handlers.IpLimitCommands.HandleIpLimitWho	web	scan_safe	captured	-	
+knownobjs	ACE.Server.Command.Handlers.AdminCommands.Handleknownobjs	in_game_character	requires_world	captured	-	
+knownobjs	ACE.Server.Command.Handlers.DeveloperCommands.HandleKnownObjs	in_game_character	requires_world	uncaptured	-	
+knownplayers	ACE.Server.Command.Handlers.DeveloperCommands.HandleKnownPlayers	in_game_character	requires_world	uncaptured	-	
+landblockperformance	ACE.Server.Command.Handlers.AdminStatCommands.HandleLandblockStats	web	scan_safe	captured	-	
+landblockstats	ACE.Server.Command.Handlers.AdminStatCommands.HandleLandblockStats	web	scan_safe	captured	-	
+language-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportLanguageDatContents	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+lbgroupstats	ACE.Server.Command.Handlers.AdminStatCommands.HandleLBGroupStats	web	scan_safe	captured	-	
+lbinterval	ACE.Server.Command.Handlers.AdminCommands.Handlelbinterval	in_game_character	requires_world	captured	-	
+lbthresh	ACE.Server.Command.Handlers.AdminCommands.Handlelbthresh	in_game_character	requires_world	captured	-	
+leaveinstance	ACE.Server.Command.Handlers.InstanceCommands.HandleLeaveInstance	in_game_character	requires_world	captured	-	
+limbo	ACE.Server.Command.Handlers.AdminCommands.HandleLimbo	in_game_character	requires_world	captured	-	
+listcb	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowCompatibleClothingBases	web	console_invoke	uncaptured	-	
+listplayers	ACE.Server.Command.Handlers.DeveloperCommands.HandleListPlayers	web	scan_safe	captured	-	
+listpositions	ACE.Server.Command.Handlers.DeveloperCommands.HandleListPositions	in_game_character	requires_world	captured	-	
+loadalllandblocks	ACE.Server.Command.Handlers.DeveloperCommands.HandleLoadAllLandblocks	in_game_only	override	captured	-	O1-class: attribute says it will likely crash a live server
+location	ACE.Server.Command.Handlers.AdminCommands.HandleLocation	in_game_character	requires_world	captured	-	
+lootgen	ACE.Server.Command.Handlers.DeveloperCommands.HandleLootGen	in_game_character	requires_world	captured	-	
+lostest	ACE.Server.Command.Handlers.DeveloperCommands.HandleVisible	in_game_character	requires_world	uncaptured	-	
+lph	ACE.Server.Command.Handlers.PlayerCommands.HandleLph	in_game_character	requires_world	captured	-	
+lumaugs	ACE.Server.Command.Handlers.AugmentationCommands.HandleLumAugs	in_game_character	requires_world	captured	-	
+magic god	ACE.Server.Command.Handlers.AdminCommands.HandleMagicGod	in_game_character	requires_world	captured	-	
+makeiou	ACE.Server.Command.Handlers.DeveloperCommands.HandleMakeIOU	in_game_character	requires_world	captured	-	
+market	ACE.Server.Command.Handlers.MarketCommands.HandleMarket	in_game_character	requires_world	captured	-	
+marketad	ACE.Server.Command.Handlers.MarketAdvertiserCommands.HandleMarketAd	in_game_character	requires_world	captured	-	
+marketadmin	ACE.Server.Command.Handlers.MarketAdminCommands.HandleMarketAdmin	in_game_character	requires_world	captured	-	
+marketbackfill	ACE.Server.Command.Handlers.MarketBackfillCommands.HandleMarketBackfill	in_game_character	requires_world	captured	-	
+mod	ACE.Server.Command.Handlers.ModCommands.HandleListMods	in_game_character	scan_unsafe	captured	-	
+modifyattr	ACE.Server.Command.Handlers.AdminCommands.HandleModifyAttribute	in_game_character	scan_unsafe	captured	-	
+modifybool	ACE.Server.Command.Handlers.AdminCommands.HandleModifyServerBoolProperty	web	override	captured	self_audit	null-safe past the scanner: PropertyAdminService reads session only inside if (session != null)
+modifydouble	ACE.Server.Command.Handlers.AdminCommands.HandleModifyServerFloatProperty	web	override	captured	self_audit	null-safe past the scanner: PropertyAdminService reads session only inside if (session != null)
+modifylong	ACE.Server.Command.Handlers.AdminCommands.HandleModifyServerLongProperty	web	override	captured	self_audit	null-safe past the scanner: PropertyAdminService reads session only inside if (session != null)
+modifypropertydesc	ACE.Server.Command.Handlers.AdminCommands.HandleModifyPropertyDescription	web	scan_safe	captured	-	
+modifyskill	ACE.Server.Command.Handlers.AdminCommands.HandleModifySkill	in_game_character	scan_unsafe	captured	-	
+modifystring	ACE.Server.Command.Handlers.AdminCommands.HandleModifyServerStringProperty	web	override	captured	self_audit	null-safe past the scanner: PropertyAdminService reads session only inside if (session != null)
+modifyvital	ACE.Server.Command.Handlers.AdminCommands.HandleModifyVital	in_game_character	scan_unsafe	captured	-	
+mods	ACE.Server.Command.Handlers.EquipmentModCommands.HandleMods	in_game_character	requires_world	captured	-	
+monstereffects	ACE.Server.Command.Handlers.MonsterEffectAdminCommands.HandleMonsterEffects	in_game_character	requires_world	captured	-	
+monsterspell	ACE.Server.Command.Handlers.DeveloperCommands.HandleMonsterProj	in_game_character	requires_world	captured	-	
+morph	ACE.Server.Command.Handlers.AdminCommands.HandleMorph	in_game_character	requires_world	captured	-	
+motionstate	ACE.Server.Command.Handlers.MotionStateCommands.HandleMotionState	in_game_only	override	captured	-	O-class: reads and clears live physics state, which is only safe on the world thread. The web bucket invokes handlers on a dedicated worker with a null session, so the handler must defer its work to the player's action queue, and that output lands after the WebCommandContext is sealed: the panel would show nothing. In-game and console use are unaffected.
+movement	ACE.Server.Command.Handlers.DeveloperCommands.Movement	in_game_character	requires_world	captured	-	
+movetome	ACE.Server.Command.Handlers.AdminCommands.HandleMoveToMe	in_game_character	requires_world	captured	-	
+mrt	ACE.Server.Command.Handlers.AdminCommands.HandleMRT	in_game_character	requires_world	captured	-	
+mule	ACE.Server.Command.Handlers.MuleCommands.HandleMule	in_game_character	requires_world	captured	-	
+myabilitypoints	ACE.Server.Command.Handlers.StageTestCommands.HandleMyAbilityPoints	in_game_character	requires_world	captured	-	
+myauggem	ACE.Server.Command.Handlers.StageTestCommands.HandleMyAugGem	in_game_character	requires_world	captured	-	
+myiid	ACE.Server.Command.Handlers.AdminCommands.HandleMyIID	in_game_character	requires_world	captured	-	
+myloc	ACE.Server.Command.Handlers.DeveloperCommands.HandleMyLoc	in_game_character	requires_world	captured	-	
+mylum	ACE.Server.Command.Handlers.StageTestCommands.HandleMyLuminance	in_game_character	requires_world	captured	-	
+mymmd	ACE.Server.Command.Handlers.StageTestCommands.HandleMyMmd	in_game_character	requires_world	captured	-	
+mypromnotes	ACE.Server.Command.Handlers.StageTestCommands.HandleMyPromissoryNotes	in_game_character	requires_world	captured	-	
+myquests	ACE.Server.Command.Handlers.PlayerCommands.HandleQuests	in_game_character	requires_world	captured	-	
+myrespec	ACE.Server.Command.Handlers.StageTestCommands.HandleMyRespec	in_game_character	requires_world	captured	-	
+myserver	ACE.Server.Command.Handlers.AdminCommands.HandleMyServer	in_game_character	requires_world	captured	-	
+mystipend	ACE.Server.Command.Handlers.StageTestCommands.HandleMyStipend	in_game_character	requires_world	captured	-	
+myxp	ACE.Server.Command.Handlers.StageTestCommands.HandleMyXp	in_game_character	requires_world	captured	-	
+netcapture	ACE.Server.Command.Handlers.NetCaptureCommands.HandleNetCapture	web	scan_safe	captured	-	
+netstats	ACE.Server.Command.Handlers.AdminStatCommands.HandleNetStats	web	scan_safe	captured	-	
+netstats	ACE.Server.Command.Handlers.DeveloperCommands.HandleNetStats	web	scan_safe	captured	-	
+neversaydie	ACE.Server.Command.Handlers.SentinelCommands.HandleNeverSayDie	in_game_character	requires_world	captured	-	
+nudge	ACE.Server.Command.Handlers.DeveloperCommands.HandleNudge	in_game_character	requires_world	captured	-	
+nudge	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleNudge	in_game_character	scan_unsafe	captured	-	
+objsend	ACE.Server.Command.Handlers.PlayerCommands.HandleObjSend	in_game_character	requires_world	captured	-	
+offlinebonus	ACE.Server.Command.Handlers.PlayerCommands.HandleOfflineBonus	in_game_character	requires_world	captured	-	
+passwd	ACE.Server.Command.Handlers.AccountCommands.HandlePasswd	in_game_character	requires_world	captured	-	
+pickupspeed	ACE.Server.Command.Handlers.PlayerCommands.HandlePickupSpeed	in_game_character	requires_world	captured	-	
+pk	ACE.Server.Command.Handlers.AdminCommands.HandlePk	in_game_character	requires_world	captured	-	
+pktimer	ACE.Server.Command.Handlers.DeveloperCommands.HandlePKTimer	in_game_character	requires_world	captured	-	
+playscriptid	ACE.Server.Command.Handlers.DeveloperCommands.HandlePlayScriptId	in_game_character	requires_world	captured	-	
+playsound	ACE.Server.Command.Handlers.DeveloperCommands.HandlePlaySound	in_game_character	requires_world	captured	-	
+pop	ACE.Server.Command.Handlers.PlayerCommands.HandlePop	web	scan_safe	captured	-	
+portal-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportPortalDatContents	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+portal-instancing	ACE.Server.Command.Handlers.InstanceCommands.HandlePortalInstancing	in_game_character	requires_world	captured	-	
+portal-realm	ACE.Server.Command.Handlers.InstanceCommands.HandlePortalRealm	in_game_character	requires_world	captured	-	
+portal_bypass	ACE.Server.Command.Handlers.SentinelCommands.HandlePortalBypass	in_game_character	requires_world	captured	-	
+portalstorm	ACE.Server.Command.Handlers.DeveloperCommands.HandlePortalStorm	in_game_character	requires_world	captured	-	
+propertydump	ACE.Server.Command.Handlers.DeveloperCommands.HandlePropertyDump	in_game_character	requires_world	captured	-	
+pscript	ACE.Server.Command.Handlers.DeveloperCommands.HandlePScript	in_game_character	requires_world	captured	-	
+purchase-house	ACE.Server.Command.Handlers.DeveloperCommands.HandlePurchaseHouse	in_game_character	requires_world	captured	-	
+puzzlegate	ACE.Server.Command.Handlers.PuzzleGateCommands.HandlePuzzleGate	in_game_character	requires_world	captured	-	
+puzzlegate-sweep	ACE.Server.Command.Handlers.PuzzleGateCommands.HandlePuzzleGateSweep	in_game_only	override	captured	-	O2-class: loads throwaway landblocks for minutes and --write-disabled writes server files (puzzle-gates.json); server console only (the handler also refuses a web context).
+pvprules	ACE.Server.Command.Handlers.PvpRulesCommands.HandlePvpRules	web	scan_safe	captured	-	
+pvptemplate	ACE.Server.Command.Handlers.PvpTemplateAdminCommands.HandlePvpTemplate	web	scan_safe	captured	-	
+qst	ACE.Server.Command.Handlers.AdminCommands.Handleqst	in_game_character	requires_world	captured	-	
+queryplugin	ACE.Server.Command.Handlers.AdminCommands.HandleQueryplugin	in_game_character	requires_world	captured	-	
+querypluginlist	ACE.Server.Command.Handlers.AdminCommands.HandleQuerypluginlist	in_game_character	requires_world	captured	-	
+quests	ACE.Server.Command.Handlers.PlayerCommands.HandleQuestStamps	in_game_character	requires_world	captured	-	
+radar	ACE.Server.Command.Handlers.AdminCommands.Handleradar	in_game_character	requires_world	captured	-	
+raise	ACE.Server.Command.Handlers.AdminCommands.HandleRaise	in_game_character	requires_world	captured	-	
+rares dump	ACE.Server.Command.Handlers.AdminCommands.HandleRaresDump	in_game_character	requires_world	captured	-	
+readdat	ACE.Server.Command.Handlers.DeveloperCommands.ReadDat	web	console_invoke	captured	-	
+realm	ACE.Server.Command.Handlers.RealmCommands.HandleRealm	in_game_character	requires_world	captured	-	
+realm-createinst	ACE.Server.Command.Handlers.RealmContentCommands.HandleRealmCreateInst	in_game_character	requires_world	captured	-	
+realm-removeinst	ACE.Server.Command.Handlers.RealmContentCommands.HandleRealmRemoveInst	in_game_character	requires_world	captured	-	
+realms	ACE.Server.Command.Handlers.RealmCommands.HandleRealms	web	scan_safe	captured	-	
+recordcast	ACE.Server.Command.Handlers.DeveloperCommands.HandleRecordCast	in_game_character	requires_world	captured	-	
+refreshtestroster	ACE.Server.Command.Handlers.TesterRosterCommands.HandleRefreshTestRoster	in_game_character	scan_unsafe	captured	-	
+regen	ACE.Server.Command.Handlers.AdminCommands.HandleRegen	in_game_character	requires_world	captured	-	
+relaria	ACE.Server.Command.Handlers.MlRelariaCommands.HandleRelaria	in_game_character	requires_world	captured	-	
+relariaprobe	ACE.Server.Command.Handlers.MlRelariaCommands.HandleRelariaProbe	in_game_character	requires_world	captured	-	
+relariaspawn	ACE.Server.Command.Handlers.MlRelariaCommands.HandleRelariaSpawn	in_game_character	requires_world	captured	-	
+reload-landblock	ACE.Server.Command.Handlers.DeveloperCommands.HandleReloadLandblocks	in_game_character	requires_world	partial	-	
+reload-loot-tables	ACE.Server.Command.Handlers.AdminCommands.HandleReloadLootTables	in_game_only	override	captured	-	O2-class: walks an arbitrary user-supplied path and swaps live loot tables
+reload-realms	ACE.Server.Command.Handlers.RealmContentCommands.HandleReloadRealms	web	scan_safe	captured	-	
+reloadspeedseasons	ACE.Server.Command.Handlers.SpeedSeasonAdminCommands.HandleReloadSpeedSeasons	web	scan_safe	captured	-	
+reloadsysmsg	ACE.Server.Command.Handlers.AdminCommands.Handlereloadsysmsg	in_game_character	requires_world	captured	-	
+remove	ACE.Server.Command.Handlers.AdvocateCommands.HandleRemove	in_game_character	requires_world	captured	-	
+remove-vitae	ACE.Server.Command.Handlers.DeveloperCommands.HandleRemoveVitae	in_game_character	requires_world	captured	-	
+removeenc	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRemoveEnc	in_game_character	requires_world	captured	-	
+removeinst	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRemoveInst	in_game_character	requires_world	captured	-	
+removeitemspell	ACE.Server.Command.Handlers.DeveloperCommands.HandleRemoveItemSpell	in_game_character	requires_world	captured	-	
+removespeedrun	ACE.Server.Command.Handlers.SpeedSeasonAdminCommands.HandleRemoveSpeedRun	web	scan_safe	captured	-	
+removespell	ACE.Server.Command.Handlers.AdminCommands.HandleRemoveSpell	in_game_character	requires_world	captured	-	
+rename	ACE.Server.Command.Handlers.AdminCommands.HandleRename	web	scan_safe	captured	-	
+repeat	ACE.Server.Command.Handlers.AdminCommands.HandleRepeat	in_game_character	requires_world	captured	-	
+reportbug	ACE.Server.Command.Handlers.PlayerCommands.HandleReportbug	in_game_character	requires_world	captured	-	
+requirecomps	ACE.Server.Command.Handlers.DeveloperCommands.HandleRequireComps	in_game_character	requires_world	captured	-	
+rerolltreasuremap	ACE.Server.Command.Handlers.TreasureMapRerollCommands.HandleRerollTreasureMap	in_game_character	requires_world	captured	-	
+resetleaderboard	ACE.Server.Command.Handlers.ProvingGroundsAdminCommands.HandleResetLeaderboard	web	scan_safe	captured	-	
+resetspeedboard	ACE.Server.Command.Handlers.SpeedSeasonAdminCommands.HandleResetSpeedBoard	web	scan_safe	captured	-	
+resist-info	ACE.Server.Command.Handlers.DeveloperCommands.HandleResistInfo	in_game_character	requires_world	captured	-	
+resyncproperties	ACE.Server.Command.Handlers.AdminCommands.HandleResyncServerProperties	web	scan_safe	captured	-	
+retaliatetargets	ACE.Server.Command.Handlers.DeveloperCommands.HandleRetaliateTargets	in_game_character	requires_world	uncaptured	-	
+rewardclaim	ACE.Server.Command.Handlers.RewardClaimCommands.HandleRewardClaim	in_game_character	scan_unsafe	captured	-	
+rip	ACE.Server.Command.Handlers.DeveloperCommands.HandleRip	in_game_character	requires_world	captured	-	
+rotate	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRotate	in_game_character	scan_unsafe	captured	-	
+rotate-x	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRotateX	in_game_character	scan_unsafe	captured	-	
+rotate-y	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRotateY	in_game_character	scan_unsafe	captured	-	
+rotate-z	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleRotateZ	in_game_character	scan_unsafe	captured	-	
+rrtm	ACE.Server.Command.Handlers.TreasureMapRerollCommands.HandleRerollTreasureMap	in_game_character	requires_world	captured	-	
+run	ACE.Server.Command.Handlers.SentinelCommands.HandleRun	in_game_character	requires_world	captured	-	
+safecomps	ACE.Server.Command.Handlers.DeveloperCommands.HandleSafeComps	in_game_character	requires_world	captured	-	
+save	ACE.Server.Command.Handlers.AdminCommands.HandleSave	in_game_character	requires_world	captured	-	
+save-now	ACE.Server.Command.Handlers.DeveloperCommands.HandleSaveNow	in_game_character	requires_world	captured	-	
+savebatchstats	ACE.Server.Command.Handlers.DeveloperDatabaseCommands.HandleSaveBatchStats	web	scan_safe	captured	-	
+serverlist	ACE.Server.Command.Handlers.AdminCommands.HandleServerlist	in_game_character	requires_world	captured	-	
+serverperformance	ACE.Server.Command.Handlers.AdminStatCommands.HandleServerPerformance	web	scan_safe	captured	-	
+serverstatus	ACE.Server.Command.Handlers.AdminStatCommands.HandleServerStatus	web	scan_safe	captured	-	
+set-accountaccess	ACE.Server.Command.Handlers.AccountCommands.HandleAccountUpdateAccessLevel	web	scan_safe	captured	-	
+set-accountpassword	ACE.Server.Command.Handlers.AccountCommands.HandleAccountSetPassword	web	scan_safe	captured	-	
+set-characteraccess	ACE.Server.Command.Handlers.CharacterCommands.HandleCharacterTokenization	web	scan_safe	captured	-	
+set-home-realm	ACE.Server.Command.Handlers.RealmCommands.HandleSetHomeRealm	web	scan_safe	captured	-	
+set-shutdown-interval	ACE.Server.Command.Handlers.AdminShardCommands.HandleSetShutdownInterval	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
+setadvclass	ACE.Server.Command.Handlers.AdminCommands.Handlesetadvclass	in_game_character	requires_world	captured	-	
+setcoin	ACE.Server.Command.Handlers.DeveloperCommands.HandleSetCoin	in_game_character	requires_world	captured	-	
+setglobalenviron	ACE.Server.Command.Handlers.AdminCommands.HandleSetGlobalEnviron	in_game_character	requires_world	captured	-	
+sethealth	ACE.Server.Command.Handlers.DeveloperCommands.HandleSetHealth	in_game_character	requires_world	captured	-	
+setlbenviron	ACE.Server.Command.Handlers.AdminCommands.HandleSetLBEnviron	in_game_character	requires_world	captured	-	
+setposition	ACE.Server.Command.Handlers.DeveloperCommands.HandleSetPosition	in_game_character	requires_world	captured	-	
+setproperty	ACE.Server.Command.Handlers.DeveloperCommands.HandleSetProperty	in_game_character	requires_world	partial	-	
+setpurchasetime	ACE.Server.Command.Handlers.DeveloperCommands.HandleSetPurchaseTime	in_game_character	requires_world	uncaptured	-	
+setvital	ACE.Server.Command.Handlers.DeveloperCommands.SetVital	in_game_character	requires_world	captured	-	
+show-allegiances	ACE.Server.Command.Handlers.AdminCommands.HandleShowAllegiances	web	scan_safe	uncaptured	-	
+show-wielded-treasure	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowWieldedTreasure	in_game_character	scan_unsafe	captured	-	
+showprops	ACE.Server.Command.Handlers.AdminCommands.HandleDisplayProps	web	scan_safe	captured	-	
+showsession	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowSession	in_game_character	requires_world	captured	-	
+showstats	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowStats	in_game_character	requires_world	captured	-	
+showtier	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowTier	in_game_character	requires_world	captured	-	
+showvelocity	ACE.Server.Command.Handlers.DeveloperCommands.HandleShowVelocity	in_game_character	requires_world	captured	-	
+shutdown	ACE.Server.Command.Handlers.AdminShardCommands.ShutdownServer	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
+simhit	ACE.Server.Command.Handlers.DeveloperCommands.HandleSimHit	in_game_character	requires_world	captured	-	
+sky-decor	ACE.Server.Command.Handlers.SkyDecorCommands.HandleSkyDecor	in_game_character	scan_unsafe	captured	-	
+slow	ACE.Server.Command.Handlers.DeveloperCommands.HandleSlow	in_game_character	requires_world	captured	-	
+smite	ACE.Server.Command.Handlers.AdminCommands.HandleSmite	in_game_character	requires_world	captured	-	
+snoop	ACE.Server.Command.Handlers.AdminCommands.HandleSnoop	in_game_character	requires_world	captured	-	
+spawncache	ACE.Server.Command.Handlers.ThreadDungeonCommands.HandleSpawnCache	in_game_character	requires_world	captured	-	
+speedseason	ACE.Server.Command.Handlers.SpeedSeasonAdminCommands.HandleSpeedSeason	web	scan_safe	captured	-	
+spendallxp	ACE.Server.Command.Handlers.DeveloperCommands.HandleSpendAllXp	in_game_character	requires_world	captured	-	
+spendxp	ACE.Server.Command.Handlers.AdminCommands.HandleSpendxp	in_game_character	requires_world	captured	-	
+splits	ACE.Server.Command.Handlers.DeveloperCommands.HandleSplits	in_game_character	requires_world	captured	-	
+sticky	ACE.Server.Command.Handlers.AdminCommands.HandleSticky	in_game_character	requires_world	captured	-	
+stop-now	ACE.Server.Command.Handlers.AdminShardCommands.ShutdownServerNow	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
+stormnumstormed	ACE.Server.Command.Handlers.AdminCommands.Handlestormnumstormed	in_game_character	requires_world	captured	-	
+stormthresh	ACE.Server.Command.Handlers.AdminCommands.Handlestormthresh	in_game_character	requires_world	captured	-	
+summonattackontarget	ACE.Server.Command.Handlers.PlayerCommands.HandleSummonAttackOnTarget	in_game_character	requires_world	captured	-	
+summondamage	ACE.Server.Command.Handlers.PlayerCommands.HandleSummonDamage	in_game_character	requires_world	captured	-	
+targetloc	ACE.Server.Command.Handlers.DeveloperCommands.HandleTargetLoc	in_game_character	requires_world	captured	-	
+tele	ACE.Server.Command.Handlers.AdvocateCommands.HandleTele	in_game_character	requires_world	captured	-	
+teleallto	ACE.Server.Command.Handlers.AdminCommands.HandleTeleAllTo	in_game_character	requires_world	captured	-	
+teledist	ACE.Server.Command.Handlers.DeveloperCommands.HandleTeleportDist	in_game_character	requires_world	captured	-	
+teledungeon	ACE.Server.Command.Handlers.DeveloperCommands.HandleTeleDungeon	in_game_character	requires_world	captured	-	
+teleloc	ACE.Server.Command.Handlers.AdminCommands.HandleTeleportLOC	in_game_character	requires_world	captured	-	
+telepoi	ACE.Server.Command.Handlers.AdminCommands.HandleTeleportPoi	in_game_character	requires_world	captured	-	
+telerealm	ACE.Server.Command.Handlers.InstanceCommands.HandleTeleRealm	in_game_character	requires_world	captured	-	
+telereturn	ACE.Server.Command.Handlers.AdminCommands.HandleTeleReturn	in_game_character	requires_world	captured	-	
+teleto	ACE.Server.Command.Handlers.AdminCommands.HandleTeleto	in_game_character	requires_world	captured	-	
+teletome	ACE.Server.Command.Handlers.AdminCommands.HandleTeleToMe	in_game_character	requires_world	captured	-	
+teletype	ACE.Server.Command.Handlers.DeveloperCommands.HandleTeleType	in_game_character	requires_world	captured	-	
+telexyz	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugTeleportXYZ	in_game_character	requires_world	captured	-	
+testaim	ACE.Server.Command.Handlers.DeveloperCommands.HandleTestAim	in_game_character	requires_world	captured	-	
+testdeathitems	ACE.Server.Command.Handlers.DeveloperCommands.HandleTestDeathItems	in_game_character	requires_world	captured	-	
+testlootgen	ACE.Server.Command.Handlers.DeveloperLootCommands.TestLootGenerator	in_game_only	override	uncaptured	-	O2-class: unbounded loop holds the web worker; -log writes a CSV
+testlootgencorpse	ACE.Server.Command.Handlers.DeveloperLootCommands.TestLootGeneratorCorpse	in_game_only	override	uncaptured	-	O2-class: unbounded loop holds the web worker; -log writes a CSV
+testskill	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleTestSkill	in_game_character	requires_world	captured	-	
+testtreasuremap	ACE.Server.Command.Handlers.MlTreasureTestCommands.HandleTestTreasureMap	in_game_character	requires_world	captured	-	
+tiermobs	ACE.Server.Command.Handlers.DeveloperCommands.HandleTierMobs	in_game_character	requires_world	captured	-	
+time	ACE.Server.Command.Handlers.AdminCommands.HandleTime	web	scan_safe	captured	-	
+tn	ACE.Server.Command.Handlers.PlayerCommands.HandleTownNetworkRecall	in_game_character	requires_world	captured	-	
+top	ACE.Server.Command.Handlers.PlayerCommands.HandleTop	in_game_character	requires_world	captured	-	
+top-exempt	ACE.Server.Command.Handlers.LeaderboardExemptionCommands.HandleTopExempt	web	scan_safe	captured	-	
+trainskill	ACE.Server.Command.Handlers.AdminCommands.Handletrainskill	in_game_character	requires_world	captured	-	
+trophies	ACE.Server.Command.Handlers.AdminCommands.HandleTrophies	in_game_character	requires_world	captured	-	
+trywield	ACE.Server.Command.Handlers.DeveloperCommands.HandleTryWield	in_game_character	requires_world	captured	-	
+ttm	ACE.Server.Command.Handlers.MlTreasureTestCommands.HandleTestTreasureMap	in_game_character	requires_world	captured	-	
+turnto	ACE.Server.Command.Handlers.DeveloperCommands.HandleRequestTurnTo	in_game_character	requires_world	uncaptured	-	
+unban	ACE.Server.Command.Handlers.SentinelCommands.HandleUnBanAccount	web	scan_safe	captured	-	
+unfreeze	ACE.Server.Command.Handlers.AdminCommands.HandleUnFreeze	in_game_character	requires_world	captured	-	
+ungag	ACE.Server.Command.Handlers.AdminCommands.HandleUnGag	in_game_character	requires_world	captured	-	
+ungod	ACE.Server.Command.Handlers.AdminCommands.HandleUngod	in_game_character	requires_world	partial	-	
+unlock	ACE.Server.Command.Handlers.AdminCommands.HandleUnlock	in_game_character	requires_world	captured	-	
+userlimit	ACE.Server.Command.Handlers.AdminCommands.Handleuserlimit	in_game_character	requires_world	captured	-	
+usewith	ACE.Server.Command.Handlers.DeveloperCommands.HandleUseWithTarget	in_game_character	requires_world	captured	-	
+vaultclassdryrun	ACE.Server.Command.Handlers.VaultClassCommands.HandleVaultClassDryRun	in_game_character	requires_world	captured	-	
+vaultclassfold	ACE.Server.Command.Handlers.VaultClassCommands.HandleVaultClassFold	in_game_character	requires_world	captured	-	Output is ASYNCHRONOUS: the handler starts a background migration and returns, so a web console sees only the kickoff line. The completion statement arrives later in the server log and via /vaultclassfold status.
+vaultclassinspect	ACE.Server.Command.Handlers.VaultClassCommands.HandleVaultClassInspect	in_game_character	requires_world	captured	-	
+vaultrestore	ACE.Server.Command.Handlers.VaultRestoreCommands.HandleVaultRestore	in_game_character	requires_world	captured	-	
+vendordump	ACE.Server.Command.Handlers.DeveloperCommands.HandleVendorDump	in_game_character	requires_world	captured	-	
+vendorstress	ACE.Server.Command.Handlers.VendorStressCommands.HandleVendorStress	in_game_character	requires_world	captured	-	
+verify-armor-levels	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleFixArmorLevel	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-attributes	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyAttributes	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-beneficial-enchantments	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleEnchantments	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-clothing-wield-level	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyClothingWieldLevel	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-heritage-augs	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyHeritageAugs	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-legendary-wield-level	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyLegendaryWieldLevel	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-max-augs	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyMaxAugs	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-melee-rares	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleFixMeleeRares	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-player-data	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyAll	web	console_invoke	captured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-shield-rating	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleRemoveShieldRatings	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-skill-credits	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifySkillCredits	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-skills	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifySkills	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-vitals	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyVitals	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+verify-xp	ACE.Server.Command.Handlers.DeveloperFixCommands.HandleVerifyExperience	web	console_invoke	uncaptured	long_running	O3/O4: bulk shard scan, available and audited; the page confirms before running it.
+version	ACE.Server.Command.Handlers.ConsoleCommands.ShowVersion	web	console_invoke	uncaptured	-	
+vfxclear	ACE.Server.Command.Handlers.DeveloperCommands.HandleVfxClear	in_game_character	requires_world	captured	-	
+vfxlist	ACE.Server.Command.Handlers.DeveloperCommands.HandleVfxList	in_game_character	requires_world	captured	-	
+vfxprop	ACE.Server.Command.Handlers.DeveloperCommands.HandleVfxProp	in_game_character	requires_world	captured	-	
+vfxstick	ACE.Server.Command.Handlers.DeveloperCommands.HandleVfxStick	in_game_character	requires_world	captured	-	
+visibleobjs	ACE.Server.Command.Handlers.DeveloperCommands.HandleVisibleObjs	in_game_character	requires_world	uncaptured	-	
+visibleplayers	ACE.Server.Command.Handlers.DeveloperCommands.HandleVisiblePlayers	in_game_character	requires_world	uncaptured	-	
+visibletargets	ACE.Server.Command.Handlers.DeveloperCommands.HandleVisibleTargets	in_game_character	requires_world	uncaptured	-	
+vloc2loc	ACE.Server.Command.Handlers.Processors.DeveloperContentCommands.HandleVLOCtoLOC	in_game_only	override	captured	-	O2-class: writes server files (content_folder is the host-mounted Content tree on stage/prod)
+watchmen	ACE.Server.Command.Handlers.AdminCommands.Handlewatchmen	web	scan_safe	captured	-	
+wave-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportWaveFiles	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
+waveencounter	ACE.Server.Command.Handlers.WaveEncounterCommands.HandleWaveEncounter	web	scan_safe	captured	-	
+we	ACE.Server.Command.Handlers.AdminCommands.HandleWe	web	scan_safe	captured	-	
+weaponmodkit	ACE.Server.Command.Handlers.WeaponModTestCommands.HandleWeaponModKit	in_game_character	requires_world	captured	-	
+weapons	ACE.Server.Command.Handlers.DeveloperCommands.HandleWeapons	in_game_character	requires_world	captured	-	
+whoami	ACE.Server.Command.Handlers.DeveloperCommands.HandleWhoAmI	in_game_character	requires_world	captured	-	
+world	ACE.Server.Command.Handlers.AdminShardCommands.HandleHelp	web	override	captured	-	null-safe: WorldManager passes a possibly-null Player to BroadcastToAuditChannel; O3 keeps world close boot available
+worldevent	ACE.Server.Command.Handlers.WorldEventCommands.HandleWorldEvent	in_game_character	scan_unsafe	captured	-	
+xp	ACE.Server.Command.Handlers.PlayerCommands.HandleXp	in_game_character	requires_world	captured	-	
+xpaugs	ACE.Server.Command.Handlers.AugmentationCommands.HandleXpAugs	in_game_character	requires_world	captured	-	

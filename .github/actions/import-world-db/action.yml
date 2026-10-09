@@ -1,0 +1,85 @@
+name: Import world database
+description: >
+  Downloads (or reuses a cache of) a pinned ACE-World-16PY-Patches release dump, then loads the
+  Auth/Shard base schemas and imports the dump into ace_world via import.sh, followed by a replay
+  of Database/Updates/World/*.sql. content-apply-ci.yml calls this action normally (synchronously).
+  build-test.yml instead runs its own copies of the cache/download steps and then launches
+  import.sh directly, backgrounded alongside its Build step - a `uses:` composite step cannot
+  itself be backgrounded - so both callers exercise the identical import.sh, never a drifted copy.
+
+inputs:
+  world-db-release-tag:
+    description: 'ACE-World-16PY-Patches release tag to import.'
+    required: false
+    default: 'v0.9.294'
+  world-db-release-asset:
+    description: 'Release asset filename (a .sql.zip) to download and import.'
+    required: false
+    default: 'ACE-World-Database-v0.9.294.sql.zip'
+  mysql-host:
+    description: 'MySQL host to load into.'
+    required: false
+    default: '127.0.0.1'
+  mysql-port:
+    description: 'MySQL port to load into.'
+    required: false
+    default: '3306'
+  mysql-user:
+    description: 'MySQL user.'
+    required: false
+    default: 'root'
+  mysql-password:
+    description: >-
+      MySQL password. content-apply-ci.yml is this action's only current caller and passes 'ci'
+      (its runner's MySQL root password - see that workflow's "Start MySQL" step). build-test.yml
+      does NOT call this action - it runs import.sh directly, backgrounded, with its own
+      MYSQL_PASSWORD (currently empty, matching its Config.js.example test fallback). The default
+      here is left empty only because no current caller relies on it.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the unzipped dump filename
+      id: dump-name
+      shell: bash
+      run: |
+        sql_file="${{ inputs.world-db-release-asset }}"
+        sql_file="${sql_file%.zip}"
+        echo "sql-file=$sql_file" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the unzipped world database dump
+      id: cache-world-dump
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.dump-name.outputs.sql-file }}
+        key: world-db-dump-${{ inputs.world-db-release-tag }}-${{ inputs.world-db-release-asset }}
+
+    - name: Download and unzip the world database dump
+      if: steps.cache-world-dump.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        WORLD_DB_RELEASE_TAG: ${{ inputs.world-db-release-tag }}
+        WORLD_DB_RELEASE_ASSET: ${{ inputs.world-db-release-asset }}
+      run: |
+        curl -fL -o "$WORLD_DB_RELEASE_ASSET" \
+          "https://github.com/ACEmulator/ACE-World-16PY-Patches/releases/download/${WORLD_DB_RELEASE_TAG}/${WORLD_DB_RELEASE_ASSET}"
+        unzip -o "$WORLD_DB_RELEASE_ASSET"
+
+    - name: Import world database (schema + dump + updates)
+      # The actual mysql work (Auth/Shard base schemas, CREATE ace_world, the dump, the fork's
+      # Database/Updates/World/*.sql replay) lives in import.sh, shared with build-test.yml, which
+      # launches that same script directly - backgrounded alongside its Build step, since a
+      # `uses:` composite step here cannot itself be backgrounded. See import.sh's own header for
+      # why the schema/import order does not need to match a caller's step order, and why
+      # Database/Updates/Shard/2026-07-10-00-Add-Biota-Position-Instance.sql is deliberately
+      # excluded.
+      shell: bash
+      env:
+        MYSQL_HOST: ${{ inputs.mysql-host }}
+        MYSQL_PORT: ${{ inputs.mysql-port }}
+        MYSQL_USER: ${{ inputs.mysql-user }}
+        MYSQL_PASSWORD: ${{ inputs.mysql-password }}
+        WORLD_DB_RELEASE_ASSET: ${{ inputs.world-db-release-asset }}
+      run: bash "${{ github.action_path }}/import.sh"

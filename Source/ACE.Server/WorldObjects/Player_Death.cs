@@ -1,0 +1,1334 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+using ACE.Common;
+using ACE.DatLoader;
+using ACE.DatLoader.FileTypes;
+using ACE.Entity;
+using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
+using ACE.Server.Entity.Facets;
+using ACE.Server.Factories;
+using ACE.Server.Managers;
+using ACE.Server.Network.Structure;
+using ACE.Server.Network.GameEvent.Events;
+using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Pvp;
+using ACE.Server.WorldEvents;
+
+namespace ACE.Server.WorldObjects
+{
+    partial class Player
+    {
+        /// <summary>
+        /// A list of players who have granted corpse looting permissions
+        /// with /permit
+        /// </summary>
+        public Dictionary<ObjectGuid, DateTime> LootPermission;
+
+        /// <summary>
+        /// Called when a player dies, in conjunction with Die()
+        /// </summary>
+        /// <param name="lastDamager">The last damager that landed the death blow</param>
+        /// <param name="damageType">The damage type for the death message</param>
+        public override DeathMessage OnDeath(DamageHistoryInfo lastDamager, DamageType damageType, bool criticalHit = false)
+        {
+            var topDamager = DamageHistory.GetTopDamager(false);
+
+            HandlePKDeathBroadcast(lastDamager, topDamager);
+
+            var deathMessage = base.OnDeath(lastDamager, damageType, criticalHit);
+
+            var lastDamagerObj = lastDamager?.TryGetAttacker();
+
+            if (lastDamagerObj != null)
+                lastDamagerObj.EmoteManager.OnKill(this);
+
+            var playerMsg = "";
+            if (lastDamager != null)
+                playerMsg = string.Format(deathMessage.Victim, Name, lastDamager.Name);
+            else
+                playerMsg = deathMessage.Victim;
+
+            var msgYourDeath = new GameEventVictimNotification(Session, playerMsg);
+            Session.Network.EnqueueSend(msgYourDeath);
+
+            // broadcast to nearby players
+            var nearbyMsg = "";
+            if (lastDamager != null)
+                nearbyMsg = string.Format(deathMessage.Broadcast, Name, lastDamager.Name);
+            else
+                nearbyMsg = deathMessage.Broadcast;
+
+            var broadcastMsg = new GameMessagePlayerKilled(nearbyMsg, Guid, lastDamager?.Guid ?? ObjectGuid.Invalid);
+
+            log.Info("[CORPSE] " + nearbyMsg);
+
+            var excludePlayers = new List<Player>();
+
+            var nearbyPlayers = EnqueueBroadcast(excludePlayers, true, broadcastMsg);
+
+            excludePlayers.AddRange(nearbyPlayers);
+
+            if (Fellowship != null)
+                Fellowship.OnDeath(this);
+
+            // if the player's lifestone is in a different landblock, also broadcast their demise to that landblock
+            if (PropertyManager.GetBool("lifestone_broadcast_death").Item && Sanctuary != null && Location.InstancedLandblock != Sanctuary.InstancedLandblock)
+            {
+                // ActionBroadcastKill might not work if other players around lifestone aren't aware of this player yet...
+                // this existing broadcast method is also based on the current visible objects to the player,
+                // and the player hasn't entered portal space or teleported back to the lifestone yet, so this doesn't work
+                //ActionBroadcastKill(nearbyMsg, Guid, lastDamager.Guid);
+
+                // instead, we get all of the players in the lifestone landblock + adjacent landblocks,
+                // and possibly limit that to some radius around the landblock?
+                var lifestoneBlock = LandblockManager.GetLandblock(new LandblockId(Sanctuary.LandblockShort << 16 | 0xFFFF), Sanctuary.Instance, true);
+
+                // We enqueue the work onto the target landblock to ensure thread-safety. It's highly likely the lifestoneBlock is far away, and part of a different landblock group (and thus different thread).
+                lifestoneBlock.EnqueueAction(new ActionEventDelegate(() => lifestoneBlock.EnqueueBroadcast(excludePlayers, true, Sanctuary, LocalBroadcastRangeSq, broadcastMsg)));
+            }
+
+            return deathMessage;
+        }
+
+        public void HandlePKDeathBroadcast(DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
+        {
+            // PvP arena: an in-match death credits no PK or PK Lite kill and broadcasts nothing (the match reports
+            // its own result). Every death path calls OnDeath - and so this - BEFORE Die(), so the Die() latch is
+            // not yet set here; the binding still is, because only the coordinator unbinds, after draining the
+            // death intent that Die() reports. Both are read, so neither order can let a match kill through.
+            if (IsInPvpMatch || PvpMatchDeathInProgress)
+                return;
+
+            if (topDamager == null || !topDamager.IsPlayer)
+                return;
+
+            var pkPlayer = topDamager.TryGetAttacker() as Player;
+            if (pkPlayer == null)
+                return;
+
+            if (IsPKDeath(topDamager))
+            {
+                pkPlayer.PkTimestamp = Time.GetUnixTime();
+                pkPlayer.PlayerKillsPk++;
+
+                var globalPKDe = $"{lastDamager.Name} has defeated {Name}!";
+
+                if ((Location.Cell & 0xFFFF) < 0x100)
+                    globalPKDe += $" The kill occured at {Location.GetMapCoordStr()}";
+
+                // The PvP Discord feed: the same globalPKDe text, without the in-game "[PKDe]" tag - mirrors
+                // Doctide's Player_Death.cs pk_kills_webhook post. Open-world only (we already returned above
+                // for an in-match death); empty discord_webhook_url_pvp means no post and no work. Its own
+                // try/catch: a relay failure (e.g. a config read throwing) must never interrupt death
+                // handling - the broadcast below, and the caller's own death-handling chain, must still run.
+                try
+                {
+                    ACE.Server.Managers.DiscordRelayManager.QueuePvp(globalPKDe);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[PVP] the open-world PK-kill Discord feed post failed for {Name}", ex);
+                }
+
+                globalPKDe += "\n[PKDe]";
+
+                PlayerManager.BroadcastToAll(new GameMessageSystemChat(globalPKDe, ChatMessageType.Broadcast));
+            }
+            else if (IsPKLiteDeath(topDamager))
+                pkPlayer.PlayerKillsPkl++;
+        }
+
+        /// <summary>
+        /// Inflicts vitae
+        /// </summary>
+        public void InflictVitaePenalty(int amount = 5)
+        {
+            DeathLevel = Level; // for calculating vitae XP
+            VitaeCpPool = 0;    // reset vitae XP earned
+
+            var msgDeathLevel = new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.DeathLevel, DeathLevel ?? 0);
+            var msgVitaeCpPool = new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.VitaeCpPool, VitaeCpPool.Value);
+
+            Session.Network.EnqueueSend(msgDeathLevel, msgVitaeCpPool);
+
+            var vitae = EnchantmentManager.UpdateVitae();
+
+            var spellID = (uint)SpellId.Vitae;
+            var spell = new Spell(spellID);
+            var vitaeEnchantment = new Enchantment(this, Guid.Full, spellID, 0, (EnchantmentMask)spell.StatModType, vitae);
+            Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(Session, vitaeEnchantment));
+        }
+
+
+        public bool IsInDeathProcess;
+
+        /// <summary>
+        /// Asheron's Protection (WaffleACE): true for the rest of the current death sequence when the player
+        /// died while a world event was Active and within its radius (WorldEventManager.ProtectsDeathAt),
+        /// latched ONCE in Die() at the moment of death - never re-evaluated later, since corpse creation
+        /// runs in a delayed ActionChain and the player can teleport away, or the event can resolve, before
+        /// it fires. Waives vitae, item loss and enchantment purge, same as an arena death, but does NOT
+        /// affect the teleport destination - the player still returns to their lifestone.
+        /// </summary>
+        private bool worldEventDeathInProgress;
+
+        /// <summary>
+        /// True while the current death sequence is a world-event-protected death - read by the death-penalty
+        /// skips in Player_Death.cs (vitae, enchantment purge, death items).
+        /// </summary>
+        public bool WorldEventDeathInProgress => worldEventDeathInProgress;
+
+        /// <summary>
+        /// Threads: true when this player was dying inside a live run's instance AT THE MOMENT
+        /// OF DEATH. Latched once in Die(), same reason as worldEventDeathInProgress: CreateCorpse,
+        /// CalculateDeathItems(_Olthoi) and ThreadSafeTeleportOnDeath all run inside the delayed
+        /// (animLength + 1.0f) ActionChain, and if the run were reaped (TTL, empty-landblock unload)
+        /// during that window a live GetRun(Location.Instance) read would flip to false mid-sequence -
+        /// dropping BOTH the item-loss waiver and the entry-point return with no warning. A dead run's
+        /// gem is still cleaned up separately (ThreadDungeonSweeper), so latching here costs nothing.
+        /// </summary>
+        private bool dynamicDungeonDeathInProgress;
+
+        public bool ThreadDungeonDeathInProgress => dynamicDungeonDeathInProgress;
+
+        /// <summary>
+        /// PvP arena (Docs/Pvp/DESIGN.md H4/H5): true when this player was bound to a match AT THE MOMENT OF
+        /// DEATH. Latched once in Die(), for the same reason as the latches above: every penalty site reads it
+        /// later, inside the delayed dieChain, by which time the coordinator may already have unbound the player.
+        /// Named apart from Die()'s PvE <c>arenaDeath</c> local (the Proving Grounds challenges), which it is not.
+        /// </summary>
+        private bool pvpMatchDeathInProgress;
+
+        /// <summary>The waiver latched beside <see cref="pvpMatchDeathInProgress"/> (pvp_arena_death_keeps_enchantments at death time).</summary>
+        private PvpDeathWaiver pvpMatchDeathWaiver;
+
+        /// <summary>The one latched read every in-match death-penalty site uses (DESIGN "Must stay identical"), never a live binding check.</summary>
+        public bool PvpMatchDeathInProgress => pvpMatchDeathInProgress;
+
+        /// <summary>
+        /// Broadcasts the player death animation, updates vitae, and sends network messages for player death
+        /// Queues the action to call TeleportOnDeath and enter portal space soon
+        /// </summary>
+        protected override void Die(DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
+        {
+            IsInDeathProcess = true;
+
+            // survival challenge (WaffleACE): a death inside the arena scores the run up front (before the penalties
+            // below are computed) and waives them for the rest of the death sequence - no vitae, no enchantment
+            // purge, no dropped items, and the player is returned to the arena entrance instead of their lifestone.
+            var survivalDeath = TryBeginSurvivalChallengeDeath();
+
+            // wave challenge (WaffleACE): a death inside the wave gauntlet gets the same penalty-free treatment.
+            // The score (the last wave fully cleared) was already banked as each wave cleared.
+            var waveDeath = TryBeginWaveChallengeDeath();
+
+            // speed challenge (WaffleACE): a death inside the season instance FORFEITS the run - no time is
+            // recorded and no row is written - but it is penalty-free in exactly the same way as the other two.
+            var speedDeath = TryBeginSpeedChallengeDeath();
+
+            // any Proving Grounds run death waives the normal death penalties for the rest of the sequence
+            var arenaDeath = survivalDeath || waveDeath || speedDeath;
+
+            // Asheron's Protection (WaffleACE): a death within an Active world event's radius waives the
+            // normal death penalties (vitae, item loss, enchantment purge) the same way an arena death does,
+            // but does NOT change the teleport destination - the player still returns to their lifestone.
+            // Latched exactly once, here, at the moment of death: corpse creation below runs in a delayed
+            // ActionChain, and by the time it fires the player may have teleported away, or the event may
+            // have resolved, so every later read in this sequence must use the latched value, never
+            // re-evaluate WorldEventManager.ProtectsDeathAt.
+            worldEventDeathInProgress = WorldEventManager.ProtectsDeathAt(Location);
+
+            // Threads (WaffleACE): latched here for the same reason as worldEventDeathInProgress
+            // immediately above - everything that reads it runs later, inside the delayed dieChain.
+            dynamicDungeonDeathInProgress = ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(Location.Instance) != null;
+
+            // PvP arena (H4): latched here with the others, and the death intent reported to the coordinator.
+            // With no binding (every player until C3 binds one) this is false and reports nothing.
+            pvpMatchDeathInProgress = LatchPvpMatchDeath(lastDamager, out pvpMatchDeathWaiver);
+
+            if (worldEventDeathInProgress)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    "Asheron's power holds death's toll at bay. You lose nothing.", ChatMessageType.Broadcast));
+            }
+
+            if (topDamager?.Guid == Guid && IsPKType)
+            {
+                var topDamagerOther = DamageHistory.GetTopDamager(false);
+
+                if (topDamagerOther != null && topDamagerOther.IsPlayer)
+                    topDamager = topDamagerOther;
+            }
+
+            UpdateVital(Health, 0);
+            NumDeaths++;
+            suicideInProgress = false;
+
+            // todo: since we are going to be using 'time since Player last died to an OlthoiPlayer'
+            // as a factor in slag generation, this will eventually be moved to after the slag generation
+
+            //if (topDamager != null && topDamager.IsOlthoiPlayer)
+                //OlthoiLootTimestamp = (int)Time.GetUnixTime();
+
+            if (CombatMode == CombatMode.Magic && MagicState.IsCasting)
+                FailCast(false);
+
+            // TODO: instead of setting IsBusy here,
+            // eventually all of the places that check for states such as IsBusy || Teleporting
+            // might want to use a common function, and IsDead should return a separate error
+            IsBusy = true;
+
+            // killer = top damager for looting rights
+            if (topDamager != null)
+                KillerId = topDamager.Guid.Full;
+
+            // broadcast death animation
+            var deathAnim = new Motion(MotionStance.NonCombat, MotionCommand.Dead);
+            EnqueueBroadcastMotion(deathAnim);
+
+            // create network messages for player death
+            var msgHealthUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Health, 0);
+
+            // TODO: death sounds? seems to play automatically in client
+            // var msgDeathSound = new GameMessageSound(Guid, Sound.Death1, 1.0f);
+            var msgNumDeaths = new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.NumDeaths, NumDeaths);
+
+            // send network messages for player death
+            Session.Network.EnqueueSend(msgHealthUpdate, msgNumDeaths);
+
+            if (lastDamager?.Guid == Guid) // suicide
+            {
+                var msgSelfInflictedDeath = new GameEventWeenieError(Session, WeenieError.YouKilledYourself);
+                Session.Network.EnqueueSend(msgSelfInflictedDeath);
+            }
+
+            var hadVitae = HasVitae;
+
+            // update vitae
+            // players who died in a PKLite fight do not accrue vitae
+            // Proving Grounds arena deaths (survival / wave / speed) accrue no vitae either
+            // Mule (WaffleACE): a mule never accrues vitae at all. Vitae is only ever worked off through
+            // UpdateXpVitae on an XP grant, and a mule can never earn XP (GrantXP refuses it), so a penalty
+            // applied here would be permanent and would compound with every death - permanently cutting the
+            // carrying capacity the character exists for. hadVitae, read just above, is therefore always false
+            // for a mule, so corpse creation stays consistent with not having applied it. Mules still die and
+            // still leave corpses; nothing else about death or item drops changes.
+            // Threads (WaffleACE): a death inside a live run waives vitae the same way an arena
+            // death does (Task 9 brief; not itself named by TECH-DESIGN S10, which covers only the death
+            // RETURN destination - this extends the existing no-penalty pattern to match "no loss inside
+            // a run"). ThreadDungeonDeathInProgress is latched in Die() beside worldEventDeathInProgress
+            // (see ~:211), for the same reason: everything below runs later, inside the delayed dieChain,
+            // by which point the player may have teleported out of the run's instance.
+            // PvP arena match deaths (H5) accrue no vitae either, read from the latch.
+            if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule && !worldEventDeathInProgress && !ThreadDungeonDeathInProgress
+                && !PvpPlayerRules.WaivesVitae(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+                InflictVitaePenalty();
+
+            // Proving Grounds arena deaths, and Asheron's Protection deaths, skip the enchantment purge
+            // entirely - the player keeps their buffs. A PvP arena match death does too while
+            // pvp_arena_death_keeps_enchantments is on (the waiver latched in Die()).
+            if (!arenaDeath && !worldEventDeathInProgress && !PvpPlayerRules.WaivesEnchantmentPurge(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+            {
+                if (IsPKDeath(topDamager) || AugmentationSpellsRemainPastDeath == 0)
+                {
+                    var msgPurgeEnchantments = new GameEventMagicPurgeEnchantments(Session);
+                    EnchantmentManager.RemoveAllEnchantments();
+                    Session.Network.EnqueueSend(msgPurgeEnchantments);
+                }
+                else
+                {
+                    var msgPurgeBadEnchantments = new GameEventMagicPurgeBadEnchantments(Session);
+                    EnchantmentManager.RemoveAllBadEnchantments();
+                    Session.Network.EnqueueSend(msgPurgeBadEnchantments, new GameMessageSystemChat("Your augmentation prevents the tides of death from ripping away your current enchantments!", ChatMessageType.Broadcast));
+                }
+            }
+
+            // wait for the death animation to finish
+            var dieChain = new ActionChain();
+            var animLength = DatManager.PortalDat.ReadFromDat<MotionTable>(MotionTableId).GetAnimationLength(MotionCommand.Dead);
+            dieChain.AddDelaySeconds(animLength + 1.0f);
+
+            dieChain.AddAction(this, () =>
+            {
+                // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 3): a battleground death leaves no corpse (so no
+                // empty corpse and no "retained all your items" line), and goes to the team pen while the match is
+                // still Live for this player; otherwise it takes the exit path below, unchanged.
+                if (!PvpBattlegroundDeathLatched)
+                    CreateCorpse(topDamager, hadVitae);
+
+                ThreadSafeTeleportOnDeath(); // enter portal space
+
+                // PvP arena (H5): no respite and no NPK flip for a match death - the player stays PK Lite until
+                // ExitPvpMatch restores their own status from the 9075 marker
+                if ((IsPKDeath(topDamager) || IsPKLiteDeath(topDamager)) && !PvpPlayerRules.WaivesRespite(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+                    SetMinimumTimeSincePK();
+
+                IsBusy = false;
+            });
+
+            dieChain.EnqueueChain();
+        }
+
+        /// <summary>
+        /// Called when the player enters portal space after dying
+        /// </summary>
+        public void ThreadSafeTeleportOnDeath()
+        {
+            // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 3): a battleground death whose match is still Live for
+            // this player goes to the team pen inside the match instance, keeping the EphemeralRealmExitTo stamp (the
+            // player is still in the match). Null for every other death, which takes the paths below unchanged.
+            var pvpPen = PvpDeathPenDestination();
+            // teleport to sanctuary or best location
+            // Proving Grounds arena deaths (survival / wave / speed) return the player to the arena entrance
+            // (EphemeralRealmExitTo) instead of their lifestone, so a death simply drops them back outside the
+            // Proving Grounds portal
+            Position newPosition;
+            var wentToPen = pvpPen != null;
+            var penMatch = PvpDeathMatchLatch;
+
+            // PvP arena (H5): a match death returns to the exit stamped by EnterPvpMatch, the same way
+            if (wentToPen)
+                newPosition = new Position(pvpPen);
+            else if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || ThreadDungeonDeathInProgress
+                || PvpMatchDeathInProgress)
+            {
+                var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
+                newPosition = (exitTo != null ? new Position(exitTo) : Sanctuary) ?? Instantiation ?? Location;
+                SetPosition(PositionType.EphemeralRealmExitTo, null);
+            }
+            else
+                newPosition = Sanctuary ?? Instantiation ?? Location;
+
+            // A death in one realm copy of a landblock whose lifestone is in another copy of the same landblock
+            // (dying in realm 0's Aerfalle Keep while bound at the realm-1 Marketplace lifestone) is a
+            // same-landblock cross-instance hop, which can render as a blend of both copies. Deliberately NOT
+            // refused - a dead player must always be sent somewhere, and the owner accepted the visual risk -
+            // only logged, so a report of a half-drawn respawn can be matched to its cause.
+            if (Realms.InstanceRouting.IsPersistentSameLandblockRealmHop(Location, newPosition))
+                log.Warn($"{Name} (0x{Guid.Full:X8}) death respawn is a same-landblock realm hop: landblock 0x{newPosition.LandblockShort:X4}, instance 0x{Location.Instance:X8} -> 0x{newPosition.Instance:X8}. Not refused (accepted risk); the arrival may render both copies' content.");
+
+            WorldManager.ThreadSafeTeleport(this, newPosition, new ActionEventDelegate(() =>
+            {
+                // Stand back up
+                SetCombatMode(CombatMode.NonCombat);
+
+                SetLifestoneProtection();
+
+                var teleportChain = new ActionChain();
+                if (!IsLoggingOut) // If we're in the process of logging out, we skip the delay
+                    teleportChain.AddDelaySeconds(3.0f);
+                teleportChain.AddAction(this, () =>
+                {
+                    // PvP Template Facets (Docs/Pvp/TEMPLATES.md "Lifecycle", death row): a death that ENDS the player's
+                    // participation takes the template off FIRST, before the vitals below are set from the maximums - so
+                    // they are the player's own. A battleground pen death does not end it: the player respawns still
+                    // templated, with their issued kit, so nothing is restored here (the exit from the match restores).
+                    // Idempotent and self-guarded; a no-op for every player not wearing a template.
+                    PvpTemplateDeathArrival(wentToPen);
+
+                    // currently happens while in portal space
+                    var newHealth = (uint)Math.Round(Health.MaxValue * 0.75f);
+                    var newStamina = (uint)Math.Round(Stamina.MaxValue * 0.75f);
+                    var newMana = (uint)Math.Round(Mana.MaxValue * 0.75f);
+
+                    var msgHealthUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Health, newHealth);
+                    var msgStaminaUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Stamina, newStamina);
+                    var msgManaUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Mana, newMana);
+
+                    UpdateVital(Health, newHealth);
+                    UpdateVital(Stamina, newStamina);
+                    UpdateVital(Mana, newMana);
+
+                    Session.Network.EnqueueSend(msgHealthUpdate, msgStaminaUpdate, msgManaUpdate);
+
+                    // reset damage history for this player
+                    DamageHistory.Reset();
+
+                    OnHealthUpdate();
+
+                    IsInDeathProcess = false;
+
+                    // the arena death sequence is fully complete - clear the markers
+                    EndSurvivalChallengeDeath();
+                    EndWaveChallengeDeath();
+                    EndSpeedChallengeDeath();
+                    worldEventDeathInProgress = false;
+                    pvpMatchDeathInProgress = false;
+                    pvpMatchDeathWaiver = null;
+                    ClearPvpDeathPenLatch();
+
+                    // Battlegrounds completion backstop (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 4): the player went to
+                    // the pen, but the match is no longer Live for them (it ended, or they were exited while dying).
+                    // The coordinator never teleports a dying seat, so this is the trip home.
+                    if (wentToPen && !IsLoggingOut && PvpPenBackstopNeeded(penMatch))
+                        ReturnFromBattlegroundPenNow("death sequence finished after the match stopped being Live");
+
+                    if (IsLoggingOut)
+                        LogOut_Final(true);
+                });
+
+                teleportChain.EnqueueChain();
+            }));
+        }
+
+        public bool suicideInProgress;
+
+        /// <summary>
+        /// Called when player uses the /die command
+        /// </summary>
+        public void HandleActionDie()
+        {
+            if (IsDead || Teleporting)
+            {
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YoureTooBusy));
+                return;
+            }
+
+            if (suicideInProgress)
+                return;
+
+            suicideInProgress = true;
+
+            if (PropertyManager.GetBool("suicide_instant_death").Item)
+                Die(new DamageHistoryInfo(this), DamageHistory.TopDamager);
+            else
+                HandleSuicide(NumDeaths);
+        }
+
+        private static List<string> SuicideMessages = new List<string>()
+        {
+            "I feel faint...",
+            "My sight is growing dim...",
+            "My life is flashing before my eyes...",
+            "I see a light...",
+            "Oh cruel, cruel world!"
+        };
+
+        private void HandleSuicide(int numDeaths, int step = 0)
+        {
+            if (!suicideInProgress || numDeaths != NumDeaths)
+                return;
+
+            if (step < SuicideMessages.Count)
+            {
+                EnqueueBroadcast(new GameMessageHearSpeech(SuicideMessages[step], GetNameWithSuffix(), Guid.Full, ChatMessageType.Speech), LocalBroadcastRange);
+
+                OnTalk(SuicideMessages[step]);
+
+                var suicideChain = new ActionChain();
+                suicideChain.AddDelaySeconds(3.0f);
+                suicideChain.AddAction(this, () => HandleSuicide(numDeaths, step + 1));
+                suicideChain.EnqueueChain();
+            }
+            else
+                Die(new DamageHistoryInfo(this), DamageHistory.TopDamager);
+        }
+
+        /// <summary>
+        /// A possession that never goes to the corpse as a death item: a Bonded item, or one that is or holds an issued
+        /// PvP template item (PvpTemplate.IsIssued recurses into packs). Issued items are Bonded themselves, but a
+        /// PERSONAL side pack holding one is not, and a templated death outside a live match (the backstop window, an
+        /// inert record) does not take the match death waiver, so without this the pack could carry issued gear onto
+        /// the corpse.
+        /// </summary>
+        internal static bool ExcludedFromDeathDrop(WorldObject item)
+            => (item.GetProperty(PropertyInt.Bonded) ?? 0) != 0 || ACE.Server.Pvp.Templates.PvpTemplate.IsIssued(item);
+
+        public List<WorldObject> CalculateDeathItems(Corpse corpse)
+        {
+            // https://web.archive.org/web/20140712134108/http://support.turbine.com/link/portal/24001/24001/Article/464/How-do-death-items-work-in-Asheron-s-Call-Could-you-explain-how-the-game-decides-what-you-drop-when-you-die-in-Asheron-s-Call
+
+            // Original formula:
+
+            // - When you are level 5 or under, you don't drop anything when you die.
+            // - From level 6 to level 10, you lose half your coins (not trade notes) and nothing else.
+            // - From level 11 to level 20, you lose half your coins and possibly one non-wielded item (that is, something that you were neither wearing nor holding in your hands).
+            // - From level 21 to level 35, you lose half your coins and some number of non-wielded items.
+            // - After level 35, you lose half your coins and some number of items. At this point, you can drop items that you were wearing or holding.
+
+            // Now, in those last two cases, I said 'some number'. Some number here is equal to your level divided by 10, rounded down, plus a random number between 0 and 2.
+            // So from level 21 to 29 you can lose between 2 and 4 items; from level 30 to 39 you can lose 3-5 items; from 40-49 you can lose 4-6 items, and so forth.
+            // By level 126 you can be losing up to 14 items.
+
+            // (one caveat here: if you were killed in a PK battle, you always lose items as if you were over level 35, although the exact number you lose
+            // is still determined by your real level / 10. In other words, PK deaths do not get the special protection from item loss that NPK deaths get under level 35.)
+
+            // So that's how many items you lose on death -- but how do we determine which items are lost? This is where the categories come into it.
+
+            // Each item in the game has a particular item type associated with it. The actual types (categories) are listed below.
+            // When we are deciding what items you drop on death, we make a list of all the items you are carrying, sorted by value (high value first).
+            // But we may adjust their values in two ways. If the item is not the most valuable item in that category, then we cut its value in half.
+            // And whether or not it is the most valuable item in its category, we randomize its value a little bit to mix things up.
+            // (To answer your first question explicitly, the cutting-the-value-in-half is not cumulative -- the second- and third- and fourth-most valuable items
+            // of one category all have their values halved, not halved and then quartered and then eighthed).
+
+            // Now note that we still keep these things in a list sorted by adjusted value -- so its possible to have your two expensive weapons
+            // listed first and second, if the value of the second weapon cut in half is still higher than the value of the third item. What I am trying to get at here is
+            // that we do not segregate the list based on item type; we only use item type to determine how we adjust the value of the item.
+
+            // Finally, we go down the list and mark the first # things as dropped, where # is the number of items we have calculated that you are going to drop this death.
+            // For instance, if you are level 48, you will drop the first 4-6 items on that list.
+
+            // The categories of items are:
+
+            // - Melee weapons
+            // - Missile weapons
+            // - Magic casters (like orbs & wands)
+            // - Armor
+            // - Clothing
+            // - Jewelry
+            // - Food
+            // - Gems
+            // - Components
+            // - Mana stones
+            // - Crafting ingredients
+            // - Parchments & books
+            // - Keys
+            // - Tradenotes
+            // - Miscellaneous
+
+            // A few categories are left out such as lifestones -- because you aren't likely to be carrying an item of that type.
+
+            // http://asheron.wikia.com/wiki/Death_Penalty
+            // The first item to drop will be the highest value item regardless of type.
+            // All items of the same type will now be counted at half their face value. This process repeats (next highest value item,
+            // if an item of the same type has already dropped, the face value is halved.)
+
+            // The number of items you drop can be reduced with the Clutch of the Miser augmentation. If you get the
+            // augmentation three times you will no longer drop any items (except half of your Pyreals and all Rares except if you're a PK).
+            // If you drop no items, you will not leave a corpse.
+
+            // Some players use gems, particularly the Archmage Portal Gems as death items, so it's important to note how
+            // stackable items work with the death system. When you die, a stack is considered to be one item for the purposes
+            // of death items. However if that stack is selected, only one item off the stack will drop. For example, let's say you
+            // can currently cover all of your items with 5 Portal Gems. After the event, if you do not stack these gems, there
+            // will be no change. However, if you combine the 5 Gems into a single stack, you would drop 1 gem and 4 other items on death.
+
+            // When you die there is a notification in your chat dialog stating what items you dropped, and your corpse location
+            // (if on the landscape). If you do not leave a corpse the notification will state so.
+
+            // Accounts with the Throne of Destiny expansion received a new formula for death items to prevent losing a
+            // pack per death at high levels. The formula was changed to divide by 20 levels instead of 10, thereby making
+            // the maximum dropped items the same.
+            // Tier 1 and 2 Rares will always drop, and do not count toward your death item count, so store them in a safe place.
+            // PKLite - no items or pyreals are lost on PKL death.
+
+            // Death items
+
+            // You can protect important items like your armor and weapons by carrying death items. These are items that are
+            // ideally light weight as well as high in value. You can tinker loot items with bags of Salvaged Gold to raise their
+            // face value. Although tinkering special items can remove some of the beneift, as you feel obligated to recover
+            // them. Items that can be purchased can just be left if the corpse would be too difficult to recover.
+
+            // Popular items to use as Death Items:
+
+            // - Massive Mana Charges (most common death item)
+            // - Pristine Mana Shards
+            // - Crowns (tinkered with gold)
+            // - Robes sold by the Mastermages
+            // - Nanner Island Portal Gems (somewhat difficult to obtain)
+
+            // Bonded items:
+
+            // Items that have the Special Property Bonded will never drop on death. Some notable bonded items include:
+            // - Academy Weapons (Starter weapons)
+            // - Augmentation Gems (Asheron's Benediction and Blackmoor's Favor)
+            // - Pathwarden Armor (Starter armor)
+            // - Trade Notes
+
+            // http://acpedia.org/wiki/Recovering_from_Death
+
+            // Recovering from Death
+
+            // Fortunately, you won't be in immediate danger of being killed again, because you're invulnerable to attack for a full minute if you don't attack another
+            // creature of cast any spells. Also, your secondary attributes, even if all had been reduced to 0 when you died, will be at 75 percent of their new
+            // maximum score, and any poisons or harmful enchantments afflicting you just before you died will be gone, giving you a fighting chance of making it
+            // back to town or meeting up with your allies.
+            // You can also find the location of your last corpse outdoors by typing @corpse.
+
+            // Corpse timer = Math.Max(1 hour, 5 mins * level)
+            // TODO: @permit and @consent commands
+            // You can have up to 20 people in your consent list at once. However, when you log off, all permissions to loot corpses will be removed.
+
+            // First, we sort the inventory by order of value.
+            // Second, we go back through the inventory starting at the most expensive item and look at each item's category.
+            // If we've seen the item category before, we divide the value of the item in half.
+            // At this point, we add a random 0-10% variance to each item's value.
+
+            // http://acpedia.org/wiki/Death_Item
+
+            // A Reign of Stone (April 2001) - Corpse permission commands added.
+            // The Changing of the Ways (May 2001) - Players are now given the coordinates of their characters' corpses when they die.
+            // Hidden Vein (May 2002) - Many changes made on the way item loss on death works. See http://acpedia.org/wiki/Hidden_Vein and http://acpedia.org/wiki/Announcements_-_2002/05_-_Hidden_Vein#Letter_to_the_Players for more details
+            // Throne of Destiny expansion (July 2005) - The formula used for working out how many items a character drops was updated. For details on the old formula and how it changed see http://acpedia.org/wiki/Announcements_-_2005/07_-_Throne_of_Destiny_(expansion)#FAQ_-_AC:TD_Level_Cap_Update
+
+            // if player dies in a PKLite battle,
+            // they don't drop any items, and revert back to NPK status
+
+            // if player dies on a No Drop landblock, they don't drop any items.
+            // Every ephemeral (private instance) landblock counts as no-drop: the instance and everything
+            // in it, corpse included, is destroyed shortly after the last player leaves (Corpse.IsNoDropLocation)
+
+            // Proving Grounds arena deaths (survival / wave / speed) are penalty-free: drop nothing (same as a no-drop landblock)
+            // server-wide switch: when player_death_no_item_loss is on, death costs nothing. This returns before
+            // the coin calculation below, so it suppresses the half-pyreal loss as well as items, for every
+            // death including PK deaths
+            // PvP arena match deaths (H5) drop nothing either, read from the latch
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || WorldEventDeathInProgress || ThreadDungeonDeathInProgress
+                || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+                return new List<WorldObject>();
+
+            var numItemsDropped = GetNumItemsDropped(corpse);
+
+            var numCoinsDropped = GetNumCoinsDropped();
+
+            var level = Level ?? 1;
+            var canDropWielded = level >= 35;
+
+            // get all items in inventory
+            var inventory = GetAllPossessions();
+
+            // exclude pyreals from randomized death item calculation
+            inventory = inventory.Where(i => i.WeenieClassId != coinStackWcid).ToList();
+
+            // exclude wielded items if < level 35
+            if (!canDropWielded)
+                inventory = inventory.Where(i => i.CurrentWieldedLocation == null).ToList();
+
+            // exclude bonded items, and anything that is or holds an issued PvP template item
+            inventory = inventory.Where(i => !ExcludedFromDeathDrop(i)).ToList();
+
+            // handle items with BondedStatus.Destroy
+            var destroyedItems = HandleDestroyBonded();
+
+            // construct the list of death items
+            var sorted = new DeathItems(inventory);
+
+            var dropItems = new List<WorldObject>();
+
+            if (numCoinsDropped > 0)
+            {
+                // add pyreals to dropped items
+                var pyreals = SpendCurrency(coinStackWcid, (uint)numCoinsDropped);
+                dropItems.AddRange(pyreals);
+                //Console.WriteLine($"Dropping {numCoinsDropped} pyreals");
+            }
+
+            // the off-player save each removal below needs is collected rather than enqueued per item, then issued
+            // as one batched save after both loops - see Player.DeepSave. A death that drops many items would
+            // otherwise put one un-mergeable entry per item on the single shard queue.
+            var deferredSaves = NewDeferredSaveList();
+
+            // Remove the items from inventory
+            for (var i = 0; i < numItemsDropped && i < sorted.Inventory.Count; i++)
+            {
+                var deathItem = sorted.Inventory[i];
+
+                // split stack if needed
+                if ((deathItem.WorldObject.StackSize ?? 1) > 1)
+                {
+                    var stack = FindObject(deathItem.WorldObject.Guid, SearchLocations.MyInventory | SearchLocations.MyEquippedItems, out var foundInContainer, out var rootContainer, out _);
+
+                    if (stack != null)
+                    {
+                        AdjustStack(stack, -1, foundInContainer, rootContainer);
+                        Session.Network.EnqueueSend(new GameMessageSetStackSize(stack));
+
+                        var dropItem = WorldObjectFactory.CreateNewWorldObject(deathItem.WorldObject.WeenieClassId);
+                        dropItem.SetStackSize(1);
+
+                        //Console.WriteLine("Dropping " + deathItem.WorldObject.Name + " (stack)");
+                        dropItems.Add(dropItem);
+                    }
+                    else
+                    {
+                        log.WarnFormat("Couldn't find death item stack 0x{0:X8}:{1} for player {2}", deathItem.WorldObject.Guid.Full, deathItem.WorldObject.Name, Name);
+                    }
+                }
+                else
+                {
+                    if (TryRemoveFromInventoryWithNetworking(deathItem.WorldObject.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath, deferredSaves) || TryDequipObjectWithNetworking(deathItem.WorldObject.Guid, out _, DequipObjectAction.ToCorpseOnDeath, deferredSaves))
+                    {
+                        //Console.WriteLine("Dropping " + deathItem.WorldObject.Name);
+                        dropItems.Add(deathItem.WorldObject);
+                    }
+                    else
+                    {
+                        log.WarnFormat("Couldn't find death item 0x{0:X8}:{1} for player {2}", deathItem.WorldObject.Guid.Full, deathItem.WorldObject.Name, Name);
+                    }
+                }
+            }
+
+            // handle items with BondedStatus.Slippery: always drop on death
+            var slipperyItems = GetSlipperyItems();
+
+            foreach (var item in slipperyItems)
+            {
+                if (TryRemoveFromInventoryWithNetworking(item.Guid, out _, RemoveFromInventoryAction.ToCorpseOnDeath, deferredSaves) || TryDequipObjectWithNetworking(item.Guid, out _, DequipObjectAction.ToCorpseOnDeath, deferredSaves))
+                    dropItems.Add(item);
+            }
+
+            // ORDERING: enqueued before the corpse-transfer loop below, which both destroys items
+            // (destroyCoins -> Destroy() -> RemoveBiotaFromDatabase) and re-parents the rest into the corpse.
+            // That is the same order the per-item saves ran in before: save first, then destroy / re-parent.
+            FlushDeferredSaves(deferredSaves);
+
+            var destroyCoins = PropertyManager.GetBool("corpse_destroy_pyreals").Item;
+
+            // add items to corpse
+            foreach (var dropItem in dropItems)
+            {
+                // coins already removed from SpendCurrency
+                if (destroyCoins && dropItem.WeenieType == WeenieType.Coin)
+                {
+                    dropItem.Destroy();
+                    continue;
+                }
+
+                if (!corpse.TryAddToInventory(dropItem))
+                {
+                    log.Warn($"Player_Death: couldn't add item to {Name}'s corpse: {dropItem.Name}");
+
+                    if (!TryAddToInventory(dropItem))
+                        log.Warn($"Player_Death: couldn't re-add item to {Name}'s inventory: {dropItem.Name}");
+                }
+            }
+
+            // notify player of destroyed items?
+            dropItems.AddRange(destroyedItems);
+
+            // send network messages
+            var dropList = DropMessage(dropItems, numCoinsDropped);
+            if (!string.IsNullOrWhiteSpace(dropList))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat(dropList, ChatMessageType.Broadcast));
+
+                DeathItemLog(dropItems, corpse);
+            }
+
+            return dropItems;
+        }
+
+        public void DeathItemLog(List<WorldObject> dropItems, Corpse corpse)
+        {
+            if (dropItems.Count == 0)
+                return;
+
+            var msg = $"[CORPSE] {Name} dropped items on corpse (0x{corpse.Guid}): ";
+
+            foreach (var dropItem in dropItems)
+                msg += $"{(dropItem.StackSize.HasValue && dropItem.StackSize > 1 ? dropItem.StackSize.Value.ToString("N0") + " " + dropItem.GetPluralName() : dropItem.Name)} (0x{dropItem.Guid}){(dropItem.WeenieClassId == 273 && PropertyManager.GetBool("corpse_destroy_pyreals").Item ? $" which {(dropItem.StackSize.HasValue && dropItem.StackSize > 1 ? "were" : "was")} destroyed" : "")}, ";
+
+            msg = msg.Substring(0, msg.Length - 2);
+
+            log.Info(msg);
+        }
+
+        /// <summary>
+        /// The maximum # of items a player can drop
+        /// </summary>
+        public const int MaxItemsDropped = 14;
+
+        /// <summary>
+        /// Rolls for the # of items to drop for a player death
+        /// </summary>
+        /// <returns></returns>
+        public int GetNumItemsDropped(Corpse corpse)
+        {
+            // Original formula:
+
+            // - When you are level 5 or under, you don't drop anything when you die.
+            // - From level 6 to level 10, you lose half your coins (not trade notes) and nothing else.
+            // - From level 11 to level 20, you lose half your coins and possibly one non-wielded item (that is, something that you were neither wearing nor holding in your hands).
+            // - From level 21 to level 35, you lose half your coins and some number of non-wielded items.
+            // - After level 35, you lose half your coins and some number of items. At this point, you can drop items that you were wearing or holding.
+
+            // Now, in those last two cases, I said 'some number'. Some number here is equal to your level divided by 10 (*20 after patch), rounded down, plus a random number between 0 and 2.
+            // So from level 21 to 29 you can lose between 2 and 4 items; from level 30 to 39 you can lose 3-5 items; from 40-49 you can lose 4-6 items, and so forth.
+            // By level 126 you can be losing up to 14 items.
+
+            // (one caveat here: if you were killed in a PK battle, you always lose items as if you were over level 35, although the exact number you lose
+            // is still determined by your real level / 10. In other words, PK deaths do not get the special protection from item loss that NPK deaths get under level 35.)
+
+            // So that's how many items you lose on death -- but how do we determine which items are lost? This is where the categories come into it.
+
+            // take augments into consideration?
+
+            var level = Level ?? 1;
+
+            if (level <= 10)
+                return 0;
+
+            if (level >= 11 && level <= 20)
+                return ThreadSafeRandom.Next(0, 1);
+
+            // level 21+
+            var numItemsDropped = (level / 20) + ThreadSafeRandom.Next(0, 2);
+
+            numItemsDropped = Math.Min(numItemsDropped, MaxItemsDropped);   // is this really a max cap?
+
+            // The number of items you drop can be reduced with the Clutch of the Miser augmentation. If you get the
+            // augmentation three times you will no longer drop any items (except half of your Pyreals and all Rares except if you're a PK).
+            // If you drop no items, you will not leave a corpse.
+
+            if (!IsPKDeath(corpse.KillerId) && AugmentationLessDeathItemLoss > 0)
+            {
+                numItemsDropped = Math.Max(0, numItemsDropped - AugmentationLessDeathItemLoss * 5);
+            }
+
+            return numItemsDropped;
+        }
+
+        public int GetNumCoinsDropped()
+        {
+            // if level > 5, lose half coins
+            // (trade notes excluded)
+            var level = Level ?? 1;
+            var coins = CoinValue ?? 0;
+
+            var numCoinsDropped = level > 5 ? coins / 2 : 0;
+
+            return numCoinsDropped;
+        }
+
+        /// <summary>
+        /// Builds the network text message for list of items dropped
+        /// </summary>
+        public string DropMessage(List<WorldObject> dropItems, int numCoinsDropped)
+        {
+            var msg = "";
+            var coinMsg = true;
+
+            for (var i = 0; i < dropItems.Count; i++)
+            {
+                var dropItem = dropItems[i];
+
+                var isCoin = dropItem.Name.Equals("Pyreal");
+
+                if (isCoin && !coinMsg)
+                    continue;
+
+                if (i == 0)
+                    msg += "You've lost ";
+                else
+                {
+                    msg += ", ";
+
+                    if (i == dropItems.Count - 1)
+                        msg += "and ";
+                }
+
+                var stackSize = dropItem.StackSize ?? 1;
+                if (isCoin)
+                {
+                    stackSize = numCoinsDropped;
+                    coinMsg = false;
+                }
+                else
+                    msg += "your ";
+
+                if (stackSize == 1)
+                    msg += dropItem.Name;
+                else
+                    msg += stackSize.ToString("N0") + " " + dropItem.GetPluralName();
+            }
+            if (msg.Length > 0)
+                msg += "!";
+
+            return msg;
+        }
+
+        public static TimeSpan PermitTime = TimeSpan.FromHours(1);
+
+        public void HandleActionAddPlayerPermission(string playerName)
+        {
+            // is this player online?
+            var player = PlayerManager.GetOnlinePlayer(playerName);
+
+            if (player == null)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{playerName} is not online.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // check for self-permit
+            if (Name.Equals(player.Name))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You already have permission to loot your corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // verify other player has /consent on
+            if (!player.GetCharacterOption(CharacterOption.AcceptCorpseLootingPermissions))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} is not accepting corpse looting permissions from other players.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // do they already have permission?
+            if (player.HasLootPermission(Guid))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} already has permission to loot your corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            player.LootPermission.Add(Guid, DateTime.UtcNow + PermitTime);
+
+            // send messages to both players
+            player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name} has given you permission to loot one of his or her corpses. This permission will last one hour.", ChatMessageType.Broadcast));
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat($"You have given permission to {player.Name} to loot one of your corpses. This permission will last one hour.", ChatMessageType.Broadcast));
+        }
+
+        public void HandleActionRemovePlayerPermission(string playerName)
+        {
+            // is this player online?
+            var player = PlayerManager.GetOnlinePlayer(playerName);
+
+            // check for self-revoke
+            if (Name.Equals(player.Name))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You always have permission to loot your corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // do they already have permission?
+            if (player == null || !player.HasLootPermission(Guid))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} doesn't have permission to loot your corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // remove looting permissions
+            player.LootPermission.Remove(Guid);
+
+            // send messages to both players
+            player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name} has revoked permission to loot one of his or her corpses.", ChatMessageType.Broadcast));
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s permission to loot your corpse has been revoked.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Cleans out any expired permissions
+        /// </summary>
+        public void PrunePermissions()
+        {
+            LootPermission = LootPermission.Where(p => p.Value >= DateTime.UtcNow).ToDictionary(p => p.Key, p => p.Value);
+        }
+
+        public bool HasLootPermission(ObjectGuid guid)
+        {
+            PrunePermissions();
+
+            return LootPermission.ContainsKey(guid);
+        }
+
+        public void HandleActionDisplayPlayerConsentList()
+        {
+            PrunePermissions();
+
+            if (LootPermission.Count == 0)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You do not have permission to loot anyone's corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            var playerNames = new List<string>();
+
+            foreach (var playerGuid in LootPermission.Keys)
+            {
+                // is the granter required to stay online?
+                var player = PlayerManager.FindByGuid(playerGuid);
+
+                if (player == null)
+                {
+                    Console.WriteLine($"{Name}.HandleActionDisplayPlayerConsentList(): couldn't find player guid {playerGuid}");
+                    continue;
+                }
+                playerNames.Add(player.Name);
+            }
+            Session.Network.EnqueueSend(new GameMessageSystemChat("You have permissions to loot a corpse from these players:\n" + string.Join("\n", playerNames), ChatMessageType.Broadcast));
+        }
+
+        public void HandleActionClearPlayerConsentList()
+        {
+            PrunePermissions();
+
+            if (LootPermission.Count == 0)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You do not have permission to loot anyone's corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            LootPermission.Clear();
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat($"You have cleared your consent list. Players will have to permit you again to allow you access to their corpse.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// A player can remove corpse looting permissions that were granted to them.
+        /// </summary>
+        /// <param name="playerName">The granter name</param>
+        public void HandleActionRemoveFromPlayerConsentList(string playerName)
+        {
+            var player = PlayerManager.FindByName(playerName);
+
+            if (player == null)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{playerName} is not online.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // check for self-revoke
+            if (Name.Equals(player.Name))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You always have permission to loot your corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // do we have permissions?
+            if (!HasLootPermission(player.Guid))
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"You don't have permission to loot {player.Name}'s corpse.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // remove looting permissions
+            LootPermission.Remove(player.Guid);
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat($"You have removed your permissions to loot {player.Name}'s corpse.", ChatMessageType.Broadcast));
+        }
+
+        public bool UnderLifestoneProtection
+        {
+            get => GetProperty(PropertyBool.UnderLifestoneProtection) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.UnderLifestoneProtection); else SetProperty(PropertyBool.UnderLifestoneProtection, value); }
+        }
+
+        public double? LifestoneProtectionTimestamp
+        {
+            get => GetProperty(PropertyFloat.LifestoneProtectionTimestamp) ?? null;
+            set { if (!value.HasValue) RemoveProperty(PropertyFloat.LifestoneProtectionTimestamp); else SetProperty(PropertyFloat.LifestoneProtectionTimestamp, value.Value); }
+        }
+
+        public void SetLifestoneProtection()
+        {
+            UnderLifestoneProtection = true;
+            LifestoneProtectionTimestamp = 0;
+        }
+
+        public void HandleLifestoneProtection()
+        {
+            Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.LifestoneMagicProtectsYou));
+            EnqueueBroadcast(new GameMessageScript(Guid, PlayScript.ShieldUpBlue));
+        }
+
+        public static TimeSpan LifestoneProtectionTime = TimeSpan.FromMinutes(1);
+
+        public void LifestoneProtectionTick()
+        {
+            if (!UnderLifestoneProtection)
+                return;
+
+            LifestoneProtectionTimestamp += CachedHeartbeatInterval;
+
+            if (LifestoneProtectionTimestamp < LifestoneProtectionTime.TotalSeconds)
+                return;
+
+            UnderLifestoneProtection = false;
+            LifestoneProtectionTimestamp = null;
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat("You're no longer protected by the Lifestone's magic!", ChatMessageType.Magic));
+        }
+
+        public void LifestoneProtectionDispel()
+        {
+            UnderLifestoneProtection = false;
+            LifestoneProtectionTimestamp = null;
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat("Your actions have dispelled the Lifestone's magic!", ChatMessageType.Magic));
+        }
+
+        public double? MinimumTimeSincePk
+        {
+            get => GetProperty(PropertyFloat.MinimumTimeSincePk);
+            set { if (!value.HasValue) RemoveProperty(PropertyFloat.MinimumTimeSincePk); else SetProperty(PropertyFloat.MinimumTimeSincePk, value.Value); }
+        }
+
+        public void SetMinimumTimeSincePK()
+        {
+            if (IsOlthoiPlayer)
+                return;
+
+            if (PlayerKillerStatus == PlayerKillerStatus.NPK && MinimumTimeSincePk == null)
+                return;
+
+            var prevStatus = PlayerKillerStatus;
+
+            MinimumTimeSincePk = 0;
+            PlayerKillerStatus = PlayerKillerStatus.NPK;
+
+            if (prevStatus == PlayerKillerStatus.PK)
+            {
+                EnqueueBroadcast(new GameMessagePublicUpdatePropertyInt(this, PropertyInt.PlayerKillerStatus, (int)PlayerKillerStatus));
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YouAreTemporarilyNoLongerPK));
+            }
+            else if (prevStatus == PlayerKillerStatus.PKLite)
+            {
+                EnqueueBroadcast(new GameMessagePublicUpdatePropertyInt(this, PropertyInt.PlayerKillerStatus, (int)PlayerKillerStatus));
+                Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YouAreNonPKAgain));
+            }
+        }
+
+        public void PK_DeathTick()
+        {
+            if (MinimumTimeSincePk == null || (PropertyManager.GetBool("pk_server_safe_training_academy").Item && RecallsDisabled))
+                return;
+
+            // One respite step, decided by FacetPk.RespiteTick. With the facet PK rule inactive this is exactly
+            // the retail tick: an NPK player (lasting level, pk_server, pkl_server) has the respite cleared at
+            // once, anyone else counts up to pk_respite_timer and then returns to their level. With the rule
+            // active there is NO early clear - the respite runs its full length on whatever facet the player
+            // stands on (so a hop off the PK facet cannot cut it short and let /facet pk straight back in), and
+            // at the end the status resolves to the rule's answer: PK on the PK facet, NPK anywhere else.
+            var next = FacetPk.RespiteTick(MinimumTimeSincePk, CachedHeartbeatInterval, PropertyManager.GetDouble("pk_respite_timer").Item,
+                FacetPkRequirementNow(), PkLevel, PropertyManager.GetBool("pk_server").Item, PropertyManager.GetBool("pkl_server").Item,
+                out var ended, out var pkLevel);
+
+            MinimumTimeSincePk = next;
+
+            if (!ended)
+                return;
+
+            var werror = WeenieError.None;
+
+            switch (pkLevel)
+            {
+                case PKLevel.NPK:
+                    return;
+
+                case PKLevel.PK:
+                    PlayerKillerStatus = PlayerKillerStatus.PK;
+                    werror = WeenieError.YouArePKAgain;
+                    break;
+
+                case PKLevel.PKLite:
+                    PlayerKillerStatus = PlayerKillerStatus.PKLite;
+                    werror = WeenieError.YouAreNowPKLite;
+                    break;
+            }
+
+            EnqueueBroadcast(new GameMessagePublicUpdatePropertyInt(this, PropertyInt.PlayerKillerStatus, (int)PlayerKillerStatus));
+            Session.Network.EnqueueSend(new GameEventWeenieError(Session, werror));
+        }
+
+        public List<WorldObject> GetSlipperyItems()
+        {
+            return SlipperyDeathDrops(GetAllPossessions());
+        }
+
+        /// <summary>
+        /// The Slippery possessions that always drop on death, minus anything that is or holds an issued PvP template
+        /// item: a Slippery personal side pack holding issued gear must not carry it onto the corpse (the same rule as
+        /// <see cref="ExcludedFromDeathDrop"/>, which cannot be reused here because it excludes every Bonded status).
+        /// </summary>
+        internal static List<WorldObject> SlipperyDeathDrops(IEnumerable<WorldObject> possessions)
+            => possessions.Where(i => i.Bonded == BondedStatus.Slippery && !ACE.Server.Pvp.Templates.PvpTemplate.IsIssued(i)).ToList();
+
+        public List<WorldObject> HandleDestroyBonded()
+        {
+            var destroyedItems = new List<WorldObject>();
+
+            var allPossessions = GetAllPossessions();
+            foreach (var destroyItem in allPossessions.Where(i => i.Bonded == BondedStatus.Destroy).ToList())
+            {
+                TryConsumeFromInventoryWithNetworking(destroyItem, (destroyItem.StackSize ?? 1));
+                destroyedItems.Add(destroyItem);
+            }
+            return destroyedItems;
+        }
+
+        private static Database.Models.World.TreasureDeath OlthoiDeathTreasureType => Database.DatabaseManager.World.GetCachedDeathTreasure(2222) ?? new()
+        {
+            TreasureType = 2222,
+            Tier = 8,
+            LootQualityMod = 0,
+            UnknownChances = 19,
+            ItemChance = 100,
+            ItemMinAmount = 1,
+            ItemMaxAmount = 2,
+            ItemTreasureTypeSelectionChances = 8,
+            MagicItemChance = 100,
+            MagicItemMinAmount = 2,
+            MagicItemMaxAmount = 3,
+            MagicItemTreasureTypeSelectionChances = 8,
+            MundaneItemChance = 100,
+            MundaneItemMinAmount = 0,
+            MundaneItemMaxAmount = 1,
+            MundaneItemTypeSelectionChances = 7
+        };
+
+        /// <summary>
+        /// Determines the amount of slag to drop on a Player corpse when killed by an OlthoiPlayer or the loot to drop when an OlthoiPlayer is killed by a Player Killer
+        /// </summary>
+        public List<WorldObject> CalculateDeathItems_Olthoi(Corpse corpse, bool hadVitae, bool killerIsOlthoiPlayer, bool killerIsPkPlayer)
+        {
+            // the same server-wide switch covers the Olthoi slag / PK-loot path, and so does the
+            // no-drop location rule (retail no-drop landblocks + every ephemeral instance): a corpse
+            // left in an ephemeral instance is destroyed with it, slag and PK loot included.
+            // Same guard as the ordinary item-drop path (see below): a Proving Grounds arena death or an
+            // Asheron's Protection world-event death must waive Olthoi slag / PK loot exactly like it
+            // waives ordinary item loss. The three arena flags were missing here before this fix too - a
+            // pre-existing gap of the same defect class as the world-event one, closed at the same time.
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock
+                || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress
+                || WorldEventDeathInProgress || ThreadDungeonDeathInProgress
+                || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
+                return new List<WorldObject>();
+
+            if (killerIsOlthoiPlayer)
+            {
+                var slag = LootGenerationFactory.RollSlag(this, hadVitae);
+
+                if (slag == null)
+                    return new();
+
+                if (!corpse.TryAddToInventory(slag))
+                    log.Warn($"CalculateDeathItems_Olthoi: couldn't add item to {Name}'s corpse: {slag.Name}");
+
+                return new() { slag };
+            }
+            else if (killerIsPkPlayer)
+            {
+                if (hadVitae)
+                    return new();
+
+                var items = LootGenerationFactory.CreateRandomLootObjects(OlthoiDeathTreasureType);
+
+                var gland = LootGenerationFactory.RollGland(this, hadVitae);
+
+                if (gland != null)
+                {
+                    items.Add(gland);
+                }
+
+                foreach (WorldObject wo in items)
+                {
+                    if (!corpse.TryAddToInventory(wo))
+                        log.Warn($"CalculateDeathItems_Olthoi: couldn't add item to {Name}'s corpse: {wo.Name}");
+                }
+
+                return items;
+            }
+            else
+            {
+                return new();
+            }
+        }
+    }
+}

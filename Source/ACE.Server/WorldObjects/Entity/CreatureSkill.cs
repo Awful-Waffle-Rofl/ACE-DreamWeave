@@ -1,0 +1,286 @@
+using System;
+
+using ACE.Common.Extensions;
+using ACE.Entity.Enum;
+using ACE.Entity.Models;
+using ACE.Server.Entity;
+using ACE.Server.ThreadDungeons;
+
+namespace ACE.Server.WorldObjects.Entity
+{
+    public class CreatureSkill
+    {
+        private readonly Creature creature;
+
+        public readonly Skill Skill;
+
+        // The underlying database record
+        public readonly PropertiesSkill PropertiesSkill;
+
+        public CreatureSkill(Creature creature, Skill skill, PropertiesSkill propertiesSkill)
+        {
+            this.creature = creature;
+            Skill = skill;
+            this.PropertiesSkill = propertiesSkill;
+        }
+
+        /// <summary>
+        /// A bonus from character creation: +5 for trained, +10 for specialized
+        /// </summary>
+        public uint InitLevel
+        {
+            get => PropertiesSkill.InitLevel;
+            set => PropertiesSkill.InitLevel = value;
+        }
+
+        /// <summary>
+        /// InitLevel as reported to the client, folding in the getter-only "Enhanced &lt;skill&gt;" class
+        /// skill bonus so the client's skill panel (which rebuilds the value from the attribute formula +
+        /// Ranks + InitLevel, not from the server's Current) reflects it. The stored InitLevel is left
+        /// untouched. The client's attribute contribution already matches the server because attributes
+        /// are sent with their own Enhanced bonus folded in (NetworkStartingValue), so there is no
+        /// double counting.
+        /// </summary>
+        public uint NetworkInitLevel =>
+            InitLevel + (creature is Player player ? (uint)player.GetEnhancedSkillBonus(Skill) : 0);
+
+        public SkillAdvancementClass AdvancementClass
+        {
+            get => PropertiesSkill.SAC;
+            set
+            {
+                if (PropertiesSkill.SAC != value)
+                    creature.ChangesDetected = true;
+
+                PropertiesSkill.SAC = value;
+            }
+        }
+
+        public bool IsUsable
+        {
+            get
+            {
+                if (AdvancementClass == SkillAdvancementClass.Trained || AdvancementClass == SkillAdvancementClass.Specialized)
+                    return true;
+
+                if (AdvancementClass == SkillAdvancementClass.Untrained)
+                {
+                    GameTables.SkillTable.SkillBaseHash.TryGetValue((uint)Skill, out var skillTableRecord);
+
+                    if (skillTableRecord?.MinLevel == 1)
+                        return true;
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The amount of experience put into this skill,
+        /// from raising directly and earned through use
+        /// </summary>
+        public uint ExperienceSpent
+        {
+            get => PropertiesSkill.PP;
+            set
+            {
+                if (PropertiesSkill.PP != value)
+                    creature.ChangesDetected = true;
+
+                PropertiesSkill.PP = value;
+            }
+        }
+
+        /// <summary>
+        /// Returns the amount of skill experience remaining
+        /// until max rank is reached
+        /// </summary>
+        public uint ExperienceLeft
+        {
+            get
+            {
+                var skillXPTable = Player.GetSkillXPTable(AdvancementClass);
+                if (skillXPTable == null)
+                    return 0;
+
+                // a player can actually have negative experience remaining,
+                // if they had a Trained skill maxed, and then specialized it in skill temple afterwards.
+
+                // (confirmed this is how it was in retail)
+
+                var remainingXP = (long)skillXPTable[skillXPTable.Count - 1] - ExperienceSpent;
+
+                return (uint)Math.Max(0, remainingXP);
+            }
+        }
+
+        /// <summary>
+        /// The number of levels a skill has been raised,
+        /// derived from ExperienceSpent
+        /// </summary>
+        public ushort Ranks
+        {
+            get => PropertiesSkill.LevelFromPP;
+            set
+            {
+                if (PropertiesSkill.LevelFromPP != value)
+                    creature.ChangesDetected = true;
+
+                PropertiesSkill.LevelFromPP = value;
+            }
+        }
+
+        /// <summary>
+        /// Returns TRUE if this skill has been raised the maximum # of times
+        /// </summary>
+        public bool IsMaxRank
+        {
+            get
+            {
+                var skillXPTable = Player.GetSkillXPTable(AdvancementClass);
+                if (skillXPTable == null)
+                    return false;
+
+                return Ranks >= (skillXPTable.Count - 1);
+            }
+        }
+
+        public uint Base
+        {
+            get
+            {
+                uint total = 0;
+
+                if (IsUsable)
+                    total = AttributeFormula.GetFormula(creature, Skill, false);
+
+                total += InitLevel + Ranks;
+
+                if (creature is Player player)
+                {
+                    total += GetAugBonus_Base(player);
+
+                    // "Enhanced <skill>" class ability - a flat base increase, so it counts toward
+                    // wield requirements (which read Base) just like trained ranks
+                    total += (uint)player.GetEnhancedSkillBonus(Skill);
+                }
+                else if (creature != null)
+                {
+                    // Threads defense-skill ceiling (DungeonCreatureNormalizer.StripCombatTraits), applied to
+                    // the pre-enchantment sum before anything else touches it. Never for a Player. Guarded on
+                    // creature != null because WeaponImbueTests builds a CreatureSkill with no creature at all
+                    // to test the pure base-skill-cap arithmetic.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetDefenseSkillCeiling(Skill));
+                }
+
+                return total;
+            }
+        }
+
+        public uint Current
+        {
+            get
+            {
+                uint total = 0;
+
+                if (IsUsable)
+                    total = AttributeFormula.GetFormula(creature, Skill);
+
+                total += InitLevel + Ranks;
+
+                var player = creature as Player;
+
+                if (player == null && creature != null)
+                {
+                    // Threads defense-skill ceiling, applied to the pre-enchantment sum immediately after it is
+                    // formed and before any enchantment (monster self-buff, player debuff such as Vulnerability)
+                    // is applied below - so a debuff still lands on top of the capped value exactly as it would
+                    // on an authored one. Guarded on creature != null for the same reason as the Base getter.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetDefenseSkillCeiling(Skill));
+                }
+
+                // base gets scaled by vitae
+                if (player != null)
+                {
+                    total += GetAugBonus_Base(player);
+
+                    // "Enhanced <skill>" is a base increase, so it rides with base (pre-multiplier)
+                    total += (uint)player.GetEnhancedSkillBonus(Skill);
+                }
+
+                // apply multiplicative enchantments
+                var multiplier = creature.EnchantmentManager.GetSkillMod_Multiplier(Skill);
+
+                var fTotal = total * multiplier;
+
+                if (player != null)
+                {
+                    var vitae = player.Vitae;
+
+                    if (vitae != 1.0f)
+                        fTotal *= vitae;
+
+                    // everything beyond this point does not get scaled by vitae
+                    fTotal += GetAugBonus_Current(player);
+                }
+
+                var additives = creature.EnchantmentManager.GetSkillMod_Additives(Skill);
+
+                var iTotal = (fTotal + additives).Round();
+
+                iTotal = Math.Max(iTotal, 0);   // skill level cannot be debuffed below 0
+
+                return (uint)iTotal;
+            }
+        }
+
+        public uint GetAugBonus_Base(Player player)
+        {
+            // TODO: verify which of these are base, and which are current
+            uint total = 0;
+
+            if (player.LumAugAllSkills != 0)
+                total += (uint)player.LumAugAllSkills;
+
+            if (player.AugmentationSkilledMelee > 0 && Player.MeleeSkills.Contains(Skill))
+                total += (uint)(player.AugmentationSkilledMelee * 10);
+            else if (player.AugmentationSkilledMissile > 0 && Player.MissileSkills.Contains(Skill))
+                total += (uint)(player.AugmentationSkilledMissile * 10);
+            else if (player.AugmentationSkilledMagic > 0 && Player.MagicSkills.Contains(Skill))
+                total += (uint)(player.AugmentationSkilledMagic * 10);
+
+            //switch (Skill)
+            //{
+            //    case Skill.ArmorTinkering:
+            //    case Skill.ItemTinkering:
+            //    case Skill.MagicItemTinkering:
+            //    case Skill.WeaponTinkering:
+            //    case Skill.Salvaging:
+
+            //        if (player.LumAugSkilledCraft != 0)
+            //            total += (uint)player.LumAugSkilledCraft;
+            //        break;
+            //}
+
+            // +1 per enlightenment to SPECIALIZED skills only (trained skills get nothing); a permanent,
+            // non-redistributable floor computed getter-only, never written into the skill record
+            if (AdvancementClass == SkillAdvancementClass.Specialized && player.EffectiveEnlightenment != 0)
+                total += (uint)player.EffectiveEnlightenment;
+
+            return total;
+        }
+
+        public uint GetAugBonus_Current(Player player)
+        {
+            // TODO: verify which of these are base, and which are current
+            uint total = 0;
+
+            if (player.AugmentationJackOfAllTrades != 0)
+                total += (uint)(player.AugmentationJackOfAllTrades * 5);
+
+            if (AdvancementClass == SkillAdvancementClass.Specialized && player.LumAugSkilledSpec != 0)
+                total += (uint)player.LumAugSkilledSpec * 2;
+
+            return total;
+        }
+    }
+}

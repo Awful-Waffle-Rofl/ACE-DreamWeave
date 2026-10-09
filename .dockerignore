@@ -1,0 +1,29 @@
+# directories
+**/bin/
+**/obj/
+**/out/
+**/.vs/
+**/.git/
+**/.github/
+**/sed/
+**/AppVeyor/
+**/publish/
+**/Config/
+**/Dats/
+**/Logs/
+**/db-data/
+
+# files
+Dockerfile*
+**/.dockerignore*
+**/*.user
+**/*.trx
+**/*.md
+**/*.ps1
+**/*.cmd
+**/*.sh
+**/*.zip
+
+# exception: the Dockerfile COPYs this script into the image, so it must survive the
+# **/*.sh exclusion above (.dockerignore evaluates rules in order; a later negation wins).
+!deploy/healthcheck.sh

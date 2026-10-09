@@ -1,0 +1,565 @@
+using System;
+using System.Collections.Generic;
+
+using log4net;
+
+using ACE.Common;
+using ACE.Entity;
+using ACE.Server.Entity.Actions;
+using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
+using ACE.Server.Entity;
+using ACE.Server.Factories;
+using ACE.Server.Managers;
+using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Network.GameEvent.Events;
+
+namespace ACE.Server.WorldObjects
+{
+    public partial class Corpse : Container
+    {
+        private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
+        /// <summary>
+        /// The maximum number of seconds for an empty corpse to stick around
+        /// </summary>
+        public const double EmptyDecayTime = 15.0;
+
+        /// <summary>
+        /// Flag indicates if a corpse is from a monster or a player
+        /// </summary>
+        /// <remarks>
+        /// This is a plain runtime field, not a persisted property: it is set once at
+        /// Creature_Death.CreateCorpse() and is always FALSE again on a corpse restored from the shard
+        /// database. Code that runs on the reload path must use <see cref="WorldObject.Level"/> instead
+        /// (see <see cref="RecalculateDecayTime"/>, which is the only thing that ever sets it, and only
+        /// for a player corpse).
+        /// </remarks>
+        public bool IsMonster = false;
+
+        /// <summary>
+        /// The configured maximum wall-clock lifetime of a player corpse, in seconds.
+        /// A value of 0 or less disables the cap.
+        /// </summary>
+        public static long MaxLifetimeSeconds => PropertyManager.GetLong("player_corpse_max_lifetime_seconds").Item;
+
+        /// <summary>
+        /// A new biota be created taking all of its values from weenie.
+        /// </summary>
+        public Corpse(Weenie weenie, ObjectGuid guid) : base(weenie, guid)
+        {
+            SetEphemeralValues();
+        }
+
+        /// <summary>
+        /// Restore a WorldObject from the database.
+        /// </summary>
+        public Corpse(Biota biota) : base(biota)
+        {
+            SetEphemeralValues();
+
+            // for player corpses restored from database,
+            // ensure any floating corpses fall to the ground
+            BumpVelocity = true;
+        }
+
+        private void SetEphemeralValues()
+        {
+            ObjectDescriptionFlags |= ObjectDescriptionFlag.Corpse;
+
+            CurrentMotionState = new Motion(MotionStance.NonCombat, MotionCommand.Dead);
+
+            ContainerCapacity = 10;
+            ItemCapacity = 120;
+
+            SuppressGenerateEffect = true;
+        }
+
+        protected override void OnInitialInventoryLoadCompleted()
+        {
+            // Level is only ever set on a PLAYER corpse (RecalculateDecayTime), so it is this class's
+            // established discriminator between player and monster corpses on the reload path, where the
+            // ephemeral IsMonster field has been reset to false by the database round trip.
+            if (!Level.HasValue)
+                return;
+
+            var dtTimeToRot = DateTime.UtcNow.AddSeconds(TimeToRot ?? 0);
+            var tsDecay = dtTimeToRot - DateTime.UtcNow;
+
+            log.Info($"[CORPSE] {Name} (0x{Guid}) Reloaded from Database: Corpse Level: {Level ?? 0} | InventoryLoaded: {InventoryLoaded} | Inventory.Count: {Inventory.Count} | TimeToRot: {TimeToRot} | CreationTimestamp: {CreationTimestamp} ({Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}) | Corpse should not decay before: {dtTimeToRot.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}, {tsDecay.ToString("%d")} day(s), {tsDecay.ToString("%h")} hours, {tsDecay.ToString("%m")} minutes, and {tsDecay.ToString("%s")} seconds from now.");
+
+            // Enforce the absolute wall-clock deadline. See HasExceededMaxLifetime() for why the TimeToRot
+            // countdown on its own cannot bound a corpse's lifetime, and why this check is NOT redundant.
+            var maxLifetimeSeconds = MaxLifetimeSeconds;
+
+            if (HasExceededMaxLifetime(CreationTimestamp, Time.GetUnixTime(), maxLifetimeSeconds))
+            {
+                log.Info($"[CORPSE] {Name} (0x{Guid}) has outlived the maximum player corpse lifetime of {maxLifetimeSeconds} seconds (created {Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}); forcing it to rot.");
+
+                // Hand the corpse to the normal decay path instead of tearing it down here. A TimeToRot of 0
+                // is the existing "instant rot" value, so the next WorldObject.Decay() tick skips the
+                // countdown branch entirely and falls straight through to the one destruction path, which
+                // pukes the corpse's contents onto the landblock before destroying it. Decaying inline is
+                // not an option: this runs from the container load action, where CurrentLandblock and
+                // Location may not be set yet, and that path dereferences both.
+                TimeToRot = 0;
+            }
+        }
+
+        /// <summary>
+        /// Returns TRUE if a corpse created at <paramref name="creationTimestamp"/> (whole seconds since the
+        /// UTC unix epoch, as written by the WorldObject weenie constructor) has already outlived
+        /// <paramref name="maxLifetimeSeconds"/> as of <paramref name="nowUnixTime"/>.
+        /// A <paramref name="maxLifetimeSeconds"/> of 0 or less disables the cap, and a corpse with no
+        /// creation timestamp cannot be aged, so both report as not expired.
+        /// </summary>
+        /// <remarks>
+        /// WHY THIS EXISTS, AND WHY IT IS NOT REDUNDANT WITH TimeToRot - do not delete it as duplicated
+        /// bookkeeping. TimeToRot is a countdown, and the ONLY thing that decrements it is
+        /// WorldObject.Decay(), which is only ever reached from the landblock heartbeat in
+        /// Landblock.TickMultiThreadedWork(). A landblock with no players in it goes dormant after 1 minute
+        /// and is queued for unload 5 minutes after that; LandblockManager.UnloadLandblocks() then removes
+        /// it from landblockGroups and it stops being ticked at all. Landblock.Unload() persists the
+        /// partially decremented TimeToRot, and the object removal path deliberately avoids clearing it on
+        /// anything but a pickup, so when a player finally returns the countdown RESUMES from where it
+        /// stopped. Downtime is skipped, never counted. That makes a corpse's real lifetime a function of
+        /// how often somebody visits its landblock rather than of elapsed time, and a corpse in a landblock
+        /// nobody revisits never finishes decaying at all. This absolute deadline is the only thing that
+        /// actually bounds wall-clock lifetime.
+        /// </remarks>
+        public static bool HasExceededMaxLifetime(int? creationTimestamp, double nowUnixTime, long maxLifetimeSeconds)
+        {
+            if (maxLifetimeSeconds <= 0)
+                return false;
+
+            if (!creationTimestamp.HasValue)
+                return false;
+
+            return nowUnixTime - creationTimestamp.Value >= maxLifetimeSeconds;
+        }
+
+        /// <summary>
+        /// Sets the object description for a corpse
+        /// </summary>
+        public override ObjDesc CalculateObjDesc()
+        {
+            if (Biota.PropertiesAnimPart.GetCount(BiotaDatabaseLock) == 0 && Biota.PropertiesPalette.GetCount(BiotaDatabaseLock) == 0 && Biota.PropertiesTextureMap.GetCount(BiotaDatabaseLock) == 0)
+                return base.CalculateObjDesc(); // No Saved ObjDesc, let base handle it.
+
+            var objDesc = new ObjDesc();
+
+            AddBaseModelData(objDesc);
+
+            Biota.PropertiesAnimPart.CopyTo(objDesc.AnimPartChanges, BiotaDatabaseLock);
+
+            Biota.PropertiesPalette.CopyTo(objDesc.SubPalettes, BiotaDatabaseLock);
+
+            Biota.PropertiesTextureMap.CopyTo(objDesc.TextureChanges, BiotaDatabaseLock);
+
+            return objDesc;
+        }
+
+        /// <summary>
+        /// Sets the decay time for player corpse.
+        /// This should be called AFTER the items (if any) have been added to the corpse.
+        /// Corpses that have no items will decay much faster.
+        /// </summary>
+        public void RecalculateDecayTime(Player player)
+        {
+            // empty corpses decay faster
+            if (Inventory.Count == 0)
+                TimeToRot = EmptyDecayTime;
+            else
+                TimeToRot = CalculatePlayerCorpseDecayTime(player.Level ?? 1, MaxLifetimeSeconds);
+
+            var dtTimeToRot = DateTime.UtcNow.AddSeconds(TimeToRot ?? 0);
+            var tsDecay = dtTimeToRot - DateTime.UtcNow;
+
+            Level = player.Level ?? 1;
+
+            log.Info($"[CORPSE] {Name}.RecalculateDecayTime({player.Name}) 0x{Guid}: Player Level: {player.Level} | Inventory.Count: {Inventory.Count} | TimeToRot: {TimeToRot} | CreationTimestamp: {CreationTimestamp} ({Time.GetDateTimeFromTimestamp(CreationTimestamp ?? 0).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}) | Corpse should not decay before: {dtTimeToRot.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")}, {tsDecay.ToString("%d")} day(s), {tsDecay.ToString("%h")} hours, {tsDecay.ToString("%m")} minutes, and {tsDecay.ToString("%s")} seconds from now.");
+        }
+
+        /// <summary>
+        /// The pure arithmetic behind <see cref="RecalculateDecayTime"/>, split out so the floor and the cap
+        /// can be unit tested without constructing a Player.
+        /// Floor: 1 hour, as in retail. Ceiling: <paramref name="maxLifetimeSeconds"/>, which wins over the
+        /// floor if an operator configures a cap below one hour, since the cap is the harder guarantee.
+        /// A <paramref name="maxLifetimeSeconds"/> of 0 or less disables the ceiling.
+        /// </summary>
+        public static double CalculatePlayerCorpseDecayTime(int playerLevel, long maxLifetimeSeconds)
+        {
+            // a player corpse decays after 5 mins * playerLevel with a minimum of 1 hour
+            var decayTime = Math.Max(3600.0, playerLevel * 300.0);
+
+            // This server has no fixed level cap - a character's personal maximum is 275 + 5 per
+            // enlightenment (see Enlightenment / EnlightenmentXpCurve), so 300 seconds per level can exceed
+            // a week on its own at a sufficiently enlightened character, without any landblock ever going
+            // dormant. Clamp the nominal countdown to the configured maximum lifetime.
+            if (maxLifetimeSeconds > 0 && decayTime > maxLifetimeSeconds)
+                decayTime = maxLifetimeSeconds;
+
+            return decayTime;
+        }
+
+        /// <summary>
+        /// Called when a player attempts to loot a corpse
+        /// </summary>
+        public override void Open(Player player)
+        {
+            // check for looting permission
+            if (!HasPermission(player))
+            {
+                if (CorpseGeneratedRare)
+                    player.Session.Network.EnqueueSend(new GameEventCommunicationTransientString(player.Session, $"You may not loot the {Name} because the {Name} has generated a rare item."));
+                else if (PkLevel == PKLevel.PK)
+                    player.Session.Network.EnqueueSend(new GameEventCommunicationTransientString(player.Session, $"You may not loot the {Name} because the death was caused by a player killer."));
+                else
+                    player.Session.Network.EnqueueSend(new GameEventCommunicationTransientString(player.Session, $"You do not yet have the right to loot the {Name}."));
+                return;
+            }
+            base.Open(player);
+        }
+
+        /// <summary>
+        /// When a permittee opens a locked corpse of a permitter,
+        /// the permitter is removed from the permittee's LootPermissions table by default, as per retail only allowing them to open 1 locked corpse
+        /// however, the permittee still has access to repeatedly open/close this corpse
+        /// Player corpses only become available to all after the corpse owner opens/closes, and not after permittees open/close
+        /// with this combination of factors, a table is required here to keep track of which permittees opened a permitter's locked corpse,
+        /// so they can repeatedly open/close it
+        /// </summary>
+        private HashSet<uint> permitteeOpened = null;
+
+        /// <summary>
+        /// Returns TRUE if input player has permission to loot this corpse
+        /// </summary>
+        public bool HasPermission(Player player)
+        {
+            // players can loot their own corpses
+            if (VictimId == null || player.Guid.Full == VictimId)
+                return true;
+
+            // players can loot corpses of creatures they killed or corpses that have previously been looted by killer
+            if (KillerId != null && player.Guid.Full == KillerId || IsLooted)
+                return true;
+
+            var victimGuid = new ObjectGuid(VictimId.Value);
+
+            // players can /permit other players to loot their corpse if not killed by another player killer.
+            if (player.HasLootPermission(victimGuid) && PkLevel != PKLevel.PK)
+            {
+                if (!PropertyManager.GetBool("permit_corpse_all").Item)
+                {
+                    // this is the retail default. see the comments for 'permitteeOpened' for an explanation of why this table is needed
+                    if (permitteeOpened == null)
+                        permitteeOpened = new HashSet<uint>();
+
+                    // these are technically side effects, and HasPermission() is not the best place for this logic to mutate state,
+                    // however with the current lone calling pattern for corpse ActOnUse -> TryOpen -> HasPermission -> Open
+                    // if HasPermission returns true, the corpse is always opened, ie. there's no chance of 'the corpse is already in use' or any other failure cases,
+                    // as those pre-verifications have already happened before this function is called
+
+                    permitteeOpened.Add(player.Guid.Full);
+
+                    player.LootPermission.Remove(victimGuid);
+                }
+                return true;
+            }
+            if (permitteeOpened != null && permitteeOpened.Contains(player.Guid.Full))
+                return true;
+
+            // all players can loot monster corpses after 1/2 decay time except if corpse generates a rare
+            if (TimeToRot != null && TimeToRot < HalfLife && !new ObjectGuid(VictimId.Value).IsPlayer() && !CorpseGeneratedRare)
+                return true;
+
+            // players in the same fellowship as the killer w/ loot sharing enabled except if corpse generates a rare
+            if (player.Fellowship != null && player.Fellowship.ShareLoot)
+            {
+                var onlinePlayer = PlayerManager.GetOnlinePlayer(KillerId ?? 0);
+                if (onlinePlayer != null && onlinePlayer.Fellowship != null && player.Fellowship == onlinePlayer.Fellowship && !CorpseGeneratedRare && PkLevel != PKLevel.PK)
+                    return true;
+            }
+            return false;
+        }
+
+        public bool IsLooted { get; set; }
+
+        /// <summary>
+        /// The number of seconds before all players can loot a monster corpse
+        /// </summary>
+        public static int HalfLife = 180;
+
+
+        public override void Close(Player player)
+        {
+            base.Close(player);
+
+            /*if (VictimId == null)
+                return;
+
+            var victimGuid = new ObjectGuid(VictimId.Value);
+
+            if (!victimGuid.IsPlayer())
+            {
+                // monster corpses -- after anyone with access to the locked corpse loots,
+                // becomes open to anyone? or only after the killer loots?
+                IsLooted = true;
+            }
+            else
+            {
+                var killerGuid = new ObjectGuid(KillerId ?? 0);
+
+                // player corpses -- after corpse owner or killer loots, becomes open to anyone?
+                if (player != null && (player.Guid == killerGuid || player.Guid == victimGuid))
+                    IsLooted = true;
+            }*/
+
+            IsLooted = true;
+        }
+
+        public bool CorpseGeneratedRare
+        {
+            get => GetProperty(PropertyBool.CorpseGeneratedRare) ?? false;
+            set { if (!value) RemoveProperty(PropertyBool.CorpseGeneratedRare); else SetProperty(PropertyBool.CorpseGeneratedRare, value); }
+        }
+
+        public bool IsOnNoDropLandblock => IsNoDropLocation(Location);
+
+        /// <summary>
+        /// True when a player corpse at this position must not receive any death items.
+        /// Covers the retail no-drop landblock list AND every ephemeral (private, on-demand)
+        /// instance. An ephemeral instance is torn down a few minutes after its last player leaves,
+        /// and Landblock.Unload destroys every non-player object in it - corpse and contents
+        /// included, DB rows and all - so a corpse left there is unrecoverable by anyone.
+        /// (2026-08-30: a First Pin death cost a player seven items this way.)
+        /// </summary>
+        public static bool IsNoDropLocation(Position location)
+        {
+            if (location == null)
+                return false;
+
+            return NoDrop_Landblocks.Contains(location.LandblockId.Landblock) || location.IsEphemeralRealm;
+        }
+
+        public override bool EnterWorld()
+        {
+            var actionChain = new ActionChain();
+
+            var success = base.EnterWorld();
+            if (!success)
+            {
+                log.Error($"{Name} ({Guid}) failed to spawn @ {Location?.ToLOCString()}");
+                return false;
+            }
+
+            actionChain.AddDelaySeconds(0.5f);
+            actionChain.AddAction(this, () =>
+            {
+                if (Location != null && CorpseGeneratedRare)
+                {
+                    EnqueueBroadcast(new GameMessageSystemChat(string.Format(RareDiscoveredFormat, killerName, rareGenerated.Name), ChatMessageType.System));
+                    ApplySoundEffects(Sound.TriggerActivated, 10);
+                }
+            });
+            actionChain.EnqueueChain();
+
+            return true;
+        }
+
+        /// <summary>
+        /// The rare broadcast text (finder, then rare name), as one constant: Corpse.EnterWorld and the Threads pooled
+        /// model (ThreadCachePlacer.Deliver) both format it, so the two texts cannot drift.
+        /// </summary>
+        internal const string RareDiscoveredFormat = "{0} has discovered the {1}!";
+
+        private WorldObject rareGenerated;
+        private string killerName;
+
+        /// <summary>
+        /// Called to attempt to generate rare and add to corpse inventory
+        /// </summary>
+        public void TryGenerateRare(DamageHistoryInfo killer)
+        {
+            var wo = RollRareFor(killer, Name, Guid, out var killerPlayer, out var timestamp, out var realTimeRares, out var tier);
+
+            if (wo == null)
+                return;
+
+            if (TryAddToInventory(wo))
+            {
+                rareGenerated = wo;
+                killerName = killer.Name.TrimStart('+');
+                CorpseGeneratedRare = true;
+                LongDesc += " This corpse generated a rare item!";
+                TimeToRot = 900;  // guesstimated 15 mins from hells
+
+                ApplyRareFoundBookkeeping(killerPlayer, realTimeRares, timestamp, tier);
+            }
+            else
+                log.Error($"[RARE] failed to add to corpse inventory");
+        }
+
+        /// <summary>
+        /// The rare roll, with no container involved: the real-time-rare timer reads and first-kill stamps,
+        /// the one or two TryCreateRare draws, the icon underlay and the two [LOOT][RARE] log lines, all exactly
+        /// as TryGenerateRare made them. The Threads pooled model (ThreadLootPool) calls this at kill time and
+        /// holds the result out of world until it lands in a Thread Cache.
+        /// </summary>
+        /// <param name="sourceName">Logged as the generating object; the corpse passes its own Name.</param>
+        /// <param name="sourceGuid">Logged beside <paramref name="sourceName"/>.</param>
+        internal static WorldObject RollRareFor(DamageHistoryInfo killer, string sourceName, ObjectGuid sourceGuid, out Player killerPlayer, out int timestamp, out bool realTimeRares, out int tier)
+        {
+            killerPlayer = killer.TryGetAttacker() as Player;
+            timestamp = (int)Time.GetUnixTime();
+            tier = 0;
+            var luck = 0;
+            var secondChanceGranted = false;
+
+            realTimeRares = PropertyManager.GetBool("rares_real_time").Item;
+            var realTimeRaresAlt = PropertyManager.GetBool("rares_real_time_v2").Item;
+            if (realTimeRares && killerPlayer != null)
+            {
+                if (killerPlayer.RaresLoginTimestamp.HasValue)
+                {
+                    // http://acpedia.org/wiki/Announcements_-_2010/04_-_Shedding_Skin#Rares_Update
+
+                    // Real Time Rares work the same as they always have. It rolls a number between 1 second and 2 months worth of seconds. When that number is up you get an additional chance of finding a rare on any valid rare kill.
+                    // That additional chance is very high. You can still only find one rare on any given kill but it's possible to find a normal rare when your Real Time Rare timer is up but you haven't found one yet.
+
+                    var now = Time.GetDateTimeFromTimestamp(timestamp);
+                    var playerLastRareFound = Time.GetDateTimeFromTimestamp(killerPlayer.RaresLoginTimestamp.Value);
+
+                    if (now >= playerLastRareFound)
+                        secondChanceGranted = true;
+                }
+                else
+                    killerPlayer.RaresLoginTimestamp = (int)Time.GetFutureUnixTime(ThreadSafeRandom.Next(1, (int)PropertyManager.GetLong("rares_max_seconds_between").Item));
+            }
+            else if (realTimeRaresAlt && killerPlayer != null)
+            {
+                if (killerPlayer.RaresLoginTimestamp.HasValue)
+                {
+                    // This version of the system is based on interpretation of the following way the system was originally described. The one above is how it was stated to *really* works as detailed in a dev chat from 2010.
+
+                    // http://acpedia.org/wiki/Rare#Real_Time_Rares
+
+                    // Also there is a real time rare timer for each character, this timer starts the first time you kill a rare eligible creature. A character such as a mule that has never killed anything will not have an active timer.
+                    // It works by looking at the real time that has elapsed since the last rare was found, it increases as the time gets closer to two months (real life time) at which point it is a 100% chance.
+                    // People have found that for characters that don't normally hunt, it's best to take them out at at the 30 day mark and a rare will drop after a few kills (although it sometimes can take longer since it's still a % chance at the 30 day mark).
+
+                    var now = Time.GetDateTimeFromTimestamp(timestamp);
+                    var playerLastRareFound = Time.GetDateTimeFromTimestamp(killerPlayer.RaresLoginTimestamp.Value);
+                    var timeBetweenRareSighting = now - playerLastRareFound;
+                    var daysSinceRareSighting = timeBetweenRareSighting.TotalDays;
+
+                    var maxDaysSinceLastRareFound = (int)PropertyManager.GetLong("rares_max_days_between").Item; // 30? 45? 60?
+                    var chancesModifier = Math.Round(daysSinceRareSighting / maxDaysSinceLastRareFound, 2, MidpointRounding.ToZero);
+                    var chancesModifierAdjusted = Math.Min(chancesModifier, 1.0f);
+
+                    var t1_chance = 2500;
+                    luck = (int)Math.Round(t1_chance * chancesModifierAdjusted, 0, MidpointRounding.ToZero);
+                }
+                else
+                    killerPlayer.RaresLoginTimestamp = timestamp;
+            }
+
+            var wo = LootGenerationFactory.TryCreateRare(luck, out var suppressed);
+
+            // A suppressed gear roll is not a miss: it must not grant the second-chance roll.
+            if (secondChanceGranted && wo == null && !suppressed)
+            {
+                luck = 2490;
+                wo = LootGenerationFactory.TryCreateRare(luck, out _);
+            }
+
+            if (wo == null)
+                return null;
+
+            if (!wo.IconUnderlayId.HasValue || wo.IconUnderlayId.Value != 0x6005B0C) // ensure icon underlay exists for rare (loot profiles use this)
+                wo.IconUnderlayId = 0x6005B0C;
+
+            tier = LootGenerationFactory.GetRareTier(wo.WeenieClassId);
+            LootGenerationFactory.RareChances.TryGetValue(tier, out var chance);
+
+            log.Info($"[LOOT][RARE] {sourceName} ({sourceGuid}) generated rare {wo.Name} ({wo.Guid}) for {killer.Name} ({killer.Guid})");
+            log.Info($"[LOOT][RARE] Tier {tier} -- 1 / {chance:N0} chance -- {luck:N0} luck");
+
+            return wo;
+        }
+
+        /// <summary>
+        /// The killer's rare bookkeeping once a rare has been found: the real-time timer reset and the per-tier
+        /// counter and login stamp. TryGenerateRare applies it only after the rare lands on the corpse; the
+        /// pooled model applies it only after the rare's ledger append succeeds, mirroring the corpse's successful-add condition.
+        /// </summary>
+        internal static void ApplyRareFoundBookkeeping(Player killerPlayer, bool realTimeRares, int timestamp, int tier)
+        {
+            if (killerPlayer == null)
+                return;
+
+            if (realTimeRares)
+                killerPlayer.RaresLoginTimestamp = (int)Time.GetFutureUnixTime(ThreadSafeRandom.Next(1, (int)PropertyManager.GetLong("rares_max_seconds_between").Item));
+            else
+                killerPlayer.RaresLoginTimestamp = timestamp;
+            switch (tier)
+            {
+                case 1:
+                    killerPlayer.RaresTierOne++;
+                    killerPlayer.RaresTierOneLogin = timestamp;
+                    break;
+                case 2:
+                    killerPlayer.RaresTierTwo++;
+                    killerPlayer.RaresTierTwoLogin = timestamp;
+                    break;
+                case 3:
+                    killerPlayer.RaresTierThree++;
+                    killerPlayer.RaresTierThreeLogin = timestamp;
+                    break;
+                case 4:
+                    killerPlayer.RaresTierFour++;
+                    killerPlayer.RaresTierFourLogin = timestamp;
+                    break;
+                case 5:
+                    killerPlayer.RaresTierFive++;
+                    killerPlayer.RaresTierFiveLogin = timestamp;
+                    break;
+                case 6:
+                    killerPlayer.RaresTierSix++;
+                    killerPlayer.RaresTierSixLogin = timestamp;
+                    break;
+                //case 7:
+                //    killerPlayer.RaresTierSeven++;
+                //    killerPlayer.RaresTierSevenLogin = timestamp;
+                //    break;
+            }
+        }
+
+        /// <summary>
+        /// A list of landblocks the player cannot drop items on corpse on death 
+        /// </summary>
+        public static HashSet<ushort> NoDrop_Landblocks = new HashSet<ushort>()
+        {
+            0x005F,     // Tanada House of Pancakes (Seasonal)
+            0x00AF,     // Colosseum Staging Area and Secret Mini-Bosses
+            0x00B0,     // Colosseum Arena One
+            0x00B1,     // Colosseum Arena Two
+            0x00B2,     // Colosseum Arena Three
+            0x00B3,     // Colosseum Arena Four
+            0x00B4,     // Colosseum Arena Five
+            0x00B6,     // Colosseum Arena Mini-Bosses
+            0x00EA,     // Mhoire Armory
+            0x33F4,     // Frozen Cave
+            0x5960,     // Gauntlet Arena One (Celestial Hand)
+            0x5961,     // Gauntlet Arena Two (Celestial Hand)
+            0x5962,     // Gauntlet Arena One (Eldritch Web)
+            0x5963,     // Gauntlet Arena Two (Eldritch Web)
+            0x5964,     // Gauntlet Arena One (Radiant Blood)
+            0x5965,     // Gauntlet Arena Two (Radiant Blood)
+            0x596B,     // Gauntlet Staging Area (All Societies)
+            0x8A04,     // Night Club (Seasonal Anniversary)
+            0xB5F0,     // Aerfalle's Sanctum
+        };
+    }
+}
