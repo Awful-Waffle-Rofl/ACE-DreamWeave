@@ -30,8 +30,8 @@ namespace ACE.Server.WorldEvents.Objectives
     }
 
     /// <summary>
-    /// The goal a running event is trying to satisfy (TECH-DESIGN 2.5). Implementations land in WP-06:
-    /// KillCountObjective, DestroySourceObjective, KillBossObjective (Hold is deferred to P2 per C6).
+    /// The goal a running event is trying to satisfy (TECH-DESIGN 2.5). Implementations:
+    /// KillCountObjective, DestroySourceObjective, KillBossObjective and HoldObjective.
     ///
     /// Every method is called on the world thread from WorldEvent.
     /// </summary>
@@ -80,6 +80,17 @@ namespace ACE.Server.WorldEvents.Objectives
         /// Defaulted to a no-op, so an objective whose size does not depend on turnout needs no change.
         /// </summary>
         void OnAudienceResampled(int participantCount) { }
+
+        /// <summary>
+        /// Non-null when the objective itself has decided the run is lost (or cannot be run at all), and
+        /// with which outcome. WorldEvent.TickActive checks it right after <see cref="Tick"/>, before
+        /// <see cref="IsComplete"/> and the timers, and finishes the run with it. Hold uses it for "too many
+        /// targets died".
+        ///
+        /// Defaulted to null ("never fails on its own"), which is what every objective before Hold and every
+        /// test fake means.
+        /// </summary>
+        WorldEventOutcome? FailureOutcome => null;
 
         WorldEventMvp Mvp();
     }

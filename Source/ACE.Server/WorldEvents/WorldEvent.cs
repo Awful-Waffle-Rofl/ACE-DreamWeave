@@ -55,7 +55,14 @@ namespace ACE.Server.WorldEvents
         FailedNoParticipants,
         AbortedAdmin,
         AbortedShutdown,
-        AbortedError
+        AbortedError,
+
+        /// <summary>
+        /// A Hold goal's protected targets fell below the goal's minSurvivors. Pays and announces like the
+        /// other Failed* outcomes (consolation cache, the boss's win line). Appended at the end so no existing
+        /// value changes its number.
+        /// </summary>
+        FailedObjectiveLost
     }
 
     /// <summary>
@@ -718,6 +725,27 @@ namespace ACE.Server.WorldEvents
             return true;
         }
 
+        /// <summary>
+        /// Hold goals (D6 - pure): the hold must be able to finish inside the run. A holdSeconds above the
+        /// maximum duration could only ever end in FailedTimeout, so it is refused at start. Every other goal
+        /// type, and a null goal, passes.
+        /// </summary>
+        public static bool ValidateHoldDuration(GoalDef goal, int maxDurationSeconds, out string error)
+        {
+            error = null;
+
+            if (goal == null || goal.TypeKind != GoalType.Hold)
+                return true;
+
+            if (goal.HoldSeconds > maxDurationSeconds)
+            {
+                error = $"goal {goal.Id} holds for {goal.HoldSeconds}s, longer than the maximum duration {maxDurationSeconds}s";
+                return false;
+            }
+
+            return true;
+        }
+
         /// <summary>Seconds left on the minimum duration, 0 once it has passed. For the status line.</summary>
         public double MinDurationRemaining(double now)
         {
@@ -1262,6 +1290,14 @@ namespace ACE.Server.WorldEvents
                     Spawner.SpawnSources(this, theme.ObjectiveWcid, spawnAnchors, objectiveKind);
                     sourcesSpawned = SourcesWereSpawned(objectiveKind);
                 }
+
+                // Hold: the goal's own protected targets, before wave 0 so the first rank already has
+                // something to go for. They come from the GOAL's protect block, not the theme, so any theme
+                // that lists a Hold goal gets the same targets; the theme's own objectives above stay scenery.
+                var goal = Composition?.Goal;
+
+                if (goal != null && goal.TypeKind == GoalType.Hold && goal.Protect != null)
+                    Spawner.SpawnProtected(this, goal.Protect, Composition?.AnchorPosition);
 
                 // WP-14 decor, before wave 0 so the scenery is already going up as the first rank lands.
                 // Placed once at the geometry CENTRE, not per anchor: a stack of discs is one thing in the
@@ -2193,6 +2229,199 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>Per protected target: the milestone tiers already announced. World thread only.</summary>
+        private readonly Dictionary<uint, HashSet<int>> protectedMilestonesFired = new Dictionary<uint, HashSet<int>>();
+
+        /// <summary>
+        /// Hold goals: a global line the first time each living protected target drops to or below 75%, 50%,
+        /// 25% of its max health, reusing <see cref="DueBossHealthMilestones"/>'s once-per-tier latch. Off
+        /// when the goal's protect.healthMilestones is false. Never throws.
+        /// </summary>
+        private void TickProtectedHealthMilestones()
+        {
+            try
+            {
+                var goal = Composition?.Goal;
+                var protect = goal?.Protect;
+
+                if (goal == null || goal.TypeKind != GoalType.Hold || protect == null)
+                    return;
+
+                foreach (var target in Spawner.LiveProtectedCreatures)
+                {
+                    var guid = target.Guid.Full;
+
+                    // The spawn line: once per target, on the first tick it is standing in the world.
+                    if (protectedGreeted.Add(guid))
+                        SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Spawn, null), viaQueue: true);
+
+                    if (!Spawner.TryGetProtectedHealth(guid, out var current, out var max))
+                        continue;
+
+                    if (!protectedMilestonesFired.TryGetValue(guid, out var fired))
+                        protectedMilestonesFired[guid] = fired = new HashSet<int>();
+
+                    foreach (var pct in DueBossHealthMilestones(current, max, fired))
+                    {
+                        if (protect.HealthMilestones)
+                        {
+                            log.Info($"[WORLDEVENT] run={RunId} announce protected_health guid=0x{guid:X8} {pct}");
+                            WorldEventAnnouncer.Broadcast(
+                                WorldEventAnnouncer.ProtectedHealthMilestoneLine(protect.EffectiveNoun, AnchorName, pct));
+                        }
+
+                        SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Health, pct), viaQueue: true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected target milestone tick threw", ex);
+            }
+        }
+
+        /// <summary>Protected targets that have already said their spawn line. World thread only.</summary>
+        private readonly HashSet<uint> protectedGreeted = new HashSet<uint>();
+
+        /// <summary>
+        /// Global copies of protected-target lines spoken off the world thread (a destroyed line comes from
+        /// Creature.Die on a landblock thread). Drained at the top of <see cref="TickActive"/>, so a target's
+        /// last words go out before any outcome line its death causes on that same tick.
+        /// </summary>
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> pendingProtectedGlobalLines =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        private readonly Random protectedLineRng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+
+        private readonly object protectedLineRngSync = new object();
+
+        /// <summary>
+        /// One line from <paramref name="pool"/>, with this run's tokens filled in: {family}/{Family} from the
+        /// composed monster families, the protect nouns, the anchor, the alive/total counts, and
+        /// <paramref name="pct"/> for health lines. Null when the pool is empty or this is not a Hold run.
+        /// </summary>
+        internal string ComposeProtectedLine(IReadOnlyList<string> pool, int? pct)
+        {
+            var protect = Composition?.Goal?.Protect;
+
+            if (protect == null || pool == null || pool.Count == 0)
+                return null;
+
+            string template;
+
+            lock (protectedLineRngSync)
+                template = WorldEventHoldRules.PickLine(pool, protectedLineRng);
+
+            if (template == null)
+                return null;
+
+            return WorldEventHoldRules.FillLine(template, Composition?.FamilyDisplayName, protect.EffectiveNoun,
+                protect.EffectiveNounPlural, AnchorName, Spawner.LiveProtectedGuids.Count, Spawner.ProtectedGuids.Count, pct);
+        }
+
+        /// <summary>
+        /// <paramref name="speaker"/> says <paramref name="line"/> in local chat, the way an npc's Say emote
+        /// does. <paramref name="viaQueue"/> routes it through the speaker's landblock action queue (for a
+        /// caller on the world thread); false speaks immediately (the caller is already on that landblock's
+        /// thread, e.g. inside Creature.Die). Never throws.
+        /// </summary>
+        private void SpeakLocally(Creature speaker, string line, bool viaQueue)
+        {
+            if (speaker == null || string.IsNullOrEmpty(line))
+                return;
+
+            void Say()
+            {
+                try
+                {
+                    if (speaker.IsDestroyed)
+                        return;
+
+                    speaker.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageHearSpeech(
+                        line, speaker.Name, speaker.Guid.Full, ACE.Entity.Enum.ChatMessageType.Emote), WorldObject.LocalBroadcastRange);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} protected target speech threw", ex);
+                }
+            }
+
+            log.Info($"[WORLDEVENT] run={RunId} protected_say guid=0x{speaker.Guid.Full:X8} \"{line}\"");
+
+            if (!viaQueue)
+            {
+                Say();
+                return;
+            }
+
+            var landblock = speaker.CurrentLandblock;
+
+            if (landblock != null)
+                landblock.EnqueueAction(new ActionEventDelegate(Say));
+        }
+
+        /// <summary>
+        /// A protected target was just destroyed: its last words in local chat (we are on its landblock's
+        /// thread, inside Creature.Die), and a global copy queued for the next world tick.
+        /// </summary>
+        private void OnProtectedTargetDestroyed(Creature target)
+        {
+            var line = ComposeProtectedLine(Composition?.Goal?.Protect?.Lines?.Destroyed, null);
+
+            if (line == null)
+                return;
+
+            SpeakLocally(target, line, viaQueue: false);
+
+            pendingProtectedGlobalLines.Enqueue(WorldEventAnnouncer.ProtectedSpeechLine(target.Name, line));
+        }
+
+        private void DrainProtectedGlobalLines()
+        {
+            while (pendingProtectedGlobalLines.TryDequeue(out var line))
+                WorldEventAnnouncer.Broadcast(line);
+        }
+
+        /// <summary>
+        /// The hold succeeded: one surviving target thanks the defenders. Spoken through its landblock queue,
+        /// which is the same queue Finish's cleanup destroys it through, so the line is heard first. Returns
+        /// the global copy for the caller to send after the outcome line, or null when there is nothing to say.
+        /// </summary>
+        private string SpeakProtectedSuccessLine()
+        {
+            try
+            {
+                var lines = Composition?.Goal?.Protect?.Lines?.Success;
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold || lines == null || lines.Count == 0)
+                    return null;
+
+                var survivors = Spawner.LiveProtectedCreatures;
+
+                if (survivors.Count == 0)
+                    return null;
+
+                Creature speaker;
+
+                lock (protectedLineRngSync)
+                    speaker = survivors[protectedLineRng.Next(survivors.Count)];
+
+                var line = ComposeProtectedLine(lines, null);
+
+                if (line == null)
+                    return null;
+
+                SpeakLocally(speaker, line, viaQueue: true);
+
+                return WorldEventAnnouncer.ProtectedSpeechLine(speaker.Name, line);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected success line threw", ex);
+                return null;
+            }
+        }
+
         /// <summary>The shipped default of world_events_progress_interval_seconds.</summary>
         public const long DefaultProgressIntervalSeconds = 120;
 
@@ -2307,7 +2536,8 @@ namespace ACE.Server.WorldEvents
 
             var guid = creature.Guid.Full;
 
-            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid)))
+            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid),
+                    Spawner.IsProtectedGuid(guid)))
                 return;
 
             Throughput.NoteCleared(creature.Health.MaxValue);
@@ -2499,6 +2729,10 @@ namespace ACE.Server.WorldEvents
 
         private void TickActive(double now)
         {
+            // Hold: global copies of target lines spoken since the last tick (a destroyed caravan's last
+            // words), ahead of anything this tick decides.
+            DrainProtectedGlobalLines();
+
             // Champion BEFORE waves (2026-08-16): a champion due on the same tick as a wave claims the
             // ground first, rather than landing into a spot 16 wave mobs just filled - a stage run latched a
             // placement failure at exactly that collision. The objective is still judged after both, below.
@@ -2510,6 +2744,8 @@ namespace ACE.Server.WorldEvents
 
             TickBossHealthMilestones();
 
+            TickProtectedHealthMilestones();
+
             try
             {
                 Objective?.Tick(now);
@@ -2517,6 +2753,26 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} objective tick threw", ex);
+            }
+
+            // The objective's own verdict that the run is lost (Hold: too many targets died). Checked before
+            // IsComplete, so a run can never both lose its last target and "succeed" on the same tick.
+            WorldEventOutcome? objectiveFailure = null;
+
+            try
+            {
+                objectiveFailure = Objective?.FailureOutcome;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective failure check threw", ex);
+            }
+
+            if (objectiveFailure != null)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} objective failed ({objectiveFailure.Value}): {ProgressText}");
+                Finish(objectiveFailure.Value);
+                return;
             }
 
             // TECH-DESIGN 2.15: true once the objective has been MET but the minimum duration is still
@@ -2531,7 +2787,15 @@ namespace ACE.Server.WorldEvents
 
                 if (CompletionAllowed(Composition?.Goal?.TypeKind ?? GoalType.KillCount, minElapsed))
                 {
+                    // Hold: a surviving target's thank-you, spoken locally BEFORE Finish queues the cleanup
+                    // that removes it, and copied globally AFTER the outcome line.
+                    var successLine = SpeakProtectedSuccessLine();
+
                     Finish(WorldEventOutcome.Success);
+
+                    if (successLine != null)
+                        WorldEventAnnouncer.Broadcast(successLine);
+
                     return;
                 }
 
@@ -2717,6 +2981,17 @@ namespace ACE.Server.WorldEvents
             // and the source-guid bookkeeping have to reflect it by then.
             Spawner.OnDied(creature);
 
+            // Hold: a destroyed target's last words, after OnDied so {alive} already counts it as gone.
+            try
+            {
+                if (creature != null && Spawner.IsProtectedGuid(creature.Guid.Full))
+                    OnProtectedTargetDestroyed(creature);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected target destroyed line threw", ex);
+            }
+
             // Also before the objective forward, so a WP-06 objective's Mvp() rule can read an
             // already-updated ledger on the same death that completes it.
             try
@@ -2817,7 +3092,7 @@ namespace ACE.Server.WorldEvents
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.OutcomeLine(
                     outcome, Composition?.Goal, AnchorName, mvp, Participation.TopKiller(), Participation.Count, bossName,
                     Composition?.GoalDisplayName, Composition?.SuccessTemplate, Composition?.FailTemplate,
-                    Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural),
+                    Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural, Composition?.FamilyDisplayName),
                     relayToDiscord: relayedToDiscord);
 
                 // Asheron's Protection (WaffleACE): the matching end line, immediately after the ordinary
@@ -3229,7 +3504,8 @@ namespace ACE.Server.WorldEvents
         {
             return outcome == WorldEventOutcome.FailedTimeout
                 || outcome == WorldEventOutcome.FailedWipe
-                || outcome == WorldEventOutcome.FailedNoParticipants;
+                || outcome == WorldEventOutcome.FailedNoParticipants
+                || outcome == WorldEventOutcome.FailedObjectiveLost;
         }
 
         private static bool IsAborted(WorldEventOutcome outcome)

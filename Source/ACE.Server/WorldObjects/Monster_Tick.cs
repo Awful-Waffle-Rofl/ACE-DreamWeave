@@ -62,7 +62,8 @@ namespace ACE.Server.WorldObjects
             // IsMonster true and lets an attack wake it, but it must never think: no target search, no movement,
             // no attack, no emote-driven turn. TargetingTactic None does NOT achieve that (Monster_Awareness
             // substitutes Random|TopDamager for None), so this is the single place the rule is enforced.
-            if (WorldEventObjectiveRules.SkipsMonsterTick(WorldEventObjective)) return;
+            // A World Events Hold protected target (a ward) is the same kind of stationary HP sink.
+            if (WorldEventObjectiveRules.SkipsMonsterTick(WorldEventObjective || WorldEventProtected)) return;
 
             // World events sky-drop (WaffleACE, WP-17): a creature still falling in from a world-event sky
             // spawn does nothing at all - no target search, no movement, no attack. Returning HERE rather

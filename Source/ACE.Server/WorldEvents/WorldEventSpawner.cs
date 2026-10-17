@@ -66,7 +66,13 @@ namespace ACE.Server.WorldEvents
         Decor,
         Npc,
         InertObjective,
-        Add
+        Add,
+
+        /// <summary>
+        /// A Hold goal's protected target (a ward): adopted WITH the run back-reference so its death reaches
+        /// the objective, but never wave pressure, never a kill, and never counted toward boss sizing.
+        /// </summary>
+        Protected
     }
 
     /// <summary>
@@ -243,6 +249,20 @@ namespace ACE.Server.WorldEvents
         private int addsAdopted;
 
         private int addsStray;
+
+        /// <summary>
+        /// Hold goal protected targets (wards): every one ever placed, and the ones still standing. They take
+        /// the run back-reference (so a death reaches the objective) but are never wave pressure.
+        /// </summary>
+        private readonly HashSet<uint> protectedGuids = new HashSet<uint>();
+
+        private readonly List<Creature> liveProtected = new List<Creature>();
+
+        /// <summary>
+        /// The running fractional carry behind <see cref="WorldEventHoldRules.SeekerCount"/>, so a 30% seeker
+        /// share comes out right across many small waves rather than rounding to 0 on each of them.
+        /// </summary>
+        private double seekerCarry;
 
         /// <summary>
         /// Guids of the OVERFLOW champions (TECH-DESIGN 2.15). They are wave-kind spawns in every other
@@ -463,6 +483,97 @@ namespace ACE.Server.WorldEvents
         public IReadOnlyCollection<uint> NpcGuids
         {
             get { lock (sync) return npcGuids.ToList(); }
+        }
+
+        /// <summary>True when <paramref name="guid"/> is a Hold protected target this run placed.</summary>
+        public bool IsProtectedGuid(uint guid)
+        {
+            lock (sync) return protectedGuids.Contains(guid);
+        }
+
+        /// <summary>Every Hold protected target this run placed, dead or alive. HoldObjective reads this.</summary>
+        public IReadOnlyCollection<uint> ProtectedGuids
+        {
+            get { lock (sync) return protectedGuids.ToList(); }
+        }
+
+        /// <summary>The Hold protected targets still standing (not dead, not destroyed).</summary>
+        public IReadOnlyCollection<uint> LiveProtectedGuids
+        {
+            get
+            {
+                lock (sync)
+                {
+                    PruneProtected();
+                    return liveProtected.Select(c => c.Guid.Full).ToList();
+                }
+            }
+        }
+
+        /// <summary>The standing protected targets themselves, for a seeker's target pick. A copy.</summary>
+        public IReadOnlyList<Creature> LiveProtectedCreatures
+        {
+            get
+            {
+                lock (sync)
+                {
+                    PruneProtected();
+                    return liveProtected.ToList();
+                }
+            }
+        }
+
+        /// <summary>
+        /// A live read of one standing protected target's health, for the milestone announcements. False when
+        /// the guid is not a standing protected target. Safe for the same tick-ordering reason
+        /// <see cref="TryGetBossHealth"/> documents.
+        /// </summary>
+        public bool TryGetProtectedHealth(uint guid, out uint current, out uint max)
+        {
+            Creature creature;
+
+            lock (sync)
+                creature = liveProtected.FirstOrDefault(c => c.Guid.Full == guid);
+
+            if (creature == null || creature.IsDestroyed || creature.IsDead)
+            {
+                current = 0;
+                max = 0;
+                return false;
+            }
+
+            max = creature.Health.MaxValue;
+            current = creature.Health.Current;
+            return true;
+        }
+
+        /// <summary>
+        /// Hold goal: the entry indices of one wave batch that become seekers, or null when this run is not a
+        /// Hold run (or its share is 0). The count comes from <see cref="WorldEventHoldRules.SeekerCount"/>
+        /// with this run's running carry; which entries is a random draw, so the seekers are not always the
+        /// first trash picked.
+        /// </summary>
+        private HashSet<int> PickSeekerIndices(WorldEvent evt, int waveSize)
+        {
+            var goal = evt?.Composition?.Goal;
+
+            if (goal == null || goal.TypeKind != GoalType.Hold || goal.Protect == null || waveSize <= 0)
+                return null;
+
+            var share = goal.Protect.EffectiveSeekShare;
+
+            lock (sync)
+            {
+                var count = WorldEventHoldRules.SeekerCount(waveSize, share, ref seekerCarry);
+
+                return count > 0 ? WorldEventHoldRules.PickIndices(waveSize, count, rng) : null;
+            }
+        }
+
+        /// <summary>Caller must hold <see cref="sync"/>.</summary>
+        private void PruneProtected()
+        {
+            liveProtected.RemoveAll(c => c == null || c.IsDestroyed || c.IsDead);
         }
 
         /// <summary>
@@ -841,6 +952,40 @@ namespace ACE.Server.WorldEvents
             // WorldEvent.ObjectiveSpawnKind) - the placement recipe is identical either way; what changes is
             // the bookkeeping branch in Adopt and the inert property writes in TryPlace.
             Spawn(evt, entries, anchors, kind, NoWaveIndex, default, 1.0, dzByAnchor);
+        }
+
+        /// <summary>
+        /// Hold goal: places the goal's protected targets (wards) around the anchor - protect.count of them,
+        /// sized from the audience now, spread evenly on a ring of protect.radius metres (one target goes at
+        /// the anchor itself). Same placement recipe as <see cref="SpawnObjectives"/>: fixed offsets through
+        /// <see cref="NpcPosition"/>, then the shared creature path, which snaps to terrain and refuses a
+        /// non-Creature wcid. Health is written in <see cref="TryPlace"/> from protect.health.
+        /// </summary>
+        public void SpawnProtected(WorldEvent evt, ProtectDef protect, Position centre)
+        {
+            if (evt == null || protect == null || protect.Wcid == 0 || centre == null)
+                return;
+
+            var participants = Math.Max(0, evt.ResolvedAudienceCount);
+            var count = protect.ResolveCount(participants);
+
+            var entries = new List<SpawnEntry>();
+            var anchors = new List<Position>();
+            var dzByAnchor = new List<float>();
+
+            foreach (var offset in WorldEventHoldRules.RingOffsets(count, protect.Radius))
+            {
+                entries.Add(new SpawnEntry(protect.Wcid, overflowChampion: false));
+                anchors.Add(NpcPosition(centre, offset.Dx, offset.Dy, 0f, offset.YawDegrees));
+                dzByAnchor.Add(0f);
+            }
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} protect wcid={protect.Wcid} count={count} radius={protect.Radius:F1} " +
+                     $"health={protect.ResolveHealth(participants)} minSurvivors={protect.MinSurvivors} " +
+                     $"seekShare={protect.EffectiveSeekShare:F2} (participants={participants})");
+
+            // healthMult 1.0: a ward's health comes from protect.health (TryPlace), never the wave multiplier.
+            Spawn(evt, entries, anchors, WorldEventSpawnKind.Protected, NoWaveIndex, default, 1.0, dzByAnchor);
         }
 
         public void SpawnBoss(WorldEvent evt, uint wcid, Position anchor)
@@ -1222,6 +1367,8 @@ namespace ACE.Server.WorldEvents
 
                 liveSourceGuids.Remove(creature.Guid.Full);
 
+                liveProtected.Remove(creature);
+
                 // TECH-DESIGN 2.15: this is the one place a wave creature is retired by DYING, which is
                 // what "cleared" means. Prune() also drops corpses, but it cannot say when, and a wave the
                 // players never finished must not be reported as a fast clear.
@@ -1429,6 +1576,7 @@ namespace ACE.Server.WorldEvents
             {
                 liveWave.Clear();
                 liveObjective.Clear();
+                liveProtected.Clear();
 
                 // Cleared on both passes: the creature pass already queued every decor destroy (decor is not
                 // a cache), so DecorCount must read 0 from that point rather than only after the final sweep.
@@ -1585,8 +1733,15 @@ namespace ACE.Server.WorldEvents
             // Steps 1 and 2 of the recipe are pure object construction and may run on the world thread.
             var candidates = new List<SpawnCandidate>();
 
+            // Hold goal: which of this wave's entries go straight for the protected targets. Null for every
+            // spawn that is not a Wave batch of a Hold run, which is every spawn outside that one case.
+            var seekerIndices = kind == WorldEventSpawnKind.Wave ? PickSeekerIndices(evt, entries.Count) : null;
+            var entryIndex = -1;
+
             foreach (var entry in entries)
             {
+                entryIndex++;
+
                 var wcid = entry.Wcid;
 
                 if (wcid == 0)
@@ -1643,6 +1798,9 @@ namespace ACE.Server.WorldEvents
                     if (SpawnedCreatureHostility.ReleaseImmobileWithoutRangedAttack(creature))
                         log.Info($"[WORLDEVENT] run={evt.RunId} wcid {wcid} AiImmobile cleared: no ranged attack");
                 }
+
+                if (seekerIndices != null && seekerIndices.Contains(entryIndex))
+                    creature.WorldEventSeeker = true;
 
                 // Band uplift (world_events_band_uplift): a roster member drawn BELOW its slot's natural band
                 // is normalized up to the band standard, and its health floored to the band median BEFORE the
@@ -1986,6 +2144,30 @@ namespace ACE.Server.WorldEvents
                 creature.Attackable = false;
                 creature.UiHidden = true;
                 creature.RadarBehavior = ACE.Entity.Enum.RadarBehavior.ShowNever;
+            }
+
+            // Hold goal protected target. Written BEFORE EnterWorld like everything above: the physics
+            // WeenieObject that ObjectMaint filters on is built during EnterWorld and caches
+            // WorldEventProtected and the WorldEventId stamp, so both must already be in place. Attackable
+            // true keeps the ward a valid candidate for its own run's monsters; players and pets are refused
+            // separately (Player.CanDamage, CheckPKStatusVsTarget, the pet filter). ApplyHealth sets an
+            // absolute target, so a placement retry through here does not compound it.
+            if (kind == WorldEventSpawnKind.Protected)
+            {
+                var protect = evt.Composition?.Goal?.Protect;
+
+                if (protect != null)
+                {
+                    var participants = Math.Max(0, evt.ResolvedAudienceCount);
+                    var hp = protect.ResolveHealth(participants);
+
+                    if (ApplyHealth(creature, hp))
+                        log.Warn($"[WORLDEVENT] run={evt.RunId} protected wcid={creature.WeenieClassId} health target={hp} " +
+                                 $"could not be reached; resulting MaxValue={creature.Health.MaxValue}");
+                }
+
+                creature.Attackable = true;
+                creature.WorldEventProtected = true;
             }
 
             ApplyBossTether(evt, creature, kind);
@@ -3412,6 +3594,11 @@ namespace ACE.Server.WorldEvents
                 {
                     sourceGuids.Add(creature.Guid.Full);
                     liveSourceGuids.Add(creature.Guid.Full);
+                }
+                else if (kind == WorldEventSpawnKind.Protected)
+                {
+                    protectedGuids.Add(creature.Guid.Full);
+                    liveProtected.Add(creature);
                 }
                 else if (kind == WorldEventSpawnKind.Boss)
                 {

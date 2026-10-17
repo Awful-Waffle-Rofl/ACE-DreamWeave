@@ -1101,6 +1101,7 @@ world_events_elite_band_high	world_events	elite	fork	no
 world_events_elite_band_low	world_events	elite	fork	no
 world_events_enabled	world_events	enabled	fork	no
 world_events_family_floor_level	world_events	family	fork	no
+world_events_hold_seek_share	world_events	hold	fork	no
 world_events_ip_exempt	world_events	ip	fork	no
 world_events_ip_gate_enabled	world_events	ip	fork	no
 world_events_max_alive	world_events	max	fork	no

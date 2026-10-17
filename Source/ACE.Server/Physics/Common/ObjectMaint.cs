@@ -464,7 +464,10 @@ namespace ACE.Server.Physics.Common
                 else
                 {
                     // adding faction mobs here, even though they are retaliate-only, for inverse visible targets
-                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.PlayerKillerStatus != PlayerKillerStatus.PK || i.WeenieObj.IsFactionMob || i.WeenieObj.PotentialFoe(PhysicsObj));
+                    // WaffleACE fork, World Events Hold: a protected target is a candidate ONLY for its own run's
+                    // monsters (WeenieObject.IsProtectedTargetFor); every other monster never sees it.
+                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.PlayerKillerStatus != PlayerKillerStatus.PK || i.WeenieObj.IsFactionMob || i.WeenieObj.PotentialFoe(PhysicsObj)
+                        || i.WeenieObj.IsProtectedTargetFor(PhysicsObj.WeenieObj));
                 }
             }
             return results;
@@ -1033,7 +1036,9 @@ namespace ACE.Server.Physics.Common
                 }
 
                 // only tracking players and combat pets
-                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.FoeType == null)
+                // (WaffleACE fork: and a World Events protected target placed by this monster's own run)
+                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.FoeType == null
+                    && !obj.WeenieObj.IsProtectedTargetFor(PhysicsObj.WeenieObj))
                 {
                     Console.WriteLine($"{PhysicsObj.Name}.ObjectMaint.AddVisibleTarget({obj.Name}): tried to add a non-player / non-combat pet");
                     return false;
@@ -1062,7 +1067,8 @@ namespace ACE.Server.Physics.Common
             VisibleTargets.Add(obj.ID, obj);
 
             // maintain inverse for monsters / combat pets
-            if (!obj.IsPlayer)
+            // (WaffleACE fork: not for a World Events protected target - it never thinks, so it tracks nothing)
+            if (!obj.IsPlayer && !obj.WeenieObj.IsWorldEventProtected)
                 obj.ObjMaint.AddVisibleTarget(PhysicsObj);
 
             return true;

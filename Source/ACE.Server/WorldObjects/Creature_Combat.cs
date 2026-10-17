@@ -1197,6 +1197,11 @@ namespace ACE.Server.WorldObjects
                 var sourcePet = this is CombatPet;
                 var targetPet = target is CombatPet;
 
+                // WaffleACE fork, World Events Hold: a protected target can be damaged by its own run's monsters
+                // and by nothing else that reaches this override (players have their own CanDamage).
+                if (target.WorldEventProtected)
+                    return !sourcePet && IsWorldEventProtectedTargetFor(target);
+
                 if (sourcePet || targetPet)
                 {
                     if (sourcePet && targetPet)     // combat pets can't damage other pets
@@ -1452,6 +1457,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void MonsterOnAttackMonster(Creature monster)
         {
+            // WaffleACE fork, World Events Hold: a protected target never retaliates or wakes - it is a
+            // stationary thing the players defend, and it never thinks (Monster_Tick skips it).
+            if (monster.WorldEventProtected)
+                return;
+
             /*Console.WriteLine($"{Name}.MonsterOnAttackMonster({monster.Name})");
             Console.WriteLine($"Attackable: {monster.Attackable}");
             Console.WriteLine($"Tolerance: {monster.Tolerance}");*/

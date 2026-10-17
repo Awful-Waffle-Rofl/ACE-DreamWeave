@@ -624,6 +624,79 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
+        /// <summary>
+        /// The Hold goal's "protect" block checks (D6 - pure). Returns null when the block is usable, or the
+        /// reason it is not, phrased to follow "goal 'id' " in the diagnostic.
+        /// </summary>
+        internal static string ValidateProtect(ProtectDef protect)
+        {
+            if (protect == null)
+                return "is type Hold but has no protect block";
+
+            if (protect.Wcid == 0)
+                return "has a protect block with no wcid";
+
+            if (protect.Count == null || protect.Count.Base < 1 || protect.Count.Cap < protect.Count.Base
+                || protect.Count.Cap > ProtectDef.MaxProtectedTargets || !IsFinite(protect.Count.PerParticipant)
+                || protect.Count.PerParticipant < 0)
+                return $"has an invalid protect.count (base at least 1, cap between base and {ProtectDef.MaxProtectedTargets})";
+
+            if (protect.Health == null || protect.Health.Base < 1 || protect.Health.Cap < protect.Health.Base
+                || !IsFinite(protect.Health.PerParticipant) || protect.Health.PerParticipant < 0)
+                return "has an invalid protect.health (base at least 1, cap at least base)";
+
+            if (!IsFinite(protect.Radius) || protect.Radius < 0)
+                return "has an invalid protect.radius (0 or more)";
+
+            if (!IsFinite(protect.SeekShare) || protect.SeekShare < 0 || protect.SeekShare > 1)
+                return "has an invalid protect.seekShare (0 to 1)";
+
+            if (protect.MinSurvivors < 1)
+                return "has an invalid protect.minSurvivors (1 or more)";
+
+            return null;
+        }
+
+        /// <summary>
+        /// The protect block's line pools, repaired in place (never a reason to drop the goal): blank lines
+        /// are removed, and an em or en dash becomes a hyphen (DreamWeave player-text rule). Each repair is
+        /// one diagnostic naming the goal and the pool. A missing "lines" block is fine and says nothing.
+        /// </summary>
+        internal static void RepairProtectLines(string goalId, ProtectDef protect, List<string> diagnostics)
+        {
+            var lines = protect?.Lines;
+
+            if (lines == null)
+                return;
+
+            lines.Spawn ??= new List<string>();
+            lines.Health ??= new List<string>();
+            lines.Destroyed ??= new List<string>();
+            lines.Success ??= new List<string>();
+
+            foreach (var (key, pool) in lines.Pools)
+            {
+                var blanks = pool.RemoveAll(string.IsNullOrWhiteSpace);
+
+                if (blanks > 0)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.lines.{key} had {blanks} blank line(s), removed");
+
+                var dashed = 0;
+
+                for (var i = 0; i < pool.Count; i++)
+                {
+                    if (WorldEventHoldRules.RepairDashes(pool[i], out var repaired))
+                    {
+                        pool[i] = repaired;
+                        dashed++;
+                    }
+                }
+
+                if (dashed > 0)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.lines.{key} had {dashed} line(s) with an em or en dash, replaced with a hyphen");
+            }
+        }
+
         private static Dictionary<string, GoalDef> ParseGoals(string json, List<string> diagnostics)
         {
             var result = new Dictionary<string, GoalDef>();
@@ -685,6 +758,16 @@ namespace ACE.Server.WorldEvents
                         diagnostics.Add($"goals.json: goal '{goal.Id}' has an invalid holdSeconds, dropped");
                         continue;
                     }
+
+                    var protectError = ValidateProtect(goal.Protect);
+
+                    if (protectError != null)
+                    {
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' {protectError}, dropped");
+                        continue;
+                    }
+
+                    RepairProtectLines(goal.Id, goal.Protect, diagnostics);
                 }
 
                 goal.TypeKind = typeKind;

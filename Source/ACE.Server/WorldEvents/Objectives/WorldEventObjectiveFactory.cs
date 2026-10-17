@@ -36,8 +36,11 @@ namespace ACE.Server.WorldEvents.Objectives
                     // The exclusion func is the UNION of SourceGuids and NpcGuids (WP-16), belt and braces
                     // alongside the withheld P_WorldEvent back-reference that is the PRIMARY guard against an
                     // npc death ever reaching OnDeathCore at all (Creature_Death.cs:130).
+                    // Hold's protected targets are excluded too, in case a source ever composes them alongside
+                    // a kill count: a ward the monsters destroy must never count as a kill for the players.
                     return new KillCountObjective(goal, () => evt.Audience.Count,
-                        () => ExclusionGuids(evt.Spawner.SourceGuids, evt.Spawner.NpcGuids), evt.Participation);
+                        () => ExclusionGuids(ExclusionGuids(evt.Spawner.SourceGuids, evt.Spawner.NpcGuids),
+                            evt.Spawner.ProtectedGuids), evt.Participation);
 
                 case GoalType.DestroySource:
 
@@ -71,10 +74,17 @@ namespace ACE.Server.WorldEvents.Objectives
 
                 case GoalType.Hold:
 
-                    // C6: Hold is deferred to P2. The enum value exists so a later WP can add the
-                    // implementation without a rename, but the factory must refuse it in the meantime.
-                    error = "goal type Hold is deferred to P2 (C6)";
-                    return null;
+                    // Protect the targets. The axis store already drops a Hold goal without a usable protect
+                    // block; this is the backstop for a goal built in code (tests, a future editor).
+                    if (goal.Protect == null)
+                    {
+                        error = "goal type Hold needs a protect block in goals.json";
+                        return null;
+                    }
+
+                    return new HoldObjective(goal, () => evt.Spawner.ProtectedGuids,
+                        () => evt.Spawner.LiveProtectedGuids, () => evt.ActiveAt, evt.Participation,
+                        () => evt.Composition?.FamilyDisplayName);
 
                 default:
 

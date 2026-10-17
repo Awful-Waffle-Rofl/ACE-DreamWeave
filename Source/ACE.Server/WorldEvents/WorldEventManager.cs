@@ -446,6 +446,14 @@ namespace ACE.Server.WorldEvents
                     return false;
                 }
 
+                // Hold: the hold must be able to finish inside the run, or it could only ever time out.
+                if (!WorldEvent.ValidateHoldDuration(composition.Goal,
+                        request?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds, out error))
+                {
+                    refusal = WorldEventStartRefusal.InvalidDurations;
+                    return false;
+                }
+
                 if (request.DryRun)
                 {
                     log.Info($"[WORLDEVENT] dry-run compose {composition.ToAxisSummary()}");

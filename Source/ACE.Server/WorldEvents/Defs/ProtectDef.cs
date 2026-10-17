@@ -1,0 +1,155 @@
+using System;
+using System.Collections.Generic;
+using System.Text.Json.Serialization;
+
+namespace ACE.Server.WorldEvents.Defs
+{
+    /// <summary>
+    /// The "protect" block of a Hold goal in goals.json: the friendly targets a run spawns near its anchor
+    /// and the players must keep alive until the goal's holdSeconds have passed.
+    ///
+    /// The targets are a property of the GOAL, not of a source theme, so any theme that lists the goal in
+    /// its compatibleGoals gets the same targets. Validated at load by WorldEventAxisStore.ParseGoals; a Hold
+    /// goal with a missing or invalid block is dropped with a diagnostic.
+    /// </summary>
+    public class ProtectDef
+    {
+        /// <summary>
+        /// The hard ceiling on how many targets one run may place. count.cap above this is refused at load.
+        /// Raise it here (and only here) if a later goal wants more.
+        /// </summary>
+        public const int MaxProtectedTargets = 3;
+
+        public const int DefaultMinSurvivors = 1;
+        public const double DefaultSeekShare = 0.3;
+        public const string DefaultNoun = "ward";
+        public const string DefaultNounPlural = "wards";
+
+        /// <summary>The Creature weenie placed as each target. Non-Creature wcids are refused at spawn.</summary>
+        [JsonPropertyName("wcid")]
+        public uint Wcid { get; set; }
+
+        /// <summary>How many targets to place, resolved once from the audience when the run goes Active.</summary>
+        [JsonPropertyName("count")]
+        public ScaledCount Count { get; set; }
+
+        /// <summary>Each target's maximum health, resolved once from the audience when the run goes Active.</summary>
+        [JsonPropertyName("health")]
+        public ScaledCount Health { get; set; }
+
+        /// <summary>
+        /// Metres from the anchor. Targets are spread evenly on a ring of this radius; a single target is
+        /// placed at the anchor itself.
+        /// </summary>
+        [JsonPropertyName("radius")]
+        public double Radius { get; set; }
+
+        /// <summary>
+        /// The run fails as soon as fewer than this many targets are alive. 1 (the default) means "fail when
+        /// all are dead". Clamped at runtime to the number of targets actually placed.
+        /// </summary>
+        [JsonPropertyName("minSurvivors")]
+        public int MinSurvivors { get; set; } = DefaultMinSurvivors;
+
+        /// <summary>
+        /// The fraction (0 to 1) of every wave's monsters that go straight for the targets instead of the
+        /// players. The rest never target them.
+        /// </summary>
+        [JsonPropertyName("seekShare")]
+        public double SeekShare { get; set; } = DefaultSeekShare;
+
+        /// <summary>Broadcast a line as each target first drops to 75%, 50% and 25% health.</summary>
+        [JsonPropertyName("healthMilestones")]
+        public bool HealthMilestones { get; set; } = true;
+
+        /// <summary>What one target is called in player-facing text, and its plural.</summary>
+        [JsonPropertyName("noun")]
+        public string Noun { get; set; }
+
+        [JsonPropertyName("nounPlural")]
+        public string NounPlural { get; set; }
+
+        /// <summary>
+        /// Optional lines the targets speak (local chat), one picked at random each time. Absent or empty pools
+        /// say nothing. See <see cref="ProtectLinesDef"/> for the moments and the tokens.
+        /// </summary>
+        [JsonPropertyName("lines")]
+        public ProtectLinesDef Lines { get; set; }
+
+        /// <summary><see cref="SeekShare"/>, or world_events_hold_seek_share when that property is set.</summary>
+        [JsonIgnore]
+        public double EffectiveSeekShare
+        {
+            get
+            {
+                var share = WorldEventOverrides.Double("world_events_hold_seek_share", SeekShare);
+
+                if (!double.IsFinite(share) || share < 0)
+                    return 0;
+
+                return share > 1 ? 1 : share;
+            }
+        }
+
+        [JsonIgnore]
+        public string EffectiveNoun => !string.IsNullOrWhiteSpace(Noun) ? Noun : DefaultNoun;
+
+        [JsonIgnore]
+        public string EffectiveNounPlural => !string.IsNullOrWhiteSpace(NounPlural) ? NounPlural : DefaultNounPlural;
+
+        /// <summary>The number of targets to place for <paramref name="participants"/> players, within [1, MaxProtectedTargets].</summary>
+        public int ResolveCount(int participants)
+        {
+            var count = Count?.Resolve(Math.Max(0, participants)) ?? 1;
+
+            return Math.Clamp(count, 1, MaxProtectedTargets);
+        }
+
+        /// <summary>Each target's maximum health for <paramref name="participants"/> players. Never below 1.</summary>
+        public int ResolveHealth(int participants)
+        {
+            var hp = Health?.Resolve(Math.Max(0, participants)) ?? 1;
+
+            return Math.Max(1, hp);
+        }
+    }
+
+    /// <summary>
+    /// The protect block's "lines": what the targets say, by moment. Each is a pool; one line is drawn at
+    /// random each time. Every line is spoken in local chat by the target itself; destroyed and success
+    /// lines are also copied to the global World Event channel.
+    ///
+    /// The monster family varies per run, so a line never names one. Tokens, filled per run
+    /// (WorldEventHoldRules.FillLine):
+    ///   {family}  the run's monster family display name as composed, e.g. "the Emberwrought" or
+    ///             "the Blackwing and the Drudges";
+    ///   {Family}  the same with its first letter capitalized, for the start of a sentence;
+    ///   {noun} {nounPlural} {anchor} {alive} {total}, and {pct} (health lines only).
+    /// Player-facing, so ASCII only: an em or en dash is repaired to a hyphen at load.
+    /// </summary>
+    public class ProtectLinesDef
+    {
+        /// <summary>Said once by each target as it is placed.</summary>
+        [JsonPropertyName("spawn")]
+        public List<string> Spawn { get; set; } = new List<string>();
+
+        /// <summary>Said when a target first drops to 75%, 50% and 25% health.</summary>
+        [JsonPropertyName("health")]
+        public List<string> Health { get; set; } = new List<string>();
+
+        /// <summary>A target's last words as it is destroyed. Also sent globally.</summary>
+        [JsonPropertyName("destroyed")]
+        public List<string> Destroyed { get; set; } = new List<string>();
+
+        /// <summary>Said by one surviving target when the hold succeeds. Also sent globally.</summary>
+        [JsonPropertyName("success")]
+        public List<string> Success { get; set; } = new List<string>();
+
+        /// <summary>Every pool, with its goals.json key, for load-time repair and diagnostics.</summary>
+        [JsonIgnore]
+        public IEnumerable<(string Key, List<string> Pool)> Pools => new[]
+        {
+            ("spawn", Spawn), ("health", Health), ("destroyed", Destroyed), ("success", Success)
+        };
+    }
+}
