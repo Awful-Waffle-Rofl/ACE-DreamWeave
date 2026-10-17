@@ -651,6 +651,9 @@ namespace ACE.Server.WorldEvents
             if (!IsFinite(protect.SpawnRadius) || protect.SpawnRadius < 0)
                 return "has an invalid protect.spawnRadius (0 or more; 0 keeps the source's radius)";
 
+            if (!IsFinite(protect.UndefendedSeconds) || protect.UndefendedSeconds < 0)
+                return "has an invalid protect.undefendedSeconds (0 or more; 0 leaves monster damage unscaled)";
+
             if (!IsFinite(protect.SeekShare) || protect.SeekShare < 0 || protect.SeekShare > 1)
                 return "has an invalid protect.seekShare (0 to 1)";
 

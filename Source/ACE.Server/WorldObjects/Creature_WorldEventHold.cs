@@ -106,7 +106,11 @@ namespace ACE.Server.WorldObjects
             AttackTarget = best;
 
             if (AttackTarget != previous)
+            {
                 EmoteManager.OnNewEnemy(AttackTarget);
+
+                log.Debug($"[WORLDEVENT] seeker 0x{Guid.Full:X8} targets {best.Name} 0x{best.Guid.Full:X8} (was {previous?.Name ?? "none"})");
+            }
 
             return true;
         }
@@ -179,6 +183,76 @@ namespace ACE.Server.WorldObjects
             var index = ACE.Server.WorldEvents.WorldEventHoldRules.NearestWithin(distances, MaxChaseRangeSq);
 
             return index >= 0 ? usable[index] : null;
+        }
+
+        /// <summary>
+        /// Hold runs: the seeker lock. Called from every path that would wake a monster AIMED AT whoever
+        /// disturbed it - a player walking into range (Creature.AlertMonster), a player's hit
+        /// (Player.OnAttackMonster), a packmate's alert (AlertFriendly) and a creature's hit
+        /// (MonsterOnAttackMonster). For a seeker with a protected target in reach it aims the monster at that
+        /// target instead and wakes it, and the caller skips its own retarget. Only an explicit taunt
+        /// (ApplyTaunt / TauntTarget) can still pull a seeker off. False, changing nothing, for every creature
+        /// that is not a seeker.
+        /// </summary>
+        public bool TryKeepWorldEventSeekerLock(WorldObject disturbedBy)
+        {
+            if (!WorldEventSeeker)
+                return false;
+
+            var previous = AttackTarget;
+
+            if (!TrySelectWorldEventSeekTarget())
+                return false;
+
+            var woke = MonsterState != State.Awake;
+
+            if (woke)
+                WakeUp(alertNearby: false);
+
+            // Only when the lock changed something (it woke, or it pulled the seeker back onto a caravan),
+            // so a player hitting a seeker that is already on its caravan does not log every hit.
+            if (woke || previous != AttackTarget)
+                log.Debug($"[WORLDEVENT] seeker 0x{Guid.Full:X8} stays on {(AttackTarget as Creature)?.Name ?? "?"} 0x{AttackTarget?.Guid.Full ?? 0:X8} " +
+                          $"(ignored {disturbedBy?.Name ?? "?"}; was {previous?.Name ?? "none"})");
+
+            return true;
+        }
+
+        /// <summary>
+        /// Per attacker: when it last landed a scaled hit on this protected target (Time.GetUnixTime). Only a
+        /// protected target ever fills it.
+        /// </summary>
+        private Dictionary<uint, double> worldEventProtectedLastHitAt;
+
+        /// <summary>
+        /// Hold runs (protect.undefendedSeconds above 0): a hit on this protected target from a monster of its
+        /// own run is replaced by a slice of the target's max health sized to the time since that attacker's
+        /// previous hit, so ONE attacker hitting it continuously destroys it in undefendedSeconds whatever its
+        /// weapon damage - see WorldEventHoldRules.ProtectedHitDamage. Every other hit (players, DoT ticks with
+        /// no source, other runs, a goal with no undefendedSeconds) is returned unchanged. Called first thing
+        /// in TakeDamage, on this creature's landblock thread.
+        /// </summary>
+        public float ScaleWorldEventProtectedHit(WorldObject source, float amount)
+        {
+            if (!WorldEventProtected || !(amount > 0) || !(source is Creature attacker) || !attacker.IsWorldEventProtectedTargetFor(this))
+                return amount;
+
+            var undefendedSeconds = P_WorldEvent?.Composition?.Goal?.Protect?.UndefendedSeconds ?? 0;
+
+            if (!(undefendedSeconds > 0))
+                return amount;
+
+            var now = ACE.Common.Time.GetUnixTime();
+
+            worldEventProtectedLastHitAt ??= new Dictionary<uint, double>();
+
+            double? last = worldEventProtectedLastHitAt.TryGetValue(attacker.Guid.Full, out var at) ? at : (double?)null;
+
+            worldEventProtectedLastHitAt[attacker.Guid.Full] = now;
+
+            var interval = ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(last, now);
+
+            return ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(Health.MaxValue, interval, undefendedSeconds);
         }
 
         private bool IsUsableSeekTarget(Creature target)

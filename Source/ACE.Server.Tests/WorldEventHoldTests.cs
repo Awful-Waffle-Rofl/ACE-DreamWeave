@@ -1352,5 +1352,239 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WorldEventOutcome.FailedNoParticipants, evt.Outcome, "the default is unchanged");
             StringAssert.StartsWith(evt.ProgressText, "3 of 3 wards stand.", "and the final count is the real one");
         }
+
+        // ---- caravans are threatened: hits sized to protect.undefendedSeconds ------------------------------
+
+        [TestMethod]
+        public void HitInterval_FirstHitDefault_GapsCapped()
+        {
+            Assert.AreEqual(WorldEventHoldRules.DefaultHitIntervalSeconds, WorldEventHoldRules.HitInterval(null, T0));
+            Assert.AreEqual(1.5, WorldEventHoldRules.HitInterval(T0, T0 + 1.5), 1e-9);
+            Assert.AreEqual(WorldEventHoldRules.MaxHitIntervalSeconds, WorldEventHoldRules.HitInterval(T0, T0 + 60),
+                "a long gap does not bank into one huge hit");
+            Assert.AreEqual(0.0, WorldEventHoldRules.HitInterval(T0 + 5, T0), "clock skew never goes negative");
+            Assert.AreEqual(WorldEventHoldRules.DefaultHitIntervalSeconds, WorldEventHoldRules.HitInterval(double.NaN, T0));
+        }
+
+        [TestMethod]
+        public void ProtectedHitDamage_IsASliceOfMaxHealthPerSecond()
+        {
+            Assert.AreEqual(640f, WorldEventHoldRules.ProtectedHitDamage(24000, 2.0, 75.0), "24000 * 2 / 75");
+            Assert.AreEqual(1f, WorldEventHoldRules.ProtectedHitDamage(10, 0.01, 75.0), "at least 1 for any real hit");
+            Assert.AreEqual(0f, WorldEventHoldRules.ProtectedHitDamage(24000, 0, 75.0), "same-instant repeat shares the slice");
+            Assert.AreEqual(0f, WorldEventHoldRules.ProtectedHitDamage(24000, 2.0, 0), "0 means unscaled; the caller keeps the raw hit");
+            Assert.AreEqual(0f, WorldEventHoldRules.ProtectedHitDamage(0, 2.0, 75.0));
+            Assert.AreEqual(0f, WorldEventHoldRules.ProtectedHitDamage(24000, double.NaN, 75.0));
+        }
+
+        /// <summary>Drives the two pure rules the way a ward's TakeDamage does, for attackers hitting on a fixed swing timer.</summary>
+        private static double SecondsToDestroy(uint maxHealth, double undefendedSeconds, int attackers, double swingSeconds)
+        {
+            var health = (double)maxHealth;
+            var last = new double?[attackers];
+
+            for (var t = 0.0; t < 10_000; t += swingSeconds)
+            {
+                for (var a = 0; a < attackers; a++)
+                {
+                    var interval = WorldEventHoldRules.HitInterval(last[a], T0 + t);
+                    last[a] = T0 + t;
+
+                    health -= WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, undefendedSeconds);
+
+                    if (health <= 0)
+                        return t;
+                }
+            }
+
+            return double.PositiveInfinity;
+        }
+
+        [TestMethod]
+        public void OneAttacker_DestroysAnUndefendedCaravanInAboutUndefendedSeconds()
+        {
+            foreach (var swing in new[] { 1.5, 2.0, 3.0 })
+            {
+                var seconds = SecondsToDestroy(24000, 75, attackers: 1, swingSeconds: swing);
+
+                Assert.IsTrue(seconds >= 60 && seconds <= 90,
+                    $"one attacker swinging every {swing}s should take 60-90s, took {seconds:F1}s");
+            }
+
+            // Health does not change the time: the hits are slices of whatever the max is.
+            Assert.AreEqual(SecondsToDestroy(24000, 75, 1, 2.0), SecondsToDestroy(200000, 75, 1, 2.0), 2.0);
+        }
+
+        [TestMethod]
+        public void MoreAttackers_DestroyItFaster_SoKillingSeekersBuysTime()
+        {
+            var one = SecondsToDestroy(24000, 75, 1, 2.0);
+            var three = SecondsToDestroy(24000, 75, 3, 2.0);
+
+            Assert.IsTrue(three < one / 2.5, $"three attackers ({three:F1}s) should be about three times faster than one ({one:F1}s)");
+        }
+
+        private static uint nextHoldGuid = 0x7EE00000;
+
+        private static Creature BuildHoldCreature(int maxHealth = 24000)
+        {
+            TestGameTables.EnsureInitialized();
+
+            var weenie = new ACE.Entity.Models.Weenie
+            {
+                WeenieClassId = 2000002,
+                WeenieType = ACE.Entity.Enum.WeenieType.Creature,
+                PropertiesInt = new Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyInt.Level, 15 }
+                },
+                PropertiesAttribute = new Dictionary<ACE.Entity.Enum.Properties.PropertyAttribute, ACE.Entity.Models.PropertiesAttribute>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyAttribute.Endurance, new ACE.Entity.Models.PropertiesAttribute { InitLevel = 10 } }
+                },
+                PropertiesAttribute2nd = new Dictionary<ACE.Entity.Enum.Properties.PropertyAttribute2nd, ACE.Entity.Models.PropertiesAttribute2nd>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyAttribute2nd.MaxHealth, new ACE.Entity.Models.PropertiesAttribute2nd { InitLevel = (uint)maxHealth } }
+                }
+            };
+
+            var creature = new Creature(weenie, new ObjectGuid(nextHoldGuid++));
+            creature.Location = new Position(0x00010064, 50f, 50f, 0f, 0f, 0f, 0f, 1f, 0);
+
+            return creature;
+        }
+
+        private static (WorldEvent Evt, Creature Ward, Creature Monster) BuildHitScene(double undefendedSeconds)
+        {
+            var protect = BuildProtect();
+            protect.UndefendedSeconds = undefendedSeconds;
+
+            var evt = BuildHoldEvent(BuildHoldGoal(protect: protect), null);
+
+            var ward = BuildHoldCreature();
+            ward.WorldEventProtected = true;
+            ward.P_WorldEvent = evt;
+
+            var monster = BuildHoldCreature();
+            monster.P_WorldEvent = evt;
+
+            return (evt, ward, monster);
+        }
+
+        [TestMethod]
+        public void ScaleHit_RunMonsterOnWard_IsASliceOfTheWardsHealth()
+        {
+            var (_, ward, monster) = BuildHitScene(75);
+
+            var scaled = ward.ScaleWorldEventProtectedHit(monster, 12f);
+
+            var expected = WorldEventHoldRules.ProtectedHitDamage(ward.Health.MaxValue, WorldEventHoldRules.DefaultHitIntervalSeconds, 75);
+
+            Assert.AreEqual(expected, scaled, "a 12-point tusker hit becomes the time-based slice");
+            Assert.IsTrue(scaled > 12f, "the weapon's own damage no longer decides it");
+        }
+
+        [TestMethod]
+        public void ScaleHit_LeavesEveryOtherHitAlone()
+        {
+            var (_, ward, monster) = BuildHitScene(75);
+
+            Assert.AreEqual(12f, ward.ScaleWorldEventProtectedHit(null, 12f), "a DoT tick with no source");
+
+            var outsider = BuildHoldCreature();
+            Assert.AreEqual(12f, ward.ScaleWorldEventProtectedHit(outsider, 12f), "a monster that is not from this run");
+
+            var otherRun = BuildHoldCreature();
+            otherRun.P_WorldEvent = BuildHoldEvent(BuildHoldGoal(), null);
+            Assert.AreEqual(12f, ward.ScaleWorldEventProtectedHit(otherRun, 12f), "a monster from another run");
+
+            Assert.AreEqual(12f, monster.ScaleWorldEventProtectedHit(ward, 12f), "a creature that is not protected");
+            Assert.AreEqual(-5f, ward.ScaleWorldEventProtectedHit(monster, -5f), "a heal is never touched");
+
+            var (_, unscaledWard, unscaledMonster) = BuildHitScene(0);
+            Assert.AreEqual(12f, unscaledWard.ScaleWorldEventProtectedHit(unscaledMonster, 12f), "undefendedSeconds 0 keeps raw damage");
+        }
+
+        [TestMethod]
+        public void GoalsJson_UndefendedSeconds_ParsesAndValidates()
+        {
+            var json = ValidProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""undefendedSeconds"": 75.0,");
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
+
+            Assert.AreEqual(75.0, store.Goals["hold_wards"].Protect.UndefendedSeconds, 1e-9);
+
+            var bad = ValidProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""undefendedSeconds"": -10,");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(bad), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.undefendedSeconds")));
+            AssertAscii(store.Diagnostics.First(d => d.Contains("protect.undefendedSeconds")));
+
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ValidProtectJson), null, null);
+            Assert.AreEqual(0.0, store.Goals["hold_wards"].Protect.UndefendedSeconds, "absent means raw damage");
+        }
+
+        // ---- seekers stay locked ------------------------------------------------------------------------
+
+        [TestMethod]
+        public void SeekerLock_DoesNothingForANonSeeker()
+        {
+            var (_, ward, monster) = BuildHitScene(75);
+            var player = BuildHoldCreature();
+
+            monster.AttackTarget = player;
+
+            Assert.IsFalse(monster.TryKeepWorldEventSeekerLock(player), "a non-seeker goes for whoever disturbed it, as before");
+            Assert.AreSame(player, monster.AttackTarget);
+            Assert.IsNotNull(ward);
+        }
+
+        [TestMethod]
+        public void SeekerLock_FallsBackWhenNoCaravanIsInReach()
+        {
+            var (_, _, monster) = BuildHitScene(75);
+            monster.WorldEventSeeker = true;
+
+            // Not in the world (no physics, run not Active): there is no caravan to hold it, so the caller's
+            // normal retarget runs and the monster is not left with no target.
+            Assert.IsFalse(monster.TryKeepWorldEventSeekerLock(null));
+            Assert.IsFalse(monster.WorldEventSeeker && monster.AttackTarget is Creature c && c.WorldEventProtected);
+        }
+
+        // ---- @smite all ---------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void SmiteAll_SkipsProtectedTargets()
+        {
+            Assert.IsTrue(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: true, worldEventProtected: false));
+            Assert.IsFalse(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: true, worldEventProtected: true),
+                "a caravan survives @smite all");
+            Assert.IsFalse(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: false, worldEventProtected: false),
+                "non-attackable creatures were never smitten");
+        }
+
+        // ---- the shipped caravan goal ---------------------------------------------------------------------
+
+        [TestMethod]
+        public void CaravanGoal_ShippedValues_PrioritiseTheCaravans()
+        {
+            // Mirrors dreamweave-content/events/defend_caravan.goal.json.
+            var json = CaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""radius"": 6.0, ""spawnRadius"": 25.0, ""undefendedSeconds"": 75.0, ""seekShare"": 0.8,");
+
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
+            var protect = store.Goals["hold_wards"].Protect;
+
+            Assert.AreEqual(0.8, protect.SeekShare, 1e-9);
+            Assert.AreEqual(75.0, protect.UndefendedSeconds, 1e-9);
+
+            var carry = 0.0;
+            var seekers = 0;
+
+            for (var wave = 0; wave < 50; wave++)
+                seekers += WorldEventHoldRules.SeekerCount(5, protect.SeekShare, ref carry);
+
+            Assert.IsTrue(seekers >= 199 && seekers <= 200, $"80% of 250 monsters go for the caravans, got {seekers}");
+        }
     }
 }

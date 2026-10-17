@@ -159,6 +159,46 @@ namespace ACE.Server.WorldEvents
             return repaired != text;
         }
 
+        /// <summary>An attacker's first hit on a protected target counts as this many seconds of attacking.</summary>
+        public const double DefaultHitIntervalSeconds = 2.0;
+
+        /// <summary>
+        /// The longest gap one hit may stand for. A monster that wandered off, or missed for a while, does not
+        /// get to bank the whole gap into one huge hit.
+        /// </summary>
+        public const double MaxHitIntervalSeconds = 4.0;
+
+        /// <summary>
+        /// The seconds of attacking one hit on a protected target stands for (D6 - pure): the time since
+        /// that attacker's previous hit, <see cref="DefaultHitIntervalSeconds"/> for its first, clamped to
+        /// [0, <see cref="MaxHitIntervalSeconds"/>].
+        /// </summary>
+        public static double HitInterval(double? lastHitAt, double now)
+        {
+            if (lastHitAt == null || !double.IsFinite(lastHitAt.Value) || !double.IsFinite(now))
+                return DefaultHitIntervalSeconds;
+
+            return Math.Clamp(now - lastHitAt.Value, 0, MaxHitIntervalSeconds);
+        }
+
+        /// <summary>
+        /// The damage one event monster's hit deals to a protected target (D6 - pure):
+        /// maxHealth * interval / undefendedSeconds, so one attacker hitting continuously empties the target
+        /// in undefendedSeconds whatever its weapon, and N attackers in roughly undefendedSeconds / N. At
+        /// least 1 for any positive interval. Returns 0 for a zero interval (two hits in the same instant
+        /// from the same attacker share the slice) and for any input it cannot use.
+        /// </summary>
+        public static float ProtectedHitDamage(uint maxHealth, double intervalSeconds, double undefendedSeconds)
+        {
+            if (maxHealth == 0 || !double.IsFinite(intervalSeconds) || !(intervalSeconds > 0)
+                || !double.IsFinite(undefendedSeconds) || !(undefendedSeconds > 0))
+                return 0f;
+
+            var damage = maxHealth * intervalSeconds / undefendedSeconds;
+
+            return (float)Math.Max(1.0, Math.Round(damage));
+        }
+
         /// <summary>
         /// The index of the smallest squared distance that is no more than <paramref name="maxDistSq"/>, or
         /// -1 when none qualifies (empty list, everything too far, or not finite). Ties keep the first.

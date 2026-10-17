@@ -53,6 +53,16 @@ namespace ACE.Server.WorldEvents.Defs
         public double SpawnRadius { get; set; }
 
         /// <summary>
+        /// Optional: how many seconds ONE of the run's monsters, hitting a target continuously, takes to
+        /// destroy it - several attackers proportionally faster. When positive, a monster's hit on a target
+        /// takes a slice of the target's max health sized to the time since that monster's previous hit,
+        /// whatever its weapon damage, so targets are threatened at any player level (WorldEventHoldRules.
+        /// ProtectedHitDamage). 0 or absent (the default) leaves monster damage unscaled.
+        /// </summary>
+        [JsonPropertyName("undefendedSeconds")]
+        public double UndefendedSeconds { get; set; }
+
+        /// <summary>
         /// The run fails as soon as fewer than this many targets are alive. 1 (the default) means "fail when
         /// all are dead". Clamped at runtime to the number of targets actually placed.
         /// </summary>
