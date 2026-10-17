@@ -542,7 +542,8 @@ namespace ACE.Server.Tests
         // ---- the run lifecycle with a Hold objective ---------------------------------------------------------
 
         private static WorldEvent BuildHoldEvent(GoalDef goal, IWorldEventObjective objective, int maxDurationSeconds = 600,
-            int abandonAfterSeconds = WorldEvent.DefaultAbandonAfterSeconds, Func<int> presenceCounter = null)
+            int abandonAfterSeconds = WorldEvent.DefaultAbandonAfterSeconds, Func<int> presenceCounter = null,
+            int? testLevel = null, Func<AudienceEstimate> audience = null)
         {
             var source = new SourceThemeDef
             {
@@ -598,13 +599,14 @@ namespace ACE.Server.Tests
                 MaxDurationSeconds = maxDurationSeconds,
                 MinDurationSeconds = 300,
                 AbandonAfterSeconds = abandonAfterSeconds,
+                TestLevel = testLevel,
                 Invoker = "test"
             };
 
             // presenceCounter defaults to 1: a player is standing at the anchor, so the abandon rule never
             // fires and the Hold rules alone decide each run below unless a test says otherwise.
             return new WorldEvent(1, composition, request, objective,
-                () => new AudienceEstimate(3, 100, 150), () => T0, presenceCounter: presenceCounter ?? (() => 1));
+                audience ?? (() => new AudienceEstimate(3, 100, 150)), () => T0, presenceCounter: presenceCounter ?? (() => 1));
         }
 
         /// <summary>A HoldObjective whose start time follows the event it is attached to.</summary>
@@ -1565,18 +1567,27 @@ namespace ACE.Server.Tests
 
         // ---- the shipped caravan goal ---------------------------------------------------------------------
 
+        /// <summary>The protect block as shipped in dreamweave-content/events/defend_caravan.goal.json (no health: damage is time-based).</summary>
+        private const string ShippedCaravanProtectJson =
+            @"""protect"": { ""wcid"": 2000002, ""count"": { ""base"": 3, ""perParticipant"": 0, ""cap"": 3 },
+                ""radius"": 6.0, ""spawnRadius"": 25.0, ""undefendedSeconds"": 120.0, ""minDeathSeconds"": 45.0,
+                ""minSurvivors"": 1, ""seekShare"": 0.8, ""healthMilestones"": true,
+                ""noun"": ""caravan"", ""nounPlural"": ""caravans"" }";
+
         [TestMethod]
         public void CaravanGoal_ShippedValues_PrioritiseTheCaravans()
         {
-            // Mirrors dreamweave-content/events/defend_caravan.goal.json.
-            var json = CaravanProtectJson.Replace(@"""radius"": 6.0,",
-                @"""radius"": 6.0, ""spawnRadius"": 25.0, ""undefendedSeconds"": 75.0, ""seekShare"": 0.8,");
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ShippedCaravanProtectJson), null, null);
 
-            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
+            Assert.AreEqual(0, store.Diagnostics.Count, "the shipped block loads clean: " + string.Join(" | ", store.Diagnostics));
+
             var protect = store.Goals["hold_wards"].Protect;
 
             Assert.AreEqual(0.8, protect.SeekShare, 1e-9);
-            Assert.AreEqual(75.0, protect.UndefendedSeconds, 1e-9);
+            Assert.AreEqual(120.0, protect.UndefendedSeconds, 1e-9);
+            Assert.AreEqual(45.0, protect.MinDeathSeconds, 1e-9);
+            Assert.IsNull(protect.Health, "no dead health setting is shipped");
+            Assert.AreEqual(ProtectDef.TimeScaledMaxHealth, protect.EffectiveMaxHealth(20));
 
             var carry = 0.0;
             var seekers = 0;
@@ -1585,6 +1596,294 @@ namespace ACE.Server.Tests
                 seekers += WorldEventHoldRules.SeekerCount(5, protect.SeekShare, ref carry);
 
             Assert.IsTrue(seekers >= 199 && seekers <= 200, $"80% of 250 monsters go for the caravans, got {seekers}");
+        }
+
+        // ---- --level ------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void ApplyTestLevel_SoloStaffCountsAsOnePlayerOfThatLevel()
+        {
+            var estimate = WorldEvent.ApplyTestLevel(new AudienceEstimate(0, 0, 0), 150);
+
+            Assert.AreEqual(1, estimate.Count);
+            Assert.AreEqual(150, estimate.MedianLevel);
+            Assert.AreEqual(150, estimate.P90Level);
+            CollectionAssert.AreEqual(new[] { 150 }, estimate.Levels.ToArray(), "the per-slot bands sample this list");
+        }
+
+        [TestMethod]
+        public void ApplyTestLevel_KeepsTheHeadcountButReplacesTheLevels()
+        {
+            var real = new AudienceEstimate(4, 30, 40, new List<int> { 20, 30, 35, 40 });
+
+            var estimate = WorldEvent.ApplyTestLevel(real, 275);
+
+            Assert.AreEqual(4, estimate.Count, "wave sizes still follow how many players are there");
+            Assert.AreEqual(275, estimate.MedianLevel);
+            Assert.IsTrue(estimate.Levels.All(l => l == 275));
+            Assert.IsTrue(estimate.PowerSum > real.PowerSum, "boss sizing sees the test level too");
+        }
+
+        [TestMethod]
+        public void ApplyTestLevel_NullLeavesTheSampleAlone()
+        {
+            var real = new AudienceEstimate(2, 80, 90, new List<int> { 70, 90 });
+            var same = WorldEvent.ApplyTestLevel(real, null);
+
+            Assert.AreEqual(real.Count, same.Count);
+            Assert.AreEqual(real.MedianLevel, same.MedianLevel);
+            Assert.AreSame(real.Levels, same.Levels);
+        }
+
+        [TestMethod]
+        public void Run_TestLevel_IsWhatTheRunScalesFrom()
+        {
+            // A solo admin: the real sample is empty.
+            var evt = BuildHoldEvent(BuildHoldGoal(), new HoldHarness(BuildHoldGoal()).Objective,
+                testLevel: 150, audience: () => new AudienceEstimate(0, 0, 0));
+
+            evt.Stage(T0);
+
+            Assert.AreEqual(150, evt.Audience.MedianLevel, "the run's audience is the test level, not the level-50 floor");
+            Assert.AreEqual(1, evt.Audience.Count);
+        }
+
+        [TestMethod]
+        public void StartArgs_Level_ParsesAndRejects()
+        {
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "--here", "--goal", "defend_caravan", "--level", "150" }, out var parsed, out var error), error);
+            Assert.AreEqual(150, parsed.TestLevel);
+
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "random", "--here", "--level", "275" }, out parsed, out error), error);
+            Assert.AreEqual(275, parsed.TestLevel);
+
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "--here" }, out parsed, out error), error);
+            Assert.IsNull(parsed.TestLevel, "absent means the real players decide");
+
+            foreach (var bad in new[] { "0", "276", "-5", "abc" })
+            {
+                Assert.IsFalse(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                    new[] { "--here", "--level", bad }, out _, out error), bad);
+                StringAssert.Contains(error, "--level");
+                AssertAscii(error);
+            }
+        }
+
+        // ---- the caravan damage cap ---------------------------------------------------------------------
+
+        /// <summary>Like SecondsToDestroy, through the cap as well (one bucket for the one target).</summary>
+        private static double SecondsToDestroyCapped(uint maxHealth, double undefendedSeconds, double minDeathSeconds,
+            int attackers, double swingSeconds)
+        {
+            var health = (double)maxHealth;
+            var last = new double?[attackers];
+            double tokens = 0, lastAt = 0;
+
+            for (var t = 0.0; t < 10_000; t += swingSeconds)
+            {
+                for (var a = 0; a < attackers; a++)
+                {
+                    var now = T0 + t;
+                    var interval = WorldEventHoldRules.HitInterval(last[a], now);
+                    last[a] = now;
+
+                    var hit = WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, undefendedSeconds);
+                    health -= WorldEventHoldRules.CapProtectedHit(hit, maxHealth, minDeathSeconds, ref tokens, ref lastAt, now);
+
+                    if (health <= 0)
+                        return t;
+                }
+            }
+
+            return double.PositiveInfinity;
+        }
+
+        [TestMethod]
+        public void Cap_StackedAttackersCannotBeatTheMinimumDeathTime()
+        {
+            foreach (var attackers in new[] { 3, 5, 10, 25 })
+            {
+                var seconds = SecondsToDestroyCapped(ProtectDef.TimeScaledMaxHealth, 120, 45, attackers, 2.0);
+
+                Assert.IsTrue(seconds >= 40 && seconds <= 50,
+                    $"{attackers} attackers should still need about 45s, took {seconds:F1}s");
+            }
+        }
+
+        [TestMethod]
+        public void Cap_OneOrTwoAttackersAreUnaffected_SoKillingSeekersBuysTime()
+        {
+            var one = SecondsToDestroyCapped(ProtectDef.TimeScaledMaxHealth, 120, 45, 1, 2.0);
+            var two = SecondsToDestroyCapped(ProtectDef.TimeScaledMaxHealth, 120, 45, 2, 2.0);
+
+            Assert.IsTrue(one >= 110 && one <= 125, $"one attacker: about 120s, took {one:F1}s");
+            Assert.IsTrue(two >= 55 && two <= 65, $"two attackers: about 60s, took {two:F1}s");
+        }
+
+        [TestMethod]
+        public void Cap_AnUndefendedCaravanStillDies()
+        {
+            Assert.IsTrue(double.IsFinite(SecondsToDestroyCapped(ProtectDef.TimeScaledMaxHealth, 120, 45, 50, 1.0)),
+                "the cap slows it down, it never makes a caravan immortal");
+        }
+
+        [TestMethod]
+        public void CapProtectedHit_ZeroMeansNoCap_AndTheBucketStartsFull()
+        {
+            double tokens = 0, lastAt = 0;
+
+            Assert.AreEqual(5000f, WorldEventHoldRules.CapProtectedHit(5000f, 10000, 0, ref tokens, ref lastAt, T0), "no cap");
+
+            // Full bucket = 2 s of the capped rate = 10000 / 45 * 2.
+            var first = WorldEventHoldRules.CapProtectedHit(5000f, 10000, 45, ref tokens, ref lastAt, T0);
+            Assert.AreEqual(10000.0 / 45 * WorldEventHoldRules.DefaultCapBurstSeconds, first, 0.01);
+
+            Assert.AreEqual(0f, WorldEventHoldRules.CapProtectedHit(100f, 10000, 45, ref tokens, ref lastAt, T0),
+                "an empty bucket lets nothing through in the same instant");
+
+            var later = WorldEventHoldRules.CapProtectedHit(100f, 10000, 45, ref tokens, ref lastAt, T0 + 1);
+            Assert.AreEqual(100f, later, 0.01, "one second later about 222 has refilled");
+        }
+
+        [TestMethod]
+        public void ScaleHit_RealCaravan_IsCappedAcrossManyAttackers()
+        {
+            var protect = BuildProtect();
+            protect.Health = null;
+            protect.UndefendedSeconds = 120;
+            protect.MinDeathSeconds = 45;
+
+            var evt = BuildHoldEvent(BuildHoldGoal(protect: protect), null);
+
+            var ward = BuildHoldCreature(ProtectDef.TimeScaledMaxHealth);
+            ward.WorldEventProtected = true;
+            ward.P_WorldEvent = evt;
+
+            var max = ward.Health.MaxValue;
+            var lost = 0.0;
+
+            // Ten monsters hitting every 2 s for 10 s.
+            for (var t = 0; t <= 10; t += 2)
+            {
+                for (var m = 0; m < 10; m++)
+                {
+                    var monster = attackersPool[m] ??= NewRunMonster(evt);
+                    lost += ward.ScaleWorldEventProtectedHit(monster, 30f, T0 + t);
+                }
+            }
+
+            var capAllows = max / 45.0 * (10 + WorldEventHoldRules.DefaultCapBurstSeconds);
+
+            Assert.IsTrue(lost <= capAllows + 1, $"lost {lost:F0} in 10 s, the cap allows {capAllows:F0}");
+            Assert.IsTrue(lost >= capAllows * 0.9, "and the cap is the only limit: the attackers had plenty to give");
+        }
+
+        private readonly Creature[] attackersPool = new Creature[10];
+
+        private static Creature NewRunMonster(WorldEvent evt)
+        {
+            var monster = BuildHoldCreature();
+            monster.P_WorldEvent = evt;
+            return monster;
+        }
+
+        [TestMethod]
+        public void GoalsJson_MinDeathSeconds_Validates()
+        {
+            var bad = ShippedCaravanProtectJson.Replace(@"""minDeathSeconds"": 45.0", @"""minDeathSeconds"": -1");
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(bad), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.minDeathSeconds")));
+            AssertAscii(store.Diagnostics.First(d => d.Contains("protect.minDeathSeconds")));
+        }
+
+        // ---- seekers spread out -------------------------------------------------------------------------
+
+        [TestMethod]
+        public void PickLeastAttacked_FewestFirst_NearestOnTies()
+        {
+            Assert.AreEqual(2, WorldEventHoldRules.PickLeastAttacked(new[] { 2, 1, 0 }, new[] { 100.0, 200.0, 900.0 }, 10000),
+                "the empty caravan wins even though it is furthest");
+            Assert.AreEqual(1, WorldEventHoldRules.PickLeastAttacked(new[] { 1, 1, 1 }, new[] { 400.0, 100.0, 900.0 }, 10000),
+                "a tie goes to the nearest");
+            Assert.AreEqual(0, WorldEventHoldRules.PickLeastAttacked(new[] { 3, 0 }, new[] { 100.0, 99999.0 }, 10000),
+                "a caravan out of reach is never picked");
+            Assert.AreEqual(-1, WorldEventHoldRules.PickLeastAttacked(new int[0], new double[0], 10000));
+            Assert.AreEqual(-1, WorldEventHoldRules.PickLeastAttacked(null, null, 10000));
+        }
+
+        [TestMethod]
+        public void Seekers_PickingOneAfterAnother_SpreadEvenly()
+        {
+            var attackers = new[] { 0, 0, 0 };
+            var distances = new[] { 100.0, 400.0, 900.0 };
+
+            for (var seeker = 0; seeker < 9; seeker++)
+                attackers[WorldEventHoldRules.PickLeastAttacked(attackers, distances, 10000)]++;
+
+            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, attackers, "nine seekers, three caravans: three each, not nine on the nearest");
+        }
+
+        // ---- protect.health: only for raw damage --------------------------------------------------------
+
+        [TestMethod]
+        public void Health_IsIgnoredWhenDamageIsTimeBased()
+        {
+            var timeBased = BuildProtect();
+            timeBased.UndefendedSeconds = 120;
+
+            Assert.IsTrue(timeBased.IsTimeScaled);
+            Assert.AreEqual(ProtectDef.TimeScaledMaxHealth, timeBased.EffectiveMaxHealth(1));
+            Assert.AreEqual(ProtectDef.TimeScaledMaxHealth, timeBased.EffectiveMaxHealth(50), "players no longer change it");
+
+            var raw = BuildProtect();
+            Assert.IsFalse(raw.IsTimeScaled);
+            Assert.AreEqual(raw.ResolveHealth(10), raw.EffectiveMaxHealth(10), "raw-damage goals still use protect.health");
+        }
+
+        [TestMethod]
+        public void GoalsJson_HealthRequiredOnlyForRawDamage_AndFlaggedWhenDead()
+        {
+            // Time-based without health: fine, nothing to say.
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ShippedCaravanProtectJson), null, null);
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"));
+            Assert.AreEqual(0, store.Diagnostics.Count);
+
+            // Time-based WITH health: kept, but the dead setting is called out.
+            var withHealth = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""health"": { ""base"": 20000, ""perParticipant"": 4000, ""cap"": 200000 }, ""radius"": 6.0,");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(withHealth), null, null);
+
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"));
+            var note = store.Diagnostics.FirstOrDefault(d => d.Contains("protect.health") && d.Contains("ignored"));
+            Assert.IsNotNull(note, string.Join(" | ", store.Diagnostics));
+            AssertAscii(note);
+
+            // Raw damage WITHOUT health: still refused, health is what decides those.
+            var rawNoHealth = ShippedCaravanProtectJson.Replace(@"""undefendedSeconds"": 120.0, ", "");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(rawNoHealth), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.health")));
+        }
+
+        // ---- neighbouring landblocks --------------------------------------------------------------------
+
+        [TestMethod]
+        public void HoldsAdjacentLandblocks_AlwaysForHold_ThemeDecidesOtherwise()
+        {
+            var noAdjacents = new SourceThemeDef { HoldAdjacentLandblocks = false };
+            var adjacents = new SourceThemeDef { HoldAdjacentLandblocks = true };
+            var killCount = new GoalDef { TypeKind = GoalType.KillCount };
+
+            Assert.IsTrue(WorldEvent.HoldsAdjacentLandblocks(noAdjacents, BuildHoldGoal()), "a Hold run near an edge keeps its caravans");
+            Assert.IsFalse(WorldEvent.HoldsAdjacentLandblocks(noAdjacents, killCount), "non-Hold runs are unchanged");
+            Assert.IsTrue(WorldEvent.HoldsAdjacentLandblocks(adjacents, killCount));
+            Assert.IsFalse(WorldEvent.HoldsAdjacentLandblocks(null, null));
         }
     }
 }

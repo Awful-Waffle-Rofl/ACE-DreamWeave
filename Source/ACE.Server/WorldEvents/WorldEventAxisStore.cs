@@ -641,9 +641,14 @@ namespace ACE.Server.WorldEvents
                 || protect.Count.PerParticipant < 0)
                 return $"has an invalid protect.count (base at least 1, cap between base and {ProtectDef.MaxProtectedTargets})";
 
-            if (protect.Health == null || protect.Health.Base < 1 || protect.Health.Cap < protect.Health.Base
-                || !IsFinite(protect.Health.PerParticipant) || protect.Health.PerParticipant < 0)
-                return "has an invalid protect.health (base at least 1, cap at least base)";
+            // protect.health only matters when damage is raw (undefendedSeconds 0); with time-based damage it is
+            // ignored, so it is neither required nor checked (ParseGoals notes it when a goal sets both).
+            if (!IsFinite(protect.UndefendedSeconds) || protect.UndefendedSeconds < 0)
+                return "has an invalid protect.undefendedSeconds (0 or more; 0 leaves monster damage unscaled)";
+
+            if (!protect.IsTimeScaled && (protect.Health == null || protect.Health.Base < 1 || protect.Health.Cap < protect.Health.Base
+                || !IsFinite(protect.Health.PerParticipant) || protect.Health.PerParticipant < 0))
+                return "has an invalid protect.health (base at least 1, cap at least base; required unless undefendedSeconds is set)";
 
             if (!IsFinite(protect.Radius) || protect.Radius < 0)
                 return "has an invalid protect.radius (0 or more)";
@@ -651,8 +656,8 @@ namespace ACE.Server.WorldEvents
             if (!IsFinite(protect.SpawnRadius) || protect.SpawnRadius < 0)
                 return "has an invalid protect.spawnRadius (0 or more; 0 keeps the source's radius)";
 
-            if (!IsFinite(protect.UndefendedSeconds) || protect.UndefendedSeconds < 0)
-                return "has an invalid protect.undefendedSeconds (0 or more; 0 leaves monster damage unscaled)";
+            if (!IsFinite(protect.MinDeathSeconds) || protect.MinDeathSeconds < 0)
+                return "has an invalid protect.minDeathSeconds (0 or more; 0 means no cap)";
 
             if (!IsFinite(protect.SeekShare) || protect.SeekShare < 0 || protect.SeekShare > 1)
                 return "has an invalid protect.seekShare (0 to 1)";
@@ -774,6 +779,10 @@ namespace ACE.Server.WorldEvents
                     }
 
                     RepairProtectLines(goal.Id, goal.Protect, diagnostics);
+
+                    // Flagged, not dropped: a dead setting someone might otherwise tune.
+                    if (goal.Protect.IsTimeScaled && goal.Protect.Health != null)
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' sets protect.health, which is ignored because protect.undefendedSeconds makes damage time-based; remove it");
                 }
 
                 goal.TypeKind = typeKind;

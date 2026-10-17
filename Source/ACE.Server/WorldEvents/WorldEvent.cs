@@ -566,6 +566,37 @@ namespace ACE.Server.WorldEvents
         /// True when the given (instance, landblock) key is one this run holds. The spawner's landblock
         /// guard: a candidate position outside the held set is rejected and retried elsewhere.
         /// </summary>
+        /// <summary>
+        /// Whether the run also holds the anchor's neighbouring landblocks (D6 - pure): the source theme's
+        /// holdAdjacentLandblocks, or ALWAYS for a Hold goal. A Hold run places its targets and its spawn ring
+        /// around the anchor, and an anchor near a landblock edge would otherwise lose every target and
+        /// spawn that lands across the edge (a caravan missing, a third of each wave refused).
+        /// </summary>
+        public static bool HoldsAdjacentLandblocks(SourceThemeDef theme, GoalDef goal)
+        {
+            return (theme?.HoldAdjacentLandblocks ?? false) || goal?.TypeKind == GoalType.Hold;
+        }
+
+        /// <summary>
+        /// "/worldevent start --level n" (admin testing, D6 - pure): every sampled participant counts as level
+        /// <paramref name="testLevel"/>, and an empty field (a solo staff tester, who never counts) counts
+        /// as one such participant, so bands and scaling come out as they would for players of that level.
+        /// Null leaves the sample exactly as it was.
+        /// </summary>
+        public static AudienceEstimate ApplyTestLevel(AudienceEstimate sampled, int? testLevel)
+        {
+            if (testLevel == null || testLevel.Value < 1)
+                return sampled;
+
+            var count = Math.Max(1, sampled.Count);
+            var levels = new List<int>(count);
+
+            for (var i = 0; i < count; i++)
+                levels.Add(testLevel.Value);
+
+            return WorldEventRosterSelector.EstimateFromLevels(levels);
+        }
+
         public bool IsHeldLandblock(ulong key)
         {
             var keys = heldBlockKeys;
@@ -888,7 +919,8 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void SetAudience(AudienceEstimate sampled)
         {
-            var estimate = WorldEventRosterSelector.WithFloor(sampled);
+            // Admin test override (--level) BEFORE the floor, so it is what every scaling dial reads.
+            var estimate = WorldEventRosterSelector.WithFloor(ApplyTestLevel(sampled, Request?.TestLevel));
 
             Audience = estimate;
 
@@ -1009,7 +1041,8 @@ namespace ACE.Server.WorldEvents
 
             SetAudience(SampleAudience());
 
-            log.Info($"[WORLDEVENT] run={RunId} estimate count={Audience.Count} median={Audience.MedianLevel} p90={Audience.P90Level}");
+            log.Info($"[WORLDEVENT] run={RunId} estimate count={Audience.Count} median={Audience.MedianLevel} p90={Audience.P90Level}" +
+                     (Request?.TestLevel != null ? $" (--level {Request.TestLevel})" : ""));
 
             if (!Transition(WorldEventState.Announced, "announce"))
                 return;
@@ -1083,7 +1116,7 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var holdAdjacents = Composition?.Source?.HoldAdjacentLandblocks ?? false;
+                var holdAdjacents = HoldsAdjacentLandblocks(Composition?.Source, Composition?.Goal);
 
                 var prior = landblockBridge.SnapshotPermaload();
 

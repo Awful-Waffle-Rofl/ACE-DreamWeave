@@ -200,6 +200,68 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// A seeker's pick (D6 - pure): among the targets within <paramref name="maxDistSq"/>, the one with
+        /// the fewest attackers already on it, the nearest among ties. -1 when none is in range. The two lists
+        /// are parallel (one entry per target).
+        /// </summary>
+        public static int PickLeastAttacked(IReadOnlyList<int> attackers, IReadOnlyList<double> distSq, double maxDistSq)
+        {
+            var best = -1;
+
+            if (attackers == null || distSq == null)
+                return best;
+
+            var n = Math.Min(attackers.Count, distSq.Count);
+
+            for (var i = 0; i < n; i++)
+            {
+                var d = distSq[i];
+
+                if (!double.IsFinite(d) || d < 0 || d > maxDistSq)
+                    continue;
+
+                if (best < 0 || attackers[i] < attackers[best] || (attackers[i] == attackers[best] && d < distSq[best]))
+                    best = i;
+            }
+
+            return best;
+        }
+
+        /// <summary>A hit-rate cap's burst: seconds of the capped rate a target can absorb at once.</summary>
+        public const double DefaultCapBurstSeconds = 2.0;
+
+        /// <summary>
+        /// The caravan damage cap (D6 - pure): a token bucket that refills at maxHealth / minDeathSeconds per
+        /// second, holding at most <see cref="DefaultCapBurstSeconds"/> of that. A hit takes what it asked
+        /// for, up to what is in the bucket. So however many attackers pile on, the target loses at most its
+        /// whole health over about minDeathSeconds; a single attacker that hits more slowly than that is
+        /// never capped. <paramref name="tokens"/>/<paramref name="lastAt"/> are the target's own bucket
+        /// state (lastAt 0 = never hit: the bucket starts full). minDeathSeconds 0 or less means no cap.
+        /// </summary>
+        public static float CapProtectedHit(float requested, uint maxHealth, double minDeathSeconds,
+            ref double tokens, ref double lastAt, double now)
+        {
+            if (!(requested > 0) || maxHealth == 0 || !double.IsFinite(minDeathSeconds) || !(minDeathSeconds > 0) || !double.IsFinite(now))
+                return requested;
+
+            var rate = maxHealth / minDeathSeconds;
+            var capacity = rate * DefaultCapBurstSeconds;
+
+            if (!(lastAt > 0) || !double.IsFinite(lastAt) || !double.IsFinite(tokens))
+                tokens = capacity;
+            else
+                tokens = Math.Min(capacity, tokens + rate * Math.Max(0, now - lastAt));
+
+            lastAt = now;
+
+            var allowed = Math.Min(requested, tokens);
+
+            tokens -= allowed;
+
+            return (float)allowed;
+        }
+
+        /// <summary>
         /// The index of the smallest squared distance that is no more than <paramref name="maxDistSq"/>, or
         /// -1 when none qualifies (empty list, everything too far, or not finite). Ties keep the first.
         /// </summary>

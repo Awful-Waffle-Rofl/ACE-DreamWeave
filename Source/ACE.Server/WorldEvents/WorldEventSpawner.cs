@@ -994,7 +994,7 @@ namespace ACE.Server.WorldEvents
             }
 
             log.Info($"[WORLDEVENT] run={evt.RunId} protect wcid={protect.Wcid} count={count} radius={protect.Radius:F1} " +
-                     $"health={protect.ResolveHealth(participants)} minSurvivors={protect.MinSurvivors} " +
+                     $"health={protect.EffectiveMaxHealth(participants)}{(protect.IsTimeScaled ? $" (time-based: undefendedSeconds={protect.UndefendedSeconds:F0} minDeathSeconds={protect.MinDeathSeconds:F0})" : "")} minSurvivors={protect.MinSurvivors} " +
                      $"seekShare={protect.EffectiveSeekShare:F2} (participants={participants})");
 
             // healthMult 1.0: a ward's health comes from protect.health (TryPlace), never the wave multiplier.
@@ -2192,7 +2192,7 @@ namespace ACE.Server.WorldEvents
                 if (protect != null)
                 {
                     var participants = Math.Max(0, evt.ResolvedAudienceCount);
-                    var hp = protect.ResolveHealth(participants);
+                    var hp = protect.EffectiveMaxHealth(participants);
 
                     if (ApplyHealth(creature, hp))
                         log.Warn($"[WORLDEVENT] run={evt.RunId} protected wcid={creature.WeenieClassId} health target={hp} " +

@@ -112,5 +112,12 @@ namespace ACE.Server.WorldEvents
         /// exactly the pre-teaser behaviour.
         /// </summary>
         public int? TeaserLeadSeconds { get; set; }
+
+        /// <summary>
+        /// "--level n" (admin testing): when set, every audience sample treats the participants as level n,
+        /// and an empty field as one such participant - see <see cref="WorldEvent.ApplyTestLevel"/>. Null (the
+        /// default, and every web-panel start) uses the real players.
+        /// </summary>
+        public int? TestLevel { get; set; }
     }
 }

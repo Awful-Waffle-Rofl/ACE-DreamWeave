@@ -75,25 +75,38 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
-            Creature best = null;
-            var bestDistSq = double.MaxValue;
+            // Spread out: the target with the FEWEST other seekers already on it, nearest first among ties, so
+            // the wave splits across the caravans and the defenders have to split up too.
+            var usable = new List<Creature>();
+            var attackerCounts = new List<int>();
+            var distances = new List<double>();
+
+            var otherSeekers = evt.Spawner.LiveWaveCreatures;
 
             foreach (var target in targets)
             {
                 if (!IsUsableSeekTarget(target))
                     continue;
 
-                var distSq = PhysicsObj.get_distance_sq_to_object(target.PhysicsObj, true);
+                var attackers = 0;
 
-                if (distSq > MaxChaseRangeSq || distSq >= bestDistSq)
-                    continue;
+                foreach (var other in otherSeekers)
+                {
+                    if (other != this && other.WorldEventSeeker && other.AttackTarget == target)
+                        attackers++;
+                }
 
-                best = target;
-                bestDistSq = distSq;
+                usable.Add(target);
+                attackerCounts.Add(attackers);
+                distances.Add(PhysicsObj.get_distance_sq_to_object(target.PhysicsObj, true));
             }
 
-            if (best == null)
+            var index = ACE.Server.WorldEvents.WorldEventHoldRules.PickLeastAttacked(attackerCounts, distances, MaxChaseRangeSq);
+
+            if (index < 0)
                 return false;
+
+            var best = usable[index];
 
             if (!IsVisibleTarget(best))
                 PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { best.PhysicsObj });
@@ -234,25 +247,50 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public float ScaleWorldEventProtectedHit(WorldObject source, float amount)
         {
+            return ScaleWorldEventProtectedHit(source, amount, ACE.Common.Time.GetUnixTime());
+        }
+
+        /// <summary>The cap bucket (see WorldEventHoldRules.CapProtectedHit): health this target may still lose right now, and when it was last topped up.</summary>
+        private double worldEventProtectedCapTokens;
+        private double worldEventProtectedCapLastAt;
+
+        /// <summary>
+        /// <see cref="ScaleWorldEventProtectedHit(WorldObject, float)"/> at a given clock (the test seam):
+        /// first the time-based slice (protect.undefendedSeconds), then the per-target rate cap
+        /// (protect.minDeathSeconds), each only when its setting is above 0.
+        /// </summary>
+        public float ScaleWorldEventProtectedHit(WorldObject source, float amount, double now)
+        {
             if (!WorldEventProtected || !(amount > 0) || !(source is Creature attacker) || !attacker.IsWorldEventProtectedTargetFor(this))
                 return amount;
 
-            var undefendedSeconds = P_WorldEvent?.Composition?.Goal?.Protect?.UndefendedSeconds ?? 0;
+            var protect = P_WorldEvent?.Composition?.Goal?.Protect;
 
-            if (!(undefendedSeconds > 0))
+            if (protect == null)
                 return amount;
 
-            var now = ACE.Common.Time.GetUnixTime();
+            var maxHealth = Health.MaxValue;
 
-            worldEventProtectedLastHitAt ??= new Dictionary<uint, double>();
+            if (protect.UndefendedSeconds > 0)
+            {
+                worldEventProtectedLastHitAt ??= new Dictionary<uint, double>();
 
-            double? last = worldEventProtectedLastHitAt.TryGetValue(attacker.Guid.Full, out var at) ? at : (double?)null;
+                double? last = worldEventProtectedLastHitAt.TryGetValue(attacker.Guid.Full, out var at) ? at : (double?)null;
 
-            worldEventProtectedLastHitAt[attacker.Guid.Full] = now;
+                worldEventProtectedLastHitAt[attacker.Guid.Full] = now;
 
-            var interval = ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(last, now);
+                var interval = ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(last, now);
 
-            return ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(Health.MaxValue, interval, undefendedSeconds);
+                amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, protect.UndefendedSeconds);
+            }
+
+            if (protect.MinDeathSeconds > 0)
+            {
+                amount = ACE.Server.WorldEvents.WorldEventHoldRules.CapProtectedHit(amount, maxHealth, protect.MinDeathSeconds,
+                    ref worldEventProtectedCapTokens, ref worldEventProtectedCapLastAt, now);
+            }
+
+            return amount;
         }
 
         private bool IsUsableSeekTarget(Creature target)

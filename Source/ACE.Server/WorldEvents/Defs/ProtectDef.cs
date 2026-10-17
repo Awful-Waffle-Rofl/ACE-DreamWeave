@@ -33,7 +33,12 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("count")]
         public ScaledCount Count { get; set; }
 
-        /// <summary>Each target's maximum health, resolved once from the audience when the run goes Active.</summary>
+        /// <summary>
+        /// Each target's maximum health, resolved once from the audience when the run goes Active. ONLY used
+        /// when <see cref="UndefendedSeconds"/> is 0 (monsters deal their own raw damage). With time-based
+        /// damage it does nothing and is ignored (see <see cref="IsTimeScaled"/>); the loader says so if a
+        /// goal sets both, and does not require it.
+        /// </summary>
         [JsonPropertyName("health")]
         public ScaledCount Health { get; set; }
 
@@ -61,6 +66,30 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("undefendedSeconds")]
         public double UndefendedSeconds { get; set; }
+
+        /// <summary>
+        /// Optional: the fastest a single target may be destroyed, in seconds, however many monsters are on
+        /// it. Caps how much health one target can lose per second at maxHealth / minDeathSeconds (with a
+        /// couple of seconds of burst), so stacked attackers cannot melt it, while a target nobody defends still
+        /// dies. 0 or absent (the default) means no cap.
+        /// </summary>
+        [JsonPropertyName("minDeathSeconds")]
+        public double MinDeathSeconds { get; set; }
+
+        /// <summary>
+        /// The max health every target is given while damage is time-based (<see cref="UndefendedSeconds"/>
+        /// above 0). The number itself changes nothing about how long a target lasts - each hit is a share of
+        /// the max - it only has to be large enough that a hit's share never rounds away. <see cref="Health"/>
+        /// is not used in that case.
+        /// </summary>
+        public const int TimeScaledMaxHealth = 10000;
+
+        /// <summary>
+        /// True when damage to the targets is time-based, which makes <see cref="Health"/> irrelevant: a
+        /// target's lifetime depends on undefendedSeconds and minDeathSeconds alone.
+        /// </summary>
+        [JsonIgnore]
+        public bool IsTimeScaled => double.IsFinite(UndefendedSeconds) && UndefendedSeconds > 0;
 
         /// <summary>
         /// The run fails as soon as fewer than this many targets are alive. 1 (the default) means "fail when
@@ -123,7 +152,16 @@ namespace ACE.Server.WorldEvents.Defs
             return Math.Clamp(count, 1, MaxProtectedTargets);
         }
 
-        /// <summary>Each target's maximum health for <paramref name="participants"/> players. Never below 1.</summary>
+        /// <summary>
+        /// The max health a target is actually given: <see cref="TimeScaledMaxHealth"/> while damage is
+        /// time-based, otherwise <see cref="ResolveHealth"/>.
+        /// </summary>
+        public int EffectiveMaxHealth(int participants)
+        {
+            return IsTimeScaled ? TimeScaledMaxHealth : ResolveHealth(participants);
+        }
+
+        /// <summary>The protect.health ScaledCount for <paramref name="participants"/> players. Never below 1. Raw-damage goals only.</summary>
         public int ResolveHealth(int participants)
         {
             var hp = Health?.Resolve(Math.Max(0, participants)) ?? 1;
