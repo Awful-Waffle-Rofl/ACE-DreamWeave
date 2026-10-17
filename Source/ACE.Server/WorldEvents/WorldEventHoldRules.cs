@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 
+using ACE.Server.WorldEvents.Defs;
+
 namespace ACE.Server.WorldEvents
 {
     /// <summary>
@@ -333,17 +335,99 @@ namespace ACE.Server.WorldEvents
 
             for (var i = 0; i < count; i++)
             {
-                // 0 degrees is due north, increasing clockwise (toward east), the usual compass sense.
+                // Placement bearing: 0 degrees is due north, increasing clockwise (toward east), the usual
+                // compass sense.
                 var degrees = 360.0 * i / count;
                 var radians = degrees * Math.PI / 180.0;
 
                 var dx = (float)(radius * Math.Sin(radians));
                 var dy = (float)(radius * Math.Cos(radians));
 
-                offsets.Add(new RingOffset(dx, dy, (float)degrees));
+                offsets.Add(new RingOffset(dx, dy, OutwardYaw(degrees)));
             }
 
             return offsets;
+        }
+
+        /// <summary>
+        /// The npc yaw that faces AWAY from the centre for a target at compass <paramref name="bearingDegrees"/>
+        /// (D6 - pure). NpcRotation's yaw 0 faces north and positive yaw turns COUNTER-clockwise, while a
+        /// compass bearing turns clockwise, so the outward heading is the negated bearing, normalised to
+        /// [0, 360).
+        /// </summary>
+        public static float OutwardYaw(double bearingDegrees)
+        {
+            var yaw = -bearingDegrees % 360.0;
+
+            if (yaw < 0)
+                yaw += 360.0;
+
+            return (float)yaw;
+        }
+
+        /// <summary>
+        /// A Hold scene's per-target props (D6 - pure): each entry of <paramref name="local"/> is in a target's
+        /// own frame - Dx metres to its RIGHT, Dy metres FORWARD (outward, the way it faces), Yaw relative to
+        /// its facing - and is placed once for every target in <paramref name="targets"/>, giving
+        /// anchor-relative copies (Dx east, Dy north, Yaw absolute) for the ordinary decor placement. Every
+        /// other field is copied unchanged. Lets one goals.json list put a wagon behind each merchant
+        /// whatever the count or radius.
+        /// </summary>
+        public static List<DecorDef> PlaceTargetDecor(IReadOnlyList<RingOffset> targets, IReadOnlyList<DecorDef> local)
+        {
+            var placed = new List<DecorDef>();
+
+            if (targets == null || local == null)
+                return placed;
+
+            foreach (var target in targets)
+            {
+                // The target faces outward: forward is its bearing from the anchor, right is 90 degrees clockwise
+                // of that. Recovered from the yaw so a target sitting on the anchor (no offset) still has one.
+                var bearing = -target.YawDegrees * Math.PI / 180.0;
+
+                var forwardX = Math.Sin(bearing);
+                var forwardY = Math.Cos(bearing);
+                var rightX = Math.Cos(bearing);
+                var rightY = -Math.Sin(bearing);
+
+                foreach (var entry in local)
+                {
+                    if (entry == null)
+                        continue;
+
+                    placed.Add(new DecorDef
+                    {
+                        Wcid = entry.Wcid,
+                        Dx = (float)(target.Dx + entry.Dx * rightX + entry.Dy * forwardX),
+                        Dy = (float)(target.Dy + entry.Dx * rightY + entry.Dy * forwardY),
+                        Dz = entry.Dz,
+                        Scale = entry.Scale,
+                        Speed = entry.Speed,
+                        Inverted = entry.Inverted,
+                        Yaw = entry.Yaw + target.YawDegrees,
+                        Pitch = entry.Pitch,
+                        Snap = entry.Snap
+                    });
+                }
+            }
+
+            return placed;
+        }
+
+        /// <summary>
+        /// Fills a Hold outcome line's count tokens (D6 - pure): {alive}, {total} and {lost} as they stood when
+        /// the run finished, so the success and fail broadcasts can say "2 of 3 caravans survived".
+        /// </summary>
+        public static string FillCounts(string template, int alive, int total)
+        {
+            if (string.IsNullOrEmpty(template))
+                return template;
+
+            return template
+                .Replace("{alive}", alive.ToString())
+                .Replace("{total}", total.ToString())
+                .Replace("{lost}", Math.Max(0, total - alive).ToString());
         }
     }
 }

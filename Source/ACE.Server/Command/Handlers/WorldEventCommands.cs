@@ -34,7 +34,7 @@ namespace ACE.Server.Command.Handlers
         // TECH-DESIGN 5.3, one line per subcommand collapsed onto one usage string per CommandHandlerAttribute.
         private const string Usage =
             "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] [--abandon <seconds>] [--level <n>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
-            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (0 = never; for solo staff tests)] [--level <n> (test participant level 1-275)] [--dry] | " +
+            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (abandon and wipe timers; 0 = never, for solo staff tests)] [--level <n> (test participant level 1-275)] [--dry] | " +
             "stop [fail|abort] | " +
             "status | " +
             "list [axes|families|presets] | " +
@@ -173,6 +173,11 @@ namespace ACE.Server.Command.Handlers
                 DryRun = parsed.Dry,
                 MinDurationSeconds = parsed.MinDurationSeconds,
                 AbandonAfterSeconds = parsed.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
+
+                // --abandon covers BOTH "nobody counted is here" timers. Staff never count as present or
+                // alive, so in a solo staff test the wipe rule fires 60 s after the first kill just as the
+                // abandon rule would; --abandon 0 has to turn both off for the test to run its full length.
+                WipeGraceSeconds = WipeGraceFor(parsed.AbandonAfterSeconds),
                 TestLevel = parsed.TestLevel,
                 Random = parsed.Random,
                 TeaserLeadSeconds = parsed.TeaserLeadSeconds
@@ -783,6 +788,12 @@ namespace ACE.Server.Command.Handlers
 
         /// <summary>The largest --abandon value accepted, in seconds (one hour).</summary>
         public const int MaxAbandonSeconds = 3600;
+
+        /// <summary>
+        /// The run's wipe grace for an --abandon value (D6 - pure): the same number (so --abandon 0 also turns
+        /// the wipe rule off), or the run default when the flag was not passed.
+        /// </summary>
+        public static int WipeGraceFor(int? abandonSeconds) => abandonSeconds ?? WorldEvent.DefaultWipeGraceSeconds;
 
         /// <summary>The largest --level accepted: the highest level the bands consider (WorldEventRosterSelector.MaxConsideredLevel).</summary>
         public const int MaxTestLevel = WorldEventRosterSelector.MaxConsideredLevel;

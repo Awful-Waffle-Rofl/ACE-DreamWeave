@@ -637,6 +637,31 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private string frozenProgressText;
 
+        /// <summary>
+        /// Whether an event creature's death counts as the players' credit (D6 - pure): every death does,
+        /// except a Hold protected target's, which the monsters caused.
+        /// </summary>
+        public static bool DeathCountsAsCredit(bool isProtectedTarget) => !isProtectedTarget;
+
+        /// <summary>The Hold success line used when a goal declares no successTemplate. ASCII only.</summary>
+        public const string DefaultHoldSuccessTemplate = "{goal} at {anchor} succeeded! {alive} of {total} {nounPlural} survived.";
+
+        /// <summary>
+        /// A Hold run's outcome templates with the final counts filled in (D6 - pure): the goal's template, or
+        /// <see cref="DefaultHoldSuccessTemplate"/> for a success with none, through
+        /// WorldEventHoldRules.FillCounts. Null alive/total (not a Hold run) returns the template unchanged.
+        /// </summary>
+        public static string HoldOutcomeTemplate(string template, bool success, int? alive, int? total)
+        {
+            if (alive == null || total == null)
+                return template;
+
+            if (success && string.IsNullOrWhiteSpace(template))
+                template = DefaultHoldSuccessTemplate;
+
+            return WorldEventHoldRules.FillCounts(template, alive.Value, total.Value);
+        }
+
         /// <summary>The pure rule for when progress is frozen at Finish (D6): Hold goals only.</summary>
         public static bool FreezesProgressAtFinish(GoalDef goal) => goal?.TypeKind == GoalType.Hold;
 
@@ -3085,7 +3110,11 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void OnCreatureDied(Creature creature, DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
         {
-            LastCreditAt = Now();
+            // A Hold target destroyed by the monsters is not the players' doing, so it is not "credit": it must
+            // neither keep an empty run alive (abandon) nor arm the wipe rule. Before this, a caravan's death
+            // armed FailedWipe against a field where nobody counted as alive, ending the run a second later.
+            if (DeathCountsAsCredit(creature != null && Spawner.IsProtectedGuid(creature.Guid.Full)))
+                LastCreditAt = Now();
 
             // Before Spawner.OnDied, purely so the classification reads the spawner's sets exactly as they
             // were when this creature was alive. Wrapped like every other forward here: a throw measuring
@@ -3224,9 +3253,17 @@ namespace ACE.Server.WorldEvents
                     ? boss.DisplayName
                     : "the champion";
 
+                // Hold: the final count goes into the outcome line ("2 of 3 caravans survived"), taken now,
+                // before cleanup removes the targets.
+                var hold = Objective as HoldObjective;
+                int? holdAlive = hold?.Alive;
+                int? holdTotal = hold?.Placed;
+
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.OutcomeLine(
                     outcome, Composition?.Goal, AnchorName, mvp, Participation.TopKiller(), Participation.Count, bossName,
-                    Composition?.GoalDisplayName, Composition?.SuccessTemplate, Composition?.FailTemplate,
+                    Composition?.GoalDisplayName,
+                    HoldOutcomeTemplate(Composition?.SuccessTemplate, success: true, holdAlive, holdTotal),
+                    HoldOutcomeTemplate(Composition?.FailTemplate, success: false, holdAlive, holdTotal),
                     Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural, Composition?.FamilyDisplayName),
                     relayToDiscord: relayedToDiscord);
 

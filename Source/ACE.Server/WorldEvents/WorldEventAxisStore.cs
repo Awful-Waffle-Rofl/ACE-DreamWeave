@@ -633,8 +633,11 @@ namespace ACE.Server.WorldEvents
             if (protect == null)
                 return "is type Hold but has no protect block";
 
-            if (protect.Wcid == 0)
-                return "has a protect block with no wcid";
+            if (protect.Wcids != null && protect.Wcids.Any(w => w == 0))
+                return "has a protect.wcids list with a 0 entry";
+
+            if (protect.WcidFor(0) == 0)
+                return "has a protect block with no wcid (set wcid or wcids)";
 
             if (protect.Count == null || protect.Count.Base < 1 || protect.Count.Cap < protect.Count.Base
                 || protect.Count.Cap > ProtectDef.MaxProtectedTargets || !IsFinite(protect.Count.PerParticipant)
@@ -708,6 +711,35 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>
+        /// A Hold scene list (protect.decor / protect.targetDecor), checked with the same entry rules as a
+        /// source's decor: a bad entry is dropped with a diagnostic, never the goal. Null stays null.
+        /// </summary>
+        internal static List<DecorDef> ValidateProtectDecor(string goalId, string key, List<DecorDef> decor, List<string> diagnostics)
+        {
+            if (decor == null)
+                return null;
+
+            var kept = new List<DecorDef>();
+
+            for (var i = 0; i < decor.Count; i++)
+            {
+                var entry = decor[i];
+
+                if (entry == null || entry.Wcid == 0 || entry.Scale <= 0 || entry.Speed <= 0 || !IsFinite(entry.Yaw)
+                    || !IsFinite(entry.Dx) || !IsFinite(entry.Dy) || !IsFinite(entry.Dz) || !IsFinite(entry.Pitch))
+                {
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} entry {i} is invalid " +
+                                    $"(wcid={entry?.Wcid} scale={entry?.Scale} speed={entry?.Speed}), dropped");
+                    continue;
+                }
+
+                kept.Add(entry);
+            }
+
+            return kept;
+        }
+
         private static Dictionary<string, GoalDef> ParseGoals(string json, List<string> diagnostics)
         {
             var result = new Dictionary<string, GoalDef>();
@@ -779,6 +811,9 @@ namespace ACE.Server.WorldEvents
                     }
 
                     RepairProtectLines(goal.Id, goal.Protect, diagnostics);
+
+                    goal.Protect.Decor = ValidateProtectDecor(goal.Id, "decor", goal.Protect.Decor, diagnostics);
+                    goal.Protect.TargetDecor = ValidateProtectDecor(goal.Id, "targetDecor", goal.Protect.TargetDecor, diagnostics);
 
                     // Flagged, not dropped: a dead setting someone might otherwise tune.
                     if (goal.Protect.IsTimeScaled && goal.Protect.Health != null)

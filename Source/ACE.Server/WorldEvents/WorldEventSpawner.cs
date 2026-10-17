@@ -583,6 +583,32 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>
+        /// How a Hold protected target reads to the CLIENT: not attackable, with the friendly PlayerKillerStatus
+        /// the retail shopkeepers carry (RubberGlue, 0x10). The client colours a name from the create packet's
+        /// object description flags - the Attackable flag (ObjectDescriptionFlag.Attackable, from
+        /// WorldObject.Attackable) is what makes a creature's name red - so clearing it shows the merchant as
+        /// a friendly NPC and gives players no attack option. Server-side nothing a run monster needs reads
+        /// Attackable: seekers pick the target directly (TrySelectWorldEventSeekTarget), physics admits it
+        /// through WeenieObject.IsProtectedTargetFor, and melee, missile, spell damage and TakeDamage never
+        /// check it. Pure property writes before EnterWorld; nothing else on the creature is touched.
+        /// </summary>
+        public static void ApplyProtectedAppearance(Creature creature)
+        {
+            if (creature == null)
+                return;
+
+            creature.Attackable = false;
+            creature.PlayerKillerStatus = ProtectedPlayerKillerStatus;
+
+            // Monster.SetMonsterState caches IsMonster from Attackable at construction; refresh it so nothing
+            // keyed on IsMonster still sees the merchant as a monster.
+            creature.SetMonsterState();
+        }
+
+        /// <summary>The PlayerKillerStatus every protected target is sent with (the retail shopkeepers' value).</summary>
+        public const ACE.Entity.Enum.PlayerKillerStatus ProtectedPlayerKillerStatus = ACE.Entity.Enum.PlayerKillerStatus.RubberGlue;
+
         /// <summary>Caller must hold <see cref="sync"/>.</summary>
         private void PruneProtected()
         {
@@ -976,7 +1002,7 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void SpawnProtected(WorldEvent evt, ProtectDef protect, Position centre)
         {
-            if (evt == null || protect == null || protect.Wcid == 0 || centre == null)
+            if (evt == null || protect == null || protect.WcidFor(0) == 0 || centre == null)
                 return;
 
             var participants = Math.Max(0, evt.ResolvedAudienceCount);
@@ -986,19 +1012,38 @@ namespace ACE.Server.WorldEvents
             var anchors = new List<Position>();
             var dzByAnchor = new List<float>();
 
-            foreach (var offset in WorldEventHoldRules.RingOffsets(count, protect.Radius))
+            var ring = WorldEventHoldRules.RingOffsets(count, protect.Radius);
+
+            for (var i = 0; i < ring.Count; i++)
             {
-                entries.Add(new SpawnEntry(protect.Wcid, overflowChampion: false));
+                var offset = ring[i];
+
+                // One weenie per target in turn (protect.wcids), so the merchants do not all look alike. Each
+                // faces outward (RingOffsets' yaw), toward the attackers coming in from the spawn ring.
+                entries.Add(new SpawnEntry(protect.WcidFor(i), overflowChampion: false));
                 anchors.Add(NpcPosition(centre, offset.Dx, offset.Dy, 0f, offset.YawDegrees));
                 dzByAnchor.Add(0f);
             }
 
-            log.Info($"[WORLDEVENT] run={evt.RunId} protect wcid={protect.Wcid} count={count} radius={protect.Radius:F1} " +
+            // The scene: props around the anchor and one set beside each target, placed stuck. Queued on the
+            // same landblock queue AFTER the targets, so a prop can never take a target's spot first.
+            var scene = new List<DecorDef>();
+
+            if (protect.Decor != null)
+                scene.AddRange(protect.Decor);
+
+            scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, protect.TargetDecor));
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} protect wcids={string.Join(",", Enumerable.Range(0, ring.Count).Select(protect.WcidFor))} " +
+                     $"count={count} radius={protect.Radius:F1} scene={scene.Count} " +
                      $"health={protect.EffectiveMaxHealth(participants)}{(protect.IsTimeScaled ? $" (time-based: undefendedSeconds={protect.UndefendedSeconds:F0} minDeathSeconds={protect.MinDeathSeconds:F0})" : "")} minSurvivors={protect.MinSurvivors} " +
                      $"seekShare={protect.EffectiveSeekShare:F2} (participants={participants})");
 
             // healthMult 1.0: a ward's health comes from protect.health (TryPlace), never the wave multiplier.
             Spawn(evt, entries, anchors, WorldEventSpawnKind.Protected, NoWaveIndex, default, 1.0, dzByAnchor);
+
+            if (scene.Count > 0)
+                SpawnDecor(evt, scene, centre, stuck: true);
         }
 
         public void SpawnBoss(WorldEvent evt, uint wcid, Position anchor)
@@ -1161,6 +1206,16 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre)
         {
+            SpawnDecor(evt, decor, centre, stuck: false);
+        }
+
+        /// <summary>
+        /// <see cref="SpawnDecor(WorldEvent, IReadOnlyList{DecorDef}, Position)"/> with the props placed Stuck
+        /// (the Hold caravan scene), so ground scenery a player can walk up to can never be picked up. The
+        /// sky decor themes keep the original call.
+        /// </summary>
+        public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool stuck)
+        {
             if (evt == null || decor == null || decor.Count == 0)
                 return;
 
@@ -1204,7 +1259,7 @@ namespace ACE.Server.WorldEvents
                     continue;
                 }
 
-                candidates.Add(new DecorCandidate(wo, entry));
+                candidates.Add(new DecorCandidate(wo, entry, stuck));
             }
 
             if (candidates.Count == 0)
@@ -2181,9 +2236,10 @@ namespace ACE.Server.WorldEvents
 
             // Hold goal protected target. Written BEFORE EnterWorld like everything above: the physics
             // WeenieObject that ObjectMaint filters on is built during EnterWorld and caches
-            // WorldEventProtected and the WorldEventId stamp, so both must already be in place. Attackable
-            // true keeps the ward a valid candidate for its own run's monsters; players and pets are refused
-            // separately (Player.CanDamage, CheckPKStatusVsTarget, the pet filter). ApplyHealth sets an
+            // WorldEventProtected and the WorldEventId stamp, so both must already be in place. The target is
+            // sent to the client as a friendly NPC (ApplyProtectedAppearance); its own run's monsters still
+            // reach and damage it through the protected-target route, which never reads Attackable, while
+            // players and pets are refused (Player.CanDamage, CheckPKStatusVsTarget, the pet filter). ApplyHealth sets an
             // absolute target, so a placement retry through here does not compound it.
             if (kind == WorldEventSpawnKind.Protected)
             {
@@ -2199,7 +2255,7 @@ namespace ACE.Server.WorldEvents
                                  $"could not be reached; resulting MaxValue={creature.Health.MaxValue}");
                 }
 
-                creature.Attackable = true;
+                ApplyProtectedAppearance(creature);
                 creature.WorldEventProtected = true;
             }
 
@@ -2417,15 +2473,19 @@ namespace ACE.Server.WorldEvents
         /// <summary>One constructed decor object and the entry it came from, carried into the landblock closure.</summary>
         private sealed class DecorCandidate
         {
-            public DecorCandidate(WorldObject wo, DecorDef def)
+            public DecorCandidate(WorldObject wo, DecorDef def, bool stuck = false)
             {
                 Object = wo;
                 Def = def;
+                Stuck = stuck;
             }
 
             public WorldObject Object { get; }
 
             public DecorDef Def { get; }
+
+            /// <summary>Hold scene props: placed Stuck so players can never pick a cart or a crate up.</summary>
+            public bool Stuck { get; }
         }
 
         /// <summary>
@@ -2494,6 +2554,9 @@ namespace ACE.Server.WorldEvents
                 // Mandatory - see the class remarks. Decor has no Generator back-reference either, so the
                 // landblock heartbeat would otherwise decay it out from under the run.
                 wo.TimeToRot = -1;
+
+                if (candidate.Stuck)
+                    wo.Stuck = true;
 
                 var entered = false;
 

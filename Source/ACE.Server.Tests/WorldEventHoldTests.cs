@@ -353,7 +353,28 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0f, offsets[0].Dx, 1e-4f, "the first is due north");
             Assert.AreEqual(6f, offsets[0].Dy, 1e-4f);
-            CollectionAssert.AreEqual(new[] { 0f, 120f, 240f }, offsets.Select(o => o.YawDegrees).ToArray());
+            // Outward headings in NpcRotation's counter-clockwise sense: north 0, then the targets at compass
+            // 120 (ESE) and 240 (WSW) face yaw 240 and 120.
+            CollectionAssert.AreEqual(new[] { 0f, 240f, 120f }, offsets.Select(o => o.YawDegrees).ToArray());
+        }
+
+        [TestMethod]
+        public void RingOffsets_EveryTargetFacesAwayFromTheCentre()
+        {
+            foreach (var count in new[] { 2, 3 })
+            {
+                foreach (var o in WorldEventHoldRules.RingOffsets(count, 6.0))
+                {
+                    // A Position's facing is Vector3.Transform(UnitY, Rotation) - the same rule the client uses.
+                    var facing = System.Numerics.Vector3.Transform(System.Numerics.Vector3.UnitY,
+                        ACE.Server.WorldEvents.WorldEventSpawner.NpcRotation(o.YawDegrees));
+
+                    var outward = new System.Numerics.Vector2(o.Dx, o.Dy) / 6f;
+
+                    Assert.AreEqual(outward.X, facing.X, 1e-3, $"target at ({o.Dx:F2}, {o.Dy:F2}) must face outward");
+                    Assert.AreEqual(outward.Y, facing.Y, 1e-3, $"target at ({o.Dx:F2}, {o.Dy:F2}) must face outward");
+                }
+            }
         }
 
         [TestMethod]
@@ -1869,6 +1890,256 @@ namespace ACE.Server.Tests
 
             Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
             Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.health")));
+        }
+
+        // ---- why the test runs ended early: caravan deaths are not credit -----------------------------------
+
+        [TestMethod]
+        public void DeathCountsAsCredit_NotForACaravan()
+        {
+            Assert.IsTrue(WorldEvent.DeathCountsAsCredit(isProtectedTarget: false), "a monster the players killed");
+            Assert.IsFalse(WorldEvent.DeathCountsAsCredit(isProtectedTarget: true), "a caravan the monsters killed");
+        }
+
+        [TestMethod]
+        public void WipeGraceFor_AbandonCoversTheWipeTimerToo()
+        {
+            Assert.AreEqual(0, ACE.Server.Command.Handlers.WorldEventCommands.WipeGraceFor(0), "--abandon 0 also turns the wipe rule off");
+            Assert.AreEqual(300, ACE.Server.Command.Handlers.WorldEventCommands.WipeGraceFor(300));
+            Assert.AreEqual(WorldEvent.DefaultWipeGraceSeconds, ACE.Server.Command.Handlers.WorldEventCommands.WipeGraceFor(null),
+                "without the flag the wipe rule is unchanged");
+        }
+
+        [TestMethod]
+        public void Run_SoloStaffTest_WithAbandonZero_RunsTheFullHold()
+        {
+            // The reported run: a staff tester (never counted as present or alive), a kill early on (credit),
+            // --abandon 0. With the wipe timer left at 60 s this ended as FailedWipe after about a minute.
+            var goal = BuildHoldGoal(holdSeconds: 420);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+
+            var request = new WorldEventRequest
+            {
+                SourceId = "ambush", FamilyId = "emberwrought", GoalId = goal.Id, AnnounceLeadSeconds = 0,
+                MaxDurationSeconds = 600, MinDurationSeconds = 300,
+                AbandonAfterSeconds = 0, WipeGraceSeconds = ACE.Server.Command.Handlers.WorldEventCommands.WipeGraceFor(0),
+                Invoker = "test"
+            };
+
+            evt = new WorldEvent(1, BuildHoldEvent(goal, null).Composition, request, harness.Objective,
+                () => new AudienceEstimate(0, 0, 0), () => T0, presenceCounter: () => 0);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            evt.LastCreditAt = T0 + 5;     // the tester killed something
+            harness.Kill(2);               // and the monsters took one caravan
+
+            evt.Tick(T0 + 70);
+            Assert.AreEqual(WorldEventState.Active, evt.State, "no wipe a minute in");
+
+            evt.Tick(T0 + 420);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "the full 7 minutes, then success with 2 of 3 standing");
+            StringAssert.StartsWith(evt.ProgressText, "2 of 3 wards stand.");
+        }
+
+        [TestMethod]
+        public void Run_DefaultWipeRule_StillFailsAPlayerlessFieldAfterACredit()
+        {
+            // The wipe rule itself is unchanged for real runs: credit, then nobody alive for 60 s.
+            var goal = BuildHoldGoal(holdSeconds: 420);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+
+            evt = BuildHoldEvent(goal, harness.Objective, presenceCounter: () => 0, abandonAfterSeconds: 0);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+            evt.LastCreditAt = T0 + 5;
+
+            evt.Tick(T0 + WorldEvent.DefaultWipeGraceSeconds + 1);
+
+            Assert.AreEqual(WorldEventOutcome.FailedWipe, evt.Outcome);
+        }
+
+        // ---- a successful hold is obvious ----------------------------------------------------------------
+
+        [TestMethod]
+        public void HoldOutcomeTemplate_FillsTheFinalCount()
+        {
+            // Only the count tokens are filled here; {nounPlural} and {anchor} are left for the announcer.
+            Assert.AreEqual("The {nounPlural} at {anchor} made it through! 2 of 3 {nounPlural} survived.",
+                WorldEvent.HoldOutcomeTemplate("The {nounPlural} at {anchor} made it through! {alive} of {total} {nounPlural} survived.", true, 2, 3));
+
+            Assert.AreEqual("x 1 lost", WorldEvent.HoldOutcomeTemplate("x {lost} lost", false, 2, 3));
+            Assert.AreEqual("{alive}", WorldEvent.HoldOutcomeTemplate("{alive}", true, null, null), "not a Hold run: untouched");
+
+            var fallback = WorldEvent.HoldOutcomeTemplate(null, success: true, 3, 3);
+            StringAssert.Contains(fallback, "3 of 3 {nounPlural} survived");
+            AssertAscii(fallback);
+
+            Assert.IsNull(WorldEvent.HoldOutcomeTemplate(null, success: false, 1, 3), "a fail with no template keeps the standard fail line");
+        }
+
+        [TestMethod]
+        public void Run_Success_BroadcastsTheFinalCount()
+        {
+            var saved = WorldEventAnnouncer.BroadcastSink;
+            var lines = new List<string>();
+
+            try
+            {
+                WorldEventAnnouncer.BroadcastSink = lines.Add;
+
+                var goal = BuildHoldGoal(holdSeconds: 120);
+                goal.SuccessTemplate = "The {nounPlural} at {anchor} made it through! {alive} of {total} {nounPlural} survived.";
+
+                WorldEvent evt = null;
+                var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+                evt = BuildHoldEvent(goal, harness.Objective);
+
+                evt.Stage(T0);
+                evt.Tick(T0);
+                harness.Place(1, 2, 3);
+                harness.Kill(3);
+
+                evt.Tick(T0 + 120);
+
+                Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome);
+
+                var outcome = lines.FirstOrDefault(l => l.Contains("made it through"));
+                Assert.IsNotNull(outcome, "a clear success broadcast: " + string.Join(" | ", lines));
+                StringAssert.Contains(outcome, "2 of 3 wards survived.");
+                AssertAscii(outcome);
+            }
+            finally
+            {
+                WorldEventAnnouncer.BroadcastSink = saved;
+            }
+        }
+
+        // ---- merchant variety ---------------------------------------------------------------------------
+
+        [TestMethod]
+        public void WcidFor_CyclesThroughTheList_ElseUsesWcid()
+        {
+            var protect = new ProtectDef { Wcid = 2000002, Wcids = new List<uint> { 2000002, 2000003, 2000004 } };
+
+            CollectionAssert.AreEqual(new uint[] { 2000002, 2000003, 2000004, 2000002 },
+                Enumerable.Range(0, 4).Select(protect.WcidFor).ToArray());
+
+            Assert.AreEqual(2000002u, new ProtectDef { Wcid = 2000002 }.WcidFor(5), "no list: every target is wcid");
+            Assert.AreEqual(2000003u, new ProtectDef { Wcids = new List<uint> { 2000003 } }.WcidFor(0), "a list alone is enough");
+        }
+
+        [TestMethod]
+        public void GoalsJson_Wcids_ParseAndValidate()
+        {
+            var json = ShippedCaravanProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 2000003, 2000004 ],");
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
+
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), string.Join(" | ", store.Diagnostics));
+            Assert.AreEqual(2000004u, store.Goals["hold_wards"].Protect.WcidFor(2));
+
+            var withZero = ShippedCaravanProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 0 ],");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(withZero), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.wcids")));
+        }
+
+        // ---- the caravan scene ----------------------------------------------------------------------------
+
+        [TestMethod]
+        public void PlaceTargetDecor_PutsAPropBehindEveryTarget()
+        {
+            var ring = WorldEventHoldRules.RingOffsets(3, 6.0);
+            var wagon = new DecorDef { Wcid = 28527, Dx = 0, Dy = -2.8f, Scale = 1, Speed = 1, Yaw = 90, Snap = true };
+
+            var placed = WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { wagon });
+
+            Assert.AreEqual(3, placed.Count, "one wagon per merchant");
+
+            for (var i = 0; i < 3; i++)
+            {
+                var t = ring[i];
+                var w = placed[i];
+
+                // 2.8 m behind the merchant means 3.2 m from the anchor, on the same bearing.
+                Assert.AreEqual(3.2, Math.Sqrt(w.Dx * w.Dx + w.Dy * w.Dy), 1e-3);
+                Assert.AreEqual(Math.Atan2(t.Dx, t.Dy), Math.Atan2(w.Dx, w.Dy), 1e-3, "on the merchant's own bearing");
+                Assert.AreEqual(90f + t.YawDegrees, w.Yaw, 1e-3f, "turned with the merchant");
+                Assert.AreEqual(28527u, w.Wcid);
+                Assert.IsTrue(w.Snap);
+            }
+
+            Assert.AreEqual(1f, wagon.Scale, "the goal's own entry is not modified");
+            Assert.AreEqual(-2.8f, wagon.Dy);
+        }
+
+        [TestMethod]
+        public void PlaceTargetDecor_RightIsToTheTargetsRight()
+        {
+            // A single target on the anchor faces north, so its right is east.
+            var placed = WorldEventHoldRules.PlaceTargetDecor(WorldEventHoldRules.RingOffsets(1, 0),
+                new List<DecorDef> { new DecorDef { Wcid = 147, Dx = 1.5f, Dy = 0, Scale = 1, Speed = 1 } });
+
+            Assert.AreEqual(1.5f, placed[0].Dx, 1e-4f);
+            Assert.AreEqual(0f, placed[0].Dy, 1e-4f);
+            Assert.AreEqual(0, WorldEventHoldRules.PlaceTargetDecor(null, null).Count);
+        }
+
+        [TestMethod]
+        public void GoalsJson_SceneDecor_BadEntriesDropped_GoalKept()
+        {
+            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""decor"": [ { ""wcid"": 4128, ""scale"": 1.0, ""speed"": 1.0, ""snap"": true }, { ""wcid"": 0, ""scale"": 1.0, ""speed"": 1.0 } ],
+                  ""targetDecor"": [ { ""wcid"": 28527, ""dy"": -2.8, ""scale"": 1.0, ""speed"": 1.0, ""yaw"": 90.0, ""snap"": true }, { ""wcid"": 147, ""scale"": 0, ""speed"": 1.0 } ],
+                  ""radius"": 6.0,");
+
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
+
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), "a bad prop never drops the goal");
+
+            var protect = store.Goals["hold_wards"].Protect;
+            Assert.AreEqual(1, protect.Decor.Count);
+            Assert.AreEqual(1, protect.TargetDecor.Count);
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.decor entry 1")));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.targetDecor entry 1")));
+        }
+
+        // ---- name colour ----------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void ProtectedAppearance_IsAFriendlyNpcToTheClient()
+        {
+            var merchant = BuildHoldCreature();
+            merchant.Attackable = true;
+            merchant.PlayerKillerStatus = ACE.Entity.Enum.PlayerKillerStatus.Creature;
+
+            ACE.Server.WorldEvents.WorldEventSpawner.ApplyProtectedAppearance(merchant);
+
+            Assert.IsFalse(merchant.Attackable, "not attackable: the client shows a friendly name and no attack");
+            Assert.AreEqual(ACE.Entity.Enum.PlayerKillerStatus.RubberGlue, merchant.PlayerKillerStatus, "the retail shopkeeper status");
+            Assert.IsFalse(merchant.IsMonster, "nothing keyed on IsMonster treats it as a monster");
+        }
+
+        [TestMethod]
+        public void ProtectedAppearance_RunMonstersStillDamageIt_PlayersStillCannot()
+        {
+            var (_, ward, monster) = BuildHitScene(120);
+
+            ACE.Server.WorldEvents.WorldEventSpawner.ApplyProtectedAppearance(ward);
+
+            Assert.IsTrue(monster.IsWorldEventProtectedTargetFor(ward), "its own run's monsters still reach it");
+            Assert.IsTrue(monster.CanDamage(ward), "and still damage it (spells use CanDamage)");
+            Assert.IsTrue(ward.ScaleWorldEventProtectedHit(monster, 10f, T0) > 0f, "and their hits still land");
+
+            var outsider = BuildHoldCreature();
+            Assert.IsFalse(outsider.CanDamage(ward), "a monster from outside the event cannot");
         }
 
         // ---- neighbouring landblocks --------------------------------------------------------------------

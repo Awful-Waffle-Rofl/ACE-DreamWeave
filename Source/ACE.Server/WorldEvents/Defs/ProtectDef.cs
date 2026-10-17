@@ -29,6 +29,43 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("wcid")]
         public uint Wcid { get; set; }
 
+        /// <summary>
+        /// Optional: several Creature weenies, one per target in turn (target i gets wcids[i % count]), so the
+        /// targets do not all look alike. Absent or empty uses <see cref="Wcid"/> for every target.
+        /// </summary>
+        [JsonPropertyName("wcids")]
+        public List<uint> Wcids { get; set; }
+
+        /// <summary>The weenie target <paramref name="index"/> is built from: <see cref="Wcids"/> in turn, else <see cref="Wcid"/>.</summary>
+        public uint WcidFor(int index)
+        {
+            if (Wcids != null && Wcids.Count > 0)
+            {
+                var pick = Wcids[((index % Wcids.Count) + Wcids.Count) % Wcids.Count];
+
+                if (pick != 0)
+                    return pick;
+            }
+
+            return Wcid;
+        }
+
+        /// <summary>
+        /// Optional scene props placed around the ANCHOR when the run starts (a campfire, say). Ordinary decor
+        /// entries: dx metres east, dy north, dz up, yaw, scale, speed, snap. Placed stuck, never attackable,
+        /// removed at the end of the run.
+        /// </summary>
+        [JsonPropertyName("decor")]
+        public List<DecorDef> Decor { get; set; }
+
+        /// <summary>
+        /// Optional scene props placed around EACH target, in that target's own frame: dx metres to its right,
+        /// dy metres forward (outward, the way it faces), yaw relative to its facing. One list gives every
+        /// merchant its own wagon whatever the count or radius (WorldEventHoldRules.PlaceTargetDecor).
+        /// </summary>
+        [JsonPropertyName("targetDecor")]
+        public List<DecorDef> TargetDecor { get; set; }
+
         /// <summary>How many targets to place, resolved once from the audience when the run goes Active.</summary>
         [JsonPropertyName("count")]
         public ScaledCount Count { get; set; }
