@@ -45,6 +45,14 @@ namespace ACE.Server.WorldEvents.Defs
         public double Radius { get; set; }
 
         /// <summary>
+        /// Optional: metres from the anchor that this goal's WAVES spawn at, replacing the source theme's
+        /// geometryRadius for Hold runs only. 0 or absent (the default) keeps the source's radius. Lets a
+        /// Hold run bring the attackers in close enough to reach the targets.
+        /// </summary>
+        [JsonPropertyName("spawnRadius")]
+        public double SpawnRadius { get; set; }
+
+        /// <summary>
         /// The run fails as soon as fewer than this many targets are alive. 1 (the default) means "fail when
         /// all are dead". Clamped at runtime to the number of targets actually placed.
         /// </summary>

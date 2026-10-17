@@ -541,7 +541,8 @@ namespace ACE.Server.Tests
 
         // ---- the run lifecycle with a Hold objective ---------------------------------------------------------
 
-        private static WorldEvent BuildHoldEvent(GoalDef goal, IWorldEventObjective objective, int maxDurationSeconds = 600)
+        private static WorldEvent BuildHoldEvent(GoalDef goal, IWorldEventObjective objective, int maxDurationSeconds = 600,
+            int abandonAfterSeconds = WorldEvent.DefaultAbandonAfterSeconds, Func<int> presenceCounter = null)
         {
             var source = new SourceThemeDef
             {
@@ -596,13 +597,14 @@ namespace ACE.Server.Tests
                 AnnounceLeadSeconds = 0,
                 MaxDurationSeconds = maxDurationSeconds,
                 MinDurationSeconds = 300,
+                AbandonAfterSeconds = abandonAfterSeconds,
                 Invoker = "test"
             };
 
-            // presenceCounter 1: a player is standing at the anchor, so the abandon rule never fires and the
-            // Hold rules alone decide each run below.
+            // presenceCounter defaults to 1: a player is standing at the anchor, so the abandon rule never
+            // fires and the Hold rules alone decide each run below unless a test says otherwise.
             return new WorldEvent(1, composition, request, objective,
-                () => new AudienceEstimate(3, 100, 150), () => T0, presenceCounter: () => 1);
+                () => new AudienceEstimate(3, 100, 150), () => T0, presenceCounter: presenceCounter ?? (() => 1));
         }
 
         /// <summary>A HoldObjective whose start time follows the event it is attached to.</summary>
@@ -1099,6 +1101,256 @@ namespace ACE.Server.Tests
             AssertAscii(line);
 
             StringAssert.EndsWith(WorldEventAnnouncer.ProtectedSpeechLine(null, "Help!"), "Ward: \"Help!\"");
+        }
+
+        // ---- protect.spawnRadius ------------------------------------------------------------------------
+
+        private static SourceThemeDef SourceWithRadius(float radius, SourceGeometry geometry = SourceGeometry.Edges)
+        {
+            return new SourceThemeDef
+            {
+                Id = "ambush", GeometryKind = geometry, GeometryRadius = radius, GeometryPoints = 3
+            };
+        }
+
+        private static GoalDef HoldGoalWithSpawnRadius(double spawnRadius)
+        {
+            var protect = BuildProtect();
+            protect.SpawnRadius = spawnRadius;
+
+            return BuildHoldGoal(protect: protect);
+        }
+
+        [TestMethod]
+        public void ResolveSpawnRadius_HoldSpawnRadiusReplacesTheSources()
+        {
+            Assert.AreEqual(25f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), HoldGoalWithSpawnRadius(25)));
+        }
+
+        [TestMethod]
+        public void ResolveSpawnRadius_UnsetOrInvalidKeepsTheSources()
+        {
+            Assert.AreEqual(45f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), HoldGoalWithSpawnRadius(0)));
+            Assert.AreEqual(45f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), HoldGoalWithSpawnRadius(double.NaN)));
+            Assert.AreEqual(45f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), HoldGoalWithSpawnRadius(-3)));
+            Assert.AreEqual(45f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), null));
+        }
+
+        [TestMethod]
+        public void ResolveSpawnRadius_NonHoldGoalsIgnoreIt()
+        {
+            var killCount = new GoalDef { Id = "kill_count", TypeKind = GoalType.KillCount, Protect = new ProtectDef { SpawnRadius = 10 } };
+
+            Assert.AreEqual(45f, WorldEvent.ResolveSpawnRadius(SourceWithRadius(45f), killCount),
+                "only a Hold goal may move the spawn ring");
+        }
+
+        private static readonly Position OutdoorAnchor = new Position(0xA9B40019, 95f, 12f, 94f, 0f, 0f, 0f, 1f, 0);
+
+        [TestMethod]
+        public void WaveAnchors_DiscUsesTheGivenRadius()
+        {
+            var disc = SourceWithRadius(45f, SourceGeometry.Disc);
+            var rng = new Random(11);
+
+            for (var i = 0; i < 20; i++)
+            {
+                foreach (var p in WorldEvent.ResolveWaveAnchors(disc, OutdoorAnchor, new List<Position>(), rng, 25f))
+                    Assert.IsTrue(OutdoorAnchor.Distance2D(p) <= 25.01f, $"a disc sample must sit within 25 m, got {OutdoorAnchor.Distance2D(p):F2}");
+            }
+
+            // The original overload still uses the source's own radius.
+            var staged = new List<Position> { OutdoorAnchor };
+            Assert.AreSame(staged, WorldEvent.ResolveWaveAnchors(SourceWithRadius(45f), OutdoorAnchor, staged, rng),
+                "a non-disc theme keeps its staged anchors");
+        }
+
+        [TestMethod]
+        public void GoalsJson_SpawnRadius_ParsesAndValidates()
+        {
+            var withRadius = ValidProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""spawnRadius"": 25.0,");
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(withRadius), null, null);
+
+            Assert.AreEqual(25.0, store.Goals["hold_wards"].Protect.SpawnRadius, 1e-9);
+
+            var negative = ValidProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""spawnRadius"": -1,");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(negative), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.spawnRadius")));
+            AssertAscii(store.Diagnostics.First(d => d.Contains("protect.spawnRadius")));
+
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ValidProtectJson), null, null);
+            Assert.AreEqual(0.0, store.Goals["hold_wards"].Protect.SpawnRadius, "absent means keep the source's radius");
+        }
+
+        // ---- indoor wave spawns -------------------------------------------------------------------------
+
+        [TestMethod]
+        public void RefusesIndoorSpawn_OnlyHoldWavesOutdoorsLandingIndoors()
+        {
+            Assert.IsTrue(WorldEventHoldRules.RefusesIndoorSpawn(isHoldRun: true, isWave: true, candidateIndoors: true, anchorIndoors: false));
+
+            Assert.IsFalse(WorldEventHoldRules.RefusesIndoorSpawn(true, true, candidateIndoors: false, anchorIndoors: false), "outdoors is fine");
+            Assert.IsFalse(WorldEventHoldRules.RefusesIndoorSpawn(true, true, true, anchorIndoors: true), "an indoor event spawns indoors on purpose");
+            Assert.IsFalse(WorldEventHoldRules.RefusesIndoorSpawn(true, isWave: false, true, false), "targets, bosses and decor are not waves");
+            Assert.IsFalse(WorldEventHoldRules.RefusesIndoorSpawn(isHoldRun: false, true, true, false), "non-Hold runs are unchanged");
+        }
+
+        [TestMethod]
+        public void IndoorCellIds_AreRecognised()
+        {
+            Assert.IsTrue(new Position(0xA9B40143, 140.8f, 5.9f, 94f, 0f, 0f, 0f, 1f, 0).Indoors, "0x0143 is a building interior cell");
+            Assert.IsFalse(OutdoorAnchor.Indoors);
+        }
+
+        [TestMethod]
+        public void AtBearing_PlacesOnTheRingFacingTheCentre()
+        {
+            foreach (var bearing in new[] { 0.0, Math.PI / 2, Math.PI, 4.0 })
+            {
+                var p = WorldEventGeometry.AtBearing(OutdoorAnchor, 25f, bearing);
+
+                Assert.AreEqual(25.0, OutdoorAnchor.Distance2D(p), 0.05, $"bearing {bearing}");
+                Assert.IsFalse(p.Indoors, "a ring point is addressed as an outdoor cell before the terrain snap");
+            }
+
+            Assert.IsNull(WorldEventGeometry.AtBearing(null, 25f, 0));
+        }
+
+        // ---- waking the wave ---------------------------------------------------------------------------
+
+        [TestMethod]
+        public void NearestWithin_PicksTheClosestInRange()
+        {
+            Assert.AreEqual(1, WorldEventHoldRules.NearestWithin(new List<double> { 400, 100, 900 }, 1000));
+            Assert.AreEqual(0, WorldEventHoldRules.NearestWithin(new List<double> { 100, 100 }, 1000), "ties keep the first");
+            Assert.AreEqual(-1, WorldEventHoldRules.NearestWithin(new List<double> { 5000, 9000 }, 1000), "everyone too far");
+            Assert.AreEqual(-1, WorldEventHoldRules.NearestWithin(new List<double>(), 1000));
+            Assert.AreEqual(-1, WorldEventHoldRules.NearestWithin(null, 1000));
+            Assert.AreEqual(1, WorldEventHoldRules.NearestWithin(new List<double> { double.NaN, 50 }, 1000));
+        }
+
+        // ---- progress frozen at the end -----------------------------------------------------------------
+
+        [TestMethod]
+        public void FreezesProgressAtFinish_HoldOnly()
+        {
+            Assert.IsTrue(WorldEvent.FreezesProgressAtFinish(BuildHoldGoal()));
+            Assert.IsFalse(WorldEvent.FreezesProgressAtFinish(new GoalDef { TypeKind = GoalType.KillCount }));
+            Assert.IsFalse(WorldEvent.FreezesProgressAtFinish(new GoalDef { TypeKind = GoalType.DestroySource }));
+            Assert.IsFalse(WorldEvent.FreezesProgressAtFinish(null));
+        }
+
+        [TestMethod]
+        public void Run_ProgressAfterCleanup_ShowsTheFinalCount()
+        {
+            var (evt, harness) = BuildLiveHoldRun(holdSeconds: 120, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            evt.Tick(T0 + 120);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome);
+
+            // Cleanup removes the targets from the world: the live set empties.
+            harness.Live.Clear();
+
+            StringAssert.StartsWith(evt.ProgressText, "3 of 3 wards stand.",
+                "status after the run must report the count at the finish, not the empty field after cleanup");
+        }
+
+        [TestMethod]
+        public void Run_ProgressAfterAFail_ShowsTheFinalCount()
+        {
+            var (evt, harness) = BuildLiveHoldRun(holdSeconds: 420, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            harness.Kill(1);
+            harness.Kill(2);
+            harness.Kill(3);
+            evt.Tick(T0 + 30);
+
+            Assert.AreEqual(WorldEventOutcome.FailedObjectiveLost, evt.Outcome);
+            StringAssert.StartsWith(evt.ProgressText, "0 of 3 wards stand.");
+        }
+
+        // ---- --abandon ------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void StartArgs_Abandon_ParsesSeconds()
+        {
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "--here", "--goal", "defend_caravan", "--abandon", "0" }, out var parsed, out var error), error);
+            Assert.AreEqual(0, parsed.AbandonAfterSeconds);
+
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "random", "--here", "--abandon", "600" }, out parsed, out error), error);
+            Assert.AreEqual(600, parsed.AbandonAfterSeconds, "start random takes it too");
+
+            Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "--here", "--goal", "defend_caravan" }, out parsed, out error), error);
+            Assert.IsNull(parsed.AbandonAfterSeconds, "absent means the run default");
+        }
+
+        [TestMethod]
+        public void StartArgs_Abandon_RejectsBadValues()
+        {
+            foreach (var bad in new[] { "-1", "abc", "3601", "1.5" })
+            {
+                Assert.IsFalse(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                    new[] { "--here", "--abandon", bad }, out _, out var error), bad);
+                StringAssert.Contains(error, "--abandon");
+                AssertAscii(error);
+            }
+
+            Assert.IsFalse(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
+                new[] { "--here", "--abandon" }, out _, out var missing), "a value is required");
+            Assert.IsNotNull(missing);
+        }
+
+        [TestMethod]
+        public void Run_AbandonZero_NeverFailsForAnEmptyField()
+        {
+            var goal = BuildHoldGoal(holdSeconds: 420);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+
+            // Nobody counts as present (a solo staff tester) and nothing ever dies.
+            evt = BuildHoldEvent(goal, harness.Objective, 600, abandonAfterSeconds: 0, presenceCounter: () => 0);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            evt.Tick(T0 + 200);
+            Assert.AreEqual(WorldEventState.Active, evt.State, "--abandon 0 turns the empty-field rule off");
+
+            evt.Tick(T0 + 420);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome);
+        }
+
+        [TestMethod]
+        public void Run_DefaultAbandon_StillFailsAnEmptyField()
+        {
+            var goal = BuildHoldGoal(holdSeconds: 420);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+
+            evt = BuildHoldEvent(goal, harness.Objective, 600, presenceCounter: () => 0);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            evt.Tick(T0 + WorldEvent.DefaultAbandonAfterSeconds);
+
+            Assert.AreEqual(WorldEventOutcome.FailedNoParticipants, evt.Outcome, "the default is unchanged");
+            StringAssert.StartsWith(evt.ProgressText, "3 of 3 wards stand.", "and the final count is the real one");
         }
     }
 }

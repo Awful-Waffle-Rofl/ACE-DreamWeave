@@ -485,6 +485,19 @@ namespace ACE.Server.WorldEvents
             get { lock (sync) return npcGuids.ToList(); }
         }
 
+        /// <summary>The live WAVE creatures (trash, elites, overflow champions), a copy. Hold's wake pass reads it.</summary>
+        public IReadOnlyList<Creature> LiveWaveCreatures
+        {
+            get
+            {
+                lock (sync)
+                {
+                    Prune();
+                    return liveWave.ToList();
+                }
+            }
+        }
+
         /// <summary>True when <paramref name="guid"/> is a Hold protected target this run placed.</summary>
         public bool IsProtectedGuid(uint guid)
         {
@@ -1987,16 +2000,23 @@ namespace ACE.Server.WorldEvents
 
                     var success = false;
 
+                    // Hold runs: set when the previous attempt's terrain snap put the candidate inside a
+                    // building, so the next attempt re-picks a point elsewhere on the spawn ring instead of
+                    // jittering a metre or two around the same indoor spot.
+                    var lastWasIndoors = false;
+
                     for (var attempt = 0; attempt < attempts && !success; attempt++)
                     {
                         Position candidate;
 
                         if (attempt == 0 && !reused)
                             candidate = new Position(basePosition);
+                        else if (lastWasIndoors)
+                            candidate = NextRingSample(evt.Composition?.AnchorPosition, evt.SpawnRadius) ?? NextJitter(basePosition);
                         else if (resample)
                             // Falls back to a jitter if the theme cannot produce a sample (no anchor
                             // position), so a resampling theme is never worse off than a jittering one.
-                            candidate = NextDiscSample(theme, evt.Composition?.AnchorPosition) ?? NextJitter(basePosition);
+                            candidate = NextDiscSample(theme, evt.Composition?.AnchorPosition, evt.SpawnRadius) ?? NextJitter(basePosition);
                         else if (kind == WorldEventSpawnKind.Boss)
                             // 2026-08-16: the boss's own jitter widens by attempt, so a champion stuck at a
                             // transiently blocked anchor fans further out on each retry within this Spawn
@@ -2005,13 +2025,14 @@ namespace ACE.Server.WorldEvents
                         else
                             candidate = NextJitter(basePosition);
 
-                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, postSnapDz);
+                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, out lastWasIndoors, postSnapDz);
 
                         if (!success)
                         {
                             lastRejected = candidate;
 
-                            log.Debug($"[WORLDEVENT] run={evt.RunId} {kind} attempt {attempt + 1}/{attempts} rejected at {candidate?.ToLOCString()}");
+                            log.Debug($"[WORLDEVENT] run={evt.RunId} {kind} attempt {attempt + 1}/{attempts} rejected at {candidate?.ToLOCString()}" +
+                                      (lastWasIndoors ? " (indoors)" : ""));
                         }
                     }
 
@@ -2066,8 +2087,10 @@ namespace ACE.Server.WorldEvents
         }
 
         private bool TryPlace(WorldEvent evt, Creature creature, Position candidate, float skyDropDz,
-            WorldEventSpawnKind kind, float postSnapDz = 0f)
+            WorldEventSpawnKind kind, out bool refusedIndoors, float postSnapDz = 0f)
         {
+            refusedIndoors = false;
+
             if (creature.IsDestroyed || candidate == null)
                 return false;
 
@@ -2097,6 +2120,16 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} terrain snap failed at {candidate.ToLOCString()}", ex);
+                return false;
+            }
+
+            // Hold runs: a wave spawn the snap put inside a building (an indoor cell, while the anchor is
+            // outdoors) is refused, so the attackers never start hidden in a house the defenders cannot see
+            // into. The caller re-picks elsewhere on the spawn ring.
+            if (WorldEventHoldRules.RefusesIndoorSpawn(evt.Composition?.Goal?.TypeKind == GoalType.Hold,
+                    kind == WorldEventSpawnKind.Wave, candidate.Indoors, evt.Composition?.AnchorPosition?.Indoors ?? false))
+            {
+                refusedIndoors = true;
                 return false;
             }
 
@@ -3711,14 +3744,31 @@ namespace ACE.Server.WorldEvents
         /// own seeded rng under <see cref="sync"/> exactly as <see cref="NextJitter"/> is. Null when the
         /// theme cannot produce one, which the caller treats as "fall back to a jitter".
         /// </summary>
-        private Position NextDiscSample(SourceThemeDef theme, Position centre)
+        /// <summary>
+        /// A point at a random bearing on the run's spawn ring (Hold's indoor re-pick), drawn from this
+        /// spawner's own seeded rng under <see cref="sync"/>. Null without a centre or a radius.
+        /// </summary>
+        private Position NextRingSample(Position centre, float radius)
+        {
+            if (centre == null || !(radius > 0f))
+                return null;
+
+            double bearing;
+
+            lock (sync)
+                bearing = rng.NextDouble() * Math.PI * 2.0;
+
+            return WorldEventGeometry.AtBearing(centre, radius, bearing);
+        }
+
+        private Position NextDiscSample(SourceThemeDef theme, Position centre, float radius)
         {
             if (theme == null || centre == null)
                 return null;
 
             lock (sync)
             {
-                var sample = WorldEventGeometry.Disc(centre, theme.GeometryRadius, 1, rng);
+                var sample = WorldEventGeometry.Disc(centre, radius, 1, rng);
 
                 return sample.Count > 0 ? sample[0] : null;
             }

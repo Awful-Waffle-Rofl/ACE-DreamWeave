@@ -111,6 +111,76 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
+        /// <summary>
+        /// Hold runs only (WorldEvent's per-tick wake pass): a wave monster that is still asleep gets an
+        /// attack target and wakes, instead of standing at the spawn ring until a player happens to walk
+        /// within its awareness range. A seeker takes the nearest protected target; everything else takes
+        /// the nearest attackable player within chase range. Returns true when it woke. Must run on this
+        /// creature's landblock thread (it touches AttackTarget, MonsterState and the physics target list).
+        /// </summary>
+        public bool TryWorldEventHoldWake()
+        {
+            if (IsDead || IsDestroyed || PhysicsObj == null || MonsterState != State.Idle)
+                return false;
+
+            if (WorldEventSeeker && TrySelectWorldEventSeekTarget())
+            {
+                // alertNearby false: a seeker never recruits its pack (see AlertFriendly), and every other
+                // wave monster in a Hold run is woken by this same pass anyway.
+                WakeUp(alertNearby: false);
+                return true;
+            }
+
+            var player = NearestWakeTargetPlayer();
+
+            if (player == null)
+                return false;
+
+            if (!IsVisibleTarget(player))
+                PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { player.PhysicsObj });
+
+            if (!IsVisibleTarget(player))
+                return false;
+
+            AttackTarget = player;
+            WakeUp(alertNearby: false);
+            return true;
+        }
+
+        /// <summary>The nearest living, attackable, non-teleporting player this monster knows of, within chase range.</summary>
+        private Player NearestWakeTargetPlayer()
+        {
+            var players = new List<Player>();
+
+            foreach (var creature in PhysicsObj.ObjMaint.GetVisibleTargetsValuesOfTypeCreature())
+            {
+                if (creature is Player p)
+                    players.Add(p);
+            }
+
+            foreach (var p in PhysicsObj.ObjMaint.GetKnownPlayersValuesAsPlayer())
+            {
+                if (p != null && !players.Contains(p))
+                    players.Add(p);
+            }
+
+            var usable = new List<Player>();
+            var distances = new List<double>();
+
+            foreach (var p in players)
+            {
+                if (p.IsDead || p.Teleporting || !p.Attackable || p.PhysicsObj == null)
+                    continue;
+
+                usable.Add(p);
+                distances.Add(PhysicsObj.get_distance_sq_to_object(p.PhysicsObj, true));
+            }
+
+            var index = ACE.Server.WorldEvents.WorldEventHoldRules.NearestWithin(distances, MaxChaseRangeSq);
+
+            return index >= 0 ? usable[index] : null;
+        }
+
         private bool IsUsableSeekTarget(Creature target)
         {
             return target != null && target.PhysicsObj != null && !target.IsDestroyed && !target.IsDead

@@ -33,8 +33,8 @@ namespace ACE.Server.Command.Handlers
 
         // TECH-DESIGN 5.3, one line per subcommand collapsed onto one usage string per CommandHandlerAttribute.
         private const string Usage =
-            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
-            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--dry] | " +
+            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] [--abandon <seconds>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
+            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (0 = never; for solo staff tests)] [--dry] | " +
             "stop [fail|abort] | " +
             "status | " +
             "list [axes|families|presets] | " +
@@ -172,6 +172,7 @@ namespace ACE.Server.Command.Handlers
                 Invoker = session.Player.Name,
                 DryRun = parsed.Dry,
                 MinDurationSeconds = parsed.MinDurationSeconds,
+                AbandonAfterSeconds = parsed.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
                 Random = parsed.Random,
                 TeaserLeadSeconds = parsed.TeaserLeadSeconds
             };
@@ -762,7 +763,18 @@ namespace ACE.Server.Command.Handlers
             /// world_events_teaser_lead_seconds tunable (WorldEventRequest.TeaserLeadSeconds).
             /// </summary>
             public int? TeaserLeadSeconds { get; set; }
+
+            /// <summary>
+            /// "--abandon &lt;seconds&gt;": how long the run waits with no kill credit and no (non-staff) player
+            /// present before failing as FailedNoParticipants. 0 turns that rule off for this run, which is
+            /// what a solo admin test needs (staff never count as present). Null when the flag was not passed:
+            /// the run default (<see cref="WorldEvent.DefaultAbandonAfterSeconds"/>) applies.
+            /// </summary>
+            public int? AbandonAfterSeconds { get; set; }
         }
+
+        /// <summary>The largest --abandon value accepted, in seconds (one hour).</summary>
+        public const int MaxAbandonSeconds = 3600;
 
         public class WorldEventSimulateArgs
         {
@@ -905,6 +917,20 @@ namespace ACE.Server.Command.Handlers
                         }
 
                         result.TeaserLeadSeconds = teaserLead;
+                        break;
+
+                    case "--abandon":
+                        if (!TryTakeValue(args, ref i, flag, out var abandonRaw, out error))
+                            return false;
+
+                        if (!int.TryParse(abandonRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var abandon)
+                            || abandon < 0 || abandon > MaxAbandonSeconds)
+                        {
+                            error = $"--abandon needs a whole number of seconds from 0 (never) to {MaxAbandonSeconds}";
+                            return false;
+                        }
+
+                        result.AbandonAfterSeconds = abandon;
                         break;
 
                     default:

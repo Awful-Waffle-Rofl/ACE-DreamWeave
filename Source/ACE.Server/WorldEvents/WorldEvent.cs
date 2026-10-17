@@ -596,7 +596,18 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public bool RunValid(uint runId) => runId == RunId && State != WorldEventState.Done;
 
-        public string ProgressText => Objective?.ProgressText ?? "";
+        public string ProgressText => frozenProgressText ?? Objective?.ProgressText ?? "";
+
+        /// <summary>
+        /// Hold runs: the progress line as it stood the moment the run finished. A Hold objective counts the
+        /// targets standing right now, and cleanup removes them, so without this "/worldevent status" after
+        /// the run would read "0 of 3 caravans still stand" for a hold that lost none. Null for every other
+        /// goal, whose progress does not depend on what is still in the world.
+        /// </summary>
+        private string frozenProgressText;
+
+        /// <summary>The pure rule for when progress is frozen at Finish (D6): Hold goals only.</summary>
+        public static bool FreezesProgressAtFinish(GoalDef goal) => goal?.TypeKind == GoalType.Hold;
 
         /// <summary>Player-facing anchor name, for announcement flavour text.</summary>
         public string AnchorName => Composition?.Anchor?.DisplayName ?? Composition?.Anchor?.Id ?? "somewhere";
@@ -1118,6 +1129,24 @@ namespace ACE.Server.WorldEvents
         /// wave, for the objective spawns and for the champion, so a run's shape stays stable as the
         /// audience estimate moves.
         /// </summary>
+        /// <summary>
+        /// The radius the run's spawn geometry uses (D6 - pure): a Hold goal's protect.spawnRadius when it is
+        /// positive and finite, otherwise the source theme's geometryRadius - so every non-Hold run, and a
+        /// Hold run that sets none, keeps exactly the source's radius.
+        /// </summary>
+        public static float ResolveSpawnRadius(SourceThemeDef theme, GoalDef goal)
+        {
+            var spawnRadius = goal?.TypeKind == GoalType.Hold ? goal.Protect?.SpawnRadius ?? 0 : 0;
+
+            if (double.IsFinite(spawnRadius) && spawnRadius > 0)
+                return (float)spawnRadius;
+
+            return theme?.GeometryRadius ?? 0f;
+        }
+
+        /// <summary>This run's spawn geometry radius; see <see cref="ResolveSpawnRadius"/>.</summary>
+        public float SpawnRadius => ResolveSpawnRadius(Composition?.Source, Composition?.Goal);
+
         private void ComputeSpawnAnchors()
         {
             var anchor = Composition?.AnchorPosition;
@@ -1129,15 +1158,17 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
+            var radius = SpawnRadius;
+
             switch (theme.GeometryKind)
             {
                 case SourceGeometry.Ring:
-                    spawnAnchors = WorldEventGeometry.Ring(anchor, theme.GeometryRadius, theme.GeometryPoints,
+                    spawnAnchors = WorldEventGeometry.Ring(anchor, radius, theme.GeometryPoints,
                         WorldEventGeometry.DefaultJitterMetres);
                     break;
 
                 case SourceGeometry.Edges:
-                    spawnAnchors = WorldEventGeometry.Edges(anchor, theme.GeometryRadius, theme.GeometryPoints,
+                    spawnAnchors = WorldEventGeometry.Edges(anchor, radius, theme.GeometryPoints,
                         WorldEventGeometry.DefaultJitterMetres);
                     break;
 
@@ -1146,7 +1177,7 @@ namespace ACE.Server.WorldEvents
                     // the champion, and this 5.2-adjacent log line still reports a real anchor count. The
                     // per-wave RESAMPLE that makes disc different from every other geometry happens in
                     // WaveAnchors, not here - sources and the boss keep using this Stage-time sample.
-                    spawnAnchors = WorldEventGeometry.Disc(anchor, theme.GeometryRadius, theme.GeometryPoints);
+                    spawnAnchors = WorldEventGeometry.Disc(anchor, radius, theme.GeometryPoints);
                     break;
 
                 default:
@@ -1154,7 +1185,8 @@ namespace ACE.Server.WorldEvents
                     break;
             }
 
-            log.Info($"[WORLDEVENT] run={RunId} geometry {theme.GeometryKind} radius={theme.GeometryRadius:F1} anchors={spawnAnchors.Count}");
+            log.Info($"[WORLDEVENT] run={RunId} geometry {theme.GeometryKind} radius={radius:F1} anchors={spawnAnchors.Count}" +
+                     (radius != theme.GeometryRadius ? $" (protect.spawnRadius; source radius {theme.GeometryRadius:F1})" : ""));
         }
 
         /// <summary>
@@ -1164,7 +1196,7 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private IReadOnlyList<Position> WaveAnchors()
         {
-            return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null);
+            return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null, SpawnRadius);
         }
 
         /// <summary>
@@ -1176,8 +1208,15 @@ namespace ACE.Server.WorldEvents
         public static IReadOnlyList<Position> ResolveWaveAnchors(SourceThemeDef theme, Position anchor,
             IReadOnlyList<Position> staged, Random rng)
         {
+            return ResolveWaveAnchors(theme, anchor, staged, rng, theme?.GeometryRadius ?? 0f);
+        }
+
+        /// <summary><see cref="ResolveWaveAnchors(SourceThemeDef, Position, IReadOnlyList{Position}, Random)"/> with the disc radius given (a Hold run's protect.spawnRadius).</summary>
+        public static IReadOnlyList<Position> ResolveWaveAnchors(SourceThemeDef theme, Position anchor,
+            IReadOnlyList<Position> staged, Random rng, float radius)
+        {
             if (theme != null && theme.GeometryKind == SourceGeometry.Disc)
-                return WorldEventGeometry.Disc(anchor, theme.GeometryRadius, theme.GeometryPoints, rng);
+                return WorldEventGeometry.Disc(anchor, radius, theme.GeometryPoints, rng);
 
             return staged;
         }
@@ -2280,6 +2319,54 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>
+        /// Hold runs only: every wave monster that is still asleep is asked to wake, through its own
+        /// landblock's action queue (Creature.TryWorldEventHoldWake runs there). Without this the wave stands
+        /// at the spawn ring until a player walks within its awareness range (often 20 m), and the seekers
+        /// never reach the targets. Asked again every tick while it stays asleep, so a monster with nobody in
+        /// reach wakes as soon as someone arrives. Never throws.
+        /// </summary>
+        private void TickHoldWake()
+        {
+            try
+            {
+                if (Composition?.Goal?.TypeKind != GoalType.Hold)
+                    return;
+
+                foreach (var creature in Spawner.LiveWaveCreatures)
+                {
+                    // A racy read on the world thread, used only to skip the enqueue for monsters already
+                    // awake; TryWorldEventHoldWake re-checks it on the landblock thread.
+                    if (creature.MonsterState != Creature.State.Idle)
+                        continue;
+
+                    var landblock = creature.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var target = creature;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (target.TryWorldEventHoldWake())
+                                log.Debug($"[WORLDEVENT] run={RunId} hold wake guid=0x{target.Guid.Full:X8} seeker={target.WorldEventSeeker} target={(target.AttackTarget as Creature)?.Name ?? "none"}");
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} hold wake threw", ex);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold wake pass threw", ex);
+            }
+        }
+
         /// <summary>Protected targets that have already said their spawn line. World thread only.</summary>
         private readonly HashSet<uint> protectedGreeted = new HashSet<uint>();
 
@@ -2740,6 +2827,8 @@ namespace ACE.Server.WorldEvents
 
             TickWaves(now);
 
+            TickHoldWake();
+
             TickBossDamage();
 
             TickBossHealthMilestones();
@@ -3067,6 +3156,19 @@ namespace ACE.Server.WorldEvents
 
             finishInvoked = true;
             Outcome = outcome;
+
+            // Before anything below can start cleanup: see frozenProgressText.
+            if (FreezesProgressAtFinish(Composition?.Goal))
+            {
+                try
+                {
+                    frozenProgressText = Objective?.ProgressText ?? "";
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} could not freeze the progress text", ex);
+                }
+            }
 
             if (Transition(WorldEventState.Resolved, $"finish:{outcome}"))
                 ResolvedAt = now;

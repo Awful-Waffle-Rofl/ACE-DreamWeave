@@ -159,6 +159,41 @@ namespace ACE.Server.WorldEvents
             return repaired != text;
         }
 
+        /// <summary>
+        /// The index of the smallest squared distance that is no more than <paramref name="maxDistSq"/>, or
+        /// -1 when none qualifies (empty list, everything too far, or not finite). Ties keep the first.
+        /// </summary>
+        public static int NearestWithin(IReadOnlyList<double> distSq, double maxDistSq)
+        {
+            var best = -1;
+
+            if (distSq == null)
+                return best;
+
+            for (var i = 0; i < distSq.Count; i++)
+            {
+                var d = distSq[i];
+
+                if (!double.IsFinite(d) || d < 0 || d > maxDistSq)
+                    continue;
+
+                if (best < 0 || d < distSq[best])
+                    best = i;
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// Hold runs only: whether a wave spawn candidate must be refused because the terrain snap put it in
+        /// an indoor cell (inside a building) while the run's anchor is outdoors (D6 - pure). An indoor
+        /// anchor is a deliberate indoor event, so it is never refused for that.
+        /// </summary>
+        public static bool RefusesIndoorSpawn(bool isHoldRun, bool isWave, bool candidateIndoors, bool anchorIndoors)
+        {
+            return isHoldRun && isWave && candidateIndoors && !anchorIndoors;
+        }
+
         /// <summary>One protected target's offset from the anchor, in metres east/north, and its facing.</summary>
         public readonly struct RingOffset
         {
