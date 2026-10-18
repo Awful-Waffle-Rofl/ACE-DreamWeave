@@ -71,10 +71,14 @@ namespace ACE.Server.Tests
             public double ActiveAt = T0;
             public readonly HoldObjective Objective;
 
+            /// <summary>Wave counts the objective reads (wave-based holds).</summary>
+            public HoldWaveCounts Waves;
+
             /// <param name="activeAt">Where the Active time comes from; null reads <see cref="ActiveAt"/>.</param>
             public HoldHarness(GoalDef goal, Func<double> activeAt = null)
             {
-                Objective = new HoldObjective(goal, () => Placed, () => Live, activeAt ?? (() => ActiveAt), null);
+                Objective = new HoldObjective(goal, () => Placed, () => Live, activeAt ?? (() => ActiveAt), null,
+                    null, () => Waves);
             }
 
             public void Place(params uint[] guids)
@@ -896,6 +900,11 @@ namespace ACE.Server.Tests
             "We made it! You have our thanks, friends.",
             "That is the last we will see of {family} today. Thank you!",
             "Driven off at last. Safe travels, and thank you.",
+            "A moment to breathe. Patch the wagons, quickly!",
+            "They fall back! Mend what you can before the next rush.",
+            "Well fought. Bind the damage before {family} return.",
+            "{waveProgress} - {alive} of {total} {nounPlural} still stand against {family}.",
+            // The time-only progress line, kept last: HoldProgress_SupportsTheFamilyToken reads it.
             "{alive} of {total} {nounPlural} still stand. Hold off {family} for {remaining}."
         };
 
@@ -946,7 +955,8 @@ namespace ACE.Server.Tests
             {
                 foreach (var template in CaravanLines)
                 {
-                    var line = WorldEventHoldRules.FillLine(template.Replace("{remaining}", "6:05"), family,
+                    var line = WorldEventHoldRules.FillLine(template.Replace("{remaining}", "6:05")
+                            .Replace("{waveProgress}", WorldEventHoldRules.WaveProgress(3, 7)), family,
                         "caravan", "caravans", "Holtburg", 2, 3, pct: 50);
 
                     Assert.IsFalse(line.Contains('{') || line.Contains('}'), $"unfilled token in \"{line}\"");
@@ -2140,6 +2150,376 @@ namespace ACE.Server.Tests
 
             var outsider = BuildHoldCreature();
             Assert.IsFalse(outsider.CanDamage(ward), "a monster from outside the event cannot");
+        }
+
+        // ---- wave-based hold ------------------------------------------------------------------------------
+
+        private static GoalDef WaveHoldGoal(int holdSeconds = 480, double minSeconds = 300, int wavesBase = 4,
+            double wavesPerParticipant = 0.2, int wavesCap = 10)
+        {
+            var protect = BuildProtect();
+            protect.Waves = new ScaledCount { Base = wavesBase, PerParticipant = wavesPerParticipant, Cap = wavesCap };
+            protect.MinSeconds = minSeconds;
+
+            return BuildHoldGoal(holdSeconds: holdSeconds, protect: protect);
+        }
+
+        [TestMethod]
+        public void Waves_TargetScalesWithTheCrowd_UpwardsOnly()
+        {
+            var h = new HoldHarness(WaveHoldGoal());
+
+            Assert.AreEqual(4, h.Objective.TargetWaves, "base 4 before any sample");
+
+            h.Objective.OnAudienceResampled(10);
+            Assert.AreEqual(6, h.Objective.TargetWaves, "4 + ceil(0.2 * 10)");
+
+            h.Objective.OnAudienceResampled(3);
+            Assert.AreEqual(6, h.Objective.TargetWaves, "never lowered when players leave");
+
+            h.Objective.OnAudienceResampled(500);
+            Assert.AreEqual(10, h.Objective.TargetWaves, "capped");
+        }
+
+        [TestMethod]
+        public void WavesWon_NeedsEveryWaveStartedClearedAndTheMinimumTime()
+        {
+            var done = new HoldWaveCounts(started: 7, landed: 7, cleared: 7, live: 0);
+
+            Assert.IsTrue(HoldObjective.WavesWon(done, 7, 300, 300));
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(6, 6, 6, 0), 7, 400, 300), "a wave still to come");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 6, 3), 7, 400, 300), "the last wave is still standing");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 7, 1), 7, 400, 300), "a straggler left");
+            Assert.IsFalse(HoldObjective.WavesWon(done, 7, 299, 300), "before the minimum time");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 0, 0, 0), 7, 400, 300), "nothing ever landed");
+        }
+
+        [TestMethod]
+        public void WantsAnotherWave_UntilBothTheCountAndTheMinimumTime()
+        {
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(started: 3, target: 7, elapsed: 400, minSeconds: 300), "waves still to come");
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(7, 7, 200, 300), "count met but the minimum is not: keep them coming");
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(7, 7, 300, 300), "both met: let the field clear");
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(9, 7, 320, 300));
+        }
+
+        [TestMethod]
+        public void Run_WaveHold_SucceedsTheMomentTheLastWaveIsCleared()
+        {
+            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 300, wavesBase: 4, wavesPerParticipant: 0, wavesCap: 4);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+            evt = BuildHoldEvent(goal, harness.Objective, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            harness.Waves = new HoldWaveCounts(4, 4, 3, 2);
+            evt.Tick(T0 + 310);
+            Assert.AreEqual(WorldEventState.Active, evt.State, "the final wave is still fighting");
+
+            harness.Waves = new HoldWaveCounts(4, 4, 4, 0);
+            evt.Tick(T0 + 311);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "success on the tick its last monster is gone");
+        }
+
+        [TestMethod]
+        public void Run_WaveHold_ClearedEarly_WaitsForTheMinimumTime()
+        {
+            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 300, wavesBase: 4, wavesPerParticipant: 0, wavesCap: 4);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+            evt = BuildHoldEvent(goal, harness.Objective, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+
+            harness.Waves = new HoldWaveCounts(4, 4, 4, 0);
+            evt.Tick(T0 + 200);
+            Assert.AreEqual(WorldEventState.Active, evt.State, "all four waves cleared, but only 200 s in");
+            Assert.IsTrue(harness.Objective.WantsAnotherWave(T0 + 200), "so more waves keep coming");
+
+            harness.Waves = new HoldWaveCounts(6, 6, 6, 0);
+            evt.Tick(T0 + 305);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome);
+        }
+
+        [TestMethod]
+        public void Run_WaveHold_HoldSecondsIsTheSafetyCap()
+        {
+            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 300, wavesBase: 4, wavesPerParticipant: 0, wavesCap: 4);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+            evt = BuildHoldEvent(goal, harness.Objective, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+            harness.Waves = new HoldWaveCounts(4, 4, 3, 5);   // the last wave never dies
+
+            evt.Tick(T0 + 479);
+            Assert.AreEqual(WorldEventState.Active, evt.State);
+
+            evt.Tick(T0 + 480);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "holdSeconds ends it with the caravans still standing");
+        }
+
+        [TestMethod]
+        public void Run_WaveHold_StillFailsWhenTheTargetsFall()
+        {
+            var goal = WaveHoldGoal();
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+            evt = BuildHoldEvent(goal, harness.Objective);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2);
+            harness.Waves = new HoldWaveCounts(9, 9, 9, 0);
+            harness.Kill(1);
+            harness.Kill(2);
+
+            evt.Tick(T0 + 400);
+
+            Assert.AreEqual(WorldEventOutcome.FailedObjectiveLost, evt.Outcome, "waves won with no caravans left is still a loss");
+        }
+
+        [TestMethod]
+        public void WaveProgress_AndTheWaveStartLine()
+        {
+            Assert.AreEqual("Wave 3 of 7", WorldEventHoldRules.WaveProgress(3, 7));
+            Assert.AreEqual("Wave 0 of 7", WorldEventHoldRules.WaveProgress(0, 7));
+            Assert.AreEqual("Wave 8, holding the line", WorldEventHoldRules.WaveProgress(8, 7));
+
+            var goal = WaveHoldGoal(wavesBase: 7, wavesPerParticipant: 0, wavesCap: 7);
+            goal.Protect.Noun = "caravan";
+            goal.Protect.NounPlural = "caravans";
+
+            var h = new HoldHarness(goal);
+            h.Place(1, 2, 3);
+
+            Assert.AreEqual("Wave 3 of 7 - 3 of 3 caravans stand.", h.Objective.WaveStartText(3));
+            AssertAscii(h.Objective.WaveStartText(3));
+            AssertAscii(h.Objective.WaveStartText(9));
+        }
+
+        [TestMethod]
+        public void WaveHold_DefaultProgressShowsTheWave()
+        {
+            var goal = WaveHoldGoal(wavesBase: 7, wavesPerParticipant: 0, wavesCap: 7);
+            goal.ProgressTemplate = null;
+
+            var h = new HoldHarness(goal);
+            h.Place(1, 2, 3);
+            h.Waves = new HoldWaveCounts(3, 3, 2, 4);
+            h.Objective.Tick(T0 + 60);
+
+            Assert.AreEqual("Wave 3 of 7 - 3 of 3 wards stand.", h.Objective.ProgressText);
+        }
+
+        [TestMethod]
+        public void FinalWave_IsTheCountedLastOne_AndALittleBigger()
+        {
+            var h = new HoldHarness(WaveHoldGoal(wavesBase: 7, wavesPerParticipant: 0, wavesCap: 7));
+
+            Assert.IsFalse(h.Objective.IsFinalWave(6));
+            Assert.IsTrue(h.Objective.IsFinalWave(7));
+            Assert.IsFalse(h.Objective.IsFinalWave(8), "an extra wave after the count is not the final one");
+            Assert.IsFalse(new HoldHarness(BuildHoldGoal()).Objective.IsFinalWave(1), "a time-only hold has no final wave");
+
+            Assert.AreEqual(1, WorldEventHoldRules.FinalWaveBonus(4), "a quarter more, at least one");
+            Assert.AreEqual(2, WorldEventHoldRules.FinalWaveBonus(6));
+            Assert.AreEqual(1, WorldEventHoldRules.FinalWaveBonus(0));
+        }
+
+        [TestMethod]
+        public void TimeOnlyHold_IsUnchangedWithoutWaves()
+        {
+            var h = new HoldHarness(BuildHoldGoal(holdSeconds: 420));
+            h.Place(1);
+            h.Waves = new HoldWaveCounts(50, 50, 50, 0);
+
+            h.Objective.Tick(T0 + 419);
+            Assert.IsFalse(h.Objective.IsComplete, "waves mean nothing to a goal without protect.waves");
+            Assert.IsTrue(h.Objective.WantsAnotherWave(T0 + 419));
+
+            h.Objective.Tick(T0 + 420);
+            Assert.IsTrue(h.Objective.IsComplete);
+        }
+
+        [TestMethod]
+        public void GoalsJson_WaveSettings_ParseAndValidate()
+        {
+            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""radius"": 11.0, ""waves"": { ""base"": 4, ""perParticipant"": 0.2, ""cap"": 10 }, ""minSeconds"": 300.0,
+                  ""healBetweenWaves"": 0.15, ""maxHealPerTenSeconds"": 0.10,");
+
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
+
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), string.Join(" | ", store.Diagnostics));
+            var p = store.Goals["hold_wards"].Protect;
+            Assert.IsTrue(p.IsWaveBased);
+            Assert.AreEqual(10, p.Waves.Cap);
+            Assert.AreEqual(300.0, p.MinSeconds, 1e-9);
+            Assert.AreEqual(0.15, p.HealBetweenWaves, 1e-9);
+            Assert.AreEqual(0.10, p.MaxHealPerTenSeconds, 1e-9);
+
+            foreach (var (bad, key) in new[]
+            {
+                (@"""waves"": { ""base"": 0, ""perParticipant"": 0, ""cap"": 4 },", "protect.waves"),
+                (@"""minSeconds"": -1,", "protect.minSeconds"),
+                (@"""healBetweenWaves"": 1.5,", "protect.healBetweenWaves"),
+                (@"""maxHealPerTenSeconds"": -0.1,", "protect.maxHealPerTenSeconds")
+            })
+            {
+                var badJson = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, " + bad);
+                store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(badJson), null, null);
+
+                Assert.IsFalse(store.Goals.ContainsKey("hold_wards"), bad);
+                Assert.IsTrue(store.Diagnostics.Any(d => d.Contains(key)), key);
+            }
+
+            // minSeconds above the safety cap can never be used.
+            var tooLong = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""radius"": 6.0, ""waves"": { ""base"": 4, ""perParticipant"": 0, ""cap"": 4 }, ""minSeconds"": 600,");
+            store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(tooLong, holdSeconds: 480), null, null);
+
+            Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.minSeconds") && d.Contains("holdSeconds")));
+        }
+
+        // ---- healing between waves -----------------------------------------------------------------------
+
+        [TestMethod]
+        public void BetweenWavesHeal_IsTheFractionOfMaxHealth()
+        {
+            Assert.AreEqual(1500, WorldEventHoldRules.BetweenWavesHeal(10000, 0.15));
+            Assert.AreEqual(10000, WorldEventHoldRules.BetweenWavesHeal(10000, 5.0), "never more than full");
+            Assert.AreEqual(0, WorldEventHoldRules.BetweenWavesHeal(10000, 0), "0 heals nothing");
+            Assert.AreEqual(0, WorldEventHoldRules.BetweenWavesHeal(0, 0.15));
+        }
+
+        // ---- player healing -----------------------------------------------------------------------------
+
+        [TestMethod]
+        public void ConvertPlayerHeal_ATypicalHealIsFourPercent_CappedPerTenSeconds()
+        {
+            double tokens = 0, lastAt = 0;
+
+            Assert.AreEqual(400, WorldEventHoldRules.ConvertPlayerHeal(100, 10000, 0.10, ref tokens, ref lastAt, T0),
+                "one typical heal (100) restores 4% of 10000");
+            Assert.AreEqual(600, WorldEventHoldRules.ConvertPlayerHeal(300, 10000, 0.10, ref tokens, ref lastAt, T0),
+                "a bigger heal is worth more, but only 600 of the 1000 per ten seconds is left");
+            Assert.AreEqual(0, WorldEventHoldRules.ConvertPlayerHeal(100, 10000, 0.10, ref tokens, ref lastAt, T0),
+                "the cap is spent");
+            Assert.AreEqual(100, WorldEventHoldRules.ConvertPlayerHeal(100, 10000, 0.10, ref tokens, ref lastAt, T0 + 1),
+                "it refills at 100 per second (10% of 10000 per ten seconds)");
+        }
+
+        [TestMethod]
+        public void ConvertPlayerHeal_ManyHealersCannotBeatTheCap()
+        {
+            double tokens = 0, lastAt = 0;
+            var healed = 0;
+
+            // Ten healers each landing a 200-point heal every second for 30 seconds.
+            for (var t = 0; t < 30; t++)
+                for (var healer = 0; healer < 10; healer++)
+                    healed += WorldEventHoldRules.ConvertPlayerHeal(200, 10000, 0.10, ref tokens, ref lastAt, T0 + t);
+
+            // A full first window plus 29 seconds of refill: about 1000 + 2900.
+            Assert.IsTrue(healed <= 3900 + 10, $"healed {healed}, more than the cap allows");
+            Assert.IsTrue(healed >= 3800, $"healed {healed}, the cap should be the only limit");
+        }
+
+        [TestMethod]
+        public void ConvertPlayerHeal_OffWhenTheSettingIsZero()
+        {
+            double tokens = 0, lastAt = 0;
+
+            Assert.AreEqual(0, WorldEventHoldRules.ConvertPlayerHeal(100, 10000, 0, ref tokens, ref lastAt, T0));
+            Assert.AreEqual(0, WorldEventHoldRules.ConvertPlayerHeal(-50, 10000, 0.1, ref tokens, ref lastAt, T0), "never a negative heal");
+        }
+
+        [TestMethod]
+        public void TakeFromBucket_Guards()
+        {
+            double tokens = 0, lastAt = 0;
+
+            Assert.AreEqual(0, WorldEventHoldRules.TakeFromBucket(double.NaN, 10, 10, ref tokens, ref lastAt, T0));
+            Assert.AreEqual(-3, WorldEventHoldRules.TakeFromBucket(-3, 10, 10, ref tokens, ref lastAt, T0), "non-positive passes through");
+            Assert.AreEqual(0, WorldEventHoldRules.TakeFromBucket(5, 0, 10, ref tokens, ref lastAt, T0), "no rate, nothing through");
+        }
+
+        [TestMethod]
+        public void HealSpellRule_OnlyBeneficialHealthBoosts()
+        {
+            Assert.IsTrue(Creature.IsWorldEventProtectedHealSpell(true, ACE.Entity.Enum.SpellType.Boost, ACE.Entity.Enum.DamageType.Health, 55, 120),
+                "Heal Other");
+            Assert.IsFalse(Creature.IsWorldEventProtectedHealSpell(false, ACE.Entity.Enum.SpellType.Boost, ACE.Entity.Enum.DamageType.Health, -50, -100),
+                "Harm");
+            Assert.IsFalse(Creature.IsWorldEventProtectedHealSpell(true, ACE.Entity.Enum.SpellType.Boost, ACE.Entity.Enum.DamageType.Stamina, 55, 120),
+                "a stamina boost");
+            Assert.IsFalse(Creature.IsWorldEventProtectedHealSpell(true, ACE.Entity.Enum.SpellType.Enchantment, ACE.Entity.Enum.DamageType.Health, 0, 0),
+                "a buff");
+            Assert.IsFalse(Creature.IsWorldEventProtectedHealSpell(null), "no spell");
+        }
+
+        [TestMethod]
+        public void ProtectedHeal_RealCaravan_ConvertsAndCaps()
+        {
+            var (_, ward, _) = BuildHitScene(120);
+            ward.P_WorldEvent.Composition.Goal.Protect.MaxHealPerTenSeconds = 0.10;
+
+            Assert.IsTrue(ward.AcceptsWorldEventPlayerHeal);
+
+            var max = ward.Health.MaxValue;
+            var first = ward.ConvertWorldEventProtectedHeal(100, T0);
+
+            Assert.AreEqual((int)Math.Floor(max * 0.04), first, "4% of max for a typical heal");
+
+            var total = first;
+
+            for (var i = 0; i < 20; i++)
+                total += ward.ConvertWorldEventProtectedHeal(100, T0);
+
+            Assert.IsTrue(total <= max * 0.10 + 1, $"capped at 10% of max per window, got {total} of {max}");
+
+            var plain = BuildHoldCreature();
+            Assert.AreEqual(100, plain.ConvertWorldEventProtectedHeal(100, T0), "any other creature is healed normally");
+            Assert.IsFalse(plain.AcceptsWorldEventPlayerHeal);
+        }
+
+        [TestMethod]
+        public void ProtectedHeal_TurnedOffByTheGoal()
+        {
+            var (_, ward, _) = BuildHitScene(120);
+            ward.P_WorldEvent.Composition.Goal.Protect.MaxHealPerTenSeconds = 0;
+
+            Assert.IsFalse(ward.AcceptsWorldEventPlayerHeal, "spells and kits are refused");
+            Assert.AreEqual(0, ward.ConvertWorldEventProtectedHeal(100, T0));
+        }
+
+        // ---- less clutter ------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void Scene_OneCartBehindEachTarget_SpreadOnTheWiderRing()
+        {
+            var ring = WorldEventHoldRules.RingOffsets(3, 11.0);
+            var cart = new DecorDef { Wcid = 28527, Dy = -3.5f, Scale = 1, Speed = 1, Yaw = 90, Snap = true };
+
+            var placed = WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { cart });
+
+            Assert.AreEqual(3, placed.Count);
+
+            foreach (var p in placed)
+                Assert.AreEqual(7.5, Math.Sqrt(p.Dx * p.Dx + p.Dy * p.Dy), 1e-3, "11 m ring, cart 3.5 m back toward the fire");
+
+            // Targets 11 m out are about 19 m apart: the group has to split up.
+            var gap = Math.Sqrt(Math.Pow(ring[0].Dx - ring[1].Dx, 2) + Math.Pow(ring[0].Dy - ring[1].Dy, 2));
+            Assert.AreEqual(19.05, gap, 0.05);
         }
 
         // ---- neighbouring landblocks --------------------------------------------------------------------

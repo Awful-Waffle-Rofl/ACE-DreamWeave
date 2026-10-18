@@ -113,6 +113,43 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("minDeathSeconds")]
         public double MinDeathSeconds { get; set; }
 
+        public const double DefaultMinSeconds = 300;
+        public const double DefaultMaxHealPerTenSeconds = 0.10;
+
+        /// <summary>
+        /// Optional: wave-based hold. How many waves the group must survive (base / perParticipant / cap,
+        /// sized at Active and raised, never lowered, as more players arrive). When set, the hold succeeds the
+        /// moment the LAST monster of the last wave dies with enough targets standing - once at least
+        /// <see cref="MinSeconds"/> have passed; until then extra waves keep coming. The final counted wave is
+        /// a little bigger. Absent keeps the time-only hold (success at holdSeconds). holdSeconds stays the
+        /// safety cap either way.
+        /// </summary>
+        [JsonPropertyName("waves")]
+        public ScaledCount Waves { get; set; }
+
+        /// <summary>Wave-based holds only: the hold never succeeds before this many seconds; waves keep coming until then.</summary>
+        [JsonPropertyName("minSeconds")]
+        public double MinSeconds { get; set; } = DefaultMinSeconds;
+
+        /// <summary>
+        /// Optional: fraction (0 to 1) of max health every surviving target regains each time a wave is
+        /// fully cleared. 0 (the default) heals nothing.
+        /// </summary>
+        [JsonPropertyName("healBetweenWaves")]
+        public double HealBetweenWaves { get; set; }
+
+        /// <summary>
+        /// Players may heal targets (heal spells and health kits): each heal becomes a share of max health,
+        /// one typical player heal giving WorldEventHoldRules.HealShareOfTypicalHeal, capped at this fraction
+        /// of max health per target per ten seconds. 0 turns player healing of targets off. Default 0.10.
+        /// </summary>
+        [JsonPropertyName("maxHealPerTenSeconds")]
+        public double MaxHealPerTenSeconds { get; set; } = DefaultMaxHealPerTenSeconds;
+
+        /// <summary>True when the hold counts waves (<see cref="Waves"/> is set).</summary>
+        [JsonIgnore]
+        public bool IsWaveBased => Waves != null;
+
         /// <summary>
         /// The max health every target is given while damage is time-based (<see cref="UndefendedSeconds"/>
         /// above 0). The number itself changes nothing about how long a target lasts - each hit is a share of
@@ -238,11 +275,15 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("success")]
         public List<string> Success { get; set; } = new List<string>();
 
+        /// <summary>Said by one surviving target when the targets heal between waves (protect.healBetweenWaves).</summary>
+        [JsonPropertyName("heal")]
+        public List<string> Heal { get; set; } = new List<string>();
+
         /// <summary>Every pool, with its goals.json key, for load-time repair and diagnostics.</summary>
         [JsonIgnore]
         public IEnumerable<(string Key, List<string> Pool)> Pools => new[]
         {
-            ("spawn", Spawn), ("health", Health), ("destroyed", Destroyed), ("success", Success)
+            ("spawn", Spawn), ("health", Health), ("destroyed", Destroyed), ("success", Success), ("heal", Heal)
         };
     }
 }

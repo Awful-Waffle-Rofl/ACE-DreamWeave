@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 using ACE.Server.Physics;
@@ -291,6 +292,62 @@ namespace ACE.Server.WorldObjects
             }
 
             return amount;
+        }
+
+        /// <summary>The player-heal cap bucket (WorldEventHoldRules.ConvertPlayerHeal): what may still be healed now, and when it was last topped up.</summary>
+        private double worldEventProtectedHealTokens;
+        private double worldEventProtectedHealLastAt;
+
+        /// <summary>
+        /// True when players may heal this creature: a living Hold protected target whose goal allows player
+        /// healing (protect.maxHealPerTenSeconds above 0). Every other creature: false.
+        /// </summary>
+        public bool AcceptsWorldEventPlayerHeal =>
+            WorldEventProtected && !IsDead && (P_WorldEvent?.Composition?.Goal?.Protect?.MaxHealPerTenSeconds ?? 0) > 0;
+
+        /// <summary>
+        /// The only spells a player may cast on a protected target (D6 - pure): a beneficial Boost that raises
+        /// HEALTH (Heal Other and its kin). Everything else - buffs, other vitals, anything harmful - stays
+        /// refused.
+        /// </summary>
+        public static bool IsWorldEventProtectedHealSpell(bool isBeneficial, ACE.Entity.Enum.SpellType type,
+            ACE.Entity.Enum.DamageType vital, int boost, int maxBoost)
+        {
+            return isBeneficial && type == ACE.Entity.Enum.SpellType.Boost && vital == ACE.Entity.Enum.DamageType.Health
+                && Math.Max(boost, maxBoost) > 0;
+        }
+
+        /// <summary><see cref="IsWorldEventProtectedHealSpell(bool, ACE.Entity.Enum.SpellType, ACE.Entity.Enum.DamageType, int, int)"/> for a spell.</summary>
+        public static bool IsWorldEventProtectedHealSpell(ACE.Server.Entity.Spell spell)
+        {
+            return spell != null && IsWorldEventProtectedHealSpell(spell.IsBeneficial, spell.MetaSpellType,
+                spell.VitalDamageType, spell.Boost, spell.MaxBoost);
+        }
+
+        /// <summary>
+        /// A player's heal (spell or kit) on this protected target, converted to the health actually restored:
+        /// a share of max health sized against a typical player heal, capped per ten seconds
+        /// (WorldEventHoldRules.ConvertPlayerHeal). Returns <paramref name="rawHeal"/> unchanged for any
+        /// creature that is not protected.
+        /// </summary>
+        public int ConvertWorldEventProtectedHeal(double rawHeal)
+        {
+            return ConvertWorldEventProtectedHeal(rawHeal, ACE.Common.Time.GetUnixTime());
+        }
+
+        /// <summary><see cref="ConvertWorldEventProtectedHeal(double)"/> at a given clock (the test seam).</summary>
+        public int ConvertWorldEventProtectedHeal(double rawHeal, double now)
+        {
+            if (!WorldEventProtected)
+                return (int)Math.Round(rawHeal);
+
+            var protect = P_WorldEvent?.Composition?.Goal?.Protect;
+
+            if (protect == null)
+                return 0;
+
+            return ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal, Health.MaxValue, protect.MaxHealPerTenSeconds,
+                ref worldEventProtectedHealTokens, ref worldEventProtectedHealLastAt, now);
         }
 
         private bool IsUsableSeekTarget(Creature target)

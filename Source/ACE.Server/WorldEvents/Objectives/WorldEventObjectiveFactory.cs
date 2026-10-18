@@ -84,7 +84,7 @@ namespace ACE.Server.WorldEvents.Objectives
 
                     return new HoldObjective(goal, () => evt.Spawner.ProtectedGuids,
                         () => evt.Spawner.LiveProtectedGuids, () => evt.ActiveAt, evt.Participation,
-                        () => evt.Composition?.FamilyDisplayName);
+                        () => evt.Composition?.FamilyDisplayName, () => evt.HoldWaveCounts);
 
                 default:
 

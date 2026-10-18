@@ -711,6 +711,11 @@ namespace ACE.Server.WorldObjects
                     srcVital = "stamina";
                     break;
                 default:   // Health
+                    // WaffleACE fork, World Events Hold: a heal on a protected target becomes a share of its max
+                    // health (damage to it is time-based), capped per ten seconds. A no-op for every other creature.
+                    if (tryBoost > 0 && targetCreature.WorldEventProtected)
+                        tryBoost = targetCreature.ConvertWorldEventProtectedHeal(tryBoost);
+
                     boost = targetCreature.UpdateVitalDelta(targetCreature.Health, tryBoost);
                     srcVital = "health";
 

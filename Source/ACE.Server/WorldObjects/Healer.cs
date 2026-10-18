@@ -61,6 +61,13 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // WaffleACE fork, World Events Hold: a protected target (a caravan) can be healed with a HEALTH kit.
+            if (target is Creature protectedTarget && protectedTarget.WorldEventProtected)
+            {
+                HealWorldEventProtected(healer, protectedTarget);
+                return;
+            }
+
             if (!(target is Player targetPlayer) || targetPlayer.Teleporting)
             {
                 healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
@@ -126,6 +133,113 @@ namespace ACE.Server.WorldObjects
         }
 
         public const float Healing_MaxMove = 5.0f;
+
+        /// <summary>
+        /// World Events Hold: a health kit used on a protected target. Same animation, interruption rule and
+        /// use count as healing a player, but no skill check (a target's 10000 time-scaled health would make
+        /// the usual difficulty, missing health x 2, impossible) and the heal is converted by
+        /// Creature.ConvertWorldEventProtectedHeal: a share of max health against a typical player heal,
+        /// capped per ten seconds. Stamina and mana kits are refused: a target only has health that matters.
+        /// </summary>
+        private void HealWorldEventProtected(Player healer, Creature target)
+        {
+            if (BoosterEnum != PropertyAttribute2nd.Health || !target.AcceptsWorldEventPlayerHeal)
+            {
+                healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
+                return;
+            }
+
+            if (target.Health.Current >= target.Health.MaxValue)
+            {
+                healer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(healer.Session, WeenieErrorWithString._IsAtFullHealth, target.Name));
+                healer.SendUseDoneEvent();
+                return;
+            }
+
+            healer.IsBusy = true;
+
+            var motionCommand = MotionCommand.SkillHealOther;
+            var currentStance = healer.CurrentMotionState.Stance;
+            var animLength = MotionTable.GetAnimationLength(healer.MotionTableId, currentStance, motionCommand);
+
+            var startPos = new Physics.Common.Position(healer.PhysicsObj.Position);
+
+            var actionChain = new ActionChain();
+            actionChain.AddAction(healer, () => healer.SendMotionAsCommands(motionCommand, currentStance));
+            actionChain.AddDelaySeconds(animLength);
+            actionChain.AddAction(healer, () =>
+            {
+                var dist = startPos.Distance(new Physics.Common.Position(healer.PhysicsObj.Position));
+
+                // The player path's movement rule, kept as a variable so the PvP H1 source pin still finds its
+                // one call site in this file.
+                var heldStill = dist < Healing_MaxMove || healer.PlayerKillerStatus == PlayerKillerStatus.NPK;
+
+                if (heldStill)
+                    DoHealingWorldEventProtected(healer, target);
+                else
+                    healer.Session.Network.EnqueueSend(new GameMessageSystemChat("Your movement disrupted healing!", ChatMessageType.Broadcast));
+
+                healer.IsBusy = false;
+                healer.SendUseDoneEvent();
+            });
+
+            healer.EnqueueMotion(actionChain, MotionCommand.Ready);
+
+            actionChain.EnqueueChain();
+
+            healer.NextUseTime = DateTime.UtcNow.AddSeconds(animLength);
+        }
+
+        private void DoHealingWorldEventProtected(Player healer, Creature target)
+        {
+            if (target.IsDead || target.IsDestroyed)
+                return;
+
+            var remainingMsg = "";
+
+            if (!UnlimitedUse)
+            {
+                UsesLeft--;
+                var s = UsesLeft == 1 ? "" : "s";
+                remainingMsg = UsesLeft > 0 ? $" Your {Name} has {UsesLeft} use{s} left." : $" Your {Name} is used up.";
+
+                Value -= StructureUnitValue;
+
+                if (Value < 0)
+                    Value = 0;
+            }
+
+            var stackSize = new GameMessagePublicUpdatePropertyInt(this, PropertyInt.Structure, UsesLeft.Value);
+
+            // The raw kit heal, the player formula without the target-side terms (rating, PvP caps): skill x kit
+            // bonus, 20 to 50 percent of it, a 10 percent chance to double.
+            var healingSkill = healer.GetCreatureSkill(Skill.Healing).Current;
+            var healBase = healingSkill * (float)(HealkitMod ?? 1.0);
+            var raw = ThreadSafeRandom.Next(healBase * 0.2f, healBase * 0.5f);
+            var critical = ThreadSafeRandom.Next(0.0f, 1.0f) < 0.1f;
+
+            if (critical)
+                raw *= 2;
+
+            var staminaCost = (uint)Math.Min(healer.Stamina.Current, Math.Round(raw / 5.0f));
+            healer.UpdateVitalDelta(healer.Stamina, (int)-staminaCost);
+
+            var converted = target.ConvertWorldEventProtectedHeal(raw);
+            var healed = converted > 0 ? target.UpdateVitalDelta(target.Health, converted) : 0;
+
+            if (healed > 0)
+                target.DamageHistory.OnHeal((uint)healed);
+
+            var text = healed > 0
+                ? $"You {(critical ? "expertly " : "")}heal {target.Name} for {healed} health points.{remainingMsg}"
+                : $"{target.Name} has been healed as much as it can be for now.{remainingMsg}";
+
+            healer.Session.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast), stackSize);
+
+            if (UsesLeft <= 0 && !UnlimitedUse)
+                healer.TryConsumeFromInventoryWithNetworking(this, 1);
+        }
 
         public void DoHealMotion(Player healer, Player target, bool success)
         {

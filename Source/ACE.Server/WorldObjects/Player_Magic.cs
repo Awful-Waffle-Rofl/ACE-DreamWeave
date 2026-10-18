@@ -492,6 +492,12 @@ namespace ACE.Server.WorldObjects
             if (spell.School != MagicSchool.ItemEnchantment && targetCreature == null)
                 return true;
 
+            // WaffleACE fork, World Events Hold: a protected target (a caravan the players defend) accepts ONE kind
+            // of spell, a health heal, while its goal allows player healing. Everything else - other buffs,
+            // anything harmful - stays invalid, exactly as for any other non-player creature.
+            if (targetCreature != null && targetCreature.WorldEventProtected)
+                return !(targetCreature.AcceptsWorldEventPlayerHeal && Creature.IsWorldEventProtectedHealSpell(spell));
+
             // Invalidate beneficial spells against Creature/Non-player targets
             if (targetCreature != null && targetPlayer == null && spell.IsBeneficial)
                 return true;

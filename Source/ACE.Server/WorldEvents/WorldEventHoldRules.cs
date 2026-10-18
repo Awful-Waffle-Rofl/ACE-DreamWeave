@@ -233,6 +233,92 @@ namespace ACE.Server.WorldEvents
         public const double DefaultCapBurstSeconds = 2.0;
 
         /// <summary>
+        /// A token bucket (D6 - pure): refills at <paramref name="ratePerSecond"/> up to
+        /// <paramref name="capacity"/>, starting full (lastAt 0 = never used), and lets through at most what it
+        /// holds. Shared by the caravan damage cap and the player-heal cap.
+        /// </summary>
+        public static double TakeFromBucket(double requested, double ratePerSecond, double capacity,
+            ref double tokens, ref double lastAt, double now)
+        {
+            if (!double.IsFinite(requested))
+                return 0;
+
+            if (requested <= 0)
+                return requested;
+
+            if (!(ratePerSecond > 0) || !(capacity > 0) || !double.IsFinite(now))
+                return 0;
+
+            if (!(lastAt > 0) || !double.IsFinite(lastAt) || !double.IsFinite(tokens))
+                tokens = capacity;
+            else
+                tokens = Math.Min(capacity, tokens + ratePerSecond * Math.Max(0, now - lastAt));
+
+            lastAt = now;
+
+            var allowed = Math.Min(requested, tokens);
+
+            tokens -= allowed;
+
+            return allowed;
+        }
+
+        /// <summary>What counts as one typical player heal (a Heal VI cast or a decent healing kit), in raw health points.</summary>
+        public const double TypicalPlayerHeal = 100.0;
+
+        /// <summary>The share of a protected target's max health one typical player heal restores.</summary>
+        public const double HealShareOfTypicalHeal = 0.04;
+
+        /// <summary>
+        /// A player's heal on a protected target, converted (D6 - pure): damage to targets is time-based (a
+        /// share of max health), so a raw heal is converted the same way - one typical player heal restores
+        /// <see cref="HealShareOfTypicalHeal"/> of max health, bigger heals proportionally more - then capped
+        /// by the target's own bucket at maxHealPerTenSeconds of max health per ten seconds. Returns the health
+        /// to restore (0 when healing is off or the cap is spent).
+        /// </summary>
+        public static int ConvertPlayerHeal(double rawHeal, uint maxHealth, double maxHealPerTenSeconds,
+            ref double tokens, ref double lastAt, double now)
+        {
+            if (!(rawHeal > 0) || maxHealth == 0 || !double.IsFinite(maxHealPerTenSeconds) || !(maxHealPerTenSeconds > 0))
+                return 0;
+
+            var wanted = maxHealth * HealShareOfTypicalHeal * (rawHeal / TypicalPlayerHeal);
+
+            var windowAllowance = maxHealth * maxHealPerTenSeconds;
+
+            var allowed = TakeFromBucket(wanted, windowAllowance / 10.0, windowAllowance, ref tokens, ref lastAt, now);
+
+            return (int)Math.Floor(allowed);
+        }
+
+        /// <summary>The health one between-waves heal restores: max health times the fraction, at least 1 when the fraction is above 0.</summary>
+        public static int BetweenWavesHeal(uint maxHealth, double fraction)
+        {
+            if (maxHealth == 0 || !double.IsFinite(fraction) || !(fraction > 0))
+                return 0;
+
+            return Math.Max(1, (int)Math.Round(maxHealth * Math.Min(1.0, fraction)));
+        }
+
+        /// <summary>How much bigger (in creatures) the final counted wave is, for a wave of <paramref name="baseSize"/>: a quarter more, at least one.</summary>
+        public static int FinalWaveBonus(int baseSize)
+        {
+            return Math.Max(1, (int)Math.Ceiling(Math.Max(0, baseSize) * 0.25));
+        }
+
+        /// <summary>
+        /// "Wave 3 of 7", or "Wave 8, holding the line" once the counted waves are spent and the minimum time is
+        /// keeping the waves coming. "Wave 0 of 7" before the first.
+        /// </summary>
+        public static string WaveProgress(int started, int target)
+        {
+            if (target > 0 && started > target)
+                return $"Wave {started}, holding the line";
+
+            return $"Wave {Math.Max(0, started)} of {Math.Max(0, target)}";
+        }
+
+        /// <summary>
         /// The caravan damage cap (D6 - pure): a token bucket that refills at maxHealth / minDeathSeconds per
         /// second, holding at most <see cref="DefaultCapBurstSeconds"/> of that. A hit takes what it asked
         /// for, up to what is in the bucket. So however many attackers pile on, the target loses at most its
@@ -247,20 +333,8 @@ namespace ACE.Server.WorldEvents
                 return requested;
 
             var rate = maxHealth / minDeathSeconds;
-            var capacity = rate * DefaultCapBurstSeconds;
 
-            if (!(lastAt > 0) || !double.IsFinite(lastAt) || !double.IsFinite(tokens))
-                tokens = capacity;
-            else
-                tokens = Math.Min(capacity, tokens + rate * Math.Max(0, now - lastAt));
-
-            lastAt = now;
-
-            var allowed = Math.Min(requested, tokens);
-
-            tokens -= allowed;
-
-            return (float)allowed;
+            return (float)TakeFromBucket(requested, rate, rate * DefaultCapBurstSeconds, ref tokens, ref lastAt, now);
         }
 
         /// <summary>

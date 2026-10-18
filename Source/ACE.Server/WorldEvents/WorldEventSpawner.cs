@@ -498,6 +498,18 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>Waves that landed (at least one monster adopted). Hold's wave counting reads it.</summary>
+        public int LandedWaveCount
+        {
+            get { lock (sync) return waveRecords.Count; }
+        }
+
+        /// <summary>Waves whose every monster has died. Separate from <see cref="TakeClearedWaves"/>, which the pace controller drains.</summary>
+        public int ClearedWaveCount
+        {
+            get { lock (sync) return waveRecords.Values.Count(r => r.Cleared); }
+        }
+
         /// <summary>True when <paramref name="guid"/> is a Hold protected target this run placed.</summary>
         public bool IsProtectedGuid(uint guid)
         {

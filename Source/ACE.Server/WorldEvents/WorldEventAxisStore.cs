@@ -662,6 +662,19 @@ namespace ACE.Server.WorldEvents
             if (!IsFinite(protect.MinDeathSeconds) || protect.MinDeathSeconds < 0)
                 return "has an invalid protect.minDeathSeconds (0 or more; 0 means no cap)";
 
+            if (protect.Waves != null && (protect.Waves.Base < 1 || protect.Waves.Cap < protect.Waves.Base
+                || !IsFinite(protect.Waves.PerParticipant) || protect.Waves.PerParticipant < 0))
+                return "has an invalid protect.waves (base at least 1, cap at least base)";
+
+            if (!IsFinite(protect.MinSeconds) || protect.MinSeconds < 0)
+                return "has an invalid protect.minSeconds (0 or more)";
+
+            if (!IsFinite(protect.HealBetweenWaves) || protect.HealBetweenWaves < 0 || protect.HealBetweenWaves > 1)
+                return "has an invalid protect.healBetweenWaves (0 to 1)";
+
+            if (!IsFinite(protect.MaxHealPerTenSeconds) || protect.MaxHealPerTenSeconds < 0 || protect.MaxHealPerTenSeconds > 1)
+                return "has an invalid protect.maxHealPerTenSeconds (0 to 1)";
+
             if (!IsFinite(protect.SeekShare) || protect.SeekShare < 0 || protect.SeekShare > 1)
                 return "has an invalid protect.seekShare (0 to 1)";
 
@@ -687,6 +700,7 @@ namespace ACE.Server.WorldEvents
             lines.Health ??= new List<string>();
             lines.Destroyed ??= new List<string>();
             lines.Success ??= new List<string>();
+            lines.Heal ??= new List<string>();
 
             foreach (var (key, pool) in lines.Pools)
             {
@@ -807,6 +821,13 @@ namespace ACE.Server.WorldEvents
                     if (protectError != null)
                     {
                         diagnostics.Add($"goals.json: goal '{goal.Id}' {protectError}, dropped");
+                        continue;
+                    }
+
+                    // A wave-based hold whose minimum time is past its safety cap could never use the minimum.
+                    if (goal.Protect.IsWaveBased && goal.Protect.MinSeconds > goal.HoldSeconds)
+                    {
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' has protect.minSeconds ({goal.Protect.MinSeconds:F0}) above holdSeconds ({goal.HoldSeconds}), dropped");
                         continue;
                     }
 

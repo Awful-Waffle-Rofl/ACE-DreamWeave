@@ -1489,8 +1489,14 @@ namespace ACE.Server.WorldEvents
 
             var alive = Spawner.LiveCount;
 
+            // Wave-based Hold: the final counted wave is a little bigger (a quarter more of the theme's base
+            // wave, at least one more monster), on top of whatever the pace controller is asking for.
+            var holdObjective = Objective as HoldObjective;
+            var finalHoldWave = holdObjective != null && holdObjective.IsFinalWave(holdWavesStarted + 1);
+            var finalWaveExtra = finalHoldWave ? WorldEventHoldRules.FinalWaveBonus(theme.EffectiveWaveCountBase) : 0;
+
             var pick = WorldEventRosterSelector.PickWave(family, Audience, theme, WaveIndex, alive,
-                Pace.QuantityBonus, Spawner.OverflowChampionsAlive, null);
+                Pace.QuantityBonus + finalWaveExtra, Spawner.OverflowChampionsAlive, null);
 
             if (pick == null || pick.IsEmpty)
             {
@@ -1534,10 +1540,28 @@ namespace ACE.Server.WorldEvents
 
             Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult);
 
+            holdWavesStarted++;
+
             // Per-wave chatter is local, not server-wide (PLAN 1.10): everyone actually near the fight sees
             // it, without spamming players nowhere near this run.
             WorldEventAnnouncer.Local(this, WorldEventAnnouncer.WaveLine(theme));
+
+            // Wave-based Hold: where the defence stands, at the start of every wave.
+            if (holdObjective != null && holdObjective.IsWaveBased)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} hold wave {holdWavesStarted} of {holdObjective.TargetWaves}" +
+                         (finalHoldWave ? $" (final wave, +{finalWaveExtra})" : ""));
+
+                WorldEventAnnouncer.Local(this, holdObjective.WaveStartText(holdWavesStarted));
+            }
         }
+
+        /// <summary>Waves this run has started (picked and sent to the spawner). A Hold run counts its waves by it.</summary>
+        private int holdWavesStarted;
+
+        /// <summary>The run's wave counts, for a wave-based Hold objective.</summary>
+        internal HoldWaveCounts HoldWaveCounts =>
+            new HoldWaveCounts(holdWavesStarted, Spawner.LandedWaveCount, Spawner.ClearedWaveCount, Spawner.LiveCount);
 
         /// <summary>
         /// Feeds the pace controller one pick's worth of evidence (TECH-DESIGN 2.15): every wave that has
@@ -2425,6 +2449,83 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>How many cleared waves the between-waves heal has already paid out for. World thread only.</summary>
+        private int holdHealedForClears;
+
+        /// <summary>
+        /// Hold runs with protect.healBetweenWaves above 0: every time a wave is fully cleared, each standing
+        /// target regains that share of its max health (through its own landblock queue), and one of them
+        /// says a protect.lines.heal line. Several waves clearing between two ticks heal once per wave. Never
+        /// throws.
+        /// </summary>
+        private void TickHoldBetweenWaveHeals()
+        {
+            try
+            {
+                var protect = Composition?.Goal?.Protect;
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold || protect == null || !(protect.HealBetweenWaves > 0))
+                    return;
+
+                var cleared = Spawner.ClearedWaveCount;
+
+                if (cleared <= holdHealedForClears)
+                    return;
+
+                var newClears = cleared - holdHealedForClears;
+
+                holdHealedForClears = cleared;
+
+                var targets = Spawner.LiveProtectedCreatures;
+
+                if (targets.Count == 0)
+                    return;
+
+                foreach (var target in targets)
+                {
+                    var landblock = target.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var t = target;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (t.IsDead || t.IsDestroyed)
+                                return;
+
+                            var amount = WorldEventHoldRules.BetweenWavesHeal(t.Health.MaxValue, protect.HealBetweenWaves) * newClears;
+
+                            var healed = t.UpdateVitalDelta(t.Health, amount);
+
+                            if (healed > 0)
+                                t.DamageHistory.OnHeal((uint)healed);
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} between-waves heal threw", ex);
+                        }
+                    }));
+                }
+
+                log.Info($"[WORLDEVENT] run={RunId} hold heal {protect.HealBetweenWaves:P0} x{newClears} for {targets.Count} target(s) (waves cleared={cleared})");
+
+                Creature speaker;
+
+                lock (protectedLineRngSync)
+                    speaker = targets[protectedLineRng.Next(targets.Count)];
+
+                SpeakLocally(speaker, ComposeProtectedLine(protect.Lines?.Heal, null), viaQueue: true);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} between-waves heal pass threw", ex);
+            }
+        }
+
         /// <summary>Protected targets that have already said their spawn line. World thread only.</summary>
         private readonly HashSet<uint> protectedGreeted = new HashSet<uint>();
 
@@ -2833,6 +2934,11 @@ namespace ACE.Server.WorldEvents
             // whole failure this minimum exists to prevent.
             var remaining = minElapsed ? Objective?.RemainingKills : null;
 
+            // Wave-based Hold: once the counted waves have all started and the minimum time is up, no more
+            // waves - the field is left to clear, and the hold succeeds when its last monster dies.
+            if (Objective is HoldObjective hold && !hold.WantsAnotherWave(now))
+                return;
+
             if (!ShouldSpawnNextWave(active, complete, lastWaveIndexSpawned, alive, now, lastWaveAt,
                     interval, MinWaveGapSeconds, remaining))
             {
@@ -2886,6 +2992,8 @@ namespace ACE.Server.WorldEvents
             TickWaves(now);
 
             TickHoldWake();
+
+            TickHoldBetweenWaveHeals();
 
             TickBossDamage();
 

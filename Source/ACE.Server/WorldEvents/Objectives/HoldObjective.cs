@@ -41,9 +41,10 @@ namespace ACE.Server.WorldEvents.Objectives
         private string topDamagerName;
 
         /// <param name="family">The run's composed monster family display name, for the {family}/{Family} progress tokens. Null reads as the generic fallback.</param>
+        /// <param name="waves">Wave-based holds: the run's wave counts, read fresh on every check. Null reads as no waves.</param>
         public HoldObjective(GoalDef goal, Func<IReadOnlyCollection<uint>> protectedGuids,
             Func<IReadOnlyCollection<uint>> liveProtectedGuids, Func<double> activeAt, WorldEventParticipation ledger,
-            Func<string> family = null)
+            Func<string> family = null, Func<HoldWaveCounts> waves = null)
         {
             this.goal = goal;
             this.protectedGuids = protectedGuids ?? (() => Array.Empty<uint>());
@@ -51,9 +52,88 @@ namespace ACE.Server.WorldEvents.Objectives
             this.activeAt = activeAt ?? (() => 0);
             this.ledger = ledger;
             this.family = family ?? (() => null);
+            this.waves = waves ?? (() => default);
         }
 
         private readonly Func<string> family;
+        private readonly Func<HoldWaveCounts> waves;
+
+        /// <summary>Wave-based holds: the sized wave target, raised as the crowd grows, never lowered. Null until first sized.</summary>
+        private int? targetWaves;
+
+        /// <summary>True when the goal counts waves (protect.waves).</summary>
+        public bool IsWaveBased => Protect?.IsWaveBased ?? false;
+
+        /// <summary>The wave target (protect.waves for the crowd). 0 for a time-only hold.</summary>
+        public int TargetWaves
+        {
+            get
+            {
+                if (!IsWaveBased)
+                    return 0;
+
+                targetWaves ??= Math.Max(1, Protect.Waves.Resolve(0));
+
+                return targetWaves.Value;
+            }
+        }
+
+        /// <summary>The wave counts as of now.</summary>
+        public HoldWaveCounts Waves => waves();
+
+        /// <summary>Wave-based holds: re-size the wave target against a fresh audience, upwards only.</summary>
+        public void OnAudienceResampled(int participantCount)
+        {
+            if (!IsWaveBased)
+                return;
+
+            var resolved = Math.Max(1, Protect.Waves.Resolve(Math.Max(0, participantCount)));
+
+            if (targetWaves == null || resolved > targetWaves.Value)
+                targetWaves = resolved;
+        }
+
+        private double MinSeconds => Math.Max(0, Protect?.MinSeconds ?? ProtectDef.DefaultMinSeconds);
+
+        /// <summary>
+        /// Wave-based holds (D6 - pure): whether the cadence should spawn another wave. Yes until both the wave
+        /// target is reached AND the minimum time has passed; after that the field is left to clear.
+        /// </summary>
+        public static bool WantsAnotherWave(int started, int target, double elapsed, double minSeconds)
+        {
+            return started < target || elapsed < minSeconds;
+        }
+
+        /// <summary>This run's <see cref="WantsAnotherWave(int, int, double, double)"/>; always true for a time-only hold.</summary>
+        public bool WantsAnotherWave(double now)
+        {
+            if (!IsWaveBased)
+                return true;
+
+            var start = activeAt();
+            var elapsed = start > 0 ? Math.Max(0, now - start) : 0;
+
+            return WantsAnotherWave(Waves.Started, TargetWaves, elapsed, MinSeconds);
+        }
+
+        /// <summary>Whether the wave about to start (1-based <paramref name="waveNumber"/>) is the final counted wave, which is made a little bigger.</summary>
+        public bool IsFinalWave(int waveNumber) => IsWaveBased && waveNumber == TargetWaves;
+
+        /// <summary>
+        /// Wave-based holds (D6 - pure): the waves are won when every counted wave has started, every wave that
+        /// landed has been cleared, nothing is left standing, and the minimum time has passed.
+        /// </summary>
+        public static bool WavesWon(HoldWaveCounts counts, int target, double elapsed, double minSeconds)
+        {
+            return target > 0 && counts.Started >= target && counts.Landed > 0 && counts.Cleared >= counts.Landed
+                && counts.Live == 0 && elapsed >= minSeconds;
+        }
+
+        /// <summary>The local line at the start of each wave: "Wave 3 of 7 - 3 of 3 caravans stand." ASCII only.</summary>
+        public string WaveStartText(int waveNumber)
+        {
+            return $"{WorldEventHoldRules.WaveProgress(waveNumber, TargetWaves)} - {Alive} of {Placed} {NounPlural} stand.";
+        }
 
         private ProtectDef Protect => goal?.Protect;
 
@@ -142,8 +222,14 @@ namespace ACE.Server.WorldEvents.Objectives
                 if (placed == 0 || activeAt() <= 0 || now <= 0)
                     return false;
 
-                return Alive >= RequiredFor(Protect?.MinSurvivors ?? ProtectDef.DefaultMinSurvivors, placed)
-                    && Elapsed >= HoldSeconds;
+                if (Alive < RequiredFor(Protect?.MinSurvivors ?? ProtectDef.DefaultMinSurvivors, placed))
+                    return false;
+
+                // holdSeconds: the time-only hold's finish line, and the wave-based hold's safety cap.
+                if (Elapsed >= HoldSeconds)
+                    return true;
+
+                return IsWaveBased && WavesWon(Waves, TargetWaves, Elapsed, MinSeconds);
             }
         }
 
@@ -180,13 +266,18 @@ namespace ACE.Server.WorldEvents.Objectives
 
                 var alive = Alive;
 
-                var template = goal?.ProgressTemplate ?? DefaultProgressTemplate;
+                var template = goal?.ProgressTemplate ?? (IsWaveBased ? DefaultWaveProgressTemplate : DefaultProgressTemplate);
 
-                // {lost} and {remaining} first; the shared protect-line filler then does the family, the
-                // nouns and the counts, so progress text and caravan lines read the tokens identically.
+                var started = Waves.Started;
+
+                // {lost}, {remaining} and the wave tokens first; the shared protect-line filler then does the
+                // family, the nouns and the counts, so progress text and target lines read the tokens identically.
                 template = template
                     .Replace("{lost}", (total - alive).ToString())
-                    .Replace("{remaining}", FormatRemaining(RemainingSeconds));
+                    .Replace("{remaining}", FormatRemaining(RemainingSeconds))
+                    .Replace("{waveProgress}", WorldEventHoldRules.WaveProgress(started, TargetWaves))
+                    .Replace("{waves}", TargetWaves.ToString())
+                    .Replace("{wave}", started.ToString());
 
                 return WorldEventHoldRules.FillLine(template, family(), Noun, NounPlural, null, alive, total);
             }
@@ -194,6 +285,9 @@ namespace ACE.Server.WorldEvents.Objectives
 
         /// <summary>The progress line a Hold goal gets when goals.json declares no progressTemplate.</summary>
         public const string DefaultProgressTemplate = "{alive} of {total} {nounPlural} stand. Hold for {remaining}.";
+
+        /// <summary>The progress line a WAVE-based Hold goal gets when goals.json declares no progressTemplate.</summary>
+        public const string DefaultWaveProgressTemplate = "{waveProgress} - {alive} of {total} {nounPlural} stand.";
 
         /// <summary>m:ss, e.g. 6:05.</summary>
         public static string FormatRemaining(int seconds)
@@ -220,5 +314,27 @@ namespace ACE.Server.WorldEvents.Objectives
                     return WorldEventMvp.None;
             }
         }
+    }
+
+    /// <summary>
+    /// A wave-based hold's wave counts: waves STARTED (picked and sent), LANDED (at least one monster
+    /// placed), CLEARED (every monster of that wave dead) and the wave monsters still standing.
+    /// </summary>
+    public readonly struct HoldWaveCounts
+    {
+        public readonly int Started;
+        public readonly int Landed;
+        public readonly int Cleared;
+        public readonly int Live;
+
+        public HoldWaveCounts(int started, int landed, int cleared, int live)
+        {
+            Started = started;
+            Landed = landed;
+            Cleared = cleared;
+            Live = live;
+        }
+
+        public override string ToString() => $"started={Started} landed={Landed} cleared={Cleared} live={Live}";
     }
 }
