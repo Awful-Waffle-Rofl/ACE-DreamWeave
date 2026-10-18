@@ -165,6 +165,11 @@ namespace ACE.Server.WorldObjects
             var targetDist = GetDistanceToTarget();
             //Console.WriteLine($"{Name} ({Guid}) - Dist: {targetDist}");
 
+            // World Events Hold ranged waves: keep a ranged monster at its hold distance (0 for every other
+            // creature, so this is skipped everywhere else).
+            if (WorldEventHoldDistance > 0 && TickWorldEventRangedHold(targetDist))
+                return;
+
             if (CurrentAttack != CombatType.Missile)
             {
                 if (targetDist > MaxRange || (!IsFacing(AttackTarget) && !IsSelfCast()))

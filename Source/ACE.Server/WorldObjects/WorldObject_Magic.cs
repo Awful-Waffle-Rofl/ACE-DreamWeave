@@ -139,6 +139,11 @@ namespace ACE.Server.WorldObjects
             if (itemCaster != null && Cloak.IsCloak(itemCaster))
                 return false;
 
+            // World Events Hold: a protected target never resists its own run's monsters (its damage is a
+            // time-based slice, so a high Magic Defense copied from its source NPC would only make it immune).
+            if (this is Creature runMonster && target is Creature protectedTarget && runMonster.IsWorldEventProtectedTargetFor(protectedTarget))
+                return false;
+
             uint magicSkill = 0;
 
             var caster = itemCaster ?? this;
@@ -713,11 +718,16 @@ namespace ACE.Server.WorldObjects
                 default:   // Health
                     // WaffleACE fork, World Events Hold: a heal on a protected target becomes a share of its max
                     // health (damage to it is time-based), capped per ten seconds. A no-op for every other creature.
+                    var protectedRaw = tryBoost;
+
                     if (tryBoost > 0 && targetCreature.WorldEventProtected)
                         tryBoost = targetCreature.ConvertWorldEventProtectedHeal(tryBoost, ACE.Common.Time.GetUnixTime(), player);
 
                     boost = targetCreature.UpdateVitalDelta(targetCreature.Health, tryBoost);
                     srcVital = "health";
+
+                    if (protectedRaw > 0 && targetCreature.WorldEventProtected)
+                        Creature.LogWorldEventProtectedHeal(targetCreature, player, $"spell {spell.Name} raw={protectedRaw} converted={tryBoost} healed={boost}");
 
                     if (boost >= 0)
                         targetCreature.DamageHistory.OnHeal((uint)boost);

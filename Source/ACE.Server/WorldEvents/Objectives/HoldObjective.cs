@@ -44,7 +44,7 @@ namespace ACE.Server.WorldEvents.Objectives
         /// <param name="waves">Wave-based holds: the run's wave counts, read fresh on every check. Null reads as no waves.</param>
         public HoldObjective(GoalDef goal, Func<IReadOnlyCollection<uint>> protectedGuids,
             Func<IReadOnlyCollection<uint>> liveProtectedGuids, Func<double> activeAt, WorldEventParticipation ledger,
-            Func<string> family = null, Func<HoldWaveCounts> waves = null)
+            Func<string> family = null, Func<HoldWaveCounts> waves = null, Func<string> targetHealth = null)
         {
             this.goal = goal;
             this.protectedGuids = protectedGuids ?? (() => Array.Empty<uint>());
@@ -53,7 +53,11 @@ namespace ACE.Server.WorldEvents.Objectives
             this.ledger = ledger;
             this.family = family ?? (() => null);
             this.waves = waves ?? (() => default);
+            this.targetHealth = targetHealth ?? (() => "");
         }
+
+        /// <summary>Every standing target's health ("Sir Draithon 80%, Sir Donovan 64%"), for the {targetHealth} token.</summary>
+        private readonly Func<string> targetHealth;
 
         private readonly Func<string> family;
         private readonly Func<HoldWaveCounts> waves;
@@ -159,13 +163,19 @@ namespace ACE.Server.WorldEvents.Objectives
         {
             var cap = Math.Min(target, ProtectDef.MaxHoldWaves);
 
-            return cap > 0 && counts.Started >= cap && counts.Landed > 0 && counts.Cleared >= counts.Landed && counts.Live == 0;
+            // Resolved: the in-game bug where the run "won" 9 ms after the finale started, because the finale's
+            // monsters (and its champion) had not been placed yet, so nothing of it was alive to count.
+            return cap > 0 && counts.Started >= cap && counts.Resolved >= counts.Started
+                && counts.Landed > 0 && counts.Cleared >= counts.Landed && counts.Live == 0;
         }
 
         /// <summary>The local line at the start of each wave: "Wave 3 of 7 - 3 of 3 caravans stand." ASCII only.</summary>
         public string WaveStartText(int waveNumber)
         {
-            return $"{WorldEventHoldRules.WaveProgress(waveNumber, TargetWaves)} - {Alive} of {Placed} {NounPlural} stand.";
+            var health = targetHealth() ?? "";
+            var line = $"{WorldEventHoldRules.WaveProgress(waveNumber, TargetWaves)} - {Alive} of {Placed} {NounPlural} stand";
+
+            return string.IsNullOrEmpty(health) ? line + "." : $"{line} ({health}).";
         }
 
         private ProtectDef Protect => goal?.Protect;
@@ -305,6 +315,9 @@ namespace ACE.Server.WorldEvents.Objectives
 
                 // {lost}, {remaining} and the wave tokens first; the shared protect-line filler then does the
                 // family, the nouns and the counts, so progress text and target lines read the tokens identically.
+                if (template.Contains("{targetHealth}"))
+                    template = template.Replace("{targetHealth}", targetHealth() ?? "");
+
                 template = template
                     .Replace("{lost}", (total - alive).ToString())
                     .Replace("{remaining}", FormatRemaining(RemainingSeconds))
@@ -360,14 +373,27 @@ namespace ACE.Server.WorldEvents.Objectives
         public readonly int Cleared;
         public readonly int Live;
 
+        /// <summary>
+        /// Waves the spawner has finished placing (landed or failed). A wave is started on the world thread and
+        /// placed a moment later on its landblock, so until it resolves its monsters are not yet counted.
+        /// </summary>
+        public readonly int Resolved;
+
+        /// <summary>Counts where every started wave has already resolved.</summary>
         public HoldWaveCounts(int started, int landed, int cleared, int live)
+            : this(started, landed, cleared, live, started)
+        {
+        }
+
+        public HoldWaveCounts(int started, int landed, int cleared, int live, int resolved)
         {
             Started = started;
             Landed = landed;
             Cleared = cleared;
             Live = live;
+            Resolved = resolved;
         }
 
-        public override string ToString() => $"started={Started} landed={Landed} cleared={Cleared} live={Live}";
+        public override string ToString() => $"started={Started} resolved={Resolved} landed={Landed} cleared={Cleared} live={Live}";
     }
 }

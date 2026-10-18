@@ -159,7 +159,7 @@ namespace ACE.Server.WorldObjects
             PrevAttackTime = Timers.RunningTime;
             NextMoveTime = PrevAttackTime + animLength + 0.5f;
 
-            var meleeDelay = ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f));
+            var meleeDelay = ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f)) / Math.Max(1.0f, WorldEventAttackSpeedMult);
 
             NextAttackTime = PrevAttackTime + animLength + meleeDelay;
 
@@ -357,7 +357,8 @@ namespace ACE.Server.WorldObjects
 
             var baseSpeed = GetAnimSpeed();
             var animSpeedMod = IsDualWieldAttack ? 1.2f : 1.0f;     // dual wield swing animation 20% faster
-            var animSpeed = baseSpeed * animSpeedMod;
+            // World Events Hold runners swing faster (1 for every other creature).
+            var animSpeed = baseSpeed * animSpeedMod * Math.Max(1.0f, WorldEventAttackSpeedMult);
 
             animLength = MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, motionCommand, animSpeed);
 

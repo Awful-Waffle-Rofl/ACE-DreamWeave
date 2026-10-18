@@ -395,6 +395,15 @@ namespace ACE.Server.WorldEvents
             return Global($"{name}: \"{line}\"");
         }
 
+        /// <summary>
+        /// A Hold phase (a special wave or the finale) as a World Event broadcast (D6 - pure):
+        /// "[World Event] Wave 4 of 7: They are massing on the east flank!" or "[World Event] Final wave: ...".
+        /// </summary>
+        public static string HoldPhaseLine(string label, string announce)
+        {
+            return Global($"{(string.IsNullOrWhiteSpace(label) ? "Next wave" : label)}: {announce ?? ""}");
+        }
+
         private static string CapitalizeFirst(string text) => WorldEventHoldRules.CapitalizeFirst(text);
 
         private static string FailedLine(string goalName, string anchorName, string reason, string failTemplate = null,

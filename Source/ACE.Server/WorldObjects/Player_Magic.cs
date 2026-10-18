@@ -496,7 +496,16 @@ namespace ACE.Server.WorldObjects
             // of spell, a health heal, while its goal allows player healing. Everything else - other buffs,
             // anything harmful - stays invalid, exactly as for any other non-player creature.
             if (targetCreature != null && targetCreature.WorldEventProtected)
-                return !(targetCreature.AcceptsWorldEventPlayerHeal && Creature.IsWorldEventProtectedHealSpell(spell));
+            {
+                var invalid = Creature.IsInvalidWorldEventProtectedSpellTarget(targetCreature.AcceptsWorldEventPlayerHeal,
+                    Creature.IsWorldEventProtectedHealSpell(spell));
+
+                if (invalid)
+                    Creature.LogWorldEventProtectedHeal(targetCreature, this, $"spell {spell.Name} refused (a heal spell: {Creature.IsWorldEventProtectedHealSpell(spell)}, " +
+                        $"healing allowed: {targetCreature.AcceptsWorldEventPlayerHeal})");
+
+                return invalid;
+            }
 
             // Invalidate beneficial spells against Creature/Non-player targets
             if (targetCreature != null && targetPlayer == null && spell.IsBeneficial)

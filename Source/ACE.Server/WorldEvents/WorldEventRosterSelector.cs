@@ -1164,6 +1164,26 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// The Hold finale's last-resort boss (D6 - pure), used only when <see cref="PickChampion"/> finds
+        /// nothing: the family member nearest the elite band (any role but a named boss, the highest level among
+        /// equals), promoted as a synthetic champion so the spawner names it "Champion ..." and buffs it. None only
+        /// for a family with no members at all.
+        /// </summary>
+        public static ChampionPick PickFinaleBossFallback(FamilyDef family, AudienceEstimate est)
+        {
+            var members = family?.Members?.Where(m => m != null && m.Wcid != 0 && m.Role != NamedBossRole).ToList();
+
+            if (members == null || members.Count == 0)
+                return ChampionPick.None;
+
+            var centre = EliteBand(est.P90Level).Centre;
+            var nearest = members.Min(m => Math.Abs(m.Level - centre));
+            var pool = members.Where(m => Math.Abs(m.Level - centre) == nearest).ToList();
+
+            return WithUplift(HighestMember(pool), true, est.P90Level);
+        }
+
+        /// <summary>
         /// Members of the given role that sit inside the band. When the band holds none, falls through to
         /// the members of that role NEAREST the band centre by |Level - centre| (PLAN 1.5 "falls through to
         /// its nearest band"), keeping every equally-near member so the draw still has variety.

@@ -59,6 +59,20 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("speedMult")]
         public double SpeedMult { get; set; } = 1.5;
 
+        /// <summary>
+        /// Runners: attack speed multiplier (1 to 3). Default 1.5. Speeds up their swings, and their time-based
+        /// damage to the targets by the same factor. Every runner is a seeker.
+        /// </summary>
+        [JsonPropertyName("attackSpeedMult")]
+        public double AttackSpeedMult { get; set; } = 1.5;
+
+        /// <summary>
+        /// Ranged: the distance in metres (5 to 40) a ranged or caster monster stops at from its target and
+        /// attacks from. It only closes in when it has no ranged attack or its spell cannot reach. Default 18.
+        /// </summary>
+        [JsonPropertyName("holdDistance")]
+        public double HoldDistance { get; set; } = 18;
+
         /// <summary>Hunters: how many of the wave hunt players instead of the targets. Default 2.</summary>
         [JsonPropertyName("hunters")]
         public int Hunters { get; set; } = 2;

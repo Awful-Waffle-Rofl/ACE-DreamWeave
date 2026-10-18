@@ -51,6 +51,9 @@ namespace ACE.Server.WorldObjects
         {
             if (healer.GetCreatureSkill(Skill.Healing).AdvancementClass < SkillAdvancementClass.Trained)
             {
+                if (target is Creature untrainedTarget && untrainedTarget.WorldEventProtected)
+                    Creature.LogWorldEventProtectedHeal(untrainedTarget, healer, "kit refused: healer is not trained in Healing");
+
                 healer.SendUseDoneEvent(WeenieError.YouArentTrainedInHealing);
                 return;
             }
@@ -145,12 +148,14 @@ namespace ACE.Server.WorldObjects
         {
             if (BoosterEnum != PropertyAttribute2nd.Health || !target.AcceptsWorldEventPlayerHeal)
             {
+                Creature.LogWorldEventProtectedHeal(target, healer, $"kit refused (vital={BoosterEnum}, accepts={target.AcceptsWorldEventPlayerHeal})");
                 healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
                 return;
             }
 
             if (target.Health.Current >= target.Health.MaxValue)
             {
+                Creature.LogWorldEventProtectedHeal(target, healer, "kit: already at full health");
                 healer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(healer.Session, WeenieErrorWithString._IsAtFullHealth, target.Name));
                 healer.SendUseDoneEvent();
                 return;
@@ -230,6 +235,8 @@ namespace ACE.Server.WorldObjects
 
             if (healed > 0)
                 target.DamageHistory.OnHeal((uint)healed);
+
+            Creature.LogWorldEventProtectedHeal(target, healer, $"kit raw={raw:F0} converted={converted} healed={healed}");
 
             var text = healed > 0
                 ? $"You {(critical ? "expertly " : "")}heal {target.Name} for {healed} health points.{remainingMsg}"

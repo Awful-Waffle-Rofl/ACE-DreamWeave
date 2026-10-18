@@ -116,6 +116,73 @@ namespace ACE.Server.WorldEvents.Defs
         public const double DefaultMinSeconds = 180;
         public const double DefaultMaxHealPerTenSeconds = 0.10;
 
+        public const double DefaultNextWaveAliveShare = 0.25;
+        public const double DefaultMinWaveGapSeconds = 8;
+        public const double DefaultFinaleBossScale = 1.25;
+        public const double DefaultFinaleBossHealthMult = 2.0;
+        public const string DefaultBossEffect = "ShieldUpRed";
+        public const double DefaultBossEffectSeconds = 6;
+
+        /// <summary>
+        /// Optional: how many monsters each wave has (base / perParticipant / cap), replacing the source theme's
+        /// waveCount for this goal. Absent keeps the theme's own size.
+        /// </summary>
+        [JsonPropertyName("waveSize")]
+        public ScaledCount WaveSize { get; set; }
+
+        /// <summary>
+        /// Optional: the most wave monsters alive at once for this goal, replacing the theme's maxAlive (which is
+        /// sized for one wave at a time). 0 or absent keeps the theme's.
+        /// </summary>
+        [JsonPropertyName("maxAlive")]
+        public int MaxAlive { get; set; }
+
+        /// <summary>
+        /// Optional: the next wave arrives this many seconds after the last one, or sooner, see
+        /// <see cref="NextWaveAliveShare"/>. Replaces the theme's waveIntervalSeconds for this goal. 0 or absent
+        /// keeps the theme's cadence.
+        /// </summary>
+        [JsonPropertyName("waveIntervalSeconds")]
+        public double WaveIntervalSeconds { get; set; }
+
+        /// <summary>
+        /// With <see cref="WaveIntervalSeconds"/>: the next wave also arrives early, as soon as no more than this
+        /// share (0 to 1) of the last wave's size is still alive ("most of the wave is dead"). Default 0.25.
+        /// </summary>
+        [JsonPropertyName("nextWaveAliveShare")]
+        public double NextWaveAliveShare { get; set; } = DefaultNextWaveAliveShare;
+
+        /// <summary>With <see cref="WaveIntervalSeconds"/>: never two waves closer together than this (0 to 60 s). Default 8.</summary>
+        [JsonPropertyName("minWaveGapSeconds")]
+        public double MinWaveGapSeconds { get; set; } = DefaultMinWaveGapSeconds;
+
+        /// <summary>
+        /// Wave-based holds: at least this many special waves (breach, runners, ranged, hunters) per run, spread
+        /// across the middle waves, whatever <see cref="SpecialWaveChance"/> rolls. Capped by the middle waves
+        /// available. 0 (the default) leaves it to the chance.
+        /// </summary>
+        [JsonPropertyName("minSpecialWaves")]
+        public int MinSpecialWaves { get; set; }
+
+        /// <summary>The finale boss's size multiplier (1 to 2). Default 1.25.</summary>
+        [JsonPropertyName("finaleBossScale")]
+        public double FinaleBossScale { get; set; } = DefaultFinaleBossScale;
+
+        /// <summary>The finale boss's extra health multiplier (1 to 10), on top of its normal health. Default 2.</summary>
+        [JsonPropertyName("finaleBossHealthMult")]
+        public double FinaleBossHealthMult { get; set; } = DefaultFinaleBossHealthMult;
+
+        /// <summary>
+        /// The visible effect replayed on the finale boss (a PlayScript name, for example ShieldUpRed), or
+        /// "none". Default ShieldUpRed.
+        /// </summary>
+        [JsonPropertyName("bossEffect")]
+        public string BossEffect { get; set; } = DefaultBossEffect;
+
+        /// <summary>How often the boss effect replays, in seconds (2 to 60). Default 6.</summary>
+        [JsonPropertyName("bossEffectSeconds")]
+        public double BossEffectSeconds { get; set; } = DefaultBossEffectSeconds;
+
         /// <summary>The most waves any wave-based hold can have, whatever protect.waves and the crowd say.</summary>
         public const int MaxHoldWaves = 10;
 

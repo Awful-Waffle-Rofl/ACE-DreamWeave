@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 
+using ACE.Entity.Enum;
 using ACE.Server.Physics;
 
 namespace ACE.Server.WorldObjects
@@ -46,6 +47,22 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>Runtime-only, Hold runner waves: multiplies this monster's run rate (GetRunRate). 1 for everyone else.</summary>
         public float WorldEventRunRateMult { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Runtime-only, Hold runner waves: multiplies this monster's melee swing speed (and divides the pause
+        /// between swings), and speeds its time-based damage to a protected target by the same factor. 1 for
+        /// everyone else.
+        /// </summary>
+        public float WorldEventAttackSpeedMult { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Runtime-only, Hold ranged waves: the distance in metres this monster stops at from its target and
+        /// attacks from, when it has a ranged attack (TickWorldEventRangedHold). 0 for everyone else.
+        /// </summary>
+        public float WorldEventHoldDistance { get; set; }
+
+        /// <summary>Runtime-only, Hold finale: this monster is the finale boss (bigger, tougher, its effect replayed).</summary>
+        public bool WorldEventFinaleBoss { get; set; }
 
         /// <summary>
         /// True when <paramref name="target"/> is a protected target and this creature is a monster placed by
@@ -408,7 +425,8 @@ namespace ACE.Server.WorldObjects
 
                 var interval = ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(last, now);
 
-                amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, protect.UndefendedSeconds);
+                amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, protect.UndefendedSeconds,
+                    attacker.WorldEventAttackSpeedMult);
             }
 
             if (protect.MinDeathSeconds > 0)
@@ -441,6 +459,15 @@ namespace ACE.Server.WorldObjects
         {
             return isBeneficial && type == ACE.Entity.Enum.SpellType.Boost && vital == ACE.Entity.Enum.DamageType.Health
                 && Math.Max(boost, maxBoost) > 0;
+        }
+
+        /// <summary>
+        /// The spell-target rule for a protected target (D6 - pure), as Player.IsInvalidTarget applies it: only a
+        /// health heal, and only while the goal allows player healing, is a valid target.
+        /// </summary>
+        public static bool IsInvalidWorldEventProtectedSpellTarget(bool acceptsPlayerHeal, bool isHealSpell)
+        {
+            return !(acceptsPlayerHeal && isHealSpell);
         }
 
         /// <summary><see cref="IsWorldEventProtectedHealSpell(bool, ACE.Entity.Enum.SpellType, ACE.Entity.Enum.DamageType, int, int)"/> for a spell.</summary>
@@ -495,6 +522,164 @@ namespace ACE.Server.WorldObjects
 
             return ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor, Health.MaxValue, protect.MaxHealPerTenSeconds,
                 ref worldEventProtectedHealTokens, ref worldEventProtectedHealLastAt, now);
+        }
+
+        /// <summary>
+        /// Hold ranged waves (<see cref="WorldEventHoldDistance"/> above 0), called from the monster tick once
+        /// the target distance is known: a monster that can attack from range walks in to the hold distance,
+        /// stops, and shoots or casts from there, instead of the stock AI's habit of re-rolling a melee attack
+        /// (casters) or switching to melee when out of missile range (archers). Returns false, leaving the stock
+        /// AI in charge, for a monster with no ranged attack at all or whose spell cannot reach from where it
+        /// stands, so it still closes in when it has to. Monster thread only.
+        /// </summary>
+        public bool TickWorldEventRangedHold(float targetDist)
+        {
+            if (WorldEventHoldDistance <= 0 || AttackTarget == null || IsDead || PhysicsObj == null)
+                return false;
+
+            var canMissile = GetEquippedMissileWeapon() != null;
+            var canMagic = HasKnownSpells;
+
+            if (!WorldEvents.WorldEventHoldRules.HoldsRange(WorldEventHoldDistance, canMissile, canMagic))
+                return false;
+
+            var hold = WorldEventHoldDistance;
+
+            // A missile weapon whose own range is shorter than the hold distance stops at its own range.
+            if (CurrentAttack == CombatType.Missile && MaxRange > 0 && MaxRange < hold)
+                hold = Math.Max(1.0f, MaxRange - 1.0f);
+
+            if (WorldEvents.WorldEventHoldRules.RangedHoldShouldApproach(targetDist, hold))
+            {
+                if (IsMoving)
+                    Movement();
+                else if (!IsTurning)
+                    StartWorldEventRangedApproach();
+
+                return true;
+            }
+
+            if (IsMoving)
+                StopWorldEventRangedApproach();
+
+            if (CurrentAttack == null || CurrentAttack == CombatType.Melee)
+            {
+                // No spell rolled this tick and no launcher: wait here rather than walk into melee.
+                if (!SelectWorldEventRangedAttack(canMissile, canMagic))
+                    return true;
+            }
+
+            // A spell that cannot reach from here: let the stock AI close the gap.
+            if (CurrentAttack == CombatType.Magic && targetDist > MaxRange)
+                return false;
+
+            if (!IsFacing(AttackTarget))
+            {
+                if (!IsTurning)
+                    StartTurn();
+
+                return true;
+            }
+
+            if (AttackReady())
+                Attack();
+
+            return true;
+        }
+
+        /// <summary>A ranged attack for the hold: a spell when one rolls, else the missile weapon. False when neither is available this tick.</summary>
+        private bool SelectWorldEventRangedAttack(bool canMissile, bool canMagic)
+        {
+            if (canMagic && TryRollSpell())
+            {
+                CurrentAttack = CombatType.Magic;
+                MaxRange = GetMaxRange();
+
+                if (CurrentAttack == CombatType.Magic)
+                    return true;
+            }
+
+            if (canMissile)
+            {
+                CurrentAttack = CombatType.Missile;
+                MaxRange = GetMaxRange();
+                return true;
+            }
+
+            CurrentAttack = null;
+            return false;
+        }
+
+        /// <summary>The stock chase move (StartTurn's move half), used to walk a ranged monster in; the hold tick stops it at the hold distance.</summary>
+        private void StartWorldEventRangedApproach()
+        {
+            if (!MoveReady())
+                return;
+
+            if (MoveSpeed == 0.0f)
+                GetMovementSpeed();
+
+            MoveTo(AttackTarget, RunRate);
+
+            IsMoving = true;
+            LastMoveTime = ACE.Server.Entity.Timers.RunningTime;
+            NextCancelTime = LastMoveTime + ACE.Common.ThreadSafeRandom.Next(2, 4);
+
+            var mvp = new ACE.Server.Physics.Animation.MovementParameters();
+            mvp.Flags &= ~ACE.Server.Physics.Animation.MovementParamFlags.CanWalk;
+            mvp.Flags |= GetMonsterMoveToFlags(false, DisableSticky);
+            mvp.Speed = CurrentMovementSlowFactor;
+
+            PhysicsObj.MoveToObject(AttackTarget.PhysicsObj, mvp);
+            PhysicsObj.UpdateTime = ACE.Server.Physics.Common.PhysicsTimer.CurrentTime;
+        }
+
+        /// <summary>Stops the approach where the monster stands, without dropping its target (CancelMoveTo would re-target).</summary>
+        private void StopWorldEventRangedApproach()
+        {
+            PhysicsObj.MovementManager.MoveToManager.CancelMoveTo(WeenieError.ActionCancelled);
+            PhysicsObj.MovementManager.MoveToManager.FailProgressCount = 0;
+
+            EnqueueBroadcastMotion(new ACE.Server.Entity.Motion(CurrentMotionState.Stance, MotionCommand.Ready));
+
+            IsMoving = false;
+        }
+
+        /// <summary>
+        /// One log line per player heal attempt on a protected target (spell or kit): accepted with the amounts,
+        /// or refused with the reason, so an in-game "heals do nothing" report can be read straight off the log.
+        /// </summary>
+        public static void LogWorldEventProtectedHeal(Creature target, Player healer, string what)
+        {
+            log.Info($"[WORLDEVENT] run={target?.P_WorldEvent?.RunId} protected heal on {target?.Name} 0x{target?.Guid.Full ?? 0:X8} " +
+                     $"by {healer?.Name ?? "?"}: {what} (health {target?.Health.Current}/{target?.Health.MaxValue})");
+        }
+
+        /// <summary>When this player was last sent a protected target's health line, and for which target (rate limit).</summary>
+        private uint worldEventHealthLineTarget;
+        private double worldEventHealthLineAt;
+
+        /// <summary>
+        /// Assessing a protected target: the player gets "Sir Donovan is at 64% health." in chat, since the
+        /// client draws no health bar for a non-attackable creature. Once per target per 3 seconds (the client
+        /// re-requests an open appraisal). A no-op for anything that is not a protected target.
+        /// </summary>
+        public void TrySendWorldEventProtectedHealth(WorldObject target)
+        {
+            if (!(this is Player player) || !(target is Creature creature) || !creature.WorldEventProtected || creature.IsDead)
+                return;
+
+            var now = ACE.Common.Time.GetUnixTime();
+
+            if (worldEventHealthLineTarget == creature.Guid.Full && now - worldEventHealthLineAt < 3.0)
+                return;
+
+            worldEventHealthLineTarget = creature.Guid.Full;
+            worldEventHealthLineAt = now;
+
+            player.Session?.Network.EnqueueSend(new ACE.Server.Network.GameMessages.Messages.GameMessageSystemChat(
+                ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealthLine(creature.Name, creature.Health.Current, creature.Health.MaxValue),
+                ChatMessageType.Broadcast));
         }
 
         private bool IsUsableSeekTarget(Creature target)

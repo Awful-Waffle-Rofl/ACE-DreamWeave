@@ -31,6 +31,12 @@ namespace ACE.Server.WorldEvents
         /// <summary>Runners: run speed multiplier (1 = unchanged).</summary>
         public float RunRateMult { get; set; } = 1.0f;
 
+        /// <summary>Runners: attack speed multiplier (1 = unchanged). Also speeds their time-based damage to the targets.</summary>
+        public float AttackSpeedMult { get; set; } = 1.0f;
+
+        /// <summary>Ranged: the distance (m) ranged and caster monsters stop at from their target (0 = stock AI).</summary>
+        public float HoldDistance { get; set; }
+
         /// <summary>Ranged: the wave's trash wcids replaced by ranged and caster family members (null = unchanged).</summary>
         public IReadOnlyList<uint> ReplacedTrash { get; set; }
 
@@ -55,8 +61,8 @@ namespace ACE.Server.WorldEvents
             switch (Type)
             {
                 case HoldWaveType.Breach: return $"type=breach target=0x{BreachTargetGuid:X8} side={BreachSide}";
-                case HoldWaveType.Runners: return $"type=runners keep={KeepCount} health=x{HealthMult:F2} speed=x{RunRateMult:F2}";
-                case HoldWaveType.Ranged: return $"type=ranged replaced={(ReplacedTrash == null ? "none" : ReplacedTrash.Count.ToString())}";
+                case HoldWaveType.Runners: return $"type=runners keep={KeepCount} health=x{HealthMult:F2} speed=x{RunRateMult:F2} attackSpeed=x{AttackSpeedMult:F2} seekers=all";
+                case HoldWaveType.Ranged: return $"type=ranged replaced={(ReplacedTrash == null ? "none" : ReplacedTrash.Count.ToString())} holdDistance={HoldDistance:0.#}";
                 case HoldWaveType.Hunters: return $"type=hunters hunters={Hunters}";
                 case HoldWaveType.Finale: return $"type=finale champion={(ChampionWcid == 0 ? "none" : $"{ChampionWcid} {ChampionName}")}";
                 default: return "type=normal";

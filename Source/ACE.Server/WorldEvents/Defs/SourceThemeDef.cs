@@ -69,6 +69,27 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("waveCount")]
         public ScaledCount WaveCount { get; set; }
 
+        /// <summary>
+        /// A Hold goal's wave sizing (protect.waveSize and protect.maxAlive) on a copy of this theme, so the
+        /// wave pick sizes against the goal while every other setting stays the theme's. Returns this theme
+        /// itself when the goal sets neither. The copy is shallow and never stored.
+        /// </summary>
+        public SourceThemeDef WithHoldSizing(ScaledCount waveSize, int maxAlive)
+        {
+            if (waveSize == null && maxAlive <= 0)
+                return this;
+
+            var copy = (SourceThemeDef)MemberwiseClone();
+
+            if (waveSize != null)
+                copy.WaveCount = waveSize;
+
+            if (maxAlive > 0)
+                copy.MaxAlive = maxAlive;
+
+            return copy;
+        }
+
         [JsonPropertyName("holdAdjacentLandblocks")]
         public bool HoldAdjacentLandblocks { get; set; }
 

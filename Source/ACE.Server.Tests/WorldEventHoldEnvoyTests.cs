@@ -58,7 +58,16 @@ namespace ACE.Server.Tests
             "Some of {family} hunt you, not us! Guard your healers!",
             "Healers, beware! {Family} seek you first!",
             "{champion} leads {family} in! Stand fast, this is their last assault!",
-            "That is {champion}! Bring it down and our charge is safe!"
+            "That is {champion}! Bring it down and our charge is safe!",
+            // What a knight says in local chat for each phase (2026-10-18).
+            "They come at a run! Strike them down before they reach us!",
+            "Quick ones, coming for our lines! Cut them off!",
+            "They strike from afar! Close with their archers and casters!",
+            "Shots from range! Run them down, defenders!",
+            "Defenders, some of them hunt you! Guard each other!",
+            "They seek our healers! Protect those who mend us!",
+            "{champion} comes for us! Stand fast, Royal Knights!",
+            "Bring down {champion} and Asheron's word is safe!"
         };
 
         /// <summary>The goal's progress, success and fail templates.</summary>
@@ -185,38 +194,89 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The wave-count fix against a real goal: 4 waves solo (a staff test counts as 0 players), never more
-        /// than 10 however big the crowd, and a group that clears every wave instantly still gets exactly 4,
-        /// paced 60 s apart over minSeconds 180, the last of them the finale.
+        /// The 2026-10-18 tuning, checked against a real goal: always 3 targets on the 16 m ring; 6 waves solo
+        /// (a staff test counts as 0 players), 7 with one counted player, never more than 10; waves of 11
+        /// monsters solo growing by 2 per player; a wave every 25 s at most, sooner once most of the last wave is
+        /// dead, never closer than 8 s; never a wave past the total; and an undefended target that lasts 180 s
+        /// against one attacker and never less than 60 s against a crowd.
         /// </summary>
         private static void AssertSoloWaveShape(GoalDef goal)
         {
             var p = goal.Protect;
 
-            Assert.AreEqual(180, p.MinSeconds, 1e-9, $"{goal.Id}: minSeconds");
-            Assert.IsTrue(goal.HoldSeconds >= p.MinSeconds, $"{goal.Id}: holdSeconds is the safety cap after the pacing");
+            for (var players = 0; players <= 40; players++)
+            {
+                var (count, radius) = p.ResolveLayout(players);
+                Assert.AreEqual(3, count, $"{goal.Id}: always 3 targets ({players} players)");
+                Assert.AreEqual(16.0, radius, 1e-9, $"{goal.Id}: 16 m ring ({players} players)");
+            }
+
+            Assert.AreEqual(0, p.MinSeconds, 1e-9, $"{goal.Id}: no minSeconds pacing, the interval paces the waves");
 
             var solo = new HoldHarness(goal);
-            Assert.AreEqual(4, solo.Objective.TargetWaves, $"{goal.Id}: solo waves");
+            Assert.AreEqual(6, solo.Objective.TargetWaves, $"{goal.Id}: solo waves");
 
             solo.Objective.OnAudienceResampled(1);
-            Assert.AreEqual(5, solo.Objective.TargetWaves, $"{goal.Id}: one counted player gets 4 + ceil(0.2)");
+            Assert.AreEqual(7, solo.Objective.TargetWaves, $"{goal.Id}: one counted player gets 6 + ceil(0.25)");
 
             var crowd = new HoldHarness(goal);
             crowd.Objective.OnAudienceResampled(500);
             Assert.AreEqual(ProtectDef.MaxHoldWaves, crowd.Objective.TargetWaves, $"{goal.Id}: hard cap");
 
-            // A wave asked for every second for the whole hold, every wave cleared at once.
-            var started = new List<int>();
+            Assert.AreEqual(11, p.WaveSize.Resolve(0), $"{goal.Id}: a solo wave is 11 monsters");
+            Assert.AreEqual(13, p.WaveSize.Resolve(1));
+            Assert.AreEqual(19, p.WaveSize.Resolve(4), $"{goal.Id}: and grows with the crowd");
+            Assert.IsTrue(p.MaxAlive >= p.WaveSize.Resolve(4) * 2, $"{goal.Id}: room for two overlapping waves of a group of 4");
 
-            for (var second = 0; second <= goal.HoldSeconds; second++)
+            Assert.AreEqual(25, p.WaveIntervalSeconds, 1e-9);
+            Assert.AreEqual(8, p.MinWaveGapSeconds, 1e-9);
+            Assert.AreEqual(2, p.MinSpecialWaves);
+
+            // Nobody kills anything: a wave every 25 s, never one past the total.
+            var slow = SimulateCadence(p, total: 6, killAllAtOnce: false, holdSeconds: goal.HoldSeconds);
+            CollectionAssert.AreEqual(new[] { 0, 25, 50, 75, 100, 125 }, slow, $"{goal.Id}: interval cadence");
+
+            // A group that wipes each wave the moment it lands: every 8 s, still exactly the total.
+            var fast = SimulateCadence(p, total: 6, killAllAtOnce: true, holdSeconds: goal.HoldSeconds);
+            CollectionAssert.AreEqual(new[] { 0, 8, 16, 24, 32, 40 }, fast, $"{goal.Id}: most-dead cadence");
+
+            // Ten waves still all start well inside the hold.
+            var ten = SimulateCadence(p, total: 10, killAllAtOnce: false, holdSeconds: goal.HoldSeconds);
+            Assert.AreEqual(10, ten.Count);
+            Assert.IsTrue(ten[9] <= goal.HoldSeconds - 120, $"{goal.Id}: the finale starts at {ten[9]} s, leaving 2 minutes to beat it");
+
+            Assert.AreEqual("Wave 6 of 6", WorldEventHoldRules.WaveProgress(9, 6), "never above the total");
+
+            // Balance: one attacker alone takes undefendedSeconds; any crowd at least minDeathSeconds.
+            Assert.AreEqual(180, p.UndefendedSeconds, 1e-9);
+            Assert.AreEqual(60, p.MinDeathSeconds, 1e-9);
+            Assert.AreEqual(0.10, p.HealBetweenWaves, 1e-9);
+        }
+
+        /// <summary>
+        /// The Hold cadence second by second: HoldObjective.WantsAnotherWave (the total) and
+        /// WorldEventHoldRules.HoldNextWaveDue (interval / most dead / min gap), as WorldEvent.TickWaves runs them.
+        /// </summary>
+        private static List<int> SimulateCadence(ProtectDef p, int total, bool killAllAtOnce, int holdSeconds)
+        {
+            var started = new List<int> { 0 };
+            var lastAt = 0.0;
+            var live = killAllAtOnce ? 0 : 11;
+
+            for (var second = 1; second <= holdSeconds; second++)
             {
-                if (HoldObjective.WantsAnotherWave(started.Count, 4, second, p.MinSeconds))
-                    started.Add(second);
+                if (!HoldObjective.WantsAnotherWave(started.Count, total, second, p.MinSeconds))
+                    continue;
+
+                if (!WorldEventHoldRules.HoldNextWaveDue(second, lastAt, p.WaveIntervalSeconds, p.MinWaveGapSeconds, live, 11, p.NextWaveAliveShare))
+                    continue;
+
+                started.Add(second);
+                lastAt = second;
+                live = killAllAtOnce ? 0 : live + 11;
             }
 
-            CollectionAssert.AreEqual(new[] { 0, 60, 120, 180 }, started, $"{goal.Id}: wave start times");
-            Assert.AreEqual("Wave 4 of 4", WorldEventHoldRules.WaveProgress(started.Count + 3, 4), "never above the total");
+            return started;
         }
     }
 }

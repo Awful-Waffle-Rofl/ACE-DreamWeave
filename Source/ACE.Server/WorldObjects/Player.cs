@@ -396,6 +396,10 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // World Events Hold: a protected target shows no health bar (it is sent as non-attackable), so
+            // assessing one also says its health in chat. No-op for everything else.
+            TrySendWorldEventProtectedHealth(wo);
+
             var currentTime = Time.GetUnixTime();
 
             // compare with previously requested appraisal target

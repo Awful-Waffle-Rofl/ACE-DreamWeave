@@ -498,6 +498,15 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        private int resolvedWaveCount;
+
+        /// <summary>
+        /// Wave batches whose placement has finished, landed or not (counted once per batch, where the fixed
+        /// 5.2 wave line is logged). Hold's win check waits for it, so a finale that has been started but not
+        /// yet placed cannot read as cleared.
+        /// </summary>
+        public int ResolvedWaveCount => System.Threading.Volatile.Read(ref resolvedWaveCount);
+
         /// <summary>Waves that landed (at least one monster adopted). Hold's wave counting reads it.</summary>
         public int LandedWaveCount
         {
@@ -1929,6 +1938,12 @@ namespace ACE.Server.WorldEvents
                     {
                         creature.WorldEventSeeker = true;
                         creature.WorldEventSeekHealthiest = true;
+                        creature.WorldEventFinaleBoss = true;
+                    }
+                    else if (plan.Type == HoldWaveType.Runners)
+                    {
+                        // Runners always go for the targets, never the players.
+                        creature.WorldEventSeeker = true;
                     }
                     else if (plan.Type == HoldWaveType.Breach && creature.WorldEventSeeker && plan.BreachTargetGuid != 0)
                         creature.WorldEventSeekForcedGuid = plan.BreachTargetGuid;
@@ -1939,7 +1954,13 @@ namespace ACE.Server.WorldEvents
                     }
 
                     if (plan.Type == HoldWaveType.Runners && entryIndex != plan.ChampionEntryIndex)
+                    {
                         creature.WorldEventRunRateMult = plan.RunRateMult;
+                        creature.WorldEventAttackSpeedMult = plan.AttackSpeedMult;
+                    }
+
+                    if (plan.Type == HoldWaveType.Ranged && plan.HoldDistance > 0 && entryIndex != plan.ChampionEntryIndex)
+                        creature.WorldEventHoldDistance = plan.HoldDistance;
                 }
 
                 // Band uplift (world_events_band_uplift): a roster member drawn BELOW its slot's natural band
@@ -1997,6 +2018,11 @@ namespace ACE.Server.WorldEvents
                 // EnterWorld, so the create packet the client first sees already carries the new name.
                 if (entry.Synthetic)
                     ApplySyntheticPromotion(evt, creature, entry.Kind);
+
+                // Hold finale boss: bigger and tougher than any wave monster, so the last phase reads as a boss
+                // fight (protect.finaleBossScale / finaleBossHealthMult). Its effect is replayed by WorldEvent.
+                if (plan != null && entryIndex == plan.ChampionEntryIndex)
+                    ApplyFinaleBoss(evt, creature);
 
                 candidates.Add(candidate);
             }
@@ -2494,6 +2520,38 @@ namespace ACE.Server.WorldEvents
 
             log.Info($"[WORLDEVENT] run={evt.RunId} boss wcid={creature.WeenieClassId} scale={before}->{creature.ObjScale ?? 1.0f} " +
                      $"(x{multiplier}) items={items} targeting=nearest-player");
+        }
+
+        /// <summary>
+        /// A Hold finale boss, before EnterWorld: its size times protect.finaleBossScale (its held items too)
+        /// and its health times protect.finaleBossHealthMult. Logged. Never throws.
+        /// </summary>
+        private void ApplyFinaleBoss(WorldEvent evt, Creature creature)
+        {
+            var protect = evt?.Composition?.Goal?.Protect;
+
+            if (protect == null || creature == null)
+                return;
+
+            try
+            {
+                var scale = (float)Math.Clamp(protect.FinaleBossScale, 1.0, 2.0);
+
+                if (scale != 1.0f)
+                    creature.ApplyRuntimeScaleMultiplier(scale);
+
+                var mult = Math.Clamp(protect.FinaleBossHealthMult, 1.0, 10.0);
+
+                if (mult > 1.0)
+                    ApplyHealthMultiplier(evt, creature, mult);
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} hold finale boss wcid={creature.WeenieClassId} {creature.Name} " +
+                         $"scale=x{scale:F2} health=x{mult:F2} -> {creature.Health.MaxValue}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} could not make wcid {creature.WeenieClassId} the finale boss", ex);
+            }
         }
 
         /// <summary>
@@ -4040,6 +4098,8 @@ namespace ACE.Server.WorldEvents
         {
             if (kind != WorldEventSpawnKind.Wave)
                 return;
+
+            System.Threading.Interlocked.Increment(ref resolvedWaveCount);
 
             log.Info($"[WORLDEVENT] run={evt.RunId} wave={waveIndex} band={band.Low}-{band.High} spawned={placed} alive={LiveCount}");
         }

@@ -500,7 +500,16 @@ namespace ACE.Server.Tests
             "Some of {family} are coming for you, not us! Guard your healers!",
             "Look out, healers! {Family} want you first!",
             "{champion} leads {family} in! This is their last push!",
-            "That is {champion}! Bring it down and we are safe!"
+            "That is {champion}! Bring it down and we are safe!",
+            // What a merchant says in local chat for each phase (2026-10-18).
+            "Fast ones! They are heading straight for us!",
+            "Here they come, and quick! Stop them!",
+            "They are shooting at the wagons from out there!",
+            "They are picking at us from range! Go get them!",
+            "Watch your backs, healers! Some of them want you!",
+            "They are not after the wagons this time, they are after you!",
+            "{champion} is coming for the wagons! Stop it!",
+            "That is the biggest one yet! Hold on, everyone!"
         };
 
         private static int SentenceCount(string line) => Regex.Matches(line.Trim(), @"[.!?]+(\s|$)").Count;

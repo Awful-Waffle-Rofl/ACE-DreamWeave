@@ -693,6 +693,37 @@ namespace ACE.Server.WorldEvents
             if (!IsFinite(protect.HealReductionSeconds) || protect.HealReductionSeconds < 0 || protect.HealReductionSeconds > 60)
                 return "has an invalid protect.healReductionSeconds (0 to 60)";
 
+            if (protect.WaveSize != null && (protect.WaveSize.Base < 1 || protect.WaveSize.Cap < protect.WaveSize.Base
+                || !IsFinite(protect.WaveSize.PerParticipant) || protect.WaveSize.PerParticipant < 0))
+                return "has an invalid protect.waveSize (base at least 1, cap at least base)";
+
+            if (protect.MaxAlive < 0 || protect.MaxAlive > 200)
+                return "has an invalid protect.maxAlive (0 to 200; 0 keeps the source's)";
+
+            if (!IsFinite(protect.WaveIntervalSeconds) || protect.WaveIntervalSeconds < 0 || protect.WaveIntervalSeconds > 600)
+                return "has an invalid protect.waveIntervalSeconds (0 to 600; 0 keeps the source's cadence)";
+
+            if (!IsFinite(protect.NextWaveAliveShare) || protect.NextWaveAliveShare < 0 || protect.NextWaveAliveShare > 1)
+                return "has an invalid protect.nextWaveAliveShare (0 to 1)";
+
+            if (!IsFinite(protect.MinWaveGapSeconds) || protect.MinWaveGapSeconds < 0 || protect.MinWaveGapSeconds > 60)
+                return "has an invalid protect.minWaveGapSeconds (0 to 60)";
+
+            if (protect.MinSpecialWaves < 0 || protect.MinSpecialWaves > ProtectDef.MaxHoldWaves)
+                return $"has an invalid protect.minSpecialWaves (0 to {ProtectDef.MaxHoldWaves})";
+
+            if (!IsFinite(protect.FinaleBossScale) || protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2)
+                return "has an invalid protect.finaleBossScale (1 to 2)";
+
+            if (!IsFinite(protect.FinaleBossHealthMult) || protect.FinaleBossHealthMult < 1 || protect.FinaleBossHealthMult > 10)
+                return "has an invalid protect.finaleBossHealthMult (1 to 10)";
+
+            if (!IsFinite(protect.BossEffectSeconds) || protect.BossEffectSeconds < 2 || protect.BossEffectSeconds > 60)
+                return "has an invalid protect.bossEffectSeconds (2 to 60)";
+
+            if (!WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out _))
+                return "has an unknown protect.bossEffect (a PlayScript name such as ShieldUpRed, or none)";
+
             return null;
         }
 
@@ -802,7 +833,13 @@ namespace ACE.Server.WorldEvents
 
                 if (!IsFinite(wave.SpeedMult) || wave.SpeedMult < 1 || wave.SpeedMult > 3)
                     return "has an invalid speedMult (1 to 3)";
+
+                if (!IsFinite(wave.AttackSpeedMult) || wave.AttackSpeedMult < 1 || wave.AttackSpeedMult > 3)
+                    return "has an invalid attackSpeedMult (1 to 3)";
             }
+
+            if (type == HoldWaveType.Ranged && (!IsFinite(wave.HoldDistance) || wave.HoldDistance < 5 || wave.HoldDistance > 40))
+                return "has an invalid holdDistance (5 to 40)";
 
             if (type == HoldWaveType.Hunters && (wave.Hunters < 1 || wave.Hunters > 20))
                 return "has an invalid hunters count (1 to 20)";

@@ -248,6 +248,198 @@ namespace ACE.Server.WorldEvents
             return eligible[eligible.Count - 1].TypeKind;
         }
 
+        /// <summary>
+        /// <see cref="PickWaveType(int, int, HoldWaveType, double, int, IReadOnlyList{SpecialWaveDef}, Random, HoldWaveType?)"/>
+        /// with a guaranteed minimum (D6 - pure): when <see cref="MustBeSpecial"/> says this middle wave has to
+        /// be special to reach <paramref name="minSpecial"/>, the chance roll is skipped and a type is always
+        /// drawn. The finale and a forced type win as before.
+        /// </summary>
+        public static HoldWaveType PickWaveType(int waveNumber, int targetWaves, HoldWaveType previous,
+            double chance, int fromWave, IReadOnlyList<SpecialWaveDef> types, Random rng, HoldWaveType? forced,
+            int specialsSoFar, int minSpecial)
+        {
+            var hasFinale = types != null && types.Any(t => t != null && t.TypeKind == HoldWaveType.Finale);
+
+            if (!MustBeSpecial(waveNumber, targetWaves, fromWave, hasFinale, specialsSoFar, minSpecial))
+                return PickWaveType(waveNumber, targetWaves, previous, chance, fromWave, types, rng, forced);
+
+            // Always special: a certain roll. A forced type still applies through the same path.
+            var type = PickWaveType(waveNumber, targetWaves, previous, 1.0, fromWave, types, rng, forced);
+
+            // Every eligible type was the previous one (a goal with only one special type): repeat it rather
+            // than miss the guarantee.
+            if (type == HoldWaveType.Normal && types != null)
+            {
+                var only = types.FirstOrDefault(t => t != null && t.TypeKind != HoldWaveType.Finale && t.TypeKind != HoldWaveType.Normal && t.Weight > 0);
+
+                if (only != null)
+                    type = only.TypeKind;
+            }
+
+            return type;
+        }
+
+        /// <summary>
+        /// Whether wave <paramref name="waveNumber"/> of <paramref name="targetWaves"/> must be special so the
+        /// run gets at least <paramref name="minSpecial"/> special waves (D6 - pure). Only the middle waves count
+        /// (from <paramref name="fromWave"/> to the last before the finale). The guaranteed ones are spread
+        /// evenly over that span, and a wave is also forced when the waves left would otherwise be too few.
+        /// </summary>
+        public static bool MustBeSpecial(int waveNumber, int targetWaves, int fromWave, bool hasFinale, int specialsSoFar, int minSpecial)
+        {
+            if (minSpecial <= 0 || targetWaves <= 0)
+                return false;
+
+            var first = Math.Max(1, fromWave);
+            var last = hasFinale ? targetWaves - 1 : targetWaves;
+
+            if (waveNumber < first || waveNumber > last || last < first)
+                return false;
+
+            var span = last - first + 1;
+            var want = Math.Min(minSpecial, span);
+            var need = want - Math.Max(0, specialsSoFar);
+
+            if (need <= 0)
+                return false;
+
+            // Catch-up: as many waves left (this one included) as specials still needed.
+            if (last - waveNumber + 1 <= need)
+                return true;
+
+            return GuaranteedSpecialSlots(first, last, want).Contains(waveNumber);
+        }
+
+        /// <summary>
+        /// The waves the guaranteed specials fall on (D6 - pure): <paramref name="count"/> slots spread evenly
+        /// over waves <paramref name="first"/> to <paramref name="last"/>, for example waves 3 and 5 for two
+        /// specials over waves 2 to 6.
+        /// </summary>
+        public static HashSet<int> GuaranteedSpecialSlots(int first, int last, int count)
+        {
+            var slots = new HashSet<int>();
+            var span = last - first + 1;
+
+            if (span <= 0 || count <= 0)
+                return slots;
+
+            count = Math.Min(count, span);
+
+            for (var i = 0; i < count; i++)
+                slots.Add(first + (int)Math.Floor((i + 0.5) * span / count));
+
+            return slots;
+        }
+
+        /// <summary>
+        /// The Hold wave cadence (D6 - pure), used when protect.waveIntervalSeconds is set: the next wave is due
+        /// once <paramref name="interval"/> seconds have passed since the last, or earlier once no more than
+        /// <paramref name="aliveShare"/> of the last wave's size is still alive. Never sooner than
+        /// <paramref name="minGap"/> after the last wave.
+        /// </summary>
+        public static bool HoldNextWaveDue(double now, double lastWaveAt, double interval, double minGap,
+            int liveCount, int lastWaveSize, double aliveShare)
+        {
+            var since = now - lastWaveAt;
+
+            if (since < Math.Max(0, minGap))
+                return false;
+
+            if (interval > 0 && since >= interval)
+                return true;
+
+            if (lastWaveSize <= 0)
+                return liveCount <= 0;
+
+            return liveCount <= Math.Floor(Math.Max(0, aliveShare) * lastWaveSize);
+        }
+
+        /// <summary>
+        /// Whether a Hold ranged-wave monster keeps its distance (D6 - pure): only with a hold distance set and a
+        /// ranged attack to use (a missile weapon or spells). A melee-only monster closes in as usual.
+        /// </summary>
+        public static bool HoldsRange(double holdDistance, bool hasMissileWeapon, bool hasSpells)
+        {
+            return holdDistance > 0 && (hasMissileWeapon || hasSpells);
+        }
+
+        /// <summary>The slack (m) past the hold distance before a ranged monster walks in again, so it does not twitch on the line.</summary>
+        public const double RangedHoldSlack = 1.5;
+
+        /// <summary>
+        /// Whether a ranged monster is still too far and should walk in (D6 - pure): farther than the hold
+        /// distance plus <see cref="RangedHoldSlack"/>.
+        /// </summary>
+        public static bool RangedHoldShouldApproach(double targetDist, double holdDistance)
+        {
+            return targetDist > holdDistance + RangedHoldSlack;
+        }
+
+        /// <summary>The label a phase broadcast starts with (D6 - pure): "Final wave" for the finale, else "Wave 4 of 7".</summary>
+        public static string PhaseLabel(int waveNumber, int targetWaves, bool isFinale)
+        {
+            return isFinale ? "Final wave" : WaveProgress(waveNumber, targetWaves);
+        }
+
+        /// <summary>A target's health as a whole percent (D6 - pure), 0 to 100, rounded up so a living target never reads 0.</summary>
+        public static int HealthPercent(uint current, uint max)
+        {
+            if (max == 0 || current == 0)
+                return 0;
+
+            return (int)Math.Clamp(Math.Ceiling(current * 100.0 / max), 1, 100);
+        }
+
+        /// <summary>
+        /// Every standing target's health, for the {targetHealth} progress token (D6 - pure):
+        /// "Sir Draithon 80%, Sir Donovan 64%". Empty when none stand.
+        /// </summary>
+        public static string TargetHealthSummary(IEnumerable<(string Name, uint Current, uint Max)> targets)
+        {
+            if (targets == null)
+                return "";
+
+            return string.Join(", ", targets.Where(t => t.Current > 0)
+                .Select(t => $"{(string.IsNullOrWhiteSpace(t.Name) ? "?" : t.Name)} {HealthPercent(t.Current, t.Max)}%"));
+        }
+
+        /// <summary>The line a player gets when assessing a protected target (D6 - pure): "Sir Donovan is at 64% health."</summary>
+        public static string ProtectedHealthLine(string name, uint current, uint max)
+        {
+            return $"{(string.IsNullOrWhiteSpace(name) ? "It" : name)} is at {HealthPercent(current, max)}% health.";
+        }
+
+        /// <summary>
+        /// protect.bossEffect (D6 - pure): a PlayScript name (case-insensitive) or "none" (and null or blank,
+        /// which read as none). False for anything else.
+        /// </summary>
+        public static bool TryParseBossEffect(string name, out ACE.Entity.Enum.PlayScript script)
+        {
+            script = ACE.Entity.Enum.PlayScript.Invalid;
+
+            if (string.IsNullOrWhiteSpace(name) || name.Trim().Equals("none", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var trimmed = name.Trim();
+
+            if (!trimmed.All(char.IsLetterOrDigit) || !Enum.TryParse(trimmed, true, out script))
+                return false;
+
+            return Enum.IsDefined(typeof(ACE.Entity.Enum.PlayScript), script) && script != ACE.Entity.Enum.PlayScript.Invalid;
+        }
+
+        /// <summary>
+        /// A runner's damage to a protected target (D6 - pure): the time-based slice for an attacker that swings
+        /// <paramref name="attackSpeedMult"/> times as fast, so one runner alone destroys a target in
+        /// undefendedSeconds / attackSpeedMult. A multiplier of 1 or less is the plain slice.
+        /// </summary>
+        public static float ProtectedHitDamage(uint maxHealth, double intervalSeconds, double undefendedSeconds, double attackSpeedMult)
+        {
+            var mult = double.IsFinite(attackSpeedMult) && attackSpeedMult > 1 ? attackSpeedMult : 1.0;
+
+            return ProtectedHitDamage(maxHealth, intervalSeconds, undefendedSeconds / mult);
+        }
+
         /// <summary>Parses a special wave type name (case-insensitive). False for anything unknown or "normal".</summary>
         public static bool TryParseWaveType(string name, out HoldWaveType type)
         {
