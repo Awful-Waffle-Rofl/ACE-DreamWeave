@@ -708,6 +708,10 @@ namespace ACE.Server.WorldEvents
             if (protect == null)
                 return;
 
+            if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +
+                                $"a hold never has more than {ProtectDef.MaxHoldWaves} waves");
+
             if (protect.SpecialWaves != null)
             {
                 if (!protect.IsWaveBased && protect.SpecialWaves.Count > 0)

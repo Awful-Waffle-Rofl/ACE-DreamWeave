@@ -72,11 +72,14 @@ namespace ACE.Server.WorldEvents.Objectives
                 if (!IsWaveBased)
                     return 0;
 
-                targetWaves ??= Math.Max(1, Protect.Waves.Resolve(0));
+                targetWaves ??= CapWaves(Protect.Waves.Resolve(0));
 
                 return targetWaves.Value;
             }
         }
+
+        /// <summary>A resolved wave count, kept within [1, <see cref="ProtectDef.MaxHoldWaves"/>].</summary>
+        public static int CapWaves(int resolved) => Math.Clamp(resolved, 1, ProtectDef.MaxHoldWaves);
 
         /// <summary>The wave counts as of now.</summary>
         public HoldWaveCounts Waves => waves();
@@ -87,21 +90,49 @@ namespace ACE.Server.WorldEvents.Objectives
             if (!IsWaveBased)
                 return;
 
-            var resolved = Math.Max(1, Protect.Waves.Resolve(Math.Max(0, participantCount)));
+            var current = TargetWaves;
 
-            if (targetWaves == null || resolved > targetWaves.Value)
+            // Once the finale has started the total is settled: raising it then would turn the finale into
+            // an ordinary wave and send more after it.
+            if (Waves.Started >= current)
+                return;
+
+            var resolved = CapWaves(Protect.Waves.Resolve(Math.Max(0, participantCount)));
+
+            if (resolved > current)
                 targetWaves = resolved;
         }
 
         private double MinSeconds => Math.Max(0, Protect?.MinSeconds ?? ProtectDef.DefaultMinSeconds);
 
         /// <summary>
-        /// Wave-based holds (D6 - pure): whether the cadence should spawn another wave. Yes until both the wave
-        /// target is reached AND the minimum time has passed; after that the field is left to clear.
+        /// Wave-based holds (D6 - pure): whether the cadence may spawn the next wave now. Never once the total
+        /// (at most <see cref="ProtectDef.MaxHoldWaves"/>) has started, and not before that wave's paced start
+        /// (<see cref="EarliestWaveStart"/>): a group that clears fast waits, it is not sent extra waves.
         /// </summary>
         public static bool WantsAnotherWave(int started, int target, double elapsed, double minSeconds)
         {
-            return started < target || elapsed < minSeconds;
+            var cap = Math.Min(target, ProtectDef.MaxHoldWaves);
+
+            if (started >= cap)
+                return false;
+
+            return elapsed >= EarliestWaveStart(started + 1, cap, minSeconds);
+        }
+
+        /// <summary>
+        /// The earliest a wave may start (D6 - pure): wave <paramref name="waveNumber"/> of
+        /// <paramref name="target"/> waits until (n - 1) / (N - 1) of <paramref name="minSeconds"/>, so the waves
+        /// are spread evenly and the last starts at minSeconds. Wave 1 (and a one-wave hold) starts at once.
+        /// </summary>
+        public static double EarliestWaveStart(int waveNumber, int target, double minSeconds)
+        {
+            if (waveNumber <= 1 || target <= 1 || !(minSeconds > 0) || !double.IsFinite(minSeconds))
+                return 0;
+
+            var n = Math.Min(waveNumber, target);
+
+            return minSeconds * (n - 1) / (target - 1);
         }
 
         /// <summary>This run's <see cref="WantsAnotherWave(int, int, double, double)"/>; always true for a time-only hold.</summary>
@@ -120,13 +151,15 @@ namespace ACE.Server.WorldEvents.Objectives
         public bool IsFinalWave(int waveNumber) => IsWaveBased && waveNumber == TargetWaves;
 
         /// <summary>
-        /// Wave-based holds (D6 - pure): the waves are won when every counted wave has started, every wave that
-        /// landed has been cleared, nothing is left standing, and the minimum time has passed.
+        /// Wave-based holds (D6 - pure): the waves are won when every counted wave (the finale last) has started,
+        /// every wave that landed has been cleared and nothing is left standing. No minimum time: minSeconds
+        /// only paces the waves (<see cref="EarliestWaveStart"/>), it never holds back a won run.
         /// </summary>
-        public static bool WavesWon(HoldWaveCounts counts, int target, double elapsed, double minSeconds)
+        public static bool WavesWon(HoldWaveCounts counts, int target)
         {
-            return target > 0 && counts.Started >= target && counts.Landed > 0 && counts.Cleared >= counts.Landed
-                && counts.Live == 0 && elapsed >= minSeconds;
+            var cap = Math.Min(target, ProtectDef.MaxHoldWaves);
+
+            return cap > 0 && counts.Started >= cap && counts.Landed > 0 && counts.Cleared >= counts.Landed && counts.Live == 0;
         }
 
         /// <summary>The local line at the start of each wave: "Wave 3 of 7 - 3 of 3 caravans stand." ASCII only.</summary>
@@ -229,7 +262,7 @@ namespace ACE.Server.WorldEvents.Objectives
                 if (Elapsed >= HoldSeconds)
                     return true;
 
-                return IsWaveBased && WavesWon(Waves, TargetWaves, Elapsed, MinSeconds);
+                return IsWaveBased && WavesWon(Waves, TargetWaves);
             }
         }
 

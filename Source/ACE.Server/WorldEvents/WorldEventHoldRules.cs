@@ -528,15 +528,19 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// "Wave 3 of 7", or "Wave 8, holding the line" once the counted waves are spent and the minimum time is
-        /// keeping the waves coming. "Wave 0 of 7" before the first.
+        /// "Wave 3 of 7"; "Wave 0 of 7" before the first. Never a number above the total.
         /// </summary>
         public static string WaveProgress(int started, int target)
         {
-            if (target > 0 && started > target)
-                return $"Wave {started}, holding the line";
+            // Never "Wave 6 of 5": a wave count past the total (which the cap should make impossible) reads as
+            // the last wave.
+            target = Math.Max(0, target);
+            started = Math.Max(0, started);
 
-            return $"Wave {Math.Max(0, started)} of {Math.Max(0, target)}";
+            if (target > 0 && started > target)
+                started = target;
+
+            return $"Wave {started} of {target}";
         }
 
         /// <summary>

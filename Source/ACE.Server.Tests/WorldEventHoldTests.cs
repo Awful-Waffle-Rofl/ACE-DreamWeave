@@ -2182,25 +2182,93 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void WavesWon_NeedsEveryWaveStartedClearedAndTheMinimumTime()
+        public void WavesWon_NeedsEveryWaveStartedAndCleared_NoMinimumTime()
         {
             var done = new HoldWaveCounts(started: 7, landed: 7, cleared: 7, live: 0);
 
-            Assert.IsTrue(HoldObjective.WavesWon(done, 7, 300, 300));
-            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(6, 6, 6, 0), 7, 400, 300), "a wave still to come");
-            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 6, 3), 7, 400, 300), "the last wave is still standing");
-            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 7, 1), 7, 400, 300), "a straggler left");
-            Assert.IsFalse(HoldObjective.WavesWon(done, 7, 299, 300), "before the minimum time");
-            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 0, 0, 0), 7, 400, 300), "nothing ever landed");
+            Assert.IsTrue(HoldObjective.WavesWon(done, 7), "the finale is cleared: won, however early");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(6, 6, 6, 0), 7), "a wave still to come");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 6, 3), 7), "the last wave is still standing");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 7, 7, 1), 7), "a straggler left");
+            Assert.IsFalse(HoldObjective.WavesWon(new HoldWaveCounts(7, 0, 0, 0), 7), "nothing ever landed");
+            Assert.IsTrue(HoldObjective.WavesWon(new HoldWaveCounts(10, 10, 10, 0), 40), "a target above the cap is won at the cap");
         }
 
         [TestMethod]
-        public void WantsAnotherWave_UntilBothTheCountAndTheMinimumTime()
+        public void WantsAnotherWave_NeverPastTheTotal_AndPacedByMinSeconds()
         {
-            Assert.IsTrue(HoldObjective.WantsAnotherWave(started: 3, target: 7, elapsed: 400, minSeconds: 300), "waves still to come");
-            Assert.IsTrue(HoldObjective.WantsAnotherWave(7, 7, 200, 300), "count met but the minimum is not: keep them coming");
-            Assert.IsFalse(HoldObjective.WantsAnotherWave(7, 7, 300, 300), "both met: let the field clear");
-            Assert.IsFalse(HoldObjective.WantsAnotherWave(9, 7, 320, 300));
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(started: 3, target: 7, elapsed: 400, minSeconds: 180), "waves still to come");
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(7, 7, 10, 180), "the in-game bug: all waves out early must NOT add more");
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(7, 7, 900, 180));
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(9, 7, 320, 180));
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(10, 40, 0, 0), "never above 10, whatever the target says");
+
+            // Five waves over 180 s: wave n waits until (n - 1) / 4 of it.
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(0, 5, 0, 180), "wave 1 at once");
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(1, 5, 44, 180), "wave 2 waits for 45 s");
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(1, 5, 45, 180));
+            Assert.IsFalse(HoldObjective.WantsAnotherWave(4, 5, 179, 180), "the finale waits for minSeconds");
+            Assert.IsTrue(HoldObjective.WantsAnotherWave(4, 5, 180, 180));
+        }
+
+        [TestMethod]
+        public void EarliestWaveStart_SpreadsTheWavesEvenly()
+        {
+            CollectionAssert.AreEqual(new[] { 0.0, 45.0, 90.0, 135.0, 180.0 },
+                Enumerable.Range(1, 5).Select(n => HoldObjective.EarliestWaveStart(n, 5, 180)).ToArray());
+
+            Assert.AreEqual(0, HoldObjective.EarliestWaveStart(1, 1, 180), "a one-wave hold starts at once");
+            Assert.AreEqual(0, HoldObjective.EarliestWaveStart(3, 5, 0), "minSeconds 0: no pacing");
+            Assert.AreEqual(180, HoldObjective.EarliestWaveStart(9, 5, 180), 1e-9, "past the total reads as the last");
+        }
+
+        [TestMethod]
+        public void SimulatedFastSoloRun_NeverExceedsTheTotal()
+        {
+            // The in-game run: every wave cleared within seconds, a wave asked for every second. It went to 32.
+            var target = 5;
+            var started = 0;
+
+            for (var second = 0; second <= 480; second++)
+            {
+                if (HoldObjective.WantsAnotherWave(started, target, second, 180))
+                    started++;
+            }
+
+            Assert.AreEqual(5, started, "exactly the total, the finale last");
+        }
+
+        [TestMethod]
+        public void Waves_TargetNeverAboveTen_AndFrozenOnceTheFinaleStarts()
+        {
+            var h = new HoldHarness(WaveHoldGoal(wavesBase: 40, wavesPerParticipant: 0, wavesCap: 40));
+            Assert.AreEqual(ProtectDef.MaxHoldWaves, h.Objective.TargetWaves, "a goal asking for 40 gets 10");
+
+            var g = new HoldHarness(WaveHoldGoal(wavesBase: 4, wavesPerParticipant: 1, wavesCap: 10));
+            Assert.AreEqual(4, g.Objective.TargetWaves);
+
+            g.Waves = new HoldWaveCounts(4, 4, 3, 2);   // the finale is out
+            g.Objective.OnAudienceResampled(6);
+            Assert.AreEqual(4, g.Objective.TargetWaves, "more players arriving during the finale add nothing after it");
+            Assert.IsTrue(g.Objective.IsFinalWave(4));
+        }
+
+        [TestMethod]
+        public void MinSeconds_DefaultIs180()
+        {
+            Assert.AreEqual(180, new ProtectDef().MinSeconds, 1e-9);
+        }
+
+        [TestMethod]
+        public void GoalsJson_WavesAboveTheCap_AreNoted()
+        {
+            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+                @"""radius"": 11.0, ""waves"": { ""base"": 4, ""perParticipant"": 1, ""cap"": 30 }, ""minSeconds"": 180.0,");
+
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
+
+            Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), string.Join(" | ", store.Diagnostics));
+            Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("never has more than 10 waves")), string.Join(" | ", store.Diagnostics));
         }
 
         [TestMethod]
@@ -2225,9 +2293,9 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Run_WaveHold_ClearedEarly_WaitsForTheMinimumTime()
+        public void Run_WaveHold_FinaleClearedEarly_SucceedsAtOnce()
         {
-            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 300, wavesBase: 4, wavesPerParticipant: 0, wavesCap: 4);
+            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 180, wavesBase: 4, wavesPerParticipant: 0, wavesCap: 4);
             WorldEvent evt = null;
             var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
             evt = BuildHoldEvent(goal, harness.Objective, maxDurationSeconds: 600);
@@ -2237,13 +2305,47 @@ namespace ACE.Server.Tests
             harness.Place(1, 2, 3);
 
             harness.Waves = new HoldWaveCounts(4, 4, 4, 0);
-            evt.Tick(T0 + 200);
-            Assert.AreEqual(WorldEventState.Active, evt.State, "all four waves cleared, but only 200 s in");
-            Assert.IsTrue(harness.Objective.WantsAnotherWave(T0 + 200), "so more waves keep coming");
+            Assert.IsFalse(harness.Objective.WantsAnotherWave(T0 + 60), "no wave past the total");
 
-            harness.Waves = new HoldWaveCounts(6, 6, 6, 0);
-            evt.Tick(T0 + 305);
-            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome);
+            evt.Tick(T0 + 60);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "finale cleared at 60 s: success, minSeconds or not");
+        }
+
+        [TestMethod]
+        public void Run_WaveHold_HoldSecondsEndsIt_EvenWithWavesStillToCome()
+        {
+            var goal = WaveHoldGoal(holdSeconds: 480, minSeconds: 180, wavesBase: 6, wavesPerParticipant: 0, wavesCap: 6);
+            WorldEvent evt = null;
+            var harness = new HoldHarness(goal, () => evt?.ActiveAt ?? 0);
+            evt = BuildHoldEvent(goal, harness.Objective, maxDurationSeconds: 600);
+
+            evt.Stage(T0);
+            evt.Tick(T0);
+            harness.Place(1, 2, 3);
+            harness.Kill(2);
+            harness.Waves = new HoldWaveCounts(3, 3, 2, 4);   // a slow group, waves 4-6 never started
+
+            evt.Tick(T0 + 479);
+            Assert.AreEqual(WorldEventState.Active, evt.State);
+
+            evt.Tick(T0 + 480);
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "holdSeconds ends it; 2 of 3 standing is enough");
+        }
+
+        [TestMethod]
+        public void ProgressText_NeverShowsAWaveAboveTheTotal()
+        {
+            var h = new HoldHarness(WaveHoldGoal(wavesBase: 5, wavesPerParticipant: 0, wavesCap: 5));
+            h.Place(1, 2);
+
+            foreach (var started in new[] { 5, 6, 32 })
+            {
+                h.Waves = new HoldWaveCounts(started, started, started - 1, 1);
+                h.Objective.Tick(T0 + 10);
+
+                StringAssert.Contains(h.Objective.ProgressText, "Wave 5 of 5", $"started={started}");
+                StringAssert.Contains(h.Objective.WaveStartText(started), "Wave 5 of 5", $"wave start line, started={started}");
+            }
         }
 
         [TestMethod]
@@ -2291,7 +2393,7 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual("Wave 3 of 7", WorldEventHoldRules.WaveProgress(3, 7));
             Assert.AreEqual("Wave 0 of 7", WorldEventHoldRules.WaveProgress(0, 7));
-            Assert.AreEqual("Wave 8, holding the line", WorldEventHoldRules.WaveProgress(8, 7));
+            Assert.AreEqual("Wave 7 of 7", WorldEventHoldRules.WaveProgress(8, 7), "never above the total");
 
             var goal = WaveHoldGoal(wavesBase: 7, wavesPerParticipant: 0, wavesCap: 7);
             goal.Protect.Noun = "caravan";

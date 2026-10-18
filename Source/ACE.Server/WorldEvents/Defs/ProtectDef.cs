@@ -113,21 +113,29 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("minDeathSeconds")]
         public double MinDeathSeconds { get; set; }
 
-        public const double DefaultMinSeconds = 300;
+        public const double DefaultMinSeconds = 180;
         public const double DefaultMaxHealPerTenSeconds = 0.10;
+
+        /// <summary>The most waves any wave-based hold can have, whatever protect.waves and the crowd say.</summary>
+        public const int MaxHoldWaves = 10;
 
         /// <summary>
         /// Optional: wave-based hold. How many waves the group must survive (base / perParticipant / cap,
-        /// sized at Active and raised, never lowered, as more players arrive). When set, the hold succeeds the
-        /// moment the LAST monster of the last wave dies with enough targets standing - once at least
-        /// <see cref="MinSeconds"/> have passed; until then extra waves keep coming. The final counted wave is
-        /// a little bigger. Absent keeps the time-only hold (success at holdSeconds). holdSeconds stays the
-        /// safety cap either way.
+        /// sized at Active and raised, never lowered, as more players arrive, and never above
+        /// <see cref="MaxHoldWaves"/>). When set, the hold succeeds the moment the LAST monster of the last
+        /// (finale) wave dies with enough targets standing. No wave is ever added beyond the total. The final
+        /// counted wave is a little bigger. Absent keeps the time-only hold (success at holdSeconds).
+        /// holdSeconds stays the safety cap either way.
         /// </summary>
         [JsonPropertyName("waves")]
         public ScaledCount Waves { get; set; }
 
-        /// <summary>Wave-based holds only: the hold never succeeds before this many seconds; waves keep coming until then.</summary>
+        /// <summary>
+        /// Wave-based holds only: the pacing target. The waves are spread so the last one starts no earlier than
+        /// this many seconds in (wave n of N waits until (n - 1) / (N - 1) of it has passed), so a group that
+        /// clears fast waits a little between waves instead of being sent extra ones. It never delays success:
+        /// the hold is won as soon as the finale is cleared.
+        /// </summary>
         [JsonPropertyName("minSeconds")]
         public double MinSeconds { get; set; } = DefaultMinSeconds;
 
