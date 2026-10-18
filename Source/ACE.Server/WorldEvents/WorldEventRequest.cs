@@ -119,5 +119,11 @@ namespace ACE.Server.WorldEvents
         /// default, and every web-panel start) uses the real players.
         /// </summary>
         public int? TestLevel { get; set; }
+
+        /// <summary>
+        /// "--wave-type t" (admin testing, Hold runs only): every wave that is not the finale is this special
+        /// type (breach, runners, ranged, hunters), as long as the goal defines it. Null rolls normally.
+        /// </summary>
+        public ACE.Server.WorldEvents.Defs.HoldWaveType? ForcedWaveType { get; set; }
     }
 }

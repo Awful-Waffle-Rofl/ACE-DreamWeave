@@ -908,18 +908,32 @@ namespace ACE.Server.WorldEvents
         public void SpawnWave(WorldEvent evt, WavePick pick, IReadOnlyList<Position> anchors,
             int waveIndex, LevelBand band, double healthMult)
         {
+            SpawnWave(evt, pick, anchors, waveIndex, band, healthMult, null);
+        }
+
+        /// <summary>
+        /// <see cref="SpawnWave(WorldEvent, WavePick, IReadOnlyList{Position}, int, LevelBand, double)"/> with a
+        /// Hold special-wave plan: ranged replacements, the runners' trimmed count and the finale champion are
+        /// applied to the batch here; the per-creature parts (breach target, hunters, runner speed and health,
+        /// the champion's healthiest-target rule) in <see cref="Spawn"/>. A null plan is an ordinary wave.
+        /// </summary>
+        public void SpawnWave(WorldEvent evt, WavePick pick, IReadOnlyList<Position> anchors,
+            int waveIndex, LevelBand band, double healthMult, HoldWavePlan plan)
+        {
             if (pick == null)
                 return;
 
             var entries = new List<SpawnEntry>();
 
-            for (var i = 0; i < pick.Trash.Count; i++)
+            var trash = plan?.ReplacedTrash != null && plan.ReplacedTrash.Count == pick.Trash.Count ? plan.ReplacedTrash : pick.Trash;
+
+            for (var i = 0; i < trash.Count; i++)
             {
                 // WP-24: the every-third-wave elite slot is one specific index into Trash, marked by
                 // WavePick.EliteIndex - every other index is plain trash.
                 var isElite = i == pick.EliteIndex;
 
-                entries.Add(new SpawnEntry(pick.Trash[i], overflowChampion: false,
+                entries.Add(new SpawnEntry(trash[i], overflowChampion: false,
                     isElite ? WorldEventWaveEntryKind.Elite : WorldEventWaveEntryKind.Trash,
                     isElite && pick.EliteSynthetic, pick.TrashUpliftAt(i), SlotLevelFor(pick, pick.TrashSlotLevelAt(i))));
             }
@@ -932,7 +946,21 @@ namespace ACE.Server.WorldEvents
                     WorldEventWaveEntryKind.Champion, synthetic, pick.ChampionUpliftAt(i), SlotLevelFor(pick, pick.ChampionSlotLevelAt(i))));
             }
 
-            Spawn(evt, entries, anchors, WorldEventSpawnKind.Wave, waveIndex, band, healthMult);
+            // Runners: fewer of them (the plan's keep count), from the front of the batch.
+            if (plan?.KeepCount != null && plan.KeepCount.Value < entries.Count)
+                entries = entries.GetRange(0, Math.Max(1, plan.KeepCount.Value));
+
+            // Finale: the family champion joins the wave as one more wave monster, so the wave only clears
+            // once it is dead too.
+            if (plan != null && plan.ChampionWcid != 0)
+            {
+                entries.Add(new SpawnEntry(plan.ChampionWcid, overflowChampion: false, WorldEventWaveEntryKind.Champion,
+                    plan.ChampionSynthetic, plan.ChampionUplift, plan.ChampionSlotLevel));
+
+                plan.ChampionEntryIndex = entries.Count - 1;
+            }
+
+            Spawn(evt, entries, anchors, WorldEventSpawnKind.Wave, waveIndex, band, healthMult, null, plan);
         }
 
         /// <summary>
@@ -1018,13 +1046,13 @@ namespace ACE.Server.WorldEvents
                 return;
 
             var participants = Math.Max(0, evt.ResolvedAudienceCount);
-            var count = protect.ResolveCount(participants);
+            var (count, radius) = protect.ResolveLayout(participants);
 
             var entries = new List<SpawnEntry>();
             var anchors = new List<Position>();
             var dzByAnchor = new List<float>();
 
-            var ring = WorldEventHoldRules.RingOffsets(count, protect.Radius);
+            var ring = WorldEventHoldRules.RingOffsets(count, radius);
 
             for (var i = 0; i < ring.Count; i++)
             {
@@ -1047,7 +1075,7 @@ namespace ACE.Server.WorldEvents
             scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, protect.TargetDecor));
 
             log.Info($"[WORLDEVENT] run={evt.RunId} protect wcids={string.Join(",", Enumerable.Range(0, ring.Count).Select(protect.WcidFor))} " +
-                     $"count={count} radius={protect.Radius:F1} scene={scene.Count} " +
+                     $"count={count} radius={radius:F1} scene={scene.Count} " +
                      $"health={protect.EffectiveMaxHealth(participants)}{(protect.IsTimeScaled ? $" (time-based: undefendedSeconds={protect.UndefendedSeconds:F0} minDeathSeconds={protect.MinDeathSeconds:F0})" : "")} minSurvivors={protect.MinSurvivors} " +
                      $"seekShare={protect.EffectiveSeekShare:F2} (participants={participants})");
 
@@ -1780,8 +1808,10 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void Spawn(WorldEvent evt, IReadOnlyList<SpawnEntry> entries, IReadOnlyList<Position> anchors,
             WorldEventSpawnKind kind, int waveIndex, LevelBand band, double healthMult,
-            IReadOnlyList<float> dzByAnchor = null)
+            IReadOnlyList<float> dzByAnchor = null, HoldWavePlan plan = null)
         {
+            HashSet<int> hunterIndices = null;
+
             if (evt == null || entries == null || entries.Count == 0)
                 return;
 
@@ -1816,6 +1846,10 @@ namespace ACE.Server.WorldEvents
             // Hold goal: which of this wave's entries go straight for the protected targets. Null for every
             // spawn that is not a Wave batch of a Hold run, which is every spawn outside that one case.
             var seekerIndices = kind == WorldEventSpawnKind.Wave ? PickSeekerIndices(evt, entries.Count) : null;
+
+            if (plan != null && plan.Type == HoldWaveType.Hunters && kind == WorldEventSpawnKind.Wave)
+                hunterIndices = WorldEventHoldRules.PickHunterIndices(entries.Count, plan.Hunters, seekerIndices, plan.ChampionEntryIndex);
+
             var entryIndex = -1;
 
             foreach (var entry in entries)
@@ -1882,6 +1916,28 @@ namespace ACE.Server.WorldEvents
                 if (seekerIndices != null && seekerIndices.Contains(entryIndex))
                     creature.WorldEventSeeker = true;
 
+                // Hold special waves (HoldWavePlan). The finale champion is always a seeker that goes for the
+                // healthiest target; a breach sends every seeker at one target; hunters are taken from the
+                // NON-seekers, so a hunter wave still sends its seeker share at the targets.
+                if (plan != null)
+                {
+                    if (entryIndex == plan.ChampionEntryIndex)
+                    {
+                        creature.WorldEventSeeker = true;
+                        creature.WorldEventSeekHealthiest = true;
+                    }
+                    else if (plan.Type == HoldWaveType.Breach && creature.WorldEventSeeker && plan.BreachTargetGuid != 0)
+                        creature.WorldEventSeekForcedGuid = plan.BreachTargetGuid;
+                    else if (hunterIndices != null && hunterIndices.Contains(entryIndex))
+                    {
+                        creature.WorldEventSeeker = false;
+                        creature.WorldEventHunter = true;
+                    }
+
+                    if (plan.Type == HoldWaveType.Runners && entryIndex != plan.ChampionEntryIndex)
+                        creature.WorldEventRunRateMult = plan.RunRateMult;
+                }
+
                 // Band uplift (world_events_band_uplift): a roster member drawn BELOW its slot's natural band
                 // is normalized up to the band standard, and its health floored to the band median BEFORE the
                 // crowd x pace multiplier below (Threads' order: floor, then multiplier). Placed ahead of the
@@ -1927,6 +1983,10 @@ namespace ACE.Server.WorldEvents
                 // EnterWorld. Health.Current is re-seeded from the new maximum in the same step, so the
                 // creature enters the world at full health rather than at its unscaled value.
                 ApplyHealthMultiplier(evt, creature, healthMult);
+
+                // Hold runner waves: lighter as well as faster.
+                if (plan != null && plan.Type == HoldWaveType.Runners && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex)
+                    ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * plan.HealthMult)));
 
                 // WP-24: a synthetic elite/champion (a role-0 member promoted because the band had no real
                 // one) is renamed and given a further health multiplier ON TOP of healthMult, here - before

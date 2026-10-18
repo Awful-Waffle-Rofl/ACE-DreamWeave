@@ -208,6 +208,10 @@ namespace ACE.Server.WorldObjects
                 if (WorldEventSeeker && TrySelectWorldEventSeekTarget())
                     return true;
 
+                // WaffleACE fork, World Events Hold hunter waves: a hunter turns onto whoever is healing the targets.
+                if (WorldEventHunter && TrySelectWorldEventHunterTarget())
+                    return true;
+
                 if (visibleTargets.Count == 0)
                 {
                     if (MonsterState != State.Return)

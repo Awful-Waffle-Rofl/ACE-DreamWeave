@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Linq;
 
 using ACE.Common;
 using ACE.Entity;
@@ -1504,6 +1505,11 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
+            // Hold special waves (protect.specialWaves): this wave's type and what it changes.
+            var holdPlan = holdObjective != null && holdObjective.IsWaveBased
+                ? BuildHoldWavePlan(holdObjective, holdWavesStarted + 1, pick)
+                : null;
+
             // Read back when this wave clears: a speed-up goes to quantity while quantity still has room,
             // and to health once it does not.
             quantityMaxedByWave[WaveIndex] = pick.Sizing.QuantityMaxed;
@@ -1538,7 +1544,7 @@ namespace ACE.Server.WorldEvents
 
             lastWaveIndexSpawned = WaveIndex;
 
-            Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult);
+            Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
 
             holdWavesStarted++;
 
@@ -1553,6 +1559,194 @@ namespace ACE.Server.WorldEvents
                          (finalHoldWave ? $" (final wave, +{finalWaveExtra})" : ""));
 
                 WorldEventAnnouncer.Local(this, holdObjective.WaveStartText(holdWavesStarted));
+
+                AnnounceHoldWave(holdPlan);
+            }
+        }
+
+        /// <summary>The previous Hold wave's type, so two special waves of one type never come back to back.</summary>
+        private HoldWaveType holdLastWaveType = HoldWaveType.Normal;
+
+        /// <summary>Every Hold wave's type in order, for the result log line.</summary>
+        private readonly List<string> holdWaveTypeHistory = new List<string>();
+
+        private readonly Random holdWaveRng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+
+        /// <summary>
+        /// This Hold wave's plan: the type (WorldEventHoldRules.PickWaveType) and what it changes, worked out on
+        /// the world thread before the wave is sent to the spawner. Null for an ordinary wave. A special type
+        /// that cannot apply (a breach with no target standing, a ranged wave from a family with no ranged
+        /// members, a finale with no champion) falls back to an ordinary wave or a finale without a champion,
+        /// and says so in the log.
+        /// </summary>
+        private HoldWavePlan BuildHoldWavePlan(HoldObjective hold, int waveNumber, WavePick pick)
+        {
+            var protect = Composition?.Goal?.Protect;
+
+            if (protect == null)
+                return null;
+
+            var type = WorldEventHoldRules.PickWaveType(waveNumber, hold.TargetWaves, holdLastWaveType, protect.SpecialWaveChance,
+                protect.SpecialWaveFromWave, protect.SpecialWaves, holdWaveRng, Request?.ForcedWaveType);
+
+            // A forced type the goal does not define is ignored (the def carries its settings and lines).
+            if (type != HoldWaveType.Normal && protect.SpecialWave(type) == null)
+            {
+                log.Warn($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: type {type} is not in protect.specialWaves; ordinary wave");
+                type = HoldWaveType.Normal;
+            }
+
+            var def = protect.SpecialWave(type);
+            var plan = new HoldWavePlan { Type = type, WaveNumber = waveNumber };
+
+            switch (type)
+            {
+                case HoldWaveType.Breach:
+                {
+                    var targets = Spawner.LiveProtectedCreatures;
+
+                    if (targets.Count == 0)
+                    {
+                        plan.Type = HoldWaveType.Normal;
+                        break;
+                    }
+
+                    var target = targets[holdWaveRng.Next(targets.Count)];
+                    plan.BreachTargetGuid = target.Guid.Full;
+                    plan.BreachSide = SideOfAnchor(target);
+                    break;
+                }
+
+                case HoldWaveType.Runners:
+                    plan.KeepCount = WorldEventHoldRules.RunnersKeep(pick.Trash.Count + pick.Champions.Count, def.CountMult);
+                    plan.HealthMult = Math.Clamp(def.HealthMult, 0.1, 1.0);
+                    plan.RunRateMult = (float)Math.Clamp(def.SpeedMult, 1.0, 3.0);
+                    break;
+
+                case HoldWaveType.Ranged:
+                {
+                    var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, pick.Band);
+
+                    if (pool.Count == 0)
+                    {
+                        log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no ranged or caster members; ordinary wave");
+                        plan.Type = HoldWaveType.Normal;
+                        break;
+                    }
+
+                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceWithRanged(pick.Trash, pool, holdWaveRng);
+                    break;
+                }
+
+                case HoldWaveType.Hunters:
+                    plan.Hunters = Math.Max(1, def.Hunters);
+                    break;
+
+                case HoldWaveType.Finale:
+                {
+                    var champion = WorldEventRosterSelector.PickChampion(Composition?.Roster, Audience);
+
+                    if (champion.Wcid == 0)
+                    {
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale: the family has no champion in band; finale without one");
+                        break;
+                    }
+
+                    plan.ChampionWcid = champion.Wcid;
+                    plan.ChampionSynthetic = champion.Synthetic;
+                    plan.ChampionUplift = champion.UpliftLevel;
+                    plan.ChampionSlotLevel = champion.SlotLevel;
+
+                    var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == champion.Wcid)?.Name;
+
+                    plan.ChampionName = string.IsNullOrWhiteSpace(name) ? null : (champion.Synthetic ? "Champion " + name : name);
+                    break;
+                }
+            }
+
+            holdLastWaveType = plan.Type;
+            holdWaveTypeHistory.Add(plan.Type.ToString().ToLowerInvariant());
+
+            log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber} {plan}" +
+                     (Request?.ForcedWaveType != null ? $" (--wave-type {Request.ForcedWaveType.Value.ToString().ToLowerInvariant()})" : ""));
+
+            return plan.Type == HoldWaveType.Normal ? null : plan;
+        }
+
+        /// <summary>Which compass side of the run's anchor <paramref name="target"/> stands on ("east").</summary>
+        private string SideOfAnchor(Creature target)
+        {
+            var anchor = Composition?.AnchorPosition;
+
+            if (anchor == null || target?.Location == null)
+                return null;
+
+            var a = anchor.ToGlobal();
+            var t = target.Location.ToGlobal();
+
+            return WorldEventHoldRules.CompassSide(t.X - a.X, t.Y - a.Y);
+        }
+
+        /// <summary>
+        /// A special wave's local announcement (one of its announce lines), and for a breach the threatened
+        /// target's own warning in local speech. Nothing for an ordinary wave or a type with no lines.
+        /// </summary>
+        private void AnnounceHoldWave(HoldWavePlan plan)
+        {
+            if (plan == null)
+                return;
+
+            var def = Composition?.Goal?.Protect?.SpecialWave(plan.Type);
+
+            if (def == null)
+                return;
+
+            List<string> Fill(IReadOnlyList<string> pool) =>
+                pool?.Select(l => WorldEventHoldRules.FillWaveTokens(l, plan.BreachSide, plan.ChampionName)).ToList();
+
+            var announce = ComposeProtectedLine(Fill(def.Announce), null);
+
+            if (!string.IsNullOrEmpty(announce))
+                WorldEventAnnouncer.Local(this, announce);
+
+            if (plan.Type == HoldWaveType.Breach)
+            {
+                var speaker = Spawner.LiveProtectedCreatures.FirstOrDefault(c => c.Guid.Full == plan.BreachTargetGuid);
+                var warning = ComposeProtectedLine(Fill(def.Lines), null);
+
+                if (speaker != null && !string.IsNullOrEmpty(warning))
+                    SpeakLocally(speaker, warning, viaQueue: true);
+            }
+        }
+
+        /// <summary>How long a player counts as "healing the targets" for hunter waves after their last heal on one.</summary>
+        internal const double ProtectedHealerMemorySeconds = 20.0;
+
+        private readonly Dictionary<uint, (Player Player, double At)> protectedHealers = new Dictionary<uint, (Player, double)>();
+
+        private readonly object protectedHealersSync = new object();
+
+        /// <summary>Remembers that <paramref name="healer"/> healed one of this run's targets at <paramref name="now"/>. Any thread.</summary>
+        internal void NoteProtectedHealer(Player healer, double now)
+        {
+            if (healer == null)
+                return;
+
+            lock (protectedHealersSync)
+                protectedHealers[healer.Guid.Full] = (healer, now);
+        }
+
+        /// <summary>Players who healed a target within <see cref="ProtectedHealerMemorySeconds"/> of <paramref name="now"/>. Any thread.</summary>
+        internal List<Player> RecentProtectedHealers(double now)
+        {
+            lock (protectedHealersSync)
+            {
+                var stale = protectedHealers.Where(kv => now - kv.Value.At > ProtectedHealerMemorySeconds).Select(kv => kv.Key).ToList();
+
+                foreach (var key in stale)
+                    protectedHealers.Remove(key);
+
+                return protectedHealers.Values.Select(v => v.Player).ToList();
             }
         }
 
@@ -3337,6 +3531,22 @@ namespace ACE.Server.WorldEvents
                 catch (Exception ex)
                 {
                     log.Error($"[WORLDEVENT] run={RunId} could not freeze the progress text", ex);
+                }
+            }
+
+            // Hold: one summary line for tuning - the result, the targets left and every wave's type.
+            if (Composition?.Goal?.TypeKind == GoalType.Hold)
+            {
+                try
+                {
+                    var counts = HoldWaveCounts;
+
+                    log.Info($"[WORLDEVENT] run={RunId} hold result={outcome} targets={Spawner.LiveProtectedGuids.Count}/{Spawner.ProtectedGuids.Count} " +
+                             $"waves started={counts.Started} cleared={counts.Cleared} types=[{string.Join(",", holdWaveTypeHistory)}]");
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} hold result log threw", ex);
                 }
             }
 

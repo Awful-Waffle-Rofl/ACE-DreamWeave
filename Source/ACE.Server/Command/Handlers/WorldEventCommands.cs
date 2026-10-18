@@ -34,7 +34,7 @@ namespace ACE.Server.Command.Handlers
         // TECH-DESIGN 5.3, one line per subcommand collapsed onto one usage string per CommandHandlerAttribute.
         private const string Usage =
             "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] [--abandon <seconds>] [--level <n>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
-            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (abandon and wipe timers; 0 = never, for solo staff tests)] [--level <n> (test participant level 1-275)] [--dry] | " +
+            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (abandon and wipe timers; 0 = never, for solo staff tests)] [--level <n> (test participant level 1-275)] [--wave-type <breach|runners|ranged|hunters> (Hold: force every non-finale wave)] [--dry] | " +
             "stop [fail|abort] | " +
             "status | " +
             "list [axes|families|presets] | " +
@@ -179,6 +179,7 @@ namespace ACE.Server.Command.Handlers
                 // abandon rule would; --abandon 0 has to turn both off for the test to run its full length.
                 WipeGraceSeconds = WipeGraceFor(parsed.AbandonAfterSeconds),
                 TestLevel = parsed.TestLevel,
+                ForcedWaveType = parsed.ForcedWaveType,
                 Random = parsed.Random,
                 TeaserLeadSeconds = parsed.TeaserLeadSeconds
             };
@@ -784,6 +785,9 @@ namespace ACE.Server.Command.Handlers
             /// was not passed: the real players decide.
             /// </summary>
             public int? TestLevel { get; set; }
+
+            /// <summary>"--wave-type &lt;t&gt;" (admin testing, Hold runs): every non-finale wave is this special type. Null rolls normally.</summary>
+            public ACE.Server.WorldEvents.Defs.HoldWaveType? ForcedWaveType { get; set; }
         }
 
         /// <summary>The largest --abandon value accepted, in seconds (one hour).</summary>
@@ -967,6 +971,20 @@ namespace ACE.Server.Command.Handlers
                         }
 
                         result.TestLevel = testLevel;
+                        break;
+
+                    case "--wave-type":
+                        if (!TryTakeValue(args, ref i, flag, out var waveTypeRaw, out error))
+                            return false;
+
+                        if (!ACE.Server.WorldEvents.WorldEventHoldRules.TryParseWaveType(waveTypeRaw, out var waveType)
+                            || waveType == ACE.Server.WorldEvents.Defs.HoldWaveType.Finale)
+                        {
+                            error = "--wave-type needs one of breach, runners, ranged, hunters";
+                            return false;
+                        }
+
+                        result.ForcedWaveType = waveType;
                         break;
 
                     default:

@@ -32,6 +32,21 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool WorldEventSeeker { get; set; }
 
+        /// <summary>Runtime-only, Hold breach waves: the one target this seeker must go for while it stands (0 = none).</summary>
+        public uint WorldEventSeekForcedGuid { get; set; }
+
+        /// <summary>Runtime-only, Hold finale champion: this seeker always picks the healthiest target.</summary>
+        public bool WorldEventSeekHealthiest { get; set; }
+
+        /// <summary>
+        /// Runtime-only, Hold hunter waves: this monster ignores the targets and hunts players, a player who has
+        /// recently healed a target first. Never a seeker.
+        /// </summary>
+        public bool WorldEventHunter { get; set; }
+
+        /// <summary>Runtime-only, Hold runner waves: multiplies this monster's run rate (GetRunRate). 1 for everyone else.</summary>
+        public float WorldEventRunRateMult { get; set; } = 1.0f;
+
         /// <summary>
         /// True when <paramref name="target"/> is a protected target and this creature is a monster placed by
         /// the same run. The only way any monster may damage a protected target.
@@ -64,8 +79,9 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // Keep the current target while it stands - unless a breach has named a different one.
             if (AttackTarget is Creature current && current.WorldEventProtected && IsUsableSeekTarget(current)
-                && IsVisibleTarget(current))
+                && IsVisibleTarget(current) && (WorldEventSeekForcedGuid == 0 || current.Guid.Full == WorldEventSeekForcedGuid))
                 return true;
 
             var targets = evt.Spawner.LiveProtectedCreatures;
@@ -76,17 +92,21 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
-            // Spread out: the target with the FEWEST other seekers already on it, nearest first among ties, so
-            // the wave splits across the caravans and the defenders have to split up too.
             var usable = new List<Creature>();
             var attackerCounts = new List<int>();
             var distances = new List<double>();
+            var health = new List<(uint, uint)>();
 
             var otherSeekers = evt.Spawner.LiveWaveCreatures;
 
             foreach (var target in targets)
             {
                 if (!IsUsableSeekTarget(target))
+                    continue;
+
+                var distSq = PhysicsObj.get_distance_sq_to_object(target.PhysicsObj, true);
+
+                if (distSq > MaxChaseRangeSq)
                     continue;
 
                 var attackers = 0;
@@ -99,15 +119,41 @@ namespace ACE.Server.WorldObjects
 
                 usable.Add(target);
                 attackerCounts.Add(attackers);
-                distances.Add(PhysicsObj.get_distance_sq_to_object(target.PhysicsObj, true));
+                distances.Add(distSq);
+                health.Add((target.Health.Current, target.Health.MaxValue));
             }
 
-            var index = ACE.Server.WorldEvents.WorldEventHoldRules.PickLeastAttacked(attackerCounts, distances, MaxChaseRangeSq);
+            Creature best = null;
 
-            if (index < 0)
-                return false;
+            // Breach: the one target the whole wave was sent at, while it stands.
+            if (WorldEventSeekForcedGuid != 0)
+            {
+                best = usable.Find(t => t.Guid.Full == WorldEventSeekForcedGuid);
 
-            var best = usable[index];
+                if (best == null)
+                    WorldEventSeekForcedGuid = 0;
+            }
+
+            // Finale champion: the healthiest target.
+            if (best == null && WorldEventSeekHealthiest)
+            {
+                var healthiest = ACE.Server.WorldEvents.WorldEventHoldRules.PickHealthiest(health);
+
+                if (healthiest >= 0)
+                    best = usable[healthiest];
+            }
+
+            // Otherwise spread out: the target with the FEWEST other seekers already on it, nearest first among
+            // ties, so the wave splits across the targets and the defenders have to split up too.
+            if (best == null)
+            {
+                var index = ACE.Server.WorldEvents.WorldEventHoldRules.PickLeastAttacked(attackerCounts, distances, MaxChaseRangeSq);
+
+                if (index < 0)
+                    return false;
+
+                best = usable[index];
+            }
 
             if (!IsVisibleTarget(best))
                 PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { best.PhysicsObj });
@@ -123,7 +169,8 @@ namespace ACE.Server.WorldObjects
             {
                 EmoteManager.OnNewEnemy(AttackTarget);
 
-                log.Debug($"[WORLDEVENT] seeker 0x{Guid.Full:X8} targets {best.Name} 0x{best.Guid.Full:X8} (was {previous?.Name ?? "none"})");
+                log.Info($"[WORLDEVENT] run={evt.RunId} seeker {Name} 0x{Guid.Full:X8} targets {best.Name} 0x{best.Guid.Full:X8} " +
+                         $"rule={(WorldEventSeekForcedGuid != 0 ? "breach" : WorldEventSeekHealthiest ? "healthiest" : "spread")} (was {previous?.Name ?? "none"})");
             }
 
             return true;
@@ -149,6 +196,12 @@ namespace ACE.Server.WorldObjects
                 return true;
             }
 
+            if (WorldEventHunter && TrySelectWorldEventHunterTarget())
+            {
+                WakeUp(alertNearby: false);
+                return true;
+            }
+
             var player = NearestWakeTargetPlayer();
 
             if (player == null)
@@ -162,6 +215,53 @@ namespace ACE.Server.WorldObjects
 
             AttackTarget = player;
             WakeUp(alertNearby: false);
+            return true;
+        }
+
+        /// <summary>
+        /// Hold hunter waves: aim this hunter at a player who has healed one of the run's targets recently,
+        /// the nearest such healer within chase range, else at the nearest player. Called on wake and from
+        /// FindNextTarget, so a hunter turns onto whoever starts healing. False when nobody is in reach.
+        /// </summary>
+        public bool TrySelectWorldEventHunterTarget()
+        {
+            if (!WorldEventHunter || PhysicsObj == null || P_WorldEvent == null)
+                return false;
+
+            Player pick = null;
+            var bestDistSq = double.MaxValue;
+
+            foreach (var healer in P_WorldEvent.RecentProtectedHealers(ACE.Common.Time.GetUnixTime()))
+            {
+                if (healer == null || healer.IsDead || healer.Teleporting || !healer.Attackable || healer.PhysicsObj == null)
+                    continue;
+
+                var distSq = PhysicsObj.get_distance_sq_to_object(healer.PhysicsObj, true);
+
+                if (distSq <= MaxChaseRangeSq && distSq < bestDistSq)
+                {
+                    pick = healer;
+                    bestDistSq = distSq;
+                }
+            }
+
+            pick ??= NearestWakeTargetPlayer();
+
+            if (pick == null)
+                return false;
+
+            if (!IsVisibleTarget(pick))
+                PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { pick.PhysicsObj });
+
+            if (!IsVisibleTarget(pick))
+                return false;
+
+            if (AttackTarget != pick)
+            {
+                log.Info($"[WORLDEVENT] run={P_WorldEvent.RunId} hunter {Name} 0x{Guid.Full:X8} targets {pick.Name} (was {AttackTarget?.Name ?? "none"})");
+                AttackTarget = pick;
+            }
+
             return true;
         }
 
@@ -270,6 +370,9 @@ namespace ACE.Server.WorldObjects
             if (protect == null)
                 return amount;
 
+            // Heal reduction after a hit (protect.healReductionAfterHit) is timed from here.
+            worldEventProtectedLastMonsterHitAt = now;
+
             var maxHealth = Health.MaxValue;
 
             if (protect.UndefendedSeconds > 0)
@@ -338,6 +441,19 @@ namespace ACE.Server.WorldObjects
         /// <summary><see cref="ConvertWorldEventProtectedHeal(double)"/> at a given clock (the test seam).</summary>
         public int ConvertWorldEventProtectedHeal(double rawHeal, double now)
         {
+            return ConvertWorldEventProtectedHeal(rawHeal, now, null);
+        }
+
+        /// <summary>When a run monster last hit this protected target (0 = never). The heal-reduction window reads it.</summary>
+        private double worldEventProtectedLastMonsterHitAt;
+
+        /// <summary>
+        /// <see cref="ConvertWorldEventProtectedHeal(double, double)"/> knowing who healed: the heal is reduced
+        /// while the target was hit recently (protect.healReductionAfterHit), then converted and capped, and the
+        /// healer is remembered by the run so hunter waves can go for them.
+        /// </summary>
+        public int ConvertWorldEventProtectedHeal(double rawHeal, double now, Player healer)
+        {
             if (!WorldEventProtected)
                 return (int)Math.Round(rawHeal);
 
@@ -346,7 +462,15 @@ namespace ACE.Server.WorldObjects
             if (protect == null)
                 return 0;
 
-            return ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal, Health.MaxValue, protect.MaxHealPerTenSeconds,
+            double? sinceHit = worldEventProtectedLastMonsterHitAt > 0 ? now - worldEventProtectedLastMonsterHitAt : (double?)null;
+
+            var factor = ACE.Server.WorldEvents.WorldEventHoldRules.HealAfterHitFactor(sinceHit,
+                protect.HealReductionAfterHit, protect.HealReductionSeconds);
+
+            if (healer != null)
+                P_WorldEvent?.NoteProtectedHealer(healer, now);
+
+            return ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor, Health.MaxValue, protect.MaxHealPerTenSeconds,
                 ref worldEventProtectedHealTokens, ref worldEventProtectedHealLastAt, now);
         }
 

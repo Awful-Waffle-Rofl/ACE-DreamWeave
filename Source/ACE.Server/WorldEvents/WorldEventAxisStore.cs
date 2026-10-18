@@ -681,7 +681,145 @@ namespace ACE.Server.WorldEvents
             if (protect.MinSurvivors < 1)
                 return "has an invalid protect.minSurvivors (1 or more)";
 
+            if (!IsFinite(protect.SpecialWaveChance) || protect.SpecialWaveChance < 0 || protect.SpecialWaveChance > 1)
+                return "has an invalid protect.specialWaveChance (0 to 1)";
+
+            if (protect.SpecialWaveFromWave < 1)
+                return "has an invalid protect.specialWaveFromWave (1 or more)";
+
+            if (!IsFinite(protect.HealReductionAfterHit) || protect.HealReductionAfterHit < 0 || protect.HealReductionAfterHit > 1)
+                return "has an invalid protect.healReductionAfterHit (0 to 1)";
+
+            if (!IsFinite(protect.HealReductionSeconds) || protect.HealReductionSeconds < 0 || protect.HealReductionSeconds > 60)
+                return "has an invalid protect.healReductionSeconds (0 to 60)";
+
             return null;
+        }
+
+        /// <summary>
+        /// protect.specialWaves and protect.countByParticipants, repaired in place (never a reason to drop the
+        /// goal). A bad entry is dropped with a diagnostic: an unknown or repeated type, a weight that is not a
+        /// positive number, settings out of range, a layout entry with a bad count or radius. Lines are
+        /// repaired like protect.lines (blanks removed, dashes replaced). Special waves on a hold without
+        /// protect.waves are ignored, with a diagnostic.
+        /// </summary>
+        internal static void RepairHoldWaveSettings(string goalId, ProtectDef protect, List<string> diagnostics)
+        {
+            if (protect == null)
+                return;
+
+            if (protect.SpecialWaves != null)
+            {
+                if (!protect.IsWaveBased && protect.SpecialWaves.Count > 0)
+                {
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.specialWaves needs protect.waves; ignored");
+                    protect.SpecialWaves = null;
+                }
+                else
+                {
+                    var kept = new List<SpecialWaveDef>();
+
+                    foreach (var wave in protect.SpecialWaves)
+                    {
+                        var error = SpecialWaveError(wave, kept);
+
+                        if (error != null)
+                        {
+                            diagnostics.Add($"goals.json: goal '{goalId}' protect.specialWaves entry '{wave?.Type}' {error}; dropped");
+                            continue;
+                        }
+
+                        wave.Announce = RepairLinePool(goalId, $"specialWaves.{wave.Type}.announce", wave.Announce, diagnostics);
+                        wave.Lines = RepairLinePool(goalId, $"specialWaves.{wave.Type}.lines", wave.Lines, diagnostics);
+
+                        kept.Add(wave);
+                    }
+
+                    protect.SpecialWaves = kept;
+                }
+            }
+
+            if (protect.CountByParticipants != null)
+            {
+                var kept = new List<TargetLayoutDef>();
+
+                foreach (var entry in protect.CountByParticipants)
+                {
+                    if (entry == null || entry.MinPlayers < 0 || entry.Count < 1 || entry.Count > ProtectDef.MaxProtectedTargets
+                        || !IsFinite(entry.Radius) || entry.Radius < 0 || entry.Radius > 60
+                        || kept.Exists(k => k.MinPlayers == entry.MinPlayers))
+                    {
+                        diagnostics.Add($"goals.json: goal '{goalId}' protect.countByParticipants entry minPlayers={entry?.MinPlayers} is invalid " +
+                                        $"(count 1 to {ProtectDef.MaxProtectedTargets}, radius 0 to 60, minPlayers unique and 0 or more); dropped");
+                        continue;
+                    }
+
+                    kept.Add(entry);
+                }
+
+                protect.CountByParticipants = kept;
+            }
+        }
+
+        /// <summary>Why one specialWaves entry is unusable (null when it is fine). Parses its type into TypeKind.</summary>
+        internal static string SpecialWaveError(SpecialWaveDef wave, IReadOnlyList<SpecialWaveDef> kept)
+        {
+            if (wave == null)
+                return "is empty";
+
+            if (!WorldEventHoldRules.TryParseWaveType(wave.Type, out var type))
+                return "has an unknown type (breach, runners, ranged, hunters or finale)";
+
+            wave.TypeKind = type;
+
+            if (type != HoldWaveType.Finale && (!IsFinite(wave.Weight) || wave.Weight <= 0))
+                return "has an invalid weight (above 0)";
+
+            if (type == HoldWaveType.Runners)
+            {
+                if (!IsFinite(wave.CountMult) || wave.CountMult <= 0 || wave.CountMult > 1)
+                    return "has an invalid countMult (above 0, up to 1)";
+
+                if (!IsFinite(wave.HealthMult) || wave.HealthMult < 0.1 || wave.HealthMult > 1)
+                    return "has an invalid healthMult (0.1 to 1)";
+
+                if (!IsFinite(wave.SpeedMult) || wave.SpeedMult < 1 || wave.SpeedMult > 3)
+                    return "has an invalid speedMult (1 to 3)";
+            }
+
+            if (type == HoldWaveType.Hunters && (wave.Hunters < 1 || wave.Hunters > 20))
+                return "has an invalid hunters count (1 to 20)";
+
+            if (kept != null && kept.Any(k => k.TypeKind == type))
+                return "repeats a type";
+
+            return null;
+        }
+
+        private static List<string> RepairLinePool(string goalId, string key, List<string> pool, List<string> diagnostics)
+        {
+            pool ??= new List<string>();
+
+            var blanks = pool.RemoveAll(string.IsNullOrWhiteSpace);
+
+            if (blanks > 0)
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} had {blanks} blank line(s), removed");
+
+            var dashed = 0;
+
+            for (var i = 0; i < pool.Count; i++)
+            {
+                if (WorldEventHoldRules.RepairDashes(pool[i], out var repaired))
+                {
+                    pool[i] = repaired;
+                    dashed++;
+                }
+            }
+
+            if (dashed > 0)
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} had {dashed} line(s) with an em or en dash, replaced with a hyphen");
+
+            return pool;
         }
 
         /// <summary>
@@ -832,6 +970,7 @@ namespace ACE.Server.WorldEvents
                     }
 
                     RepairProtectLines(goal.Id, goal.Protect, diagnostics);
+                    RepairHoldWaveSettings(goal.Id, goal.Protect, diagnostics);
 
                     goal.Protect.Decor = ValidateProtectDecor(goal.Id, "decor", goal.Protect.Decor, diagnostics);
                     goal.Protect.TargetDecor = ValidateProtectDecor(goal.Id, "targetDecor", goal.Protect.TargetDecor, diagnostics);

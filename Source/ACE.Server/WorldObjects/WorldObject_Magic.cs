@@ -714,7 +714,7 @@ namespace ACE.Server.WorldObjects
                     // WaffleACE fork, World Events Hold: a heal on a protected target becomes a share of its max
                     // health (damage to it is time-based), capped per ten seconds. A no-op for every other creature.
                     if (tryBoost > 0 && targetCreature.WorldEventProtected)
-                        tryBoost = targetCreature.ConvertWorldEventProtectedHeal(tryBoost);
+                        tryBoost = targetCreature.ConvertWorldEventProtectedHeal(tryBoost, ACE.Common.Time.GetUnixTime(), player);
 
                     boost = targetCreature.UpdateVitalDelta(targetCreature.Health, tryBoost);
                     srcVital = "health";

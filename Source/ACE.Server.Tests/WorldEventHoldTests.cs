@@ -24,7 +24,7 @@ namespace ACE.Server.Tests
     /// WorldEventStateMachineTests: no database, no landblock, no live Creature (TECH-DESIGN D6).
     /// </summary>
     [TestClass]
-    public class WorldEventHoldTests
+    public partial class WorldEventHoldTests
     {
         private const double T0 = 1_700_000_000d;
 

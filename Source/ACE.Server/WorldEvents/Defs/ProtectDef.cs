@@ -151,6 +151,73 @@ namespace ACE.Server.WorldEvents.Defs
         public bool IsWaveBased => Waves != null;
 
         /// <summary>
+        /// Optional, wave-based holds only: the special wave types this goal can roll (breach, runners, ranged,
+        /// hunters) and its finale. Empty or absent means every wave is ordinary.
+        /// </summary>
+        [JsonPropertyName("specialWaves")]
+        public List<SpecialWaveDef> SpecialWaves { get; set; }
+
+        /// <summary>The chance (0 to 1) that a wave from <see cref="SpecialWaveFromWave"/> on is a special type. 0 (default) never.</summary>
+        [JsonPropertyName("specialWaveChance")]
+        public double SpecialWaveChance { get; set; }
+
+        /// <summary>The first wave number that may be special. Default 2.</summary>
+        [JsonPropertyName("specialWaveFromWave")]
+        public int SpecialWaveFromWave { get; set; } = 2;
+
+        /// <summary>
+        /// Optional: for this long after a target is hit by a run monster, healing on it is reduced by
+        /// <see cref="HealReductionAfterHit"/>, so heals buy time but cannot cancel an attacker on their own.
+        /// </summary>
+        [JsonPropertyName("healReductionSeconds")]
+        public double HealReductionSeconds { get; set; } = 5;
+
+        /// <summary>How much healing on a recently hit target is reduced (0 to 1). 0 (default) means no reduction.</summary>
+        [JsonPropertyName("healReductionAfterHit")]
+        public double HealReductionAfterHit { get; set; }
+
+        /// <summary>
+        /// Optional: target count and ring radius by crowd size, replacing <see cref="Count"/> and
+        /// <see cref="Radius"/> (see TargetLayoutDef).
+        /// </summary>
+        [JsonPropertyName("countByParticipants")]
+        public List<TargetLayoutDef> CountByParticipants { get; set; }
+
+        /// <summary>
+        /// The target count and ring radius for <paramref name="participants"/> players: the
+        /// <see cref="CountByParticipants"/> entry with the highest minPlayers not above the crowd, else
+        /// <see cref="ResolveCount"/> and <see cref="Radius"/>. The count stays within [1, MaxProtectedTargets].
+        /// </summary>
+        public (int Count, double Radius) ResolveLayout(int participants)
+        {
+            TargetLayoutDef best = null;
+
+            if (CountByParticipants != null)
+            {
+                foreach (var entry in CountByParticipants)
+                {
+                    if (entry == null || entry.MinPlayers > participants)
+                        continue;
+
+                    if (best == null || entry.MinPlayers > best.MinPlayers)
+                        best = entry;
+                }
+            }
+
+            if (best == null)
+                return (ResolveCount(participants), Radius);
+
+            return (Math.Clamp(best.Count, 1, MaxProtectedTargets), best.Radius);
+        }
+
+        /// <summary>The finale entry of <see cref="SpecialWaves"/>, or null.</summary>
+        [JsonIgnore]
+        public SpecialWaveDef Finale => SpecialWaves?.Find(w => w != null && w.TypeKind == HoldWaveType.Finale);
+
+        /// <summary>The <see cref="SpecialWaves"/> entry of <paramref name="type"/>, or null.</summary>
+        public SpecialWaveDef SpecialWave(HoldWaveType type) => SpecialWaves?.Find(w => w != null && w.TypeKind == type);
+
+        /// <summary>
         /// The max health every target is given while damage is time-based (<see cref="UndefendedSeconds"/>
         /// above 0). The number itself changes nothing about how long a target lasts - each hit is a share of
         /// the max - it only has to be large enough that a hit's share never rounds away. <see cref="Health"/>

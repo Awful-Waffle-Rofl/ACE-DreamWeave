@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Server.WorldEvents.Defs;
 
@@ -199,6 +200,199 @@ namespace ACE.Server.WorldEvents
             var damage = maxHealth * intervalSeconds / undefendedSeconds;
 
             return (float)Math.Max(1.0, Math.Round(damage));
+        }
+
+        /// <summary>
+        /// One wave's type (D6 - pure). In order:
+        ///   * the final counted wave is always the finale, when the goal defines one;
+        ///   * an admin-forced type (--wave-type) applies to every other wave;
+        ///   * waves before <paramref name="fromWave"/> are ordinary;
+        ///   * otherwise a roll against <paramref name="chance"/>, then a weighted pick among the goal's
+        ///     special types, never the finale and never the same type as <paramref name="previous"/>.
+        /// </summary>
+        public static HoldWaveType PickWaveType(int waveNumber, int targetWaves, HoldWaveType previous,
+            double chance, int fromWave, IReadOnlyList<SpecialWaveDef> types, Random rng, HoldWaveType? forced)
+        {
+            var hasFinale = types != null && types.Any(t => t != null && t.TypeKind == HoldWaveType.Finale);
+
+            if (hasFinale && targetWaves > 0 && waveNumber == targetWaves)
+                return HoldWaveType.Finale;
+
+            if (forced != null && forced.Value != HoldWaveType.Finale && forced.Value != HoldWaveType.Normal)
+                return forced.Value;
+
+            if (types == null || waveNumber < Math.Max(1, fromWave) || !double.IsFinite(chance) || chance <= 0)
+                return HoldWaveType.Normal;
+
+            rng ??= new Random();
+
+            if (rng.NextDouble() >= chance)
+                return HoldWaveType.Normal;
+
+            var eligible = types.Where(t => t != null && t.TypeKind != HoldWaveType.Finale && t.TypeKind != HoldWaveType.Normal
+                && t.TypeKind != previous && t.Weight > 0 && double.IsFinite(t.Weight)).ToList();
+
+            if (eligible.Count == 0)
+                return HoldWaveType.Normal;
+
+            var roll = rng.NextDouble() * eligible.Sum(t => t.Weight);
+
+            foreach (var t in eligible)
+            {
+                roll -= t.Weight;
+
+                if (roll < 0)
+                    return t.TypeKind;
+            }
+
+            return eligible[eligible.Count - 1].TypeKind;
+        }
+
+        /// <summary>Parses a special wave type name (case-insensitive). False for anything unknown or "normal".</summary>
+        public static bool TryParseWaveType(string name, out HoldWaveType type)
+        {
+            if (!string.IsNullOrWhiteSpace(name) && name.Trim().All(char.IsLetter) && Enum.TryParse(name.Trim(), true, out type) && type != HoldWaveType.Normal
+                && Enum.IsDefined(typeof(HoldWaveType), type))
+                return true;
+
+            type = HoldWaveType.Normal;
+            return false;
+        }
+
+        private static readonly string[] CompassNames = { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" };
+
+        /// <summary>
+        /// Which side of the anchor a point is on (D6 - pure), as one of eight compass words, from its offset
+        /// (<paramref name="dx"/> metres east, <paramref name="dy"/> north). "center" when it sits on the anchor.
+        /// </summary>
+        public static string CompassSide(double dx, double dy)
+        {
+            if (!double.IsFinite(dx) || !double.IsFinite(dy) || (Math.Abs(dx) < 0.5 && Math.Abs(dy) < 0.5))
+                return "center";
+
+            var degrees = Math.Atan2(dx, dy) * 180.0 / Math.PI;
+
+            if (degrees < 0)
+                degrees += 360.0;
+
+            var index = (int)Math.Round(degrees / 45.0) % 8;
+
+            return CompassNames[index];
+        }
+
+        /// <summary>
+        /// The share of a heal that lands on a target last hit <paramref name="secondsSinceHit"/> ago (D6 - pure):
+        /// 1 - <paramref name="reduction"/> inside <paramref name="windowSeconds"/>, else 1. A target never hit
+        /// (null) heals in full.
+        /// </summary>
+        public static double HealAfterHitFactor(double? secondsSinceHit, double reduction, double windowSeconds)
+        {
+            if (secondsSinceHit == null || !double.IsFinite(secondsSinceHit.Value) || !(reduction > 0) || !(windowSeconds > 0))
+                return 1.0;
+
+            if (secondsSinceHit.Value < 0 || secondsSinceHit.Value >= windowSeconds)
+                return 1.0;
+
+            return Math.Max(0.0, 1.0 - Math.Min(1.0, reduction));
+        }
+
+        /// <summary>The index of the highest health fraction (current / max), or -1 for an empty list. Ties keep the first.</summary>
+        public static int PickHealthiest(IReadOnlyList<(uint Current, uint Max)> health)
+        {
+            var best = -1;
+            var bestFraction = -1.0;
+
+            if (health == null)
+                return best;
+
+            for (var i = 0; i < health.Count; i++)
+            {
+                var (current, max) = health[i];
+
+                if (max == 0)
+                    continue;
+
+                var fraction = (double)current / max;
+
+                if (fraction > bestFraction)
+                {
+                    best = i;
+                    bestFraction = fraction;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// A ranged wave's monsters (D6 - pure): each wcid in <paramref name="wave"/> is replaced, in turn, by one
+        /// of the <paramref name="rangedPool"/> wcids (cycling); with an empty pool the wave is returned unchanged,
+        /// which the caller logs as "no ranged members, ordinary wave".
+        /// </summary>
+        public static List<uint> ReplaceWithRanged(IReadOnlyList<uint> wave, IReadOnlyList<uint> rangedPool, Random rng)
+        {
+            var result = new List<uint>(wave ?? Array.Empty<uint>());
+
+            if (rangedPool == null || rangedPool.Count == 0)
+                return result;
+
+            rng ??= new Random();
+
+            var offset = rng.Next(rangedPool.Count);
+
+            for (var i = 0; i < result.Count; i++)
+                result[i] = rangedPool[(i + offset) % rangedPool.Count];
+
+            return result;
+        }
+
+        /// <summary>
+        /// A hunter wave's hunters (D6 - pure): <paramref name="hunters"/> indices of a <paramref name="waveSize"/>
+        /// batch, non-seekers first (in order) and then seekers, never <paramref name="excludedIndex"/> (the
+        /// finale champion). A seeker picked here stops being a seeker.
+        /// </summary>
+        public static HashSet<int> PickHunterIndices(int waveSize, int hunters, ISet<int> seekers, int excludedIndex)
+        {
+            var result = new HashSet<int>();
+
+            if (waveSize <= 0 || hunters <= 0)
+                return result;
+
+            var order = Enumerable.Range(0, waveSize).Where(i => i != excludedIndex)
+                .OrderBy(i => seekers != null && seekers.Contains(i) ? 1 : 0).ThenBy(i => i);
+
+            foreach (var i in order)
+            {
+                if (result.Count >= hunters)
+                    break;
+
+                result.Add(i);
+            }
+
+            return result;
+        }
+
+        /// <summary>How many of a <paramref name="waveSize"/> wave a Runners wave keeps: the share, at least one.</summary>
+        public static int RunnersKeep(int waveSize, double countMult)
+        {
+            if (waveSize <= 0)
+                return 0;
+
+            if (!double.IsFinite(countMult) || countMult <= 0 || countMult >= 1)
+                return waveSize;
+
+            return Math.Max(1, (int)Math.Round(waveSize * countMult));
+        }
+
+        /// <summary>Fills a special wave line's {side} and {champion} tokens; the rest are left for FillLine.</summary>
+        public static string FillWaveTokens(string template, string side, string champion)
+        {
+            if (string.IsNullOrEmpty(template))
+                return template;
+
+            return template
+                .Replace("{side}", string.IsNullOrWhiteSpace(side) ? "nearest" : side)
+                .Replace("{champion}", string.IsNullOrWhiteSpace(champion) ? "Their champion" : champion);
         }
 
         /// <summary>

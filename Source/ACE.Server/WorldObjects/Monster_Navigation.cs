@@ -391,6 +391,11 @@ namespace ACE.Server.WorldObjects
             var runSkill = GetCreatureSkill(Skill.Run).Current;
             var runRate = MovementSystem.GetRunRate(burden, (int)runSkill, 1.0f);
 
+            // WaffleACE fork, World Events Hold runner waves: a per-monster speed multiplier, 1 for every other
+            // creature and never applied to a player.
+            if (!(this is Player))
+                runRate *= WorldEventRunRateMult;
+
             return (float)runRate;
         }
 

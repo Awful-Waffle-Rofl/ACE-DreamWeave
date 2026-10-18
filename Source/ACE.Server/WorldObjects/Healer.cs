@@ -225,7 +225,7 @@ namespace ACE.Server.WorldObjects
             var staminaCost = (uint)Math.Min(healer.Stamina.Current, Math.Round(raw / 5.0f));
             healer.UpdateVitalDelta(healer.Stamina, (int)-staminaCost);
 
-            var converted = target.ConvertWorldEventProtectedHeal(raw);
+            var converted = target.ConvertWorldEventProtectedHeal(raw, ACE.Common.Time.GetUnixTime(), healer);
             var healed = converted > 0 ? target.UpdateVitalDelta(target.Health, converted) : 0;
 
             if (healed > 0)
