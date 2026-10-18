@@ -746,7 +746,7 @@ namespace ACE.Server.Command.Handlers
 
         /// <summary>
         /// Which creatures "@smite all" kills (D6 - pure): every attackable one, EXCEPT a World Events Hold
-        /// protected target (a caravan the players are defending), so an admin clearing a wave does not also
+        /// protected target (a target the players are defending), so an admin clearing a wave does not also
         /// fail the run. "@smite" on a selected target still kills a protected target.
         /// </summary>
         public static bool SmiteAllTakes(bool attackable, bool worldEventProtected)

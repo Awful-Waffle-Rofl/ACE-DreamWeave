@@ -627,7 +627,7 @@ namespace ACE.Server.WorldObjects
 
                     alerted = true;
 
-                    // WaffleACE fork, World Events Hold: an alerted seeker goes for its caravan, not the alert's target.
+                    // WaffleACE fork, World Events Hold: an alerted seeker goes for its target, not the alert's target.
                     if (nearbyCreature.TryKeepWorldEventSeekerLock(this))
                         continue;
 

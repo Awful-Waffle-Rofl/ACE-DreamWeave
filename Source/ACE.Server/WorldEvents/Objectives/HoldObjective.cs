@@ -169,7 +169,7 @@ namespace ACE.Server.WorldEvents.Objectives
                 && counts.Landed > 0 && counts.Cleared >= counts.Landed && counts.Live == 0;
         }
 
-        /// <summary>The local line at the start of each wave: "Wave 3 of 7 - 3 of 3 caravans stand." ASCII only.</summary>
+        /// <summary>The local line at the start of each wave: "Wave 3 of 7 - 3 of 3 targets stand." ASCII only.</summary>
         public string WaveStartText(int waveNumber)
         {
             var health = targetHealth() ?? "";

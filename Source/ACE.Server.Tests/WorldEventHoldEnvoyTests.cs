@@ -12,8 +12,8 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Defend Asheron's Envoys (goal defend_envoys): the second Hold goal, three Royal Knights (WCIDs 2000005 to
-    /// 2000007) in place of the caravan merchants. Content only, so these tests check the shipped lines and, when
+    /// Defend Asheron's Envoys (goal defend_envoys): the shipped Hold goal, three Royal Knights (WCIDs 2000005 to
+    /// 2000007). Content only, so these tests check the shipped lines and, when
     /// this machine has the content folders, the real goal file and the live goals.json / sources.json.
     /// Shares the builders in WorldEventHoldTests.
     /// </summary>
@@ -21,7 +21,7 @@ namespace ACE.Server.Tests
     {
         private static readonly uint[] EnvoyWcids = { 2000005, 2000006, 2000007 };
 
-        /// <summary>The Homecoming Pennant placed behind each knight, in place of the caravan's cart.</summary>
+        /// <summary>The Homecoming Pennant placed behind each knight.</summary>
         private const uint EnvoyPennantWcid = 25952;
 
         /// <summary>The target lines shipped in dreamweave-content/events/defend_envoys.goal.json (lines block).</summary>
@@ -41,7 +41,13 @@ namespace ACE.Server.Tests
             "Well fought! Mend what you can, the next charge is coming.",
             "The field is ours! Asheron will hear of your courage.",
             "{Family} are broken. You have the thanks of the Royal Knights!",
-            "Our message will reach its destination. Well fought, friends!"
+            "Our message will reach its destination. Well fought, friends!",
+            "The shrine's waters steady me. I can hold a while longer.",
+            "Strength returns! My thanks, defender.",
+            "Asheron's grace flows through the shrine. Back to the line!",
+            "The corrupted one has fallen! I feel my strength return.",
+            "Its foul hold is broken. Stand fast, the tide turns!",
+            "Well struck! With that one gone we can breathe again."
         };
 
         /// <summary>The special wave lines (announce and breach lines) shipped in defend_envoys.goal.json.</summary>
@@ -78,8 +84,8 @@ namespace ACE.Server.Tests
             "The defense of Asheron's envoys at {anchor} failed - {reason}. {alive} of {total} {nounPlural} were still standing."
         };
 
-        /// <summary>Words from the caravan goal that must not leak into the knights' lines.</summary>
-        private static readonly string[] CaravanWords = { "caravan", "wagon", "merchant", "market", "goods" };
+        /// <summary>Traders' words that do not belong in a Royal Knight's mouth.</summary>
+        private static readonly string[] OffThemeWords = { "caravan", "wagon", "merchant", "market", "goods" };
 
         [TestMethod]
         public void EnvoyLines_InCharacter_AsciiShortAndFilled()
@@ -99,8 +105,8 @@ namespace ACE.Server.Tests
                     Assert.IsTrue(SentenceCount(line) <= 3, $"more than three sentences: {line}");
                     Assert.IsFalse(line.IndexOf("warp", StringComparison.OrdinalIgnoreCase) >= 0, $"names the Warp: {line}");
 
-                    foreach (var word in CaravanWords)
-                        Assert.IsFalse(line.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0, $"caravan wording \"{word}\": {line}");
+                    foreach (var word in OffThemeWords)
+                        Assert.IsFalse(line.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0, $"off-theme wording \"{word}\": {line}");
                 }
             }
         }
@@ -116,9 +122,9 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The real goal file, when this machine has it: it loads with no diagnostics, uses the three knights and
-        /// the pennant, uses {family} in every line pool, matches the mirror above, and keeps the caravan's wave
-        /// tuning (4 waves solo, 10 at most, paced over 180 s).
+        /// The real goal file, when this machine has it: it loads with no diagnostics, uses the three knights, the
+        /// pennants and the shrines, uses {family} in every line pool, matches the mirrors above, and has the tuning
+        /// the balance simulation (WorldEventHoldBalanceTests) settled on.
         /// </summary>
         [TestMethod]
         public void ShippedEnvoyGoalFile_LoadsClean_WhenPresent()
@@ -142,8 +148,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual("envoy", p.Noun);
             Assert.AreEqual("envoys", p.NounPlural);
 
-            Assert.IsTrue(p.TargetDecor.All(d => d.Wcid == EnvoyPennantWcid), "a pennant behind each knight, not the cart");
-            Assert.IsFalse(p.TargetDecor.Any(d => d.Wcid == 28527), "no caravan cart");
+            Assert.IsTrue(p.TargetDecor.All(d => d.Wcid == EnvoyPennantWcid), "a pennant behind each knight");
 
             // Every pool names the run's monster family at least once.
             foreach (var pool in new[] { p.Lines.Spawn, p.Lines.Health, p.Lines.Destroyed, p.Lines.Heal, p.Lines.Success })
@@ -152,7 +157,8 @@ namespace ACE.Server.Tests
             var breach = p.SpecialWaves.Single(w => w.TypeKind == HoldWaveType.Breach);
             Assert.IsTrue(breach.Lines.All(l => l.Contains("{side}")), "breach warnings name the side");
 
-            var shippedTargetLines = p.Lines.Spawn.Concat(p.Lines.Health).Concat(p.Lines.Destroyed).Concat(p.Lines.Heal).Concat(p.Lines.Success);
+            var shippedTargetLines = p.Lines.Spawn.Concat(p.Lines.Health).Concat(p.Lines.Destroyed).Concat(p.Lines.Heal).Concat(p.Lines.Success)
+                .Concat(p.Lines.Shrine).Concat(p.Lines.CorruptedKill);
             CollectionAssert.AreEquivalent(EnvoyTargetLines, shippedTargetLines.ToList(), "the target-line mirror matches the file");
 
             var shippedWaveLines = p.SpecialWaves.SelectMany(w => w.Announce.Concat(w.Lines)).ToList();
@@ -160,15 +166,15 @@ namespace ACE.Server.Tests
 
             CollectionAssert.AreEquivalent(EnvoyTemplates, new[] { goal.ProgressTemplate, goal.SuccessTemplate, goal.FailTemplate });
 
-            AssertSoloWaveShape(goal);
+            AssertEnvoyTuning(goal);
         }
 
         /// <summary>
-        /// The live content (ace-content next to the repo), when present: both Hold goals load, the caravan is
-        /// still there unchanged in shape, and the ambush source offers both.
+        /// The live content (ace-content next to the repo), when present: defend_envoys loads, and the ambush source
+        /// offers it. It is the only Hold goal shipped.
         /// </summary>
         [TestMethod]
-        public void LiveContent_BothHoldGoalsLoad_AndAmbushOffersBoth_WhenPresent()
+        public void LiveContent_EnvoysLoad_AndAmbushOffersThem_WhenPresent()
         {
             var goalsPath = FindContentFile(Path.Combine("ace-content", "events", "axes", "goals.json"));
             var sourcesPath = FindContentFile(Path.Combine("ace-content", "events", "axes", "sources.json"));
@@ -178,29 +184,27 @@ namespace ACE.Server.Tests
 
             var store = WorldEventAxisStore.Parse(File.ReadAllText(sourcesPath), null, File.ReadAllText(goalsPath), null, null);
 
-            Assert.IsTrue(store.Goals.ContainsKey("defend_caravan"), string.Join(" | ", store.Diagnostics));
             Assert.IsTrue(store.Goals.ContainsKey("defend_envoys"), string.Join(" | ", store.Diagnostics));
-            Assert.IsFalse(store.Diagnostics.Any(d => d.Contains("defend_envoys") || d.Contains("defend_caravan")),
-                string.Join(" | ", store.Diagnostics));
+            Assert.IsFalse(store.Diagnostics.Any(d => d.Contains("defend_envoys")), string.Join(" | ", store.Diagnostics));
+            Assert.AreEqual(1, store.Goals.Values.Count(g => g.TypeKind == GoalType.Hold), "defend_envoys is the only Hold goal");
 
-            CollectionAssert.AreEqual(new uint[] { 2000002, 2000003, 2000004 }, store.Goals["defend_caravan"].Protect.Wcids, "the caravan goal is kept as is");
             CollectionAssert.AreEqual(EnvoyWcids, store.Goals["defend_envoys"].Protect.Wcids);
 
             Assert.IsTrue(store.Sources.ContainsKey("ambush"), string.Join(" | ", store.Diagnostics));
-            CollectionAssert.IsSubsetOf(new[] { "defend_caravan", "defend_envoys" }, store.Sources["ambush"].CompatibleGoals);
+            CollectionAssert.Contains(store.Sources["ambush"].CompatibleGoals, "defend_envoys");
+            Assert.IsTrue(store.Sources["ambush"].CompatibleGoals.All(store.Goals.ContainsKey), "ambush offers only goals that exist");
 
-            AssertSoloWaveShape(store.Goals["defend_caravan"]);
-            AssertSoloWaveShape(store.Goals["defend_envoys"]);
+            AssertEnvoyTuning(store.Goals["defend_envoys"]);
         }
 
         /// <summary>
-        /// The 2026-10-18 tuning, checked against a real goal: always 3 targets on the 16 m ring; 6 waves solo
-        /// (a staff test counts as 0 players), 7 with one counted player, never more than 10; waves of 11
-        /// monsters solo growing by 2 per player; a wave every 25 s at most, sooner once most of the last wave is
-        /// dead, never closer than 8 s; never a wave past the total; and an undefended target that lasts 180 s
-        /// against one attacker and never less than 60 s against a crowd.
+        /// The tuning the balance simulation settled on (see WorldEventHoldBalanceTests and HOLD-SUMMARY.md):
+        /// always 3 targets on the 16 m ring; 6 waves (7 with a counted player, never more than 10); waves of 2 + 2.5
+        /// per player (5 for one, 7 for two, 15 for five); the next wave after 40 s AND once 80% of the field is
+        /// dead, never later than 75 s; time-based damage of 150 s for one attacker, 15 s less per extra player,
+        /// never under 100 s, and never faster than 60 s however many pile on; and the healing safeguards.
         /// </summary>
-        private static void AssertSoloWaveShape(GoalDef goal)
+        private static void AssertEnvoyTuning(GoalDef goal)
         {
             var p = goal.Protect;
 
@@ -214,66 +218,83 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, p.MinSeconds, 1e-9, $"{goal.Id}: no minSeconds pacing, the interval paces the waves");
 
             var solo = new HoldHarness(goal);
-            Assert.AreEqual(6, solo.Objective.TargetWaves, $"{goal.Id}: solo waves");
+            Assert.AreEqual(6, solo.Objective.TargetWaves, $"{goal.Id}: waves before anyone counts");
 
             solo.Objective.OnAudienceResampled(1);
-            Assert.AreEqual(7, solo.Objective.TargetWaves, $"{goal.Id}: one counted player gets 6 + ceil(0.25)");
+            Assert.AreEqual(7, solo.Objective.TargetWaves, $"{goal.Id}: one counted player (or --level) gets 6 + ceil(0.25)");
 
             var crowd = new HoldHarness(goal);
             crowd.Objective.OnAudienceResampled(500);
             Assert.AreEqual(ProtectDef.MaxHoldWaves, crowd.Objective.TargetWaves, $"{goal.Id}: hard cap");
 
-            Assert.AreEqual(11, p.WaveSize.Resolve(0), $"{goal.Id}: a solo wave is 11 monsters");
-            Assert.AreEqual(13, p.WaveSize.Resolve(1));
-            Assert.AreEqual(19, p.WaveSize.Resolve(4), $"{goal.Id}: and grows with the crowd");
-            Assert.IsTrue(p.MaxAlive >= p.WaveSize.Resolve(4) * 2, $"{goal.Id}: room for two overlapping waves of a group of 4");
+            Assert.AreEqual(5, p.WaveSize.Resolve(1), $"{goal.Id}: a solo (or --level) wave is 5 monsters");
+            Assert.AreEqual(7, p.WaveSize.Resolve(2), $"{goal.Id}: two players, 7");
+            Assert.AreEqual(15, p.WaveSize.Resolve(5), $"{goal.Id}: five players, about the old solo size");
+            Assert.AreEqual(27, p.WaveSize.Resolve(10), $"{goal.Id}: ten players");
+            Assert.IsTrue(p.MaxAlive >= p.WaveSize.Resolve(5) * 2, $"{goal.Id}: room for two overlapping waves of a group of 5");
 
-            Assert.AreEqual(25, p.WaveIntervalSeconds, 1e-9);
+            Assert.AreEqual(40, p.WaveIntervalSeconds, 1e-9);
+            Assert.AreEqual(0.2, p.NextWaveAliveShare, 1e-9, "80% dead");
+            Assert.IsTrue(p.NextWaveRequiresBoth, "whichever comes later");
+            Assert.AreEqual(75, p.MaxWaveIntervalSeconds, 1e-9);
             Assert.AreEqual(8, p.MinWaveGapSeconds, 1e-9);
-            Assert.AreEqual(2, p.MinSpecialWaves);
 
-            // Nobody kills anything: a wave every 25 s, never one past the total.
-            var slow = SimulateCadence(p, total: 6, killAllAtOnce: false, holdSeconds: goal.HoldSeconds);
-            CollectionAssert.AreEqual(new[] { 0, 25, 50, 75, 100, 125 }, slow, $"{goal.Id}: interval cadence");
+            // A group that wipes each wave the moment it lands still waits the 40 s interval.
+            var fast = SimulateCadence(p, total: 7, killAllAtOnce: true, holdSeconds: goal.HoldSeconds);
+            CollectionAssert.AreEqual(new[] { 0, 40, 80, 120, 160, 200, 240 }, fast, $"{goal.Id}: a breather even for a fast group");
 
-            // A group that wipes each wave the moment it lands: every 8 s, still exactly the total.
-            var fast = SimulateCadence(p, total: 6, killAllAtOnce: true, holdSeconds: goal.HoldSeconds);
-            CollectionAssert.AreEqual(new[] { 0, 8, 16, 24, 32, 40 }, fast, $"{goal.Id}: most-dead cadence");
+            // A group that kills nothing gets the next wave at the 75 s ceiling.
+            var slow = SimulateCadence(p, total: 7, killAllAtOnce: false, holdSeconds: goal.HoldSeconds);
+            CollectionAssert.AreEqual(new[] { 0, 75, 150, 225, 300, 375 }, slow.Take(6).ToArray(), $"{goal.Id}: the ceiling keeps the run moving");
 
-            // Ten waves still all start well inside the hold.
-            var ten = SimulateCadence(p, total: 10, killAllAtOnce: false, holdSeconds: goal.HoldSeconds);
-            Assert.AreEqual(10, ten.Count);
-            Assert.IsTrue(ten[9] <= goal.HoldSeconds - 120, $"{goal.Id}: the finale starts at {ten[9]} s, leaving 2 minutes to beat it");
+            Assert.AreEqual("Wave 7 of 7", WorldEventHoldRules.WaveProgress(9, 7), "never above the total");
 
-            Assert.AreEqual("Wave 6 of 6", WorldEventHoldRules.WaveProgress(9, 6), "never above the total");
-
-            // Balance: one attacker alone takes undefendedSeconds; any crowd at least minDeathSeconds.
-            Assert.AreEqual(180, p.UndefendedSeconds, 1e-9);
+            // Damage.
+            Assert.AreEqual(150, p.EffectiveUndefendedSeconds(1), 1e-9, "solo (or --level): 150 s for one attacker");
+            Assert.AreEqual(120, p.EffectiveUndefendedSeconds(3), 1e-9, "three players: 120 s");
+            Assert.AreEqual(100, p.EffectiveUndefendedSeconds(10), 1e-9, "never under the 100 s floor");
             Assert.AreEqual(60, p.MinDeathSeconds, 1e-9);
+
+            // Keeping them alive, and the safeguards.
             Assert.AreEqual(0.10, p.HealBetweenWaves, 1e-9);
+            Assert.AreEqual(0.10, p.CorruptedKillHeal, 1e-9);
+            Assert.AreEqual(0.15, p.ShrineHeal, 1e-9);
+            Assert.AreEqual(45, p.ShrineCooldownSeconds, 1e-9);
+            Assert.AreEqual(0.01, p.RescueHeal, 1e-9);
+            Assert.AreEqual(0.10, p.RescueCapPerWave, 1e-9);
+            Assert.AreEqual(10, p.ClearRadius, 1e-9);
+            Assert.AreEqual(0.005, p.ClearRegenPerSecond, 1e-9);
+            Assert.AreEqual(0.25, p.HealBudgetPerWave, 1e-9);
+            Assert.AreEqual(0.5, p.HealReductionAfterHit, 1e-9);
+            Assert.AreEqual(5, p.HealReductionSeconds, 1e-9);
+
+            Assert.IsNotNull(p.Shrine);
+            Assert.AreEqual(19484u, p.Shrine.Wcid, "the Essence Font");
         }
 
         /// <summary>
         /// The Hold cadence second by second: HoldObjective.WantsAnotherWave (the total) and
-        /// WorldEventHoldRules.HoldNextWaveDue (interval / most dead / min gap), as WorldEvent.TickWaves runs them.
+        /// WorldEventHoldRules.HoldNextWaveDue (the goal's rule), as WorldEvent.TickWaves runs them.
         /// </summary>
         private static List<int> SimulateCadence(ProtectDef p, int total, bool killAllAtOnce, int holdSeconds)
         {
             var started = new List<int> { 0 };
             var lastAt = 0.0;
-            var live = killAllAtOnce ? 0 : 11;
+            var size = p.WaveSize?.Resolve(1) ?? 11;
+            var live = killAllAtOnce ? 0 : size;
 
             for (var second = 1; second <= holdSeconds; second++)
             {
                 if (!HoldObjective.WantsAnotherWave(started.Count, total, second, p.MinSeconds))
                     continue;
 
-                if (!WorldEventHoldRules.HoldNextWaveDue(second, lastAt, p.WaveIntervalSeconds, p.MinWaveGapSeconds, live, 11, p.NextWaveAliveShare))
+                if (!WorldEventHoldRules.HoldNextWaveDue(second, lastAt, p.WaveIntervalSeconds, p.MinWaveGapSeconds, live, size,
+                        p.NextWaveAliveShare, p.NextWaveRequiresBoth, p.MaxWaveIntervalSeconds))
                     continue;
 
                 started.Add(second);
                 lastAt = second;
-                live = killAllAtOnce ? 0 : live + 11;
+                live = killAllAtOnce ? 0 : live + size;
             }
 
             return started;

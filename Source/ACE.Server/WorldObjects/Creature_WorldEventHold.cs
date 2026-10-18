@@ -474,8 +474,8 @@ namespace ACE.Server.WorldObjects
             if (woke)
                 WakeUp(alertNearby: false);
 
-            // Only when the lock changed something (it woke, or it pulled the seeker back onto a caravan),
-            // so a player hitting a seeker that is already on its caravan does not log every hit.
+            // Only when the lock changed something (it woke, or it pulled the seeker back onto a target),
+            // so a player hitting a seeker that is already on its target does not log every hit.
             if (woke || previous != AttackTarget)
                 log.Debug($"[WORLDEVENT] seeker 0x{Guid.Full:X8} stays on {(AttackTarget as Creature)?.Name ?? "?"} 0x{AttackTarget?.Guid.Full ?? 0:X8} " +
                           $"(ignored {disturbedBy?.Name ?? "?"}; was {previous?.Name ?? "none"})");
@@ -536,7 +536,8 @@ namespace ACE.Server.WorldObjects
 
                 var interval = ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(last, now);
 
-                amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, protect.UndefendedSeconds,
+                amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval,
+                    protect.EffectiveUndefendedSeconds(P_WorldEvent?.ResolvedAudienceCount ?? 1),
                     attacker.WorldEventAttackSpeedMult);
             }
 
@@ -635,9 +636,129 @@ namespace ACE.Server.WorldObjects
             if (healer != null)
                 P_WorldEvent?.NoteProtectedHealer(healer, now);
 
-            return ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor, Health.MaxValue, protect.MaxHealPerTenSeconds,
+            var converted = ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor, Health.MaxValue, protect.MaxHealPerTenSeconds,
                 ref worldEventProtectedHealTokens, ref worldEventProtectedHealLastAt, now);
+
+            // A player's heal counts against the same per-wave budget as every other source (only what it can
+            // actually restore is charged). No budget set: the converted heal as before.
+            if (!(protect.HealBudgetPerWave > 0))
+                return converted;
+
+            return TakeWorldEventHealBudget(Math.Min(converted, (int)(Health.MaxValue - Health.Current)));
         }
+
+        /// <summary>The wave this target's healing budget (and rescue cap) is counting for.</summary>
+        private int worldEventHealBudgetWave = -1;
+
+        /// <summary>Health regained this wave, every source together (protect.healBudgetPerWave).</summary>
+        private int worldEventHealBudgetSpent;
+
+        /// <summary>Health regained this wave from rescues (protect.rescueCapPerWave).</summary>
+        private int worldEventRescueSpent;
+
+        /// <summary>Health regained this wave, every source together. Tests and the log read it.</summary>
+        public int WorldEventHealSpentThisWave
+        {
+            get
+            {
+                RollWorldEventHealBudget();
+                return worldEventHealBudgetSpent;
+            }
+        }
+
+        /// <summary>Starts a fresh budget when the run has started a new wave since the last heal.</summary>
+        private void RollWorldEventHealBudget()
+        {
+            var wave = P_WorldEvent?.HoldWaveNumber ?? 0;
+
+            if (wave == worldEventHealBudgetWave)
+                return;
+
+            worldEventHealBudgetWave = wave;
+            worldEventHealBudgetSpent = 0;
+            worldEventRescueSpent = 0;
+        }
+
+        /// <summary>The share of <paramref name="requested"/> the per-wave budget lets through, spent now.</summary>
+        private int TakeWorldEventHealBudget(int requested)
+        {
+            if (requested <= 0)
+                return 0;
+
+            RollWorldEventHealBudget();
+
+            var budget = P_WorldEvent?.Composition?.Goal?.Protect?.HealBudgetPerWave ?? 0;
+            var allowed = ACE.Server.WorldEvents.WorldEventHoldRules.HealWithinBudget(requested, Health.MaxValue, budget, worldEventHealBudgetSpent);
+
+            worldEventHealBudgetSpent += allowed;
+
+            return allowed;
+        }
+
+        /// <summary>
+        /// Every non-player heal on a protected target goes through here (shrine, corrupted kills, rescues, clear
+        /// regeneration, the between-waves heal): <paramref name="share"/> of max health, reduced while the target was
+        /// hit recently (protect.healReductionAfterHit for protect.healReductionSeconds), then held to the per-wave
+        /// budget (protect.healBudgetPerWave), and a rescue also to protect.rescueCapPerWave. Writes the health and
+        /// returns what was restored. Must run on this target's landblock thread.
+        /// </summary>
+        public int ApplyWorldEventProtectedHeal(double share, bool isRescue, double now, out ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome outcome)
+        {
+            outcome = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.None;
+
+            var protect = P_WorldEvent?.Composition?.Goal?.Protect;
+
+            if (!WorldEventProtected || IsDead || protect == null || !(share > 0) || !double.IsFinite(share))
+                return 0;
+
+            RollWorldEventHealBudget();
+
+            var missing = (int)(Health.MaxValue - Health.Current);
+
+            if (missing <= 0)
+            {
+                outcome = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.Full;
+                return 0;
+            }
+
+            double? sinceHit = worldEventProtectedLastMonsterHitAt > 0 ? now - worldEventProtectedLastMonsterHitAt : (double?)null;
+            var factor = ACE.Server.WorldEvents.WorldEventHoldRules.HealAfterHitFactor(sinceHit, protect.HealReductionAfterHit, protect.HealReductionSeconds);
+
+            var requested = (int)Math.Floor(Math.Min(1.0, share) * Health.MaxValue * factor);
+
+            if (isRescue)
+            {
+                var rescueRoom = (int)Math.Floor(Math.Clamp(protect.RescueCapPerWave, 0, 1) * Health.MaxValue) - worldEventRescueSpent;
+                requested = Math.Min(requested, Math.Max(0, rescueRoom));
+            }
+
+            requested = Math.Min(requested, missing);
+
+            var allowed = TakeWorldEventHealBudget(requested);
+
+            if (allowed <= 0)
+            {
+                outcome = requested > 0 ? ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.BudgetSpent
+                    : ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.None;
+                return 0;
+            }
+
+            var healed = UpdateVitalDelta(Health, allowed);
+
+            if (healed > 0)
+                DamageHistory.OnHeal((uint)healed);
+
+            if (isRescue)
+                worldEventRescueSpent += Math.Max(0, healed);
+
+            outcome = healed > 0 ? ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.Healed
+                : ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHealOutcome.Full;
+
+            return Math.Max(0, healed);
+        }
+
+        /// <summary>When a run monster last hit this protected target (0 = never), for the heal reduction and the simulation.</summary>
+        public double WorldEventLastMonsterHitAt => worldEventProtectedLastMonsterHitAt;
 
         /// <summary>
         /// Hold ranged waves (<see cref="WorldEventHoldDistance"/> above 0), called from the monster tick once

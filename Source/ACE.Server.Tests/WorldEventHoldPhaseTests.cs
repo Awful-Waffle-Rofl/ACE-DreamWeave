@@ -33,9 +33,7 @@ namespace ACE.Server.Tests
         /// </summary>
         private static readonly (uint Wcid, string Name, bool BodyParts, uint MeleeDefense, uint Quickness, uint Coordination)[] ProtectedProfiles =
         {
-            (2000002, "Caravan Merchant (scout)", true, 4, 50, 100),
-            (2000003, "Caravan Merchant (Grawalda)", true, 0, 80, 60),
-            (2000004, "Caravan Merchant (Waham)", true, 0, 100, 85),
+            (0, "a plain low-defense NPC", true, 4, 50, 100),
             (2000005, "Sir Draithon, as first shipped", false, 0, 290, 290),
             (2000005, "Sir Draithon", true, 0, 290, 290),
             (2000006, "Sir Donovan, as first shipped", false, 0, 290, 290),
@@ -530,7 +528,7 @@ namespace ACE.Server.Tests
         {
             void Refused(string replace, string with, string expected)
             {
-                var json = ShippedCaravanProtectJson.Replace(replace, with);
+                var json = SampleProtectJson.Replace(replace, with);
                 var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
 
                 Assert.IsFalse(store.Goals.ContainsKey("hold_wards"), $"{with} should drop the goal");
@@ -587,7 +585,7 @@ namespace ACE.Server.Tests
             StringAssert.StartsWith(line, WorldEventAnnouncer.Global(""));
 
             // Every shipped announce line, as a broadcast, stays within three sentences and ASCII.
-            foreach (var template in SpecialWaveLines.Concat(EnvoySpecialWaveLines))
+            foreach (var template in EnvoySpecialWaveLines)
             {
                 var filled = WorldEventHoldRules.FillLine(WorldEventHoldRules.FillWaveTokens(template, "east", "Champion Drudge Ravener"),
                     "the Drudges", "envoy", "envoys", "Holtburg", 3, 3);

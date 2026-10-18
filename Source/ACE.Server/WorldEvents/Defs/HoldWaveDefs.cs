@@ -135,6 +135,10 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("corrupted")]
         public double Corrupted { get; set; } = 0.1;
 
+        /// <summary>At least this many in the breach squad, so the knight it hits really feels it (0 to 10). Default 0.</summary>
+        [JsonPropertyName("minBreach")]
+        public int MinBreach { get; set; }
+
         /// <summary>At least this many ranged in every wave big enough to hold them (0 to 20). Default 3.</summary>
         [JsonPropertyName("minRanged")]
         public int MinRanged { get; set; } = 3;
@@ -158,9 +162,9 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonIgnore]
         public double[] Shares => new[] { Seekers, Breach, Runners, Ranged, Hunters, Corrupted };
 
-        /// <summary>The per-role minimums in role order (only Ranged and Corrupted have one, and only while their share is above 0).</summary>
+        /// <summary>The per-role minimums in role order (Breach, Ranged and Corrupted, each only while its share is above 0).</summary>
         [JsonIgnore]
-        public int[] Minimums => new[] { 0, 0, 0, Ranged > 0 ? MinRanged : 0, 0, Corrupted > 0 ? MinCorrupted : 0 };
+        public int[] Minimums => new[] { 0, Breach > 0 ? MinBreach : 0, 0, Ranged > 0 ? MinRanged : 0, 0, Corrupted > 0 ? MinCorrupted : 0 };
 
         /// <summary>The per-role maximums in role order (-1 = none; only Corrupted has one).</summary>
         [JsonIgnore]

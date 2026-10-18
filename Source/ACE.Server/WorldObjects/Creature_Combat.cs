@@ -1292,7 +1292,7 @@ namespace ACE.Server.WorldObjects
 
             // add to retaliate targets?
 
-            // WaffleACE fork, World Events Hold: a seeker woken by someone walking past goes for its caravan.
+            // WaffleACE fork, World Events Hold: a seeker woken by someone walking past goes for its target.
             if (monster.TryKeepWorldEventSeekerLock(this))
                 return true;
 
@@ -1478,7 +1478,7 @@ namespace ACE.Server.WorldObjects
             if (FoeType != null && (monster.FoeType == null || monster.FoeType != CreatureType))
                 monster.AddRetaliateTarget(this);
 
-            // WaffleACE fork, World Events Hold: a seeker hit by a pet or another creature keeps its caravan.
+            // WaffleACE fork, World Events Hold: a seeker hit by a pet or another creature keeps its target.
             if (monster.TryKeepWorldEventSeekerLock(this))
                 return;
 

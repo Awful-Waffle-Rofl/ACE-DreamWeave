@@ -84,7 +84,7 @@ namespace ACE.Server.WorldEvents
     /// only <see cref="State"/> itself (written solely on the world thread while no landblock work is in
     /// flight), and everything it writes goes through <see cref="Participation"/>, whose own lock covers it.
     /// </summary>
-    public sealed class WorldEvent
+    public sealed partial class WorldEvent
     {
         private static readonly ILog log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -571,7 +571,7 @@ namespace ACE.Server.WorldEvents
         /// Whether the run also holds the anchor's neighbouring landblocks (D6 - pure): the source theme's
         /// holdAdjacentLandblocks, or ALWAYS for a Hold goal. A Hold run places its targets and its spawn ring
         /// around the anchor, and an anchor near a landblock edge would otherwise lose every target and
-        /// spawn that lands across the edge (a caravan missing, a third of each wave refused).
+        /// spawn that lands across the edge (a target missing, a third of each wave refused).
         /// </summary>
         public static bool HoldsAdjacentLandblocks(SourceThemeDef theme, GoalDef goal)
         {
@@ -633,7 +633,7 @@ namespace ACE.Server.WorldEvents
         /// <summary>
         /// Hold runs: the progress line as it stood the moment the run finished. A Hold objective counts the
         /// targets standing right now, and cleanup removes them, so without this "/worldevent status" after
-        /// the run would read "0 of 3 caravans still stand" for a hold that lost none. Null for every other
+        /// the run would read "0 of 3 targets still stand" for a hold that lost none. Null for every other
         /// goal, whose progress does not depend on what is still in the world.
         /// </summary>
         private string frozenProgressText;
@@ -1926,7 +1926,14 @@ namespace ACE.Server.WorldEvents
                 if (pool.Count > 0)
                     plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng);
                 else
-                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no ranged or caster members; ranged slots keep their monster");
+                {
+                    // No member with a real ranged attack: those slots seek instead, never a melee monster
+                    // standing in a ranged slot (warded, holding back) and then walking in.
+                    var moved = WorldEventHoldRules.ReassignRole(plan.Roles, HoldRole.Ranged, HoldRole.Seeker);
+
+                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no member with a real ranged attack; " +
+                             $"{moved} ranged slot(s) seek instead");
+                }
             }
         }
 
@@ -2066,6 +2073,9 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>Waves this run has started (picked and sent to the spawner). A Hold run counts its waves by it.</summary>
         private int holdWavesStarted;
+
+        /// <summary>The number of the wave in progress (0 before the first): healing budgets count per wave by it.</summary>
+        internal int HoldWaveNumber => holdWavesStarted;
 
         /// <summary>The run's wave counts, for a wave-based Hold objective.</summary>
         internal HoldWaveCounts HoldWaveCounts =>
@@ -3146,7 +3156,12 @@ namespace ACE.Server.WorldEvents
                     var script = ACE.Entity.Enum.PlayScript.Invalid;
 
                     if (monster.WorldEventCorrupted && corruptedDue)
+                    {
                         script = corruptedEffect;
+
+                        // protect.corrupted.extraEffect: a second effect on top, for a mark that reads in a crowd.
+                        PlayScriptOn(monster, corrupted.ExtraEffect);
+                    }
 
                     if (monster.WorldEventWarded && restoreEffect != ACE.Entity.Enum.PlayScript.Invalid)
                     {
@@ -3229,12 +3244,8 @@ namespace ACE.Server.WorldEvents
                             if (t.IsDead || t.IsDestroyed)
                                 return;
 
-                            var amount = WorldEventHoldRules.BetweenWavesHeal(t.Health.MaxValue, protect.HealBetweenWaves) * newClears;
-
-                            var healed = t.UpdateVitalDelta(t.Health, amount);
-
-                            if (healed > 0)
-                                t.DamageHistory.OnHeal((uint)healed);
+                            // Through the shared heal path: reduced right after a hit, and held to the per-wave budget.
+                            t.ApplyWorldEventProtectedHeal(Math.Min(1.0, protect.HealBetweenWaves * newClears), false, ACE.Common.Time.GetUnixTime(), out _);
                         }
                         catch (Exception ex)
                         {
@@ -3726,7 +3737,7 @@ namespace ACE.Server.WorldEvents
                     return;
 
                 if (!WorldEventHoldRules.HoldNextWaveDue(now, lastWaveAt, holdCadence.WaveIntervalSeconds, holdCadence.MinWaveGapSeconds,
-                        alive, holdLastWaveSize, holdCadence.NextWaveAliveShare))
+                        alive, holdLastWaveSize, holdCadence.NextWaveAliveShare, holdCadence.NextWaveRequiresBoth, holdCadence.MaxWaveIntervalSeconds))
                     return;
 
                 var holdTrigger = now - lastWaveAt >= holdCadence.WaveIntervalSeconds ? "interval" : "most-dead";
@@ -3787,7 +3798,7 @@ namespace ACE.Server.WorldEvents
         {
             holdTickNow = now;
 
-            // Hold: global copies of target lines spoken since the last tick (a destroyed caravan's last
+            // Hold: global copies of target lines spoken since the last tick (a destroyed target's last
             // words), ahead of anything this tick decides.
             DrainProtectedGlobalLines();
 
@@ -3805,6 +3816,10 @@ namespace ACE.Server.WorldEvents
             TickHoldBossEffect(now);
 
             TickHoldMarkerEffects(now);
+
+            TickHoldClearRegen();
+
+            TickHoldShrines();
 
             TickBossDamage();
 
@@ -4030,7 +4045,7 @@ namespace ACE.Server.WorldEvents
         public void OnCreatureDied(Creature creature, DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
         {
             // A Hold target destroyed by the monsters is not the players' doing, so it is not "credit": it must
-            // neither keep an empty run alive (abandon) nor arm the wipe rule. Before this, a caravan's death
+            // neither keep an empty run alive (abandon) nor arm the wipe rule. Before this, a target's death
             // armed FailedWipe against a field where nobody counted as alive, ending the run a second later.
             if (DeathCountsAsCredit(creature != null && Spawner.IsProtectedGuid(creature.Guid.Full)))
                 LastCreditAt = Now();
@@ -4050,6 +4065,16 @@ namespace ACE.Server.WorldEvents
             // Before the objective forward: the objective may complete on this death, and the alive count
             // and the source-guid bookkeeping have to reflect it by then.
             Spawner.OnDied(creature);
+
+            // Hold: a corrupted kill heals the targets, and killing a target's attacker is a rescue.
+            try
+            {
+                OnHoldMonsterDied(creature, lastDamager);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold monster death heal threw", ex);
+            }
 
             // Hold: a destroyed target's last words, after OnDied so {alive} already counts it as gone.
             try
@@ -4188,7 +4213,7 @@ namespace ACE.Server.WorldEvents
                     ? boss.DisplayName
                     : "the champion";
 
-                // Hold: the final count goes into the outcome line ("2 of 3 caravans survived"), taken now,
+                // Hold: the final count goes into the outcome line ("2 of 3 targets survived"), taken now,
                 // before cleanup removes the targets.
                 var hold = Objective as HoldObjective;
                 int? holdAlive = hold?.Alive;

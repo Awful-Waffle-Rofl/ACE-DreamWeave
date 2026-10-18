@@ -61,7 +61,7 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>
         /// Optional scene props placed around EACH target, in that target's own frame: dx metres to its right,
         /// dy metres forward (outward, the way it faces), yaw relative to its facing. One list gives every
-        /// merchant its own wagon whatever the count or radius (WorldEventHoldRules.PlaceTargetDecor).
+        /// target its own props whatever the count or radius (WorldEventHoldRules.PlaceTargetDecor).
         /// </summary>
         [JsonPropertyName("targetDecor")]
         public List<DecorDef> TargetDecor { get; set; }
@@ -105,6 +105,34 @@ namespace ACE.Server.WorldEvents.Defs
         public double UndefendedSeconds { get; set; }
 
         /// <summary>
+        /// Optional: seconds taken off <see cref="UndefendedSeconds"/> for every participant beyond the first, down to
+        /// <see cref="UndefendedSecondsFloor"/>. A bigger group kills each attacker sooner, so each one has to hit
+        /// harder for the targets to stay under threat. 0 (the default) keeps one value for every group size.
+        /// </summary>
+        [JsonPropertyName("undefendedSecondsPerParticipant")]
+        public double UndefendedSecondsPerParticipant { get; set; }
+
+        /// <summary>The lowest <see cref="UndefendedSeconds"/> can go with <see cref="UndefendedSecondsPerParticipant"/> (0 = no floor).</summary>
+        [JsonPropertyName("undefendedSecondsFloor")]
+        public double UndefendedSecondsFloor { get; set; }
+
+        /// <summary>
+        /// <see cref="UndefendedSeconds"/> for <paramref name="participants"/> players (D6 - pure): less
+        /// <see cref="UndefendedSecondsPerParticipant"/> per player beyond the first, never under
+        /// <see cref="UndefendedSecondsFloor"/> or 1. A solo staff test counts as one.
+        /// </summary>
+        public double EffectiveUndefendedSeconds(int participants)
+        {
+            if (!(UndefendedSeconds > 0))
+                return UndefendedSeconds;
+
+            var extra = Math.Max(0, Math.Max(1, participants) - 1);
+            var seconds = UndefendedSeconds - Math.Max(0, UndefendedSecondsPerParticipant) * extra;
+
+            return Math.Max(Math.Max(1, UndefendedSecondsFloor), Math.Min(UndefendedSeconds, seconds));
+        }
+
+        /// <summary>
         /// Optional: the fastest a single target may be destroyed, in seconds, however many monsters are on
         /// it. Caps how much health one target can lose per second at maxHealth / minDeathSeconds (with a
         /// couple of seconds of burst), so stacked attackers cannot melt it, while a target nobody defends still
@@ -142,6 +170,48 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("waveMix")]
         public WaveMixDef WaveMix { get; set; }
+
+        // ---- keeping the targets alive (all off by default) ----------------------------------------------
+
+        /// <summary>Share of max health (0 to 1) every standing target regains when a corrupted monster dies. 0 = off.</summary>
+        [JsonPropertyName("corruptedKillHeal")]
+        public double CorruptedKillHeal { get; set; }
+
+        /// <summary>Share of max health (0 to 1) a target regains when a player uses its shrine. Needs <see cref="Shrine"/>.</summary>
+        [JsonPropertyName("shrineHeal")]
+        public double ShrineHeal { get; set; } = 0.15;
+
+        /// <summary>Seconds a shrine rests after a use (1 to 600). Default 45.</summary>
+        [JsonPropertyName("shrineCooldownSeconds")]
+        public double ShrineCooldownSeconds { get; set; } = 45;
+
+        /// <summary>Share of max health (0 to 1) a target regains when a monster that was attacking it is killed. 0 = off.</summary>
+        [JsonPropertyName("rescueHeal")]
+        public double RescueHeal { get; set; }
+
+        /// <summary>The most a target can regain from rescues per wave (0 to 1). Default 0.10.</summary>
+        [JsonPropertyName("rescueCapPerWave")]
+        public double RescueCapPerWave { get; set; } = 0.10;
+
+        /// <summary>A target regenerates only with no hostile wave monster within this many metres (0 to 50). Default 10.</summary>
+        [JsonPropertyName("clearRadius")]
+        public double ClearRadius { get; set; } = 10;
+
+        /// <summary>Share of max health (0 to 0.1) a clear target regenerates each second. 0 = off.</summary>
+        [JsonPropertyName("clearRegenPerSecond")]
+        public double ClearRegenPerSecond { get; set; }
+
+        /// <summary>
+        /// The most a target can regain per wave (0 to 1) across every heal source together: shrine, corrupted kills,
+        /// rescues, regeneration, the between-waves heal and player heals. Once spent, healing it does nothing until
+        /// the next wave starts. 0 = no budget.
+        /// </summary>
+        [JsonPropertyName("healBudgetPerWave")]
+        public double HealBudgetPerWave { get; set; }
+
+        /// <summary>Optional: a restoration shrine beside each target (see ShrineDef). Absent: no shrines.</summary>
+        [JsonPropertyName("shrine")]
+        public ShrineDef Shrine { get; set; }
 
         /// <summary>Optional: the ward on mixed waves' ranged monsters (see WardDef). Absent: no ward.</summary>
         [JsonPropertyName("ward")]
@@ -201,6 +271,18 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("nextWaveAliveShare")]
         public double NextWaveAliveShare { get; set; } = DefaultNextWaveAliveShare;
+
+        /// <summary>
+        /// With <see cref="WaveIntervalSeconds"/>: true makes the next wave wait for BOTH the interval and
+        /// <see cref="NextWaveAliveShare"/> (whichever comes later), with <see cref="MaxWaveIntervalSeconds"/> as the
+        /// ceiling. False (the default) sends it at whichever comes first.
+        /// </summary>
+        [JsonPropertyName("nextWaveRequiresBoth")]
+        public bool NextWaveRequiresBoth { get; set; }
+
+        /// <summary>With <see cref="NextWaveRequiresBoth"/>: the next wave comes after this long whatever is alive (0 to 600; 0 = no ceiling). Default 75.</summary>
+        [JsonPropertyName("maxWaveIntervalSeconds")]
+        public double MaxWaveIntervalSeconds { get; set; } = 75;
 
         /// <summary>With <see cref="WaveIntervalSeconds"/>: never two waves closer together than this (0 to 60 s). Default 8.</summary>
         [JsonPropertyName("minWaveGapSeconds")]
@@ -491,11 +573,20 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("heal")]
         public List<string> Heal { get; set; } = new List<string>();
 
+        /// <summary>Said by a target restored at its shrine (protect.shrine).</summary>
+        [JsonPropertyName("shrine")]
+        public List<string> Shrine { get; set; } = new List<string>();
+
+        /// <summary>Said by one surviving target when a corrupted monster dies and the targets heal (protect.corruptedKillHeal).</summary>
+        [JsonPropertyName("corruptedKill")]
+        public List<string> CorruptedKill { get; set; } = new List<string>();
+
         /// <summary>Every pool, with its goals.json key, for load-time repair and diagnostics.</summary>
         [JsonIgnore]
         public IEnumerable<(string Key, List<string> Pool)> Pools => new[]
         {
-            ("spawn", Spawn), ("health", Health), ("destroyed", Destroyed), ("success", Success), ("heal", Heal)
+            ("spawn", Spawn), ("health", Health), ("destroyed", Destroyed), ("success", Success), ("heal", Heal),
+            ("shrine", Shrine), ("corruptedKill", CorruptedKill)
         };
     }
 }

@@ -278,7 +278,7 @@ namespace ACE.Server.Tests
         {
             void Refused(string with, string expected)
             {
-                var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, " + with);
+                var json = SampleProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, " + with);
                 var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
 
                 Assert.IsFalse(store.Goals.ContainsKey("hold_wards"), with);
@@ -295,7 +295,7 @@ namespace ACE.Server.Tests
             Refused(@"""portals"": { ""count"": 4 },", "protect.portals with no parts");
             Refused(@"""waves"": { ""base"": 6, ""perParticipant"": 0, ""cap"": 6 }, ""minSeconds"": 0, ""waveMix"": { ""minCorrupted"": 3, ""maxCorrupted"": 2 },", "protect.waveMix minimum");
 
-            var ok = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var ok = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 6.0, ""ward"": { ""reduces"": [ ""missile"" ], ""breakOn"": [ ""melee"", ""magic"" ], ""announce"": [ ""Warded!"" ] },");
             var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ok, holdSeconds: 480), null, null);
 
@@ -307,6 +307,8 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void MixedPlan_HasWardedRangedAndCorrupted()
         {
+            using var rangedFamily = RangedFamily();
+
             var (evt, objective) = MixedRun();
             evt.Composition.Goal.Protect.Ward = new WardDef();
             evt.Spawner.AdoptProtectedForTest(BuildHoldCreature());
@@ -334,7 +336,7 @@ namespace ACE.Server.Tests
 
             var store = WorldEventAxisStore.Parse(null, null, File.ReadAllText(goalsPath), null, null);
 
-            foreach (var id in new[] { "defend_caravan", "defend_envoys" })
+            foreach (var id in new[] { "defend_envoys" })
             {
                 var p = store.Goals[id].Protect;
 
@@ -350,7 +352,9 @@ namespace ACE.Server.Tests
 
                 Assert.IsNotNull(p.Corrupted, id);
                 Assert.AreEqual("Corrupted", p.Corrupted.Prefix, id);
-                Assert.IsTrue(p.Corrupted.Scale >= 1.2 && p.Corrupted.Scale <= 1.3, id);
+                Assert.AreEqual(1.5, p.Corrupted.Scale, 1e-9, $"{id}: corrupted 1.5x, easy to pick out");
+                Assert.AreEqual("EnchantUpPurple", p.Corrupted.ExtraEffect, id);
+                Assert.AreEqual(0.5, p.Portals.Scale, 1e-9, $"{id}: portals 1.43x the old 0.35");
 
                 Assert.IsNotNull(p.Portals, id);
                 Assert.IsTrue(p.Portals.Count >= 3 && p.Portals.Count <= 5, id);

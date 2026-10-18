@@ -85,6 +85,10 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("effectSeconds")]
         public double EffectSeconds { get; set; } = 3;
 
+        /// <summary>A second effect played with the first, for a stronger mark (a PlayScript name, or none). Default none.</summary>
+        [JsonPropertyName("extraEffect")]
+        public string ExtraEffect { get; set; } = "none";
+
         /// <summary>The radius in metres of its empowering aura (0 to 50). Default 12.</summary>
         [JsonPropertyName("empowerRadius")]
         public double EmpowerRadius { get; set; } = 12;
@@ -100,6 +104,46 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>A World Event line, one picked at random, when a wave brings corrupted monsters.</summary>
         [JsonPropertyName("announce")]
         public List<string> Announce { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// protect.shrine: a restoration shrine placed beside each target. A player uses it (from up to
+    /// <see cref="UseRadius"/> away) to restore that target by protect.shrineHeal, then it rests for
+    /// protect.shrineCooldownSeconds. Placed stuck, removed at cleanup with the rest of the scene.
+    /// </summary>
+    public class ShrineDef
+    {
+        /// <summary>The model. Default 19484, the Essence Font ("a rushing fountain of pure mana").</summary>
+        [JsonPropertyName("wcid")]
+        public uint Wcid { get; set; } = 19484;
+
+        /// <summary>The name players see (letters and spaces, up to 30). Default Restoration Shrine.</summary>
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = "Restoration Shrine";
+
+        /// <summary>Size (0.1 to 3). Default 0.5.</summary>
+        [JsonPropertyName("scale")]
+        public double Scale { get; set; } = 0.5;
+
+        /// <summary>Where it stands in the target's own frame: metres to its right. Default 2.5.</summary>
+        [JsonPropertyName("dx")]
+        public double Dx { get; set; } = 2.5;
+
+        /// <summary>Where it stands in the target's own frame: metres outward (negative is toward the anchor). Default -1.</summary>
+        [JsonPropertyName("dy")]
+        public double Dy { get; set; } = -1;
+
+        /// <summary>How far away a player may use it, in metres (1 to 10). Default 4.</summary>
+        [JsonPropertyName("useRadius")]
+        public double UseRadius { get; set; } = 4;
+
+        /// <summary>The effect on the shrine when it is ready again (a PlayScript name, or none). Default RestrictionEffectGreen.</summary>
+        [JsonPropertyName("readyEffect")]
+        public string ReadyEffect { get; set; } = "RestrictionEffectGreen";
+
+        /// <summary>The effect on the target when the shrine restores it (a PlayScript name, or none). Default HealthUpRed.</summary>
+        [JsonPropertyName("usedEffect")]
+        public string UsedEffect { get; set; } = "HealthUpRed";
     }
 
     /// <summary>

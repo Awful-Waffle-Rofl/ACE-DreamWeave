@@ -877,7 +877,7 @@ namespace ACE.Server.Tests
             Assert.IsTrue(WorldEventThroughput.Counts(10, 99, false, false), "the old overload is unchanged");
         }
 
-        // ---- caravan lines: {family} and friends --------------------------------------------------------
+        // ---- envoy lines: {family} and friends --------------------------------------------------------
 
         /// <summary>Family display names as WorldEventComposition.FamilyDisplayName composes them, one and two families.</summary>
         private static readonly string[] SampleFamilies =
@@ -885,22 +885,22 @@ namespace ACE.Server.Tests
             "the Emberwrought", "the Drudges", "the Blackwing and the Drudges", "the Virindi", null
         };
 
-        /// <summary>The caravan lines shipped in dreamweave-content/events/defend_caravan.goal.json.</summary>
-        private static readonly string[] CaravanLines =
+        /// <summary>Sample target lines and progress templates, every token in use.</summary>
+        private static readonly string[] EnvoyLines =
         {
-            "Here come {family}! Keep them away from the wagons!",
+            "Here come {family}! Keep them away from the posts!",
             "We will never reach the market without your help. Hold them off!",
             "Stand with us, friends. Do not let {family} near these goods!",
             "We are down to {pct} percent! Hurry!",
-            "Get {family} off this wagon!",
+            "Get {family} off this post!",
             "We cannot take much more of this!",
             "We are lost! Save the others!",
-            "The wagon is gone... protect the rest!",
+            "The post is gone... protect the rest!",
             "Curse {family}! Do not let them take the others!",
             "We made it! You have our thanks, friends.",
             "That is the last we will see of {family} today. Thank you!",
             "Driven off at last. Safe travels, and thank you.",
-            "A moment to breathe. Patch the wagons, quickly!",
+            "A moment to breathe. Patch the posts, quickly!",
             "They fall back! Mend what you can before the next rush.",
             "Well fought. Bind the damage before {family} return.",
             "{waveProgress} - {alive} of {total} {nounPlural} still stand against {family}.",
@@ -911,20 +911,20 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void FillLine_FamilyToken_UsesTheRunsFamily()
         {
-            Assert.AreEqual("Here come the Emberwrought! Keep them away from the wagons!",
-                WorldEventHoldRules.FillLine("Here come {family}! Keep them away from the wagons!", "the Emberwrought",
-                    "caravan", "caravans", "Holtburg", 3, 3));
+            Assert.AreEqual("Here come the Emberwrought! Keep them away from the posts!",
+                WorldEventHoldRules.FillLine("Here come {family}! Keep them away from the posts!", "the Emberwrought",
+                    "envoy", "envoys", "Holtburg", 3, 3));
 
-            Assert.AreEqual("Get the Blackwing and the Drudges off this wagon!",
-                WorldEventHoldRules.FillLine("Get {family} off this wagon!", "the Blackwing and the Drudges",
-                    "caravan", "caravans", "Holtburg", 2, 3), "a two-family run reads naturally too");
+            Assert.AreEqual("Get the Blackwing and the Drudges off this post!",
+                WorldEventHoldRules.FillLine("Get {family} off this post!", "the Blackwing and the Drudges",
+                    "envoy", "envoys", "Holtburg", 2, 3), "a two-family run reads naturally too");
         }
 
         [TestMethod]
         public void FillLine_CapitalFamilyToken_StartsASentence()
         {
-            Assert.AreEqual("The Emberwrought will not take this caravan!",
-                WorldEventHoldRules.FillLine("{Family} will not take this caravan!", "the Emberwrought", "caravan", "caravans", null, 3, 3));
+            Assert.AreEqual("The Emberwrought will not take this envoy!",
+                WorldEventHoldRules.FillLine("{Family} will not take this envoy!", "the Emberwrought", "envoy", "envoys", null, 3, 3));
         }
 
         [TestMethod]
@@ -937,9 +937,9 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void FillLine_CountsNounsAnchorAndPct()
         {
-            Assert.AreEqual("2 of 3 caravans at Holtburg, 50 percent.",
+            Assert.AreEqual("2 of 3 envoys at Holtburg, 50 percent.",
                 WorldEventHoldRules.FillLine("{alive} of {total} {nounPlural} at {anchor}, {pct} percent.", "the Drudges",
-                    "caravan", "caravans", "Holtburg", 2, 3, pct: 50));
+                    "envoy", "envoys", "Holtburg", 2, 3, pct: 50));
 
             Assert.AreEqual("{pct} and {anchor} stay put",
                 WorldEventHoldRules.FillLine("{pct} and {anchor} stay put", "the Drudges", "c", "cs", null, 0, 0),
@@ -949,19 +949,19 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CaravanLines_ReadForEveryFamily_AsciiAndNoLeftoverTokens()
+        public void EnvoyLines_ReadForEveryFamily_AsciiAndNoLeftoverTokens()
         {
             foreach (var family in SampleFamilies)
             {
-                foreach (var template in CaravanLines)
+                foreach (var template in EnvoyLines)
                 {
                     var line = WorldEventHoldRules.FillLine(template.Replace("{remaining}", "6:05")
                             .Replace("{waveProgress}", WorldEventHoldRules.WaveProgress(3, 7)), family,
-                        "caravan", "caravans", "Holtburg", 2, 3, pct: 50);
+                        "envoy", "envoys", "Holtburg", 2, 3, pct: 50);
 
                     Assert.IsFalse(line.Contains('{') || line.Contains('}'), $"unfilled token in \"{line}\"");
                     Assert.IsFalse(line.IndexOf("bandit", StringComparison.OrdinalIgnoreCase) >= 0,
-                        $"a caravan line must never hardcode a family: \"{line}\"");
+                        $"a envoy line must never hardcode a family: \"{line}\"");
                     AssertAscii(line);
                 }
             }
@@ -1006,21 +1006,21 @@ namespace ACE.Server.Tests
             Assert.IsFalse(WorldEventHoldRules.RepairDashes(null, out _));
         }
 
-        // ---- the caravan goal: exactly three, lines from goals.json -------------------------------------
+        // ---- the envoy goal: exactly three, lines from goals.json -------------------------------------
 
-        private const string CaravanProtectJson =
+        private const string EnvoyProtectJson =
             @"""protect"": { ""wcid"": 2000002, ""count"": { ""base"": 3, ""perParticipant"": 0, ""cap"": 3 },
                 ""health"": { ""base"": 20000, ""perParticipant"": 4000, ""cap"": 200000 }, ""radius"": 6.0,
-                ""noun"": ""caravan"", ""nounPlural"": ""caravans"",
+                ""noun"": ""envoy"", ""nounPlural"": ""envoys"",
                 ""lines"": { ""spawn"": [ ""Here come {family}!"", """" ],
                              ""health"": [ ""We are down to {pct} percent! DASH"" ],
                              ""destroyed"": [ ""We are lost!"" ],
                              ""success"": [ ""We made it!"" ] } }";
 
         [TestMethod]
-        public void CaravanGoal_AlwaysPlacesExactlyThree()
+        public void EnvoyGoal_AlwaysPlacesExactlyThree()
         {
-            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(CaravanProtectJson), null, null);
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(EnvoyProtectJson), null, null);
 
             Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), string.Join(" | ", store.Diagnostics));
 
@@ -1033,9 +1033,9 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CaravanGoal_LinesParse_BlanksDropped_DashesRepaired()
+        public void EnvoyGoal_LinesParse_BlanksDropped_DashesRepaired()
         {
-            var json = HoldGoalsJson(CaravanProtectJson.Replace("DASH", ((char)0x2014).ToString()));
+            var json = HoldGoalsJson(EnvoyProtectJson.Replace("DASH", ((char)0x2014).ToString()));
 
             var store = WorldEventAxisStore.Parse(null, null, json, null, null);
 
@@ -1052,7 +1052,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CaravanGoal_MissingLinesOrNullPools_AreFine()
+        public void EnvoyGoal_MissingLinesOrNullPools_AreFine()
         {
             var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ValidProtectJson), null, null);
             Assert.IsNull(store.Goals["hold_wards"].Protect.Lines, "no lines block, nothing is said");
@@ -1072,14 +1072,14 @@ namespace ACE.Server.Tests
                 Wcid = 2000002,
                 Count = new ScaledCount { Base = 3, Cap = 3 },
                 Health = new ScaledCount { Base = 1, Cap = 1 },
-                Noun = "caravan",
-                NounPlural = "caravans",
+                Noun = "envoy",
+                NounPlural = "envoys",
                 Lines = new ProtectLinesDef { Spawn = new List<string> { "{Family} at {anchor}! Guard the {nounPlural}!" } }
             });
 
             var evt = BuildHoldEvent(goal, null);
 
-            Assert.AreEqual("The Emberwrought at the test anchor! Guard the caravans!",
+            Assert.AreEqual("The Emberwrought at the test anchor! Guard the envoys!",
                 evt.ComposeProtectedLine(goal.Protect.Lines.Spawn, null));
 
             Assert.IsNull(evt.ComposeProtectedLine(goal.Protect.Lines.Success, null), "an empty pool says nothing");
@@ -1089,11 +1089,11 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void HoldProgress_SupportsTheFamilyToken()
         {
-            var goal = BuildHoldGoal(holdSeconds: 420, progressTemplate: CaravanLines[CaravanLines.Length - 1],
+            var goal = BuildHoldGoal(holdSeconds: 420, progressTemplate: EnvoyLines[EnvoyLines.Length - 1],
                 protect: new ProtectDef
                 {
                     Wcid = 2000002, Count = new ScaledCount { Base = 3, Cap = 3 }, Health = new ScaledCount { Base = 1, Cap = 1 },
-                    Noun = "caravan", NounPlural = "caravans"
+                    Noun = "envoy", NounPlural = "envoys"
                 });
 
             var placed = new List<uint> { 1, 2, 3 };
@@ -1102,7 +1102,7 @@ namespace ACE.Server.Tests
             var objective = new HoldObjective(goal, () => placed, () => live, () => T0, null, () => "the Drudges");
             objective.Tick(T0 + 55);
 
-            Assert.AreEqual("2 of 3 caravans still stand. Hold off the Drudges for 6:05.", objective.ProgressText);
+            Assert.AreEqual("2 of 3 envoys still stand. Hold off the Drudges for 6:05.", objective.ProgressText);
         }
 
         [TestMethod]
@@ -1111,16 +1111,16 @@ namespace ACE.Server.Tests
             var goal = BuildHoldGoal();
 
             var success = WorldEventAnnouncer.OutcomeLine(WorldEventOutcome.Success, goal, "Holtburg", WorldEventMvp.None,
-                null, 3, successTemplate: "{Family} were driven from {anchor}!", noun: "caravan", nounPlural: "caravans",
+                null, 3, successTemplate: "{Family} were driven from {anchor}!", noun: "envoy", nounPlural: "envoys",
                 family: "the Emberwrought");
 
             StringAssert.Contains(success, "The Emberwrought were driven from Holtburg!");
 
             var fail = WorldEventAnnouncer.OutcomeLine(WorldEventOutcome.FailedObjectiveLost, goal, "Holtburg", WorldEventMvp.None,
-                null, 3, failTemplate: "{family} took the {nounPlural} - {reason}.", noun: "caravan", nounPlural: "caravans",
+                null, 3, failTemplate: "{family} took the {nounPlural} - {reason}.", noun: "envoy", nounPlural: "envoys",
                 family: "the Blackwing and the Drudges");
 
-            StringAssert.Contains(fail, "the Blackwing and the Drudges took the caravans - the caravans were destroyed.");
+            StringAssert.Contains(fail, "the Blackwing and the Drudges took the envoys - the envoys were destroyed.");
             AssertAscii(success);
             AssertAscii(fail);
         }
@@ -1128,9 +1128,9 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void ProtectedSpeechLine_GlobalCopyFormat()
         {
-            var line = WorldEventAnnouncer.ProtectedSpeechLine("Caravan Merchant", "We made it!");
+            var line = WorldEventAnnouncer.ProtectedSpeechLine("Royal Knight", "We made it!");
 
-            StringAssert.EndsWith(line, "Caravan Merchant: \"We made it!\"");
+            StringAssert.EndsWith(line, "Royal Knight: \"We made it!\"");
             AssertAscii(line);
 
             StringAssert.EndsWith(WorldEventAnnouncer.ProtectedSpeechLine(null, "Help!"), "Ward: \"Help!\"");
@@ -1318,7 +1318,7 @@ namespace ACE.Server.Tests
         public void StartArgs_Abandon_ParsesSeconds()
         {
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
-                new[] { "--here", "--goal", "defend_caravan", "--abandon", "0" }, out var parsed, out var error), error);
+                new[] { "--here", "--goal", "defend_envoys", "--abandon", "0" }, out var parsed, out var error), error);
             Assert.AreEqual(0, parsed.AbandonAfterSeconds);
 
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
@@ -1326,7 +1326,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(600, parsed.AbandonAfterSeconds, "start random takes it too");
 
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
-                new[] { "--here", "--goal", "defend_caravan" }, out parsed, out error), error);
+                new[] { "--here", "--goal", "defend_envoys" }, out parsed, out error), error);
             Assert.IsNull(parsed.AbandonAfterSeconds, "absent means the run default");
         }
 
@@ -1386,7 +1386,7 @@ namespace ACE.Server.Tests
             StringAssert.StartsWith(evt.ProgressText, "3 of 3 wards stand.", "and the final count is the real one");
         }
 
-        // ---- caravans are threatened: hits sized to protect.undefendedSeconds ------------------------------
+        // ---- envoys are threatened: hits sized to protect.undefendedSeconds ------------------------------
 
         [TestMethod]
         public void HitInterval_FirstHitDefault_GapsCapped()
@@ -1434,7 +1434,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void OneAttacker_DestroysAnUndefendedCaravanInAboutUndefendedSeconds()
+        public void OneAttacker_DestroysAnUndefendedEnvoyInAboutUndefendedSeconds()
         {
             foreach (var swing in new[] { 1.5, 2.0, 3.0 })
             {
@@ -1573,12 +1573,12 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void SeekerLock_FallsBackWhenNoCaravanIsInReach()
+        public void SeekerLock_FallsBackWhenNoEnvoyIsInReach()
         {
             var (_, _, monster) = BuildHitScene(75);
             monster.WorldEventSeeker = true;
 
-            // Not in the world (no physics, run not Active): there is no caravan to hold it, so the caller's
+            // Not in the world (no physics, run not Active): there is no envoy to hold it, so the caller's
             // normal retarget runs and the monster is not left with no target.
             Assert.IsFalse(monster.TryKeepWorldEventSeekerLock(null));
             Assert.IsFalse(monster.WorldEventSeeker && monster.AttackTarget is Creature c && c.WorldEventProtected);
@@ -1591,24 +1591,24 @@ namespace ACE.Server.Tests
         {
             Assert.IsTrue(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: true, worldEventProtected: false));
             Assert.IsFalse(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: true, worldEventProtected: true),
-                "a caravan survives @smite all");
+                "a envoy survives @smite all");
             Assert.IsFalse(ACE.Server.Command.Handlers.AdminCommands.SmiteAllTakes(attackable: false, worldEventProtected: false),
                 "non-attackable creatures were never smitten");
         }
 
-        // ---- the shipped caravan goal ---------------------------------------------------------------------
+        // ---- the shipped envoy goal ---------------------------------------------------------------------
 
-        /// <summary>The protect block as shipped in dreamweave-content/events/defend_caravan.goal.json (no health: damage is time-based).</summary>
-        private const string ShippedCaravanProtectJson =
+        /// <summary>A full sample protect block (no health: damage is time-based).</summary>
+        private const string SampleProtectJson =
             @"""protect"": { ""wcid"": 2000002, ""count"": { ""base"": 3, ""perParticipant"": 0, ""cap"": 3 },
                 ""radius"": 6.0, ""spawnRadius"": 25.0, ""undefendedSeconds"": 120.0, ""minDeathSeconds"": 45.0,
                 ""minSurvivors"": 1, ""seekShare"": 0.8, ""healthMilestones"": true,
-                ""noun"": ""caravan"", ""nounPlural"": ""caravans"" }";
+                ""noun"": ""envoy"", ""nounPlural"": ""envoys"" }";
 
         [TestMethod]
-        public void CaravanGoal_ShippedValues_PrioritiseTheCaravans()
+        public void EnvoyGoal_ShippedValues_PrioritiseTheEnvoys()
         {
-            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ShippedCaravanProtectJson), null, null);
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(SampleProtectJson), null, null);
 
             Assert.AreEqual(0, store.Diagnostics.Count, "the shipped block loads clean: " + string.Join(" | ", store.Diagnostics));
 
@@ -1626,7 +1626,7 @@ namespace ACE.Server.Tests
             for (var wave = 0; wave < 50; wave++)
                 seekers += WorldEventHoldRules.SeekerCount(5, protect.SeekShare, ref carry);
 
-            Assert.IsTrue(seekers >= 199 && seekers <= 200, $"80% of 250 monsters go for the caravans, got {seekers}");
+            Assert.IsTrue(seekers >= 199 && seekers <= 200, $"80% of 250 monsters go for the envoys, got {seekers}");
         }
 
         // ---- --level ------------------------------------------------------------------------------------
@@ -1683,7 +1683,7 @@ namespace ACE.Server.Tests
         public void StartArgs_Level_ParsesAndRejects()
         {
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
-                new[] { "--here", "--goal", "defend_caravan", "--level", "150" }, out var parsed, out var error), error);
+                new[] { "--here", "--goal", "defend_envoys", "--level", "150" }, out var parsed, out var error), error);
             Assert.AreEqual(150, parsed.TestLevel);
 
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
@@ -1703,7 +1703,7 @@ namespace ACE.Server.Tests
             }
         }
 
-        // ---- the caravan damage cap ---------------------------------------------------------------------
+        // ---- the envoy damage cap ---------------------------------------------------------------------
 
         /// <summary>Like SecondsToDestroy, through the cap as well (one bucket for the one target).</summary>
         private static double SecondsToDestroyCapped(uint maxHealth, double undefendedSeconds, double minDeathSeconds,
@@ -1755,10 +1755,10 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Cap_AnUndefendedCaravanStillDies()
+        public void Cap_AnUndefendedEnvoyStillDies()
         {
             Assert.IsTrue(double.IsFinite(SecondsToDestroyCapped(ProtectDef.TimeScaledMaxHealth, 120, 45, 50, 1.0)),
-                "the cap slows it down, it never makes a caravan immortal");
+                "the cap slows it down, it never makes a envoy immortal");
         }
 
         [TestMethod]
@@ -1780,7 +1780,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ScaleHit_RealCaravan_IsCappedAcrossManyAttackers()
+        public void ScaleHit_RealEnvoy_IsCappedAcrossManyAttackers()
         {
             var protect = BuildProtect();
             protect.Health = null;
@@ -1824,7 +1824,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GoalsJson_MinDeathSeconds_Validates()
         {
-            var bad = ShippedCaravanProtectJson.Replace(@"""minDeathSeconds"": 45.0", @"""minDeathSeconds"": -1");
+            var bad = SampleProtectJson.Replace(@"""minDeathSeconds"": 45.0", @"""minDeathSeconds"": -1");
             var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(bad), null, null);
 
             Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
@@ -1838,11 +1838,11 @@ namespace ACE.Server.Tests
         public void PickLeastAttacked_FewestFirst_NearestOnTies()
         {
             Assert.AreEqual(2, WorldEventHoldRules.PickLeastAttacked(new[] { 2, 1, 0 }, new[] { 100.0, 200.0, 900.0 }, 10000),
-                "the empty caravan wins even though it is furthest");
+                "the empty envoy wins even though it is furthest");
             Assert.AreEqual(1, WorldEventHoldRules.PickLeastAttacked(new[] { 1, 1, 1 }, new[] { 400.0, 100.0, 900.0 }, 10000),
                 "a tie goes to the nearest");
             Assert.AreEqual(0, WorldEventHoldRules.PickLeastAttacked(new[] { 3, 0 }, new[] { 100.0, 99999.0 }, 10000),
-                "a caravan out of reach is never picked");
+                "a envoy out of reach is never picked");
             Assert.AreEqual(-1, WorldEventHoldRules.PickLeastAttacked(new int[0], new double[0], 10000));
             Assert.AreEqual(-1, WorldEventHoldRules.PickLeastAttacked(null, null, 10000));
         }
@@ -1856,7 +1856,7 @@ namespace ACE.Server.Tests
             for (var seeker = 0; seeker < 9; seeker++)
                 attackers[WorldEventHoldRules.PickLeastAttacked(attackers, distances, 10000)]++;
 
-            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, attackers, "nine seekers, three caravans: three each, not nine on the nearest");
+            CollectionAssert.AreEqual(new[] { 3, 3, 3 }, attackers, "nine seekers, three envoys: three each, not nine on the nearest");
         }
 
         // ---- protect.health: only for raw damage --------------------------------------------------------
@@ -1880,12 +1880,12 @@ namespace ACE.Server.Tests
         public void GoalsJson_HealthRequiredOnlyForRawDamage_AndFlaggedWhenDead()
         {
             // Time-based without health: fine, nothing to say.
-            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ShippedCaravanProtectJson), null, null);
+            var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(SampleProtectJson), null, null);
             Assert.IsTrue(store.Goals.ContainsKey("hold_wards"));
             Assert.AreEqual(0, store.Diagnostics.Count);
 
             // Time-based WITH health: kept, but the dead setting is called out.
-            var withHealth = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var withHealth = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""health"": { ""base"": 20000, ""perParticipant"": 4000, ""cap"": 200000 }, ""radius"": 6.0,");
             store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(withHealth), null, null);
 
@@ -1895,20 +1895,20 @@ namespace ACE.Server.Tests
             AssertAscii(note);
 
             // Raw damage WITHOUT health: still refused, health is what decides those.
-            var rawNoHealth = ShippedCaravanProtectJson.Replace(@"""undefendedSeconds"": 120.0, ", "");
+            var rawNoHealth = SampleProtectJson.Replace(@"""undefendedSeconds"": 120.0, ", "");
             store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(rawNoHealth), null, null);
 
             Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
             Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.health")));
         }
 
-        // ---- why the test runs ended early: caravan deaths are not credit -----------------------------------
+        // ---- why the test runs ended early: envoy deaths are not credit -----------------------------------
 
         [TestMethod]
-        public void DeathCountsAsCredit_NotForACaravan()
+        public void DeathCountsAsCredit_NotForAEnvoy()
         {
             Assert.IsTrue(WorldEvent.DeathCountsAsCredit(isProtectedTarget: false), "a monster the players killed");
-            Assert.IsFalse(WorldEvent.DeathCountsAsCredit(isProtectedTarget: true), "a caravan the monsters killed");
+            Assert.IsFalse(WorldEvent.DeathCountsAsCredit(isProtectedTarget: true), "a envoy the monsters killed");
         }
 
         [TestMethod]
@@ -1945,7 +1945,7 @@ namespace ACE.Server.Tests
             harness.Place(1, 2, 3);
 
             evt.LastCreditAt = T0 + 5;     // the tester killed something
-            harness.Kill(2);               // and the monsters took one caravan
+            harness.Kill(2);               // and the monsters took one envoy
 
             evt.Tick(T0 + 70);
             Assert.AreEqual(WorldEventState.Active, evt.State, "no wipe a minute in");
@@ -2031,7 +2031,7 @@ namespace ACE.Server.Tests
             }
         }
 
-        // ---- merchant variety ---------------------------------------------------------------------------
+        // ---- knight variety ---------------------------------------------------------------------------
 
         [TestMethod]
         public void WcidFor_CyclesThroughTheList_ElseUsesWcid()
@@ -2048,46 +2048,46 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GoalsJson_Wcids_ParseAndValidate()
         {
-            var json = ShippedCaravanProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 2000003, 2000004 ],");
+            var json = SampleProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 2000003, 2000004 ],");
             var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json), null, null);
 
             Assert.IsTrue(store.Goals.ContainsKey("hold_wards"), string.Join(" | ", store.Diagnostics));
             Assert.AreEqual(2000004u, store.Goals["hold_wards"].Protect.WcidFor(2));
 
-            var withZero = ShippedCaravanProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 0 ],");
+            var withZero = SampleProtectJson.Replace(@"""wcid"": 2000002,", @"""wcids"": [ 2000002, 0 ],");
             store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(withZero), null, null);
 
             Assert.IsFalse(store.Goals.ContainsKey("hold_wards"));
             Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("protect.wcids")));
         }
 
-        // ---- the caravan scene ----------------------------------------------------------------------------
+        // ---- the envoy scene ----------------------------------------------------------------------------
 
         [TestMethod]
         public void PlaceTargetDecor_PutsAPropBehindEveryTarget()
         {
             var ring = WorldEventHoldRules.RingOffsets(3, 6.0);
-            var wagon = new DecorDef { Wcid = 28527, Dx = 0, Dy = -2.8f, Scale = 1, Speed = 1, Yaw = 90, Snap = true };
+            var post = new DecorDef { Wcid = 28527, Dx = 0, Dy = -2.8f, Scale = 1, Speed = 1, Yaw = 90, Snap = true };
 
-            var placed = WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { wagon });
+            var placed = WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { post });
 
-            Assert.AreEqual(3, placed.Count, "one wagon per merchant");
+            Assert.AreEqual(3, placed.Count, "one post per knight");
 
             for (var i = 0; i < 3; i++)
             {
                 var t = ring[i];
                 var w = placed[i];
 
-                // 2.8 m behind the merchant means 3.2 m from the anchor, on the same bearing.
+                // 2.8 m behind the knight means 3.2 m from the anchor, on the same bearing.
                 Assert.AreEqual(3.2, Math.Sqrt(w.Dx * w.Dx + w.Dy * w.Dy), 1e-3);
-                Assert.AreEqual(Math.Atan2(t.Dx, t.Dy), Math.Atan2(w.Dx, w.Dy), 1e-3, "on the merchant's own bearing");
-                Assert.AreEqual(90f + t.YawDegrees, w.Yaw, 1e-3f, "turned with the merchant");
+                Assert.AreEqual(Math.Atan2(t.Dx, t.Dy), Math.Atan2(w.Dx, w.Dy), 1e-3, "on the knight's own bearing");
+                Assert.AreEqual(90f + t.YawDegrees, w.Yaw, 1e-3f, "turned with the knight");
                 Assert.AreEqual(28527u, w.Wcid);
                 Assert.IsTrue(w.Snap);
             }
 
-            Assert.AreEqual(1f, wagon.Scale, "the goal's own entry is not modified");
-            Assert.AreEqual(-2.8f, wagon.Dy);
+            Assert.AreEqual(1f, post.Scale, "the goal's own entry is not modified");
+            Assert.AreEqual(-2.8f, post.Dy);
         }
 
         [TestMethod]
@@ -2105,7 +2105,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GoalsJson_SceneDecor_BadEntriesDropped_GoalKept()
         {
-            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var json = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""decor"": [ { ""wcid"": 4128, ""scale"": 1.0, ""speed"": 1.0, ""snap"": true }, { ""wcid"": 0, ""scale"": 1.0, ""speed"": 1.0 } ],
                   ""targetDecor"": [ { ""wcid"": 28527, ""dy"": -2.8, ""scale"": 1.0, ""speed"": 1.0, ""yaw"": 90.0, ""snap"": true }, { ""wcid"": 147, ""scale"": 0, ""speed"": 1.0 } ],
                   ""radius"": 6.0,");
@@ -2126,15 +2126,15 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void ProtectedAppearance_IsAFriendlyNpcToTheClient()
         {
-            var merchant = BuildHoldCreature();
-            merchant.Attackable = true;
-            merchant.PlayerKillerStatus = ACE.Entity.Enum.PlayerKillerStatus.Creature;
+            var knight = BuildHoldCreature();
+            knight.Attackable = true;
+            knight.PlayerKillerStatus = ACE.Entity.Enum.PlayerKillerStatus.Creature;
 
-            ACE.Server.WorldEvents.WorldEventSpawner.ApplyProtectedAppearance(merchant);
+            ACE.Server.WorldEvents.WorldEventSpawner.ApplyProtectedAppearance(knight);
 
-            Assert.IsFalse(merchant.Attackable, "not attackable: the client shows a friendly name and no attack");
-            Assert.AreEqual(ACE.Entity.Enum.PlayerKillerStatus.RubberGlue, merchant.PlayerKillerStatus, "the retail shopkeeper status");
-            Assert.IsFalse(merchant.IsMonster, "nothing keyed on IsMonster treats it as a monster");
+            Assert.IsFalse(knight.Attackable, "not attackable: the client shows a friendly name and no attack");
+            Assert.AreEqual(ACE.Entity.Enum.PlayerKillerStatus.RubberGlue, knight.PlayerKillerStatus, "the retail shopkeeper status");
+            Assert.IsFalse(knight.IsMonster, "nothing keyed on IsMonster treats it as a monster");
         }
 
         [TestMethod]
@@ -2262,7 +2262,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GoalsJson_WavesAboveTheCap_AreNoted()
         {
-            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var json = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 11.0, ""waves"": { ""base"": 4, ""perParticipant"": 1, ""cap"": 30 }, ""minSeconds"": 180.0,");
 
             var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
@@ -2365,7 +2365,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(WorldEventState.Active, evt.State);
 
             evt.Tick(T0 + 480);
-            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "holdSeconds ends it with the caravans still standing");
+            Assert.AreEqual(WorldEventOutcome.Success, evt.Outcome, "holdSeconds ends it with the envoys still standing");
         }
 
         [TestMethod]
@@ -2385,7 +2385,7 @@ namespace ACE.Server.Tests
 
             evt.Tick(T0 + 400);
 
-            Assert.AreEqual(WorldEventOutcome.FailedObjectiveLost, evt.Outcome, "waves won with no caravans left is still a loss");
+            Assert.AreEqual(WorldEventOutcome.FailedObjectiveLost, evt.Outcome, "waves won with no envoys left is still a loss");
         }
 
         [TestMethod]
@@ -2396,13 +2396,13 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Wave 7 of 7", WorldEventHoldRules.WaveProgress(8, 7), "never above the total");
 
             var goal = WaveHoldGoal(wavesBase: 7, wavesPerParticipant: 0, wavesCap: 7);
-            goal.Protect.Noun = "caravan";
-            goal.Protect.NounPlural = "caravans";
+            goal.Protect.Noun = "envoy";
+            goal.Protect.NounPlural = "envoys";
 
             var h = new HoldHarness(goal);
             h.Place(1, 2, 3);
 
-            Assert.AreEqual("Wave 3 of 7 - 3 of 3 caravans stand.", h.Objective.WaveStartText(3));
+            Assert.AreEqual("Wave 3 of 7 - 3 of 3 envoys stand.", h.Objective.WaveStartText(3));
             AssertAscii(h.Objective.WaveStartText(3));
             AssertAscii(h.Objective.WaveStartText(9));
         }
@@ -2454,7 +2454,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GoalsJson_WaveSettings_ParseAndValidate()
         {
-            var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var json = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 11.0, ""waves"": { ""base"": 4, ""perParticipant"": 0.2, ""cap"": 10 }, ""minSeconds"": 300.0,
                   ""healBetweenWaves"": 0.15, ""maxHealPerTenSeconds"": 0.10,");
 
@@ -2476,7 +2476,7 @@ namespace ACE.Server.Tests
                 (@"""maxHealPerTenSeconds"": -0.1,", "protect.maxHealPerTenSeconds")
             })
             {
-                var badJson = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, " + bad);
+                var badJson = SampleProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, " + bad);
                 store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(badJson), null, null);
 
                 Assert.IsFalse(store.Goals.ContainsKey("hold_wards"), bad);
@@ -2484,7 +2484,7 @@ namespace ACE.Server.Tests
             }
 
             // minSeconds above the safety cap can never be used.
-            var tooLong = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var tooLong = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 6.0, ""waves"": { ""base"": 4, ""perParticipant"": 0, ""cap"": 4 }, ""minSeconds"": 600,");
             store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(tooLong, holdSeconds: 480), null, null);
 
@@ -2570,7 +2570,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ProtectedHeal_RealCaravan_ConvertsAndCaps()
+        public void ProtectedHeal_RealEnvoy_ConvertsAndCaps()
         {
             var (_, ward, _) = BuildHitScene(120);
             ward.P_WorldEvent.Composition.Goal.Protect.MaxHealPerTenSeconds = 0.10;
@@ -2633,7 +2633,7 @@ namespace ACE.Server.Tests
             var adjacents = new SourceThemeDef { HoldAdjacentLandblocks = true };
             var killCount = new GoalDef { TypeKind = GoalType.KillCount };
 
-            Assert.IsTrue(WorldEvent.HoldsAdjacentLandblocks(noAdjacents, BuildHoldGoal()), "a Hold run near an edge keeps its caravans");
+            Assert.IsTrue(WorldEvent.HoldsAdjacentLandblocks(noAdjacents, BuildHoldGoal()), "a Hold run near an edge keeps its envoys");
             Assert.IsFalse(WorldEvent.HoldsAdjacentLandblocks(noAdjacents, killCount), "non-Hold runs are unchanged");
             Assert.IsTrue(WorldEvent.HoldsAdjacentLandblocks(adjacents, killCount));
             Assert.IsFalse(WorldEvent.HoldsAdjacentLandblocks(null, null));

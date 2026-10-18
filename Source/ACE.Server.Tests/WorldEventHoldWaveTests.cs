@@ -141,7 +141,7 @@ namespace ACE.Server.Tests
         public void StartArgs_WaveType_ParsesAndRejects()
         {
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
-                new[] { "--here", "--goal", "defend_caravan", "--wave-type", "breach" }, out var parsed, out var error), error);
+                new[] { "--here", "--goal", "defend_envoys", "--wave-type", "breach" }, out var parsed, out var error), error);
             Assert.AreEqual(HoldWaveType.Breach, parsed.ForcedWaveType);
 
             Assert.IsTrue(ACE.Server.Command.Handlers.WorldEventCommands.TryParseStartArgs(
@@ -236,23 +236,44 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void RangedMember_CasterOrMissileWeapon()
+        public void RangedMember_OnlyARealRangedAttackCounts()
         {
-            var old = WorldEventRangedMembers.MissileLookup;
+            var old = WorldEventRangedMembers.RangedLookup;
 
             try
             {
-                WorldEventRangedMembers.MissileLookup = wcid => wcid == 777001;
+                WorldEventRangedMembers.ClearCache();
+                WorldEventRangedMembers.RangedLookup = wcid => wcid == 777001;
 
-                Assert.IsTrue(WorldEventRangedMembers.IsRanged(new FamilyMember { Wcid = 777000, Caster = true }), "a caster");
-                Assert.IsTrue(WorldEventRangedMembers.IsRanged(new FamilyMember { Wcid = 777001 }), "an archer");
+                Assert.IsTrue(WorldEventRangedMembers.IsRanged(new FamilyMember { Wcid = 777001 }), "an archer with arrows, or a war caster");
                 Assert.IsFalse(WorldEventRangedMembers.IsRanged(new FamilyMember { Wcid = 777002 }), "a brawler");
+                Assert.IsFalse(WorldEventRangedMembers.IsRanged(new FamilyMember { Wcid = 777000, Caster = true }),
+                    "the in-game bug: a spellbook alone (buffs, heals) no longer makes a melee monster ranged");
                 Assert.IsFalse(WorldEventRangedMembers.IsRanged(null));
             }
             finally
             {
-                WorldEventRangedMembers.MissileLookup = old;
+                WorldEventRangedMembers.RangedLookup = old;
+                WorldEventRangedMembers.ClearCache();
             }
+        }
+
+        [TestMethod]
+        public void RealRangedAttack_TheRule()
+        {
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(launcherWielded: true, hasAmmo: true, thrownWielded: false, offensiveSpells: 0), "a bow and arrows");
+            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(true, false, false, 0), "a bow with no arrows");
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, true, 0), "throwing axes");
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 1), "an offensive spell");
+            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(false, true, false, 0), "arrows and no bow");
+            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 0), "nothing at range");
+
+            // Spells: projectiles and Harm are offensive; buffs and heals are not.
+            Assert.IsTrue(WorldEventRangedMembers.IsOffensiveSpell(projectileWcid: 1499, numProjectiles: 1, boost: null, vitalDamageType: null), "a war bolt");
+            Assert.IsTrue(WorldEventRangedMembers.IsOffensiveSpell(null, null, -50, (int)ACE.Entity.Enum.DamageType.Health), "Harm Other");
+            Assert.IsFalse(WorldEventRangedMembers.IsOffensiveSpell(null, null, 50, (int)ACE.Entity.Enum.DamageType.Health), "Heal Self");
+            Assert.IsFalse(WorldEventRangedMembers.IsOffensiveSpell(null, null, -50, (int)ACE.Entity.Enum.DamageType.Stamina), "a stamina drain is not a health attack");
+            Assert.IsFalse(WorldEventRangedMembers.IsOffensiveSpell(null, null, null, null), "a buff");
         }
 
         [TestMethod]
@@ -375,14 +396,14 @@ namespace ACE.Server.Tests
               ""countByParticipants"": [ { ""minPlayers"": 0, ""count"": 2, ""radius"": 8.0 }, { ""minPlayers"": 4, ""count"": 3, ""radius"": 11.0 } ],
               ""specialWaveChance"": 0.5, ""specialWaveFromWave"": 2,
               ""specialWaves"": [
-                { ""type"": ""breach"", ""announce"": [ ""One big push!"" ], ""lines"": [ ""They are massing on the {side} wagon!"" ] },
+                { ""type"": ""breach"", ""announce"": [ ""One big push!"" ], ""lines"": [ ""They are massing on the {side} post!"" ] },
                 { ""type"": ""runners"", ""countMult"": 0.6, ""healthMult"": 0.6, ""speedMult"": 1.5, ""announce"": [ ""Fast ones!"" ] },
                 { ""type"": ""ranged"", ""announce"": [ ""Archers!"" ] },
                 { ""type"": ""hunters"", ""hunters"": 2, ""announce"": [ ""Guard your healers!"" ] },
                 { ""type"": ""finale"", ""announce"": [ ""{champion} leads them in!"" ] } ],";
 
         private static string WithSpecials(string extra) =>
-            HoldGoalsJson(ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 11.0, " + extra), holdSeconds: 480);
+            HoldGoalsJson(SampleProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 11.0, " + extra), holdSeconds: 480);
 
         [TestMethod]
         public void GoalsJson_SpecialWaves_ParseClean()
@@ -486,32 +507,6 @@ namespace ACE.Server.Tests
 
         // ---- shipped lines ------------------------------------------------------------------------------------
 
-        /// <summary>The special wave lines shipped in dreamweave-content/events/defend_caravan.goal.json.</summary>
-        private static readonly string[] SpecialWaveLines =
-        {
-            "Watch out! {Family} are gathering for one big push!",
-            "They are all going for the same wagon!",
-            "They are massing on the {side} wagon! Help us!",
-            "All of them are coming for the {side} wagon!",
-            "Fast ones coming! Stop them before they reach the wagons!",
-            "{Family} are rushing in! Catch them quick!",
-            "They are hanging back to strike at the wagons! Go after them!",
-            "{Family} are attacking from a distance! Do not let them pick us apart!",
-            "Some of {family} are coming for you, not us! Guard your healers!",
-            "Look out, healers! {Family} want you first!",
-            "{champion} leads {family} in! This is their last push!",
-            "That is {champion}! Bring it down and we are safe!",
-            // What a merchant says in local chat for each phase (2026-10-18).
-            "Fast ones! They are heading straight for us!",
-            "Here they come, and quick! Stop them!",
-            "They are shooting at the wagons from out there!",
-            "They are picking at us from range! Go get them!",
-            "Watch your backs, healers! Some of them want you!",
-            "They are not after the wagons this time, they are after you!",
-            "{champion} is coming for the wagons! Stop it!",
-            "That is the biggest one yet! Hold on, everyone!"
-        };
-
         private static int SentenceCount(string line) => Regex.Matches(line.Trim(), @"[.!?]+(\s|$)").Count;
 
         [TestMethod]
@@ -519,10 +514,10 @@ namespace ACE.Server.Tests
         {
             foreach (var family in SampleFamilies)
             {
-                foreach (var template in SpecialWaveLines)
+                foreach (var template in EnvoySpecialWaveLines)
                 {
                     var line = WorldEventHoldRules.FillLine(WorldEventHoldRules.FillWaveTokens(template, "east", "Champion Drudge Ravener"),
-                        family, "caravan", "caravans", "Holtburg", 3, 3);
+                        family, "envoy", "envoys", "Holtburg", 3, 3);
 
                     AssertAscii(line);
                     Assert.IsFalse(line.Contains('{') || line.Contains('}'), $"leftover token: {line}");
@@ -535,32 +530,9 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void FillWaveTokens_FallsBackWhenUnknown()
         {
-            Assert.AreEqual("They are massing on the east wagon!", WorldEventHoldRules.FillWaveTokens("They are massing on the {side} wagon!", "east", null));
-            Assert.AreEqual("They are massing on the nearest wagon!", WorldEventHoldRules.FillWaveTokens("They are massing on the {side} wagon!", null, null));
+            Assert.AreEqual("They are massing on the east post!", WorldEventHoldRules.FillWaveTokens("They are massing on the {side} post!", "east", null));
+            Assert.AreEqual("They are massing on the nearest post!", WorldEventHoldRules.FillWaveTokens("They are massing on the {side} post!", null, null));
             Assert.AreEqual("Their champion leads them in!", WorldEventHoldRules.FillWaveTokens("{champion} leads them in!", null, null));
-        }
-
-        /// <summary>
-        /// The real content file, when this machine has it (dreamweave-content sits next to the repo): it must
-        /// load with no diagnostics, and its special wave lines must be the ones mirrored above.
-        /// </summary>
-        [TestMethod]
-        public void ShippedCaravanGoalFile_LoadsClean_WhenPresent()
-        {
-            var path = FindContentFile(Path.Combine("dreamweave-content", "events", "defend_caravan.goal.json"));
-
-            if (path == null)
-                return;
-
-            var store = WorldEventAxisStore.Parse(null, null, File.ReadAllText(path), null, null);
-
-            Assert.IsTrue(store.Goals.ContainsKey("defend_caravan"), string.Join(" | ", store.Diagnostics));
-            Assert.AreEqual(0, store.Diagnostics.Count, string.Join(" | ", store.Diagnostics));
-
-            var p = store.Goals["defend_caravan"].Protect;
-            var shipped = p.SpecialWaves.SelectMany(w => w.Announce.Concat(w.Lines)).ToList();
-
-            CollectionAssert.AreEquivalent(SpecialWaveLines, shipped, "the mirror above matches the file");
         }
 
         private static string FindContentFile(string relative)

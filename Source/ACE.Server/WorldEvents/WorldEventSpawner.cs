@@ -1097,6 +1097,10 @@ namespace ACE.Server.WorldEvents
 
             scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, protect.TargetDecor));
 
+            // protect.shrine: a restoration shrine beside each target, in the target's own frame.
+            if (protect.Shrine != null)
+                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { WorldEventHoldRules.ShrineDecor(protect.Shrine) }));
+
             // protect.portals: small portals around the outside of the spawn ring; every wave comes out of them.
             if (protect.Portals != null)
             {
@@ -1286,7 +1290,7 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>
         /// <see cref="SpawnDecor(WorldEvent, IReadOnlyList{DecorDef}, Position)"/> with the props placed Stuck
-        /// (the Hold caravan scene), so ground scenery a player can walk up to can never be picked up. The
+        /// (the Hold target scene), so ground scenery a player can walk up to can never be picked up. The
         /// sky decor themes keep the original call.
         /// </summary>
         public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool stuck)
@@ -1333,6 +1337,10 @@ namespace ACE.Server.WorldEvents
                     log.Error($"[WORLDEVENT] run={evt.RunId} decor wcid {entry.Wcid} does not exist; skipped");
                     continue;
                 }
+
+                // Hold protect.shrine: renamed and usable from a few metres, before the create packet goes out.
+                if (entry.HoldShrine)
+                    ConfigureHoldShrine(wo, evt.Composition?.Goal?.Protect?.Shrine);
 
                 candidates.Add(new DecorCandidate(wo, entry, stuck));
             }
@@ -1956,8 +1964,18 @@ namespace ACE.Server.WorldEvents
                 // NON-seekers, so a hunter wave still sends its seeker share at the targets.
                 if (plan != null && plan.Roles != null && entryIndex < plan.Roles.Length && entryIndex != plan.ChampionEntryIndex)
                 {
-                    // A mixed wave (protect.waveMix): this monster's own role.
-                    ApplyHoldRole(creature, plan.Roles[entryIndex], plan);
+                    // A mixed wave (protect.waveMix): this monster's own role. A Ranged slot whose monster turns out
+                    // to have no real ranged attack (no offensive spell, no launcher with ammo, no thrown weapon)
+                    // seeks instead, so a melee monster is never warded and held back as an archer.
+                    var role = plan.Roles[entryIndex];
+
+                    if (role == HoldRole.Ranged && !WorldEventRangedMembers.CreatureHasRealRangedAttack(creature))
+                    {
+                        log.Info($"[WORLDEVENT] run={evt.RunId} wcid {wcid} {creature.Name} has no real ranged attack; seeks instead of ranged");
+                        role = HoldRole.Seeker;
+                    }
+
+                    ApplyHoldRole(creature, role, plan);
                 }
                 else if (plan != null)
                 {
@@ -2603,6 +2621,24 @@ namespace ACE.Server.WorldEvents
                     creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
                     break;
             }
+        }
+
+        /// <summary>
+        /// A Hold restoration shrine, before it enters the world: named, and usable from protect.shrine.useRadius
+        /// metres (Usable.Remote), so the client lets a player use it. What the use does is WorldEvent.TryUseHoldShrine;
+        /// the model's own use behaviour never runs.
+        /// </summary>
+        public static void ConfigureHoldShrine(WorldObject wo, ShrineDef shrine)
+        {
+            if (wo == null || shrine == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(shrine.Name))
+                wo.Name = shrine.Name;
+
+            wo.ItemUseable = ACE.Entity.Enum.Usable.Remote;
+            wo.UseRadius = (float)Math.Clamp(shrine.UseRadius, 1, 10);
+            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.LongDesc, "Its waters restore the defender who stands beside it.");
         }
 
         /// <summary>

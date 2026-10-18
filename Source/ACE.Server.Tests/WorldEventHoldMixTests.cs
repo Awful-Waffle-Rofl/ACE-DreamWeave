@@ -261,7 +261,7 @@ namespace ACE.Server.Tests
         {
             void Refused(string with, string expected)
             {
-                var json = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""waves"": { ""base"": 6, ""perParticipant"": 0, ""cap"": 6 }, ""minSeconds"": 0, " + with);
+                var json = SampleProtectJson.Replace(@"""radius"": 6.0,", @"""radius"": 6.0, ""waves"": { ""base"": 6, ""perParticipant"": 0, ""cap"": 6 }, ""minSeconds"": 0, " + with);
                 var store = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(json, holdSeconds: 480), null, null);
 
                 Assert.IsFalse(store.Goals.ContainsKey("hold_wards"), with);
@@ -275,7 +275,7 @@ namespace ACE.Server.Tests
             Refused(@"""bossArrivalEffect"": ""Fireworks"",", "protect.bossArrivalEffect");
             Refused(@"""finaleBossScale"": 3,", "protect.finaleBossScale");
 
-            var ok = ShippedCaravanProtectJson.Replace(@"""radius"": 6.0,",
+            var ok = SampleProtectJson.Replace(@"""radius"": 6.0,",
                 @"""radius"": 6.0, ""waves"": { ""base"": 6, ""perParticipant"": 0, ""cap"": 6 }, ""minSeconds"": 0, ""waveMix"": { ""announce"": [ ""Watch the {side} side!"" ] }, ""showHealthBar"": false,");
             var good = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ok, holdSeconds: 480), null, null);
 
@@ -354,6 +354,29 @@ namespace ACE.Server.Tests
 
         // ---- the plan WorldEvent builds ----------------------------------------------------------------------
 
+        /// <summary>
+        /// For the length of a using block, every family member counts as having a real ranged attack (this test
+        /// project has no world database to look the weenies up in), so a mixed plan keeps its ranged slots.
+        /// </summary>
+        private static IDisposable RangedFamily() => new RangedSeam();
+
+        private sealed class RangedSeam : IDisposable
+        {
+            private readonly Func<uint, bool> old = WorldEventRangedMembers.RangedLookup;
+
+            public RangedSeam()
+            {
+                WorldEventRangedMembers.ClearCache();
+                WorldEventRangedMembers.RangedLookup = _ => true;
+            }
+
+            public void Dispose()
+            {
+                WorldEventRangedMembers.RangedLookup = old;
+                WorldEventRangedMembers.ClearCache();
+            }
+        }
+
         private static (WorldEvent Evt, HoldObjective Objective) MixedRun(HoldWaveType? forced = null)
         {
             var goal = WaveHoldGoal(wavesBase: 6, wavesPerParticipant: 0, wavesCap: 6, minSeconds: 0);
@@ -375,8 +398,39 @@ namespace ACE.Server.Tests
         private static WavePick ElevenTusks() => new WavePick(Enumerable.Repeat(1u, 11).ToList(), new List<uint>());
 
         [TestMethod]
+        public void MixedPlan_FamilyWithNoRealRangedAttack_FillsThoseSlotsWithSeekers()
+        {
+            // The in-game bug: melee monsters with no ranged attack were picked as ranged (warded, held back).
+            var old = WorldEventRangedMembers.RangedLookup;
+
+            try
+            {
+                WorldEventRangedMembers.ClearCache();
+                WorldEventRangedMembers.RangedLookup = _ => false;
+
+                var (evt, objective) = MixedRun();
+                evt.Spawner.AdoptProtectedForTest(BuildHoldCreature());
+
+                var plan = evt.BuildHoldWavePlan(objective, 2, ElevenTusks());
+
+                Assert.AreEqual(HoldWaveType.Mixed, plan.Type);
+                Assert.IsFalse(plan.Roles.Contains(HoldRole.Ranged), "no member with a real ranged attack: no ranged slot");
+                Assert.AreEqual(11, plan.Roles.Length, "the slots are filled with another role, not dropped");
+                Assert.IsTrue(plan.Roles.Count(r => r == HoldRole.Seeker) >= 5, "they seek instead");
+                Assert.IsNull(plan.ReplacedTrash, "nothing is redrawn");
+            }
+            finally
+            {
+                WorldEventRangedMembers.RangedLookup = old;
+                WorldEventRangedMembers.ClearCache();
+            }
+        }
+
+        [TestMethod]
         public void MixedPlan_EveryWaveButTheFinale_CarriesEveryRole()
         {
+            using var ranged = RangedFamily();
+
             var (evt, objective) = MixedRun();
 
             var target = BuildHoldCreature();
@@ -449,7 +503,7 @@ namespace ACE.Server.Tests
 
             var store = WorldEventAxisStore.Parse(null, null, File.ReadAllText(goalsPath), null, null);
 
-            foreach (var id in new[] { "defend_caravan", "defend_envoys" })
+            foreach (var id in new[] { "defend_envoys" })
             {
                 Assert.IsTrue(store.Goals.ContainsKey(id), string.Join(" | ", store.Diagnostics));
                 var p = store.Goals[id].Protect;

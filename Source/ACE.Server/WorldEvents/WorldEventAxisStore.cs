@@ -745,9 +745,49 @@ namespace ACE.Server.WorldEvents
 
                 var mix = protect.WaveMix;
 
-                if (mix.MinRanged < 0 || mix.MinRanged > 20 || mix.MinCorrupted < 0 || mix.MinCorrupted > 5
+                if (mix.MinBreach < 0 || mix.MinBreach > 10 || mix.MinRanged < 0 || mix.MinRanged > 20 || mix.MinCorrupted < 0 || mix.MinCorrupted > 5
                     || mix.MaxCorrupted < 0 || mix.MaxCorrupted > 10 || mix.MinCorrupted > mix.MaxCorrupted)
                     return "has an invalid protect.waveMix minimum (minRanged 0 to 20, minCorrupted 0 to 5, maxCorrupted 0 to 10 and not below minCorrupted)";
+            }
+
+            if (!IsFinite(protect.UndefendedSecondsPerParticipant) || protect.UndefendedSecondsPerParticipant < 0 || protect.UndefendedSecondsPerParticipant > 600
+                || !IsFinite(protect.UndefendedSecondsFloor) || protect.UndefendedSecondsFloor < 0 || protect.UndefendedSecondsFloor > 3600)
+                return "has an invalid protect.undefendedSecondsPerParticipant or undefendedSecondsFloor (0 to 600, 0 to 3600)";
+
+            static bool Share(double v) => double.IsFinite(v) && v >= 0 && v <= 1;
+
+            if (!Share(protect.CorruptedKillHeal) || !Share(protect.ShrineHeal) || !Share(protect.RescueHeal)
+                || !Share(protect.RescueCapPerWave) || !Share(protect.HealBudgetPerWave))
+                return "has an invalid heal share (corruptedKillHeal, shrineHeal, rescueHeal, rescueCapPerWave, healBudgetPerWave: 0 to 1)";
+
+            if (!IsFinite(protect.ClearRegenPerSecond) || protect.ClearRegenPerSecond < 0 || protect.ClearRegenPerSecond > 0.1)
+                return "has an invalid protect.clearRegenPerSecond (0 to 0.1)";
+
+            if (!IsFinite(protect.ClearRadius) || protect.ClearRadius < 0 || protect.ClearRadius > 50)
+                return "has an invalid protect.clearRadius (0 to 50)";
+
+            if (!IsFinite(protect.ShrineCooldownSeconds) || protect.ShrineCooldownSeconds < 1 || protect.ShrineCooldownSeconds > 600)
+                return "has an invalid protect.shrineCooldownSeconds (1 to 600)";
+
+            if (!IsFinite(protect.MaxWaveIntervalSeconds) || protect.MaxWaveIntervalSeconds < 0 || protect.MaxWaveIntervalSeconds > 600)
+                return "has an invalid protect.maxWaveIntervalSeconds (0 to 600)";
+
+            if (protect.Shrine != null)
+            {
+                var s = protect.Shrine;
+
+                if (s.Wcid == 0)
+                    return "has protect.shrine with no wcid";
+
+                if (string.IsNullOrWhiteSpace(s.Name) || s.Name.Length > 30 || !s.Name.All(c => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ' || c == '\''))
+                    return "has an invalid protect.shrine.name (letters, spaces and apostrophes, up to 30)";
+
+                if (!IsFinite(s.Scale) || s.Scale < 0.1 || s.Scale > 3 || !IsFinite(s.UseRadius) || s.UseRadius < 1 || s.UseRadius > 10
+                    || !IsFinite(s.Dx) || !IsFinite(s.Dy) || Math.Abs(s.Dx) > 10 || Math.Abs(s.Dy) > 10)
+                    return "has an invalid protect.shrine layout (scale 0.1 to 3, useRadius 1 to 10, dx and dy within 10)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(s.ReadyEffect, out _) || !WorldEventHoldRules.TryParseBossEffect(s.UsedEffect, out _))
+                    return "has an unknown protect.shrine effect (a PlayScript name, or none)";
             }
 
             if (protect.Ward != null)
@@ -787,7 +827,8 @@ namespace ACE.Server.WorldEvents
                     || !IsFinite(c.EmpowerMult) || c.EmpowerMult < 1 || c.EmpowerMult > 5 || !IsFinite(c.SelfMult) || c.SelfMult < 1 || c.SelfMult > 5)
                     return "has an invalid protect.corrupted aura (empowerRadius 0 to 50, empowerMult and selfMult 1 to 5)";
 
-                if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _))
+                if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _)
+                    || !WorldEventHoldRules.TryParseBossEffect(c.ExtraEffect, out _))
                     return "has an invalid protect.corrupted effect (a PlayScript name or none, every 1 to 60 s)";
             }
 

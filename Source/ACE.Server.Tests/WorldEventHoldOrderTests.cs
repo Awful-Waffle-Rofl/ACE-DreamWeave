@@ -12,7 +12,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// In-game run 2 of the special-wave build: wave 1 was picked before the caravans entered the world, so its
+    /// In-game run 2 of the special-wave build: wave 1 was picked before the envoys entered the world, so its
     /// start line read "0 of 0" and a forced breach silently fell back to an ordinary wave; the seekers' roles
     /// were not visible in the log; and the small-group ring was too tight. Shares the builders in
     /// WorldEventHoldTests.
@@ -39,7 +39,7 @@ namespace ACE.Server.Tests
         {
             var grace = HoldObjective.PlacementGraceSeconds;
 
-            Assert.IsFalse(WorldEvent.HoldFirstWaveMayStart(false, 0, grace), "run 2: picked before the caravans existed");
+            Assert.IsFalse(WorldEvent.HoldFirstWaveMayStart(false, 0, grace), "run 2: picked before the envoys existed");
             Assert.IsFalse(WorldEvent.HoldFirstWaveMayStart(false, grace - 0.1, grace));
             Assert.IsTrue(WorldEvent.HoldFirstWaveMayStart(true, 0.02, grace), "the batch reported back");
             Assert.IsTrue(WorldEvent.HoldFirstWaveMayStart(false, grace, grace), "a batch that never reports cannot stall the run");
@@ -69,8 +69,8 @@ namespace ACE.Server.Tests
         public void WaveStartLine_CountsTheTargets_OnceTheyArePlaced()
         {
             var goal = WaveHoldGoal();
-            goal.Protect.Noun = "caravan";
-            goal.Protect.NounPlural = "caravans";
+            goal.Protect.Noun = "envoy";
+            goal.Protect.NounPlural = "envoys";
 
             var evt = BuildHoldEvent(goal, null);
             var objective = SpawnerWiredObjective(evt, goal);
@@ -82,7 +82,7 @@ namespace ACE.Server.Tests
 
             var line = objective.WaveStartText(1);
 
-            StringAssert.Contains(line, "2 of 2 caravans");
+            StringAssert.Contains(line, "2 of 2 envoys");
             AssertAscii(line);
         }
 
@@ -94,7 +94,7 @@ namespace ACE.Server.Tests
             goal.Protect.SpecialWaves = new List<SpecialWaveDef>
             {
                 new SpecialWaveDef { Type = "breach", TypeKind = HoldWaveType.Breach, Weight = 1,
-                    Announce = new List<string> { "One big push!" }, Lines = new List<string> { "They are massing on the {side} wagon!" } },
+                    Announce = new List<string> { "One big push!" }, Lines = new List<string> { "They are massing on the {side} post!" } },
                 new SpecialWaveDef { Type = "finale", TypeKind = HoldWaveType.Finale }
             };
 
@@ -120,7 +120,7 @@ namespace ACE.Server.Tests
 
             Assert.IsNotNull(plan, "--wave-type breach applies to wave 1");
             Assert.AreEqual(HoldWaveType.Breach, plan.Type);
-            CollectionAssert.Contains(new[] { a.Guid.Full, b.Guid.Full }, plan.BreachTargetGuid, "one of the standing caravans");
+            CollectionAssert.Contains(new[] { a.Guid.Full, b.Guid.Full }, plan.BreachTargetGuid, "one of the standing envoys");
             Assert.IsFalse(string.IsNullOrEmpty(plan.BreachSide));
         }
 
@@ -165,7 +165,7 @@ namespace ACE.Server.Tests
             };
 
             Assert.AreEqual("hold wave 1 roles: seekers=4 hunters=0 others=2", WorldEventHoldRules.WaveRoleSummary(1, roles),
-                "run 2 wave 1: four went for the caravans, two for the player");
+                "run 2 wave 1: four went for the envoys, two for the player");
 
             var breach = new List<(bool, bool, uint)>
             {
@@ -180,9 +180,9 @@ namespace ACE.Server.Tests
         public void SeekerStrayed_OnlyASeekerOffTheTargets_WhileOneStands()
         {
             Assert.IsTrue(WorldEventHoldRules.SeekerStrayed(true, false, true), "a seeker on a player");
-            Assert.IsFalse(WorldEventHoldRules.SeekerStrayed(true, true, true), "a seeker on a caravan");
+            Assert.IsFalse(WorldEventHoldRules.SeekerStrayed(true, true, true), "a seeker on a envoy");
             Assert.IsFalse(WorldEventHoldRules.SeekerStrayed(false, false, true), "an ordinary monster on a player");
-            Assert.IsFalse(WorldEventHoldRules.SeekerStrayed(true, false, false), "no caravan left to go back to");
+            Assert.IsFalse(WorldEventHoldRules.SeekerStrayed(true, false, false), "no envoy left to go back to");
         }
 
         [TestMethod]
@@ -201,12 +201,12 @@ namespace ACE.Server.Tests
             Assert.IsFalse(monster.TryRestoreWorldEventSeekerLock(), "a taunt may hold a seeker elsewhere");
             Assert.AreSame(player, monster.AttackTarget);
 
-            var caravan = BuildHoldCreature();
-            caravan.WorldEventProtected = true;
+            var envoy = BuildHoldCreature();
+            envoy.WorldEventProtected = true;
             monster.TauntTarget = null;
-            monster.AttackTarget = caravan;
-            Assert.IsFalse(monster.TryRestoreWorldEventSeekerLock(), "already on a caravan");
-            Assert.AreSame(caravan, monster.AttackTarget);
+            monster.AttackTarget = envoy;
+            Assert.IsFalse(monster.TryRestoreWorldEventSeekerLock(), "already on a envoy");
+            Assert.AreSame(envoy, monster.AttackTarget);
         }
 
         // ---- 4. layout and spawn clearance ---------------------------------------------------------------------
@@ -233,15 +233,15 @@ namespace ACE.Server.Tests
             Assert.AreEqual((2, 14.0), protect.ResolveLayout(1));
             Assert.AreEqual((3, 16.0), protect.ResolveLayout(4));
 
-            // Two caravans on a 14 m ring stand 28 m apart; three on 16 m stand about 27.7 m apart.
+            // Two envoys on a 14 m ring stand 28 m apart; three on 16 m stand about 27.7 m apart.
             var two = WorldEventHoldRules.RingOffsets(2, 14.0);
             var three = WorldEventHoldRules.RingOffsets(3, 16.0);
 
             double Gap(IReadOnlyList<WorldEventHoldRules.RingOffset> ring) =>
                 System.Math.Sqrt(System.Math.Pow(ring[0].Dx - ring[1].Dx, 2) + System.Math.Pow(ring[0].Dy - ring[1].Dy, 2));
 
-            Assert.IsTrue(Gap(two) >= 27.9, $"2 caravans {Gap(two):F1} m apart");
-            Assert.IsTrue(Gap(three) >= 27.0, $"3 caravans {Gap(three):F1} m apart");
+            Assert.IsTrue(Gap(two) >= 27.9, $"2 envoys {Gap(two):F1} m apart");
+            Assert.IsTrue(Gap(three) >= 27.0, $"3 envoys {Gap(three):F1} m apart");
         }
 
         [TestMethod]

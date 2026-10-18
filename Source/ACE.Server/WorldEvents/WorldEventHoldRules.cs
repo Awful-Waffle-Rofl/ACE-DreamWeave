@@ -355,6 +355,33 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// The cadence with protect.nextWaveRequiresBoth (D6 - pure): the next wave waits for BOTH the interval and
+        /// most of the field being dead (whichever comes later), so a group that clears fast still gets a breather
+        /// and a group that falls behind is not buried. <paramref name="maxInterval"/> (0 = none) sends it anyway, so a
+        /// run where nobody kills never stalls. Never sooner than <paramref name="minGap"/>. Without
+        /// <paramref name="requireBoth"/> it is the either-or rule above.
+        /// </summary>
+        public static bool HoldNextWaveDue(double now, double lastWaveAt, double interval, double minGap,
+            int liveCount, int lastWaveSize, double aliveShare, bool requireBoth, double maxInterval)
+        {
+            if (!requireBoth)
+                return HoldNextWaveDue(now, lastWaveAt, interval, minGap, liveCount, lastWaveSize, aliveShare);
+
+            var since = now - lastWaveAt;
+
+            if (since < Math.Max(0, minGap))
+                return false;
+
+            if (maxInterval > 0 && since >= maxInterval)
+                return true;
+
+            var intervalDone = !(interval > 0) || since >= interval;
+            var mostDead = lastWaveSize <= 0 ? liveCount <= 0 : liveCount <= Math.Floor(Math.Max(0, aliveShare) * lastWaveSize);
+
+            return intervalDone && mostDead;
+        }
+
+        /// <summary>
         /// Whether a Hold ranged-wave monster keeps its distance (D6 - pure): only with a hold distance set and a
         /// ranged attack to use (a missile weapon or spells). A melee-only monster closes in as usual.
         /// </summary>
@@ -467,29 +494,49 @@ namespace ACE.Server.WorldEvents
                 }
             }
 
-            // Minimums: taken from the biggest roles that can spare one.
-            for (var r = 0; r < roles; r++)
+            // No minimum ever takes more than half the wave (3 ranged out of a solo wave of 5 would be most of it).
+            int Floor(int r)
             {
                 var min = Max(r) >= 0 ? Math.Min(Min(r), Max(r)) : Min(r);
+                return Math.Min(min, waveSize / 2);
+            }
 
-                while (counts[r] < min)
+            // Minimums, in priority order (corrupted, then ranged, then the rest), taken from the biggest roles that
+            // can spare one. First pass: never take a wanted role below 1. Second pass, for a wave too small for
+            // every role: roles drop out, the least important first (hunters, runners, breach, seekers).
+            var order = Enumerable.Range(0, roles).OrderByDescending(r => r).ToList();
+
+            for (var pass = 0; pass < 2; pass++)
+            {
+                foreach (var r in order)
                 {
-                    var donor = Enumerable.Range(0, roles)
-                        .Where(d => d != r && counts[d] > Math.Max(Min(d), Wanted(d) ? 1 : 0))
-                        .OrderByDescending(d => counts[d])
-                        .DefaultIfEmpty(-1)
-                        .First();
+                    var min = Floor(r);
 
-                    if (donor < 0)
-                        break;
+                    while (counts[r] < min)
+                    {
+                        var keepOne = pass == 0;
 
-                    counts[donor]--;
-                    counts[r]++;
+                        var donor = Enumerable.Range(0, roles)
+                            .Where(d => d != r && counts[d] > Math.Max(Floor(d), keepOne && Wanted(d) ? 1 : 0))
+                            .OrderByDescending(d => counts[d])
+                            .ThenBy(d => Array.IndexOf(DropOrder, (HoldRole)d) < 0 ? int.MaxValue : Array.IndexOf(DropOrder, (HoldRole)d))
+                            .DefaultIfEmpty(-1)
+                            .First();
+
+                        if (donor < 0)
+                            break;
+
+                        counts[donor]--;
+                        counts[r]++;
+                    }
                 }
             }
 
             return counts;
         }
+
+        /// <summary>Which roles give way first when a small wave cannot hold every role (D6): least important first.</summary>
+        public static readonly HoldRole[] DropOrder = { HoldRole.Hunter, HoldRole.Runner, HoldRole.Breach, HoldRole.Seeker, HoldRole.Ranged, HoldRole.Corrupted };
 
         // ---- ward, corrupted aura, portals (D6 - pure) ----------------------------------------------------
 
@@ -653,6 +700,118 @@ namespace ACE.Server.WorldEvents
                 // Always on the ground where the portal stands, which can be well above or below the anchor.
                 Snap = true
             }).ToList();
+        }
+
+        /// <summary>
+        /// How much of a heal a target's per-wave budget lets through (D6 - pure): <paramref name="requested"/> health,
+        /// against a budget of <paramref name="budgetShare"/> of <paramref name="maxHealth"/> of which
+        /// <paramref name="spentThisWave"/> is used. A budget of 0 or less means no budget. Never negative.
+        /// </summary>
+        public static int HealWithinBudget(int requested, uint maxHealth, double budgetShare, int spentThisWave)
+        {
+            if (requested <= 0)
+                return 0;
+
+            if (!(budgetShare > 0) || !double.IsFinite(budgetShare))
+                return requested;
+
+            var budget = (int)Math.Floor(Math.Min(1.0, budgetShare) * maxHealth);
+
+            return Math.Max(0, Math.Min(requested, budget - Math.Max(0, spentThisWave)));
+        }
+
+        /// <summary>What one heal on a protected target came to (D6).</summary>
+        public enum ProtectedHealOutcome
+        {
+            /// <summary>Some health was restored.</summary>
+            Healed,
+
+            /// <summary>Nothing: the target was already at full health.</summary>
+            Full,
+
+            /// <summary>Nothing: the target's healing budget for this wave is spent.</summary>
+            BudgetSpent,
+
+            /// <summary>Nothing: not a living protected target, or nothing asked for.</summary>
+            None
+        }
+
+        /// <summary>Whether a kill counts as a rescue (D6 - pure): a player's kill, or a pet's (it has an owner). Never a monster's.</summary>
+        public static bool IsRescueKill(bool killerIsPlayer, bool killerHasPetOwner) => killerIsPlayer || killerHasPetOwner;
+
+        /// <summary>
+        /// Whether a target is clear enough to regenerate (D6 - pure): no living wave monster within
+        /// <paramref name="radius"/> metres. <paramref name="nearestMonster"/> is null when none is alive.
+        /// </summary>
+        public static bool IsClear(double? nearestMonster, double radius)
+        {
+            return nearestMonster == null || !(radius > 0) || nearestMonster.Value > radius;
+        }
+
+        /// <summary>
+        /// Whether a ready shrine plays its ready effect now (D6 - pure): ready (<paramref name="now"/> past
+        /// <paramref name="readyAt"/>, 0 = never used), and either it has not pulsed since it became ready or the last
+        /// pulse is <paramref name="period"/> seconds old.
+        /// </summary>
+        public static bool ShrineReadyPulseDue(double now, double readyAt, double pulsedAt, double period)
+        {
+            if (now < readyAt)
+                return false;
+
+            return pulsedAt < readyAt || pulsedAt <= 0 || now - pulsedAt >= period;
+        }
+
+        /// <summary>What a player is told using a shrine that is resting (D6 - pure). ASCII.</summary>
+        public static string ShrineCooldownLine(double secondsLeft)
+        {
+            var s = (int)Math.Ceiling(Math.Max(1, secondsLeft));
+
+            return $"The shrine is still gathering its strength. It will be ready in {s} second{(s == 1 ? "" : "s")}.";
+        }
+
+        /// <summary>What a player is told when a shrine heal restores nothing (D6 - pure). ASCII.</summary>
+        public static string ShrineWastedLine(string targetName, ProtectedHealOutcome outcome)
+        {
+            var name = string.IsNullOrWhiteSpace(targetName) ? "The defender" : targetName;
+
+            return outcome == ProtectedHealOutcome.BudgetSpent
+                ? $"{name} can draw no more strength this wave. The shrine holds its power for now."
+                : $"{name} needs no restoring. The shrine holds its power for now.";
+        }
+
+        /// <summary>One target's shrine as a decor entry in the target's own frame (D6 - pure): on the ground, flagged as a shrine.</summary>
+        public static DecorDef ShrineDecor(ShrineDef shrine)
+        {
+            return new DecorDef
+            {
+                Wcid = shrine?.Wcid ?? 0,
+                Dx = (float)(shrine?.Dx ?? 0),
+                Dy = (float)(shrine?.Dy ?? 0),
+                Scale = (float)Math.Clamp(shrine?.Scale ?? 1, 0.1, 3),
+                Speed = 1,
+                Snap = true,
+                HoldShrine = true
+            };
+        }
+
+        /// <summary>Every <paramref name="from"/> role becomes <paramref name="to"/> (D6 - pure). Returns how many moved.</summary>
+        public static int ReassignRole(HoldRole[] roles, HoldRole from, HoldRole to)
+        {
+            if (roles == null)
+                return 0;
+
+            var moved = 0;
+
+            for (var i = 0; i < roles.Length; i++)
+            {
+                if (roles[i] == from)
+                {
+                    roles[i] = to;
+                    moved++;
+                }
+            }
+
+            return moved;
         }
 
         /// <summary>The attacker count an avoided target is given, so it is only ever picked when nothing else is in reach.</summary>
@@ -1098,7 +1257,7 @@ namespace ACE.Server.WorldEvents
         /// <summary>
         /// A token bucket (D6 - pure): refills at <paramref name="ratePerSecond"/> up to
         /// <paramref name="capacity"/>, starting full (lastAt 0 = never used), and lets through at most what it
-        /// holds. Shared by the caravan damage cap and the player-heal cap.
+        /// holds. Shared by the target damage cap and the player-heal cap.
         /// </summary>
         public static double TakeFromBucket(double requested, double ratePerSecond, double capacity,
             ref double tokens, ref double lastAt, double now)
@@ -1186,7 +1345,7 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// The caravan damage cap (D6 - pure): a token bucket that refills at maxHealth / minDeathSeconds per
+        /// The target damage cap (D6 - pure): a token bucket that refills at maxHealth / minDeathSeconds per
         /// second, holding at most <see cref="DefaultCapBurstSeconds"/> of that. A hit takes what it asked
         /// for, up to what is in the bucket. So however many attackers pile on, the target loses at most its
         /// whole health over about minDeathSeconds; a single attacker that hits more slowly than that is
@@ -1311,7 +1470,7 @@ namespace ACE.Server.WorldEvents
         /// own frame - Dx metres to its RIGHT, Dy metres FORWARD (outward, the way it faces), Yaw relative to
         /// its facing - and is placed once for every target in <paramref name="targets"/>, giving
         /// anchor-relative copies (Dx east, Dy north, Yaw absolute) for the ordinary decor placement. Every
-        /// other field is copied unchanged. Lets one goals.json list put a wagon behind each merchant
+        /// other field is copied unchanged. Lets one goals.json list put a prop beside each target
         /// whatever the count or radius.
         /// </summary>
         public static List<DecorDef> PlaceTargetDecor(IReadOnlyList<RingOffset> targets, IReadOnlyList<DecorDef> local)
@@ -1348,7 +1507,8 @@ namespace ACE.Server.WorldEvents
                         Inverted = entry.Inverted,
                         Yaw = entry.Yaw + target.YawDegrees,
                         Pitch = entry.Pitch,
-                        Snap = entry.Snap
+                        Snap = entry.Snap,
+                        HoldShrine = entry.HoldShrine
                     });
                 }
             }
@@ -1358,7 +1518,7 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>
         /// Fills a Hold outcome line's count tokens (D6 - pure): {alive}, {total} and {lost} as they stood when
-        /// the run finished, so the success and fail broadcasts can say "2 of 3 caravans survived".
+        /// the run finished, so the success and fail broadcasts can say "2 of 3 targets survived".
         /// </summary>
         public static string FillCounts(string template, int alive, int total)
         {

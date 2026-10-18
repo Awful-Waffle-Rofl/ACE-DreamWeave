@@ -64,7 +64,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            // WaffleACE fork, World Events Hold: a protected target (a caravan) can be healed with a HEALTH kit.
+            // WaffleACE fork, World Events Hold: a protected target (a target) can be healed with a HEALTH kit.
             if (target is Creature protectedTarget && protectedTarget.WorldEventProtected)
             {
                 HealWorldEventProtected(healer, protectedTarget);

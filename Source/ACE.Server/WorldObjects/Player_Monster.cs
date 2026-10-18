@@ -57,7 +57,7 @@ namespace ACE.Server.WorldObjects
             if (SameFaction(monster))
                 monster.AddRetaliateTarget(this);
 
-            // WaffleACE fork, World Events Hold: a seeker keeps going for its caravan even when hit.
+            // WaffleACE fork, World Events Hold: a seeker keeps going for its target even when hit.
             if (monster.TryKeepWorldEventSeekerLock(this))
                 return;
 

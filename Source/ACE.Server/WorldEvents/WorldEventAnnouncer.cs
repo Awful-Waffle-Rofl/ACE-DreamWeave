@@ -202,7 +202,7 @@ namespace ACE.Server.WorldEvents
         {
             var result = template ?? "";
 
-            // {family}/{Family}: the run's composed monster families (2026-10-17, Hold caravans). Families vary
+            // {family}/{Family}: the run's composed monster families (2026-10-17, Hold targets). Families vary
             // per run, so a template names them only through this token. Same fallback as protect lines.
             var familyText = string.IsNullOrWhiteSpace(family) ? WorldEventHoldRules.DefaultFamilyText : family.Trim();
             result = result.Replace("{Family}", WorldEventHoldRules.CapitalizeFirst(familyText));
@@ -386,7 +386,7 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>
         /// The global copy of a protected target's spoken line (destroyed and success lines):
-        /// "[World Event] Caravan Merchant: "We made it!"". Falls back to the default noun for a nameless speaker.
+        /// "[World Event] Sir Donovan: "We made it!"". Falls back to the default noun for a nameless speaker.
         /// </summary>
         public static string ProtectedSpeechLine(string speakerName, string line)
         {
