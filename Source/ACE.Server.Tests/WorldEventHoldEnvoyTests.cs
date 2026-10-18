@@ -101,7 +101,7 @@ namespace ACE.Server.Tests
         {
             foreach (var template in EnvoyTargetLines.Concat(EnvoySpecialWaveLines).Concat(EnvoyTemplates))
             {
-                Assert.IsFalse(template.Contains('–') || template.Contains('—'), $"en or em dash: {template}");
+                Assert.IsFalse(template.Contains((char)0x2013) || template.Contains((char)0x2014), $"en or em dash: {template}");
                 AssertAscii(template);
             }
         }
