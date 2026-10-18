@@ -1195,12 +1195,16 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static float ResolveSpawnRadius(SourceThemeDef theme, GoalDef goal)
         {
-            var spawnRadius = goal?.TypeKind == GoalType.Hold ? goal.Protect?.SpawnRadius ?? 0 : 0;
+            var hold = goal?.TypeKind == GoalType.Hold ? goal.Protect : null;
+            var spawnRadius = hold?.SpawnRadius ?? 0;
 
-            if (double.IsFinite(spawnRadius) && spawnRadius > 0)
-                return (float)spawnRadius;
+            var radius = double.IsFinite(spawnRadius) && spawnRadius > 0 ? spawnRadius : theme?.GeometryRadius ?? 0f;
 
-            return theme?.GeometryRadius ?? 0f;
+            // Hold: monsters always arrive from outside the targets' ring, whichever layout the crowd gets.
+            if (hold != null)
+                radius = Math.Max(radius, hold.MaxRingRadius + ProtectDef.MinSpawnClearance);
+
+            return (float)radius;
         }
 
         /// <summary>This run's spawn geometry radius; see <see cref="ResolveSpawnRadius"/>.</summary>
@@ -1432,7 +1436,13 @@ namespace ACE.Server.WorldEvents
                 if (npcs != null && npcs.Count > 0)
                     Spawner.SpawnNpcs(this, npcs, Composition?.AnchorPosition);
 
-                SpawnWave(now, initial: true);
+                // Hold: the protected targets enter the world in a queued landblock action, so wave 0 waits
+                // for that batch (TickWaves, HoldFirstWaveMayStart). Picked now, it would see no targets: the
+                // wave-start line read "0 of 0" and a breach found nothing to send its seekers at.
+                if (DefersFirstWave(goal))
+                    holdFirstWavePending = true;
+                else
+                    SpawnWave(now, initial: true);
             }
             catch (Exception ex)
             {
@@ -1579,7 +1589,7 @@ namespace ACE.Server.WorldEvents
         /// members, a finale with no champion) falls back to an ordinary wave or a finale without a champion,
         /// and says so in the log.
         /// </summary>
-        private HoldWavePlan BuildHoldWavePlan(HoldObjective hold, int waveNumber, WavePick pick)
+        internal HoldWavePlan BuildHoldWavePlan(HoldObjective hold, int waveNumber, WavePick pick)
         {
             var protect = Composition?.Goal?.Protect;
 
@@ -1607,6 +1617,7 @@ namespace ACE.Server.WorldEvents
 
                     if (targets.Count == 0)
                     {
+                        log.Warn($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: breach has no standing target; ordinary wave");
                         plan.Type = HoldWaveType.Normal;
                         break;
                     }
@@ -2609,12 +2620,35 @@ namespace ACE.Server.WorldEvents
                 if (Composition?.Goal?.TypeKind != GoalType.Hold)
                     return;
 
+                var targetsStanding = Spawner.LiveProtectedGuids.Count > 0;
+
                 foreach (var creature in Spawner.LiveWaveCreatures)
                 {
-                    // A racy read on the world thread, used only to skip the enqueue for monsters already
-                    // awake; TryWorldEventHoldWake re-checks it on the landblock thread.
+                    // An awake seeker on anything but a target (a player, nothing) is put back on a target,
+                    // with a warning naming what it was on: the seeker lock should make this impossible.
                     if (creature.MonsterState != Creature.State.Idle)
+                    {
+                        if (WorldEventHoldRules.SeekerStrayed(creature.WorldEventSeeker,
+                                (creature.AttackTarget as Creature)?.WorldEventProtected ?? false, targetsStanding)
+                            && creature.CurrentLandblock is { } strayLandblock)
+                        {
+                            var stray = creature;
+
+                            strayLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                            {
+                                try
+                                {
+                                    stray.TryRestoreWorldEventSeekerLock();
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.Error($"[WORLDEVENT] run={RunId} seeker restore threw", ex);
+                                }
+                            }));
+                        }
+
                         continue;
+                    }
 
                     var landblock = creature.CurrentLandblock;
 
@@ -3092,6 +3126,22 @@ namespace ACE.Server.WorldEvents
             return now >= lastWaveAt + interval ? "interval" : "cleared";
         }
 
+        /// <summary>A Hold run's wave 0 is waiting for its protected targets to be placed (see OnBecameActive).</summary>
+        internal bool holdFirstWavePending;
+
+        /// <summary>True for a goal whose first wave waits for its protected targets: a Hold goal with a protect block.</summary>
+        public static bool DefersFirstWave(GoalDef goal) => goal != null && goal.TypeKind == GoalType.Hold && goal.Protect != null;
+
+        /// <summary>
+        /// Whether a Hold run's first wave may go out (D6 - pure): once the protected-target batch has resolved
+        /// on its landblock, or after <paramref name="graceSeconds"/> regardless, so a batch that never reports
+        /// back cannot hold the run without waves.
+        /// </summary>
+        public static bool HoldFirstWaveMayStart(bool placementResolved, double secondsSinceActive, double graceSeconds)
+        {
+            return placementResolved || secondsSinceActive >= graceSeconds;
+        }
+
         /// <summary>
         /// The wave cadence. Runs ahead of the objective and timer evaluation so a wave that completes the
         /// objective is judged on the same tick it lands.
@@ -3100,6 +3150,30 @@ namespace ACE.Server.WorldEvents
         {
             if (AnchorLandblock == null)
                 return;
+
+            if (holdFirstWavePending)
+            {
+                if (!HoldFirstWaveMayStart(Spawner.ProtectedPlacementResolved, now - ActiveAt, HoldObjective.PlacementGraceSeconds))
+                    return;
+
+                holdFirstWavePending = false;
+
+                log.Info($"[WORLDEVENT] run={RunId} hold first wave: targets placed={Spawner.ProtectedGuids.Count} " +
+                         $"(resolved={Spawner.ProtectedPlacementResolved}) after {now - ActiveAt:F1}s");
+
+                try
+                {
+                    SpawnWave(now, initial: true);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} initial spawn threw", ex);
+                }
+
+                // The cadence counts from the wave that actually went out.
+                lastWaveAt = now;
+                return;
+            }
 
             var interval = Composition?.Source?.EffectiveWaveIntervalSeconds ?? 0;
 

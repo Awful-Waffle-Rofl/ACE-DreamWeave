@@ -372,6 +372,33 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
+        /// <summary>
+        /// Whether an awake seeker has strayed (D6 - pure): it is a seeker, its current target is not a
+        /// protected target, and at least one target still stands for it to go back to.
+        /// </summary>
+        public static bool SeekerStrayed(bool isSeeker, bool targetIsProtected, bool targetsStanding)
+        {
+            return isSeeker && !targetIsProtected && targetsStanding;
+        }
+
+        /// <summary>
+        /// The per-wave seeker summary for the log (D6 - pure): how many of the wave's creatures are seekers,
+        /// hunters and others, with the targets the seekers were sent at (guid to count).
+        /// </summary>
+        public static string WaveRoleSummary(int waveNumber, IReadOnlyList<(bool Seeker, bool Hunter, uint ForcedGuid)> roles)
+        {
+            roles ??= Array.Empty<(bool, bool, uint)>();
+
+            var seekers = roles.Count(r => r.Seeker);
+            var hunters = roles.Count(r => r.Hunter);
+            var others = roles.Count - seekers - hunters;
+            var forced = roles.Where(r => r.Seeker && r.ForcedGuid != 0).GroupBy(r => r.ForcedGuid)
+                .Select(g => $"0x{g.Key:X8}x{g.Count()}").ToList();
+
+            return $"hold wave {waveNumber} roles: seekers={seekers} hunters={hunters} others={others}" +
+                   (forced.Count > 0 ? $" breach=[{string.Join(",", forced)}]" : "");
+        }
+
         /// <summary>How many of a <paramref name="waveSize"/> wave a Runners wave keeps: the share, at least one.</summary>
         public static int RunnersKeep(int waveSize, double countMult)
         {

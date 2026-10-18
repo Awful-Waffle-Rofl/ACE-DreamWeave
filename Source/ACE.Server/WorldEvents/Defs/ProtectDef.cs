@@ -210,6 +210,26 @@ namespace ACE.Server.WorldEvents.Defs
             return (Math.Clamp(best.Count, 1, MaxProtectedTargets), best.Radius);
         }
 
+        /// <summary>How far outside the widest target ring the waves spawn, at least (metres).</summary>
+        public const double MinSpawnClearance = 10.0;
+
+        /// <summary>The widest ring any crowd size can get: <see cref="Radius"/> or any countByParticipants radius.</summary>
+        [JsonIgnore]
+        public double MaxRingRadius
+        {
+            get
+            {
+                var max = double.IsFinite(Radius) ? Math.Max(0, Radius) : 0;
+
+                if (CountByParticipants != null)
+                    foreach (var entry in CountByParticipants)
+                        if (entry != null && double.IsFinite(entry.Radius))
+                            max = Math.Max(max, entry.Radius);
+
+                return max;
+            }
+        }
+
         /// <summary>The finale entry of <see cref="SpecialWaves"/>, or null.</summary>
         [JsonIgnore]
         public SpecialWaveDef Finale => SpecialWaves?.Find(w => w != null && w.TypeKind == HoldWaveType.Finale);

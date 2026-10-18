@@ -308,6 +308,29 @@ namespace ACE.Server.WorldObjects
         /// (ApplyTaunt / TauntTarget) can still pull a seeker off. False, changing nothing, for every creature
         /// that is not a seeker.
         /// </summary>
+        public bool TryRestoreWorldEventSeekerLock()
+        {
+            if (!WorldEventSeeker || IsDead || IsDestroyed || PhysicsObj == null)
+                return false;
+
+            if (AttackTarget is Creature current && current.WorldEventProtected)
+                return false;
+
+            // An active taunt is the one thing allowed to hold a seeker elsewhere.
+            if (TauntTarget != null && ACE.Server.Entity.Timers.RunningTime < TauntExpiry && !TauntTarget.IsDead)
+                return false;
+
+            var was = AttackTarget;
+
+            if (!TrySelectWorldEventSeekTarget())
+                return false;
+
+            log.Warn($"[WORLDEVENT] run={P_WorldEvent?.RunId} seeker {Name} 0x{Guid.Full:X8} had strayed onto {was?.Name ?? "nothing"}; " +
+                     $"back on {AttackTarget?.Name} 0x{AttackTarget?.Guid.Full ?? 0:X8}");
+
+            return true;
+        }
+
         public bool TryKeepWorldEventSeekerLock(WorldObject disturbedBy)
         {
             if (!WorldEventSeeker)

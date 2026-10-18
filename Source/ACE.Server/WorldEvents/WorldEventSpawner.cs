@@ -1043,7 +1043,11 @@ namespace ACE.Server.WorldEvents
         public void SpawnProtected(WorldEvent evt, ProtectDef protect, Position centre)
         {
             if (evt == null || protect == null || protect.WcidFor(0) == 0 || centre == null)
+            {
+                // Nothing will be placed: resolved now, so the run's first wave is not held back for it.
+                NoteBossPlacementResolved(WorldEventSpawnKind.Protected, placed: false);
                 return;
+            }
 
             var participants = Math.Max(0, evt.ResolvedAudienceCount);
             var (count, radius) = protect.ResolveLayout(participants);
@@ -2045,6 +2049,17 @@ namespace ACE.Server.WorldEvents
                     }
 
                     placed = PlaceOnLandblock(evt, candidates, anchorSnapshot, kind, waveIndex, band, dzSnapshot);
+
+                    // Hold: who in this wave goes for the targets, who hunts players, and who is ordinary.
+                    if (kind == WorldEventSpawnKind.Wave && evt.Composition?.Goal?.TypeKind == GoalType.Hold)
+                    {
+                        var roles = candidates.Select(c => c.Creature)
+                            .Where(c => c != null && !c.IsDestroyed && c.PhysicsObj != null)
+                            .Select(c => (c.WorldEventSeeker, c.WorldEventHunter, c.WorldEventSeekForcedGuid))
+                            .ToList();
+
+                        log.Info($"[WORLDEVENT] run={runId} " + WorldEventHoldRules.WaveRoleSummary(plan?.WaveNumber ?? waveIndex + 1, roles));
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -2068,8 +2083,38 @@ namespace ACE.Server.WorldEvents
         /// enqueued, so always <c>placed: false</c>) and the queued delegate's try/finally (whatever
         /// actually landed).
         /// </summary>
+        /// <summary>
+        /// True once the Hold run's protected-target batch has finished on its landblock, placed or not. A
+        /// Hold run's first wave waits for it (WorldEvent.HoldFirstWaveMayStart), so the wave-start count and
+        /// a breach target read real targets rather than an empty set.
+        /// </summary>
+        public bool ProtectedPlacementResolved
+        {
+            get { lock (sync) return protectedPlacementResolved; }
+        }
+
+        private bool protectedPlacementResolved;
+
+        /// <summary>Test seam: files <paramref name="creature"/> as a placed, standing protected target, as Adopt would.</summary>
+        internal void AdoptProtectedForTest(Creature creature)
+        {
+            lock (sync)
+            {
+                protectedGuids.Add(creature.Guid.Full);
+                liveProtected.Add(creature);
+            }
+        }
+
         private void NoteBossPlacementResolved(WorldEventSpawnKind kind, bool placed)
         {
+            if (kind == WorldEventSpawnKind.Protected)
+            {
+                lock (sync)
+                    protectedPlacementResolved = true;
+
+                return;
+            }
+
             if (kind != WorldEventSpawnKind.Boss)
                 return;
 

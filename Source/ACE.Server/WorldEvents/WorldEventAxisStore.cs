@@ -739,6 +739,17 @@ namespace ACE.Server.WorldEvents
                 }
             }
 
+            // Waves must arrive from outside the widest ring; a tighter spawnRadius is raised at runtime
+            // (WorldEvent.ResolveSpawnRadius), and said so here.
+            void NoteSpawnClearance()
+            {
+                var needed = protect.MaxRingRadius + ProtectDef.MinSpawnClearance;
+
+                if (protect.SpawnRadius > 0 && protect.SpawnRadius < needed)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.spawnRadius {protect.SpawnRadius:0.#} is inside the target ring " +
+                                    $"plus {ProtectDef.MinSpawnClearance:0} m; waves will spawn at {needed:0.#} m");
+            }
+
             if (protect.CountByParticipants != null)
             {
                 var kept = new List<TargetLayoutDef>();
@@ -759,6 +770,8 @@ namespace ACE.Server.WorldEvents
 
                 protect.CountByParticipants = kept;
             }
+
+            NoteSpawnClearance();
         }
 
         /// <summary>Why one specialWaves entry is unusable (null when it is fine). Parses its type into TypeKind.</summary>
