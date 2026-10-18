@@ -261,10 +261,12 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void RealRangedAttack_TheRule()
         {
-            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(launcherWielded: true, hasAmmo: true, thrownWielded: false, offensiveSpells: 0), "a bow and arrows");
-            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(true, false, false, 0), "a bow with no arrows");
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(launcherWielded: true, hasMatchingAmmo: true, thrownWielded: false, offensiveCastChance: 0), "a bow and arrows");
+            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(true, false, false, 0), "a bow with no arrows (or the wrong ammo)");
             Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, true, 0), "throwing axes");
-            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 1), "an offensive spell");
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 0.25), "a 25% Harm: a caster");
+            Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 0.06), "two 3% bolts on a melee monster (Grievver Shredder): not a caster");
+            Assert.IsTrue(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, WorldEventRangedMembers.MinOffensiveCastChance), "exactly the bar");
             Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(false, true, false, 0), "arrows and no bow");
             Assert.IsFalse(WorldEventRangedMembers.HasRealRangedAttack(false, false, false, 0), "nothing at range");
 

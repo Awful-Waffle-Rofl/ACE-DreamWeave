@@ -227,10 +227,10 @@ namespace ACE.Server.Tests
             crowd.Objective.OnAudienceResampled(500);
             Assert.AreEqual(ProtectDef.MaxHoldWaves, crowd.Objective.TargetWaves, $"{goal.Id}: hard cap");
 
-            Assert.AreEqual(5, p.WaveSize.Resolve(1), $"{goal.Id}: a solo (or --level) wave is 5 monsters");
-            Assert.AreEqual(7, p.WaveSize.Resolve(2), $"{goal.Id}: two players, 7");
-            Assert.AreEqual(15, p.WaveSize.Resolve(5), $"{goal.Id}: five players, about the old solo size");
-            Assert.AreEqual(27, p.WaveSize.Resolve(10), $"{goal.Id}: ten players");
+            Assert.AreEqual(4, p.WaveSize.Resolve(1), $"{goal.Id}: a solo (or --level) wave is 4 monsters (an assault wave adds 2 corrupted)");
+            Assert.AreEqual(6, p.WaveSize.Resolve(2), $"{goal.Id}: two players, 6");
+            Assert.AreEqual(14, p.WaveSize.Resolve(5), $"{goal.Id}: five players, 14");
+            Assert.AreEqual(26, p.WaveSize.Resolve(10), $"{goal.Id}: ten players");
             Assert.IsTrue(p.MaxAlive >= p.WaveSize.Resolve(5) * 2, $"{goal.Id}: room for two overlapping waves of a group of 5");
 
             Assert.AreEqual(40, p.WaveIntervalSeconds, 1e-9);
@@ -250,8 +250,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Wave 7 of 7", WorldEventHoldRules.WaveProgress(9, 7), "never above the total");
 
             // Damage.
-            Assert.AreEqual(150, p.EffectiveUndefendedSeconds(1), 1e-9, "solo (or --level): 150 s for one attacker");
-            Assert.AreEqual(120, p.EffectiveUndefendedSeconds(3), 1e-9, "three players: 120 s");
+            Assert.AreEqual(200, p.EffectiveUndefendedSeconds(1), 1e-9, "solo (or --level): 200 s for one attacker");
+            Assert.AreEqual(135, p.EffectiveUndefendedSeconds(2), 1e-9, "two players: 135 s");
+            Assert.AreEqual(100, p.EffectiveUndefendedSeconds(3), 1e-9, "three players: the 100 s floor");
             Assert.AreEqual(100, p.EffectiveUndefendedSeconds(10), 1e-9, "never under the 100 s floor");
             Assert.AreEqual(60, p.MinDeathSeconds, 1e-9);
 
@@ -264,12 +265,16 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.10, p.RescueCapPerWave, 1e-9);
             Assert.AreEqual(10, p.ClearRadius, 1e-9);
             Assert.AreEqual(0.005, p.ClearRegenPerSecond, 1e-9);
-            Assert.AreEqual(0.25, p.HealBudgetPerWave, 1e-9);
+            Assert.AreEqual(0.35, p.HealBudgetPerWave, 1e-9);
             Assert.AreEqual(0.5, p.HealReductionAfterHit, 1e-9);
             Assert.AreEqual(5, p.HealReductionSeconds, 1e-9);
 
             Assert.IsNotNull(p.Shrine);
-            Assert.AreEqual(19484u, p.Shrine.Wcid, "the Essence Font");
+            Assert.AreEqual(855u, p.Shrine.Wcid, "the Altar of Asheron, not the Essence Font and its constant blue flame");
+            Assert.AreEqual(1.0, p.Shrine.Scale, 1e-9, "normal size");
+            Assert.AreEqual(20, p.Shrine.ReadyPulseSeconds, 1e-9, "a small cue every 20 s while ready, nothing constant");
+            Assert.AreEqual("SkillUpGreen", p.Shrine.ReadyEffect);
+            Assert.AreEqual("HealthUpRed", p.Shrine.UsedEffect);
         }
 
         /// <summary>

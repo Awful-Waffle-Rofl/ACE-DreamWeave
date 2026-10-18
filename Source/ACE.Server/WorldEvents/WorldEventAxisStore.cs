@@ -788,6 +788,9 @@ namespace ACE.Server.WorldEvents
 
                 if (!WorldEventHoldRules.TryParseBossEffect(s.ReadyEffect, out _) || !WorldEventHoldRules.TryParseBossEffect(s.UsedEffect, out _))
                     return "has an unknown protect.shrine effect (a PlayScript name, or none)";
+
+                if (!IsFinite(s.ReadyPulseSeconds) || (s.ReadyPulseSeconds != 0 && (s.ReadyPulseSeconds < 5 || s.ReadyPulseSeconds > 120)))
+                    return "has an invalid protect.shrine.readyPulseSeconds (0, or 5 to 120)";
             }
 
             if (protect.Ward != null)
@@ -824,8 +827,11 @@ namespace ACE.Server.WorldEvents
                     return "has an invalid protect.corrupted scale or healthMult (scale 1 to 2, healthMult 1 to 5)";
 
                 if (!IsFinite(c.EmpowerRadius) || c.EmpowerRadius < 0 || c.EmpowerRadius > 50
-                    || !IsFinite(c.EmpowerMult) || c.EmpowerMult < 1 || c.EmpowerMult > 5 || !IsFinite(c.SelfMult) || c.SelfMult < 1 || c.SelfMult > 5)
-                    return "has an invalid protect.corrupted aura (empowerRadius 0 to 50, empowerMult and selfMult 1 to 5)";
+                    || !IsFinite(c.EmpowerMult) || c.EmpowerMult < 1 || c.EmpowerMult > 5 || !IsFinite(c.SelfMult) || c.SelfMult < 1 || c.SelfMult > 10)
+                    return "has an invalid protect.corrupted aura (empowerRadius 0 to 50, empowerMult 1 to 5, selfMult 1 to 10)";
+
+                if (c.AssaultEveryWaves < 0 || c.AssaultEveryWaves > 10 || c.AssaultFromWave < 1 || c.AssaultFromWave > 10 || c.AssaultCount < 1 || c.AssaultCount > 5)
+                    return "has an invalid protect.corrupted assault (assaultEveryWaves 0 to 10, assaultFromWave 1 to 10, assaultCount 1 to 5)";
 
                 if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _)
                     || !WorldEventHoldRules.TryParseBossEffect(c.ExtraEffect, out _))
@@ -872,7 +878,10 @@ namespace ACE.Server.WorldEvents
                 protect.Ward.Announce = RepairLinePool(goalId, "ward.announce", protect.Ward.Announce, diagnostics);
 
             if (protect.Corrupted != null)
+            {
                 protect.Corrupted.Announce = RepairLinePool(goalId, "corrupted.announce", protect.Corrupted.Announce, diagnostics);
+                protect.Corrupted.AssaultAnnounce = RepairLinePool(goalId, "corrupted.assaultAnnounce", protect.Corrupted.AssaultAnnounce, diagnostics);
+            }
 
             if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
                 diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +

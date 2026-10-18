@@ -1537,8 +1537,11 @@ namespace ACE.Server.WorldEvents
 
             var finalWaveExtra = finalHoldWave ? WorldEventHoldRules.FinalWaveBonus(sizingTheme.EffectiveWaveCountBase) : 0;
 
+            // A corrupted assault wave (protect.corrupted.assaultEveryWaves) brings its corrupted on top of the wave.
+            var assaultExtra = HoldAssaultExtra(holdObjective, holdWavesStarted + 1, finalHoldWave);
+
             var pick = WorldEventRosterSelector.PickWave(family, Audience, sizingTheme, WaveIndex, alive,
-                Pace.QuantityBonus + finalWaveExtra, Spawner.OverflowChampionsAlive, null);
+                Pace.QuantityBonus + finalWaveExtra + assaultExtra, Spawner.OverflowChampionsAlive, null);
 
             if (pick == null || pick.IsEmpty)
             {
@@ -1808,7 +1811,7 @@ namespace ACE.Server.WorldEvents
 
                 case HoldWaveType.Ranged:
                 {
-                    var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, pick.Band);
+                    var pool = RangedPoolFor(pick.Band, waveNumber);
 
                     if (pool.Count == 0)
                     {
@@ -1892,7 +1895,22 @@ namespace ACE.Server.WorldEvents
             for (var i = 0; i < pick.Champions.Count; i++)
                 keep.Add(pick.Trash.Count + i);
 
-            plan.Roles = WorldEventHoldRules.AssignWaveMix(size, protect.WaveMix.Shares, protect.WaveMix.Minimums, protect.WaveMix.Maximums, keep, holdWaveRng);
+            // The corrupted assault: an assault wave has exactly assaultCount corrupted, every other wave none.
+            var corrupted = protect.EffectiveCorrupted;
+            plan.Assault = corrupted.AssaultMode && WorldEventHoldRules.IsAssaultWave(waveNumber, corrupted.AssaultEveryWaves, corrupted.AssaultFromWave, false);
+
+            if (plan.Assault)
+            {
+                // The assault's corrupted come on top of an ordinary mixed wave (the pick drew them as extra monsters).
+                plan.Roles = WorldEventHoldRules.AssignAssaultWave(size, Math.Clamp(corrupted.AssaultCount, 1, 5), protect.WaveMix.Shares,
+                    protect.WaveMix.Minimums, protect.WaveMix.Maximums, keep, holdWaveRng);
+            }
+            else
+            {
+                var mix = WorldEventHoldRules.AssaultMix(protect.WaveMix.Shares, protect.WaveMix.Minimums, protect.WaveMix.Maximums, corrupted.AssaultMode);
+
+                plan.Roles = WorldEventHoldRules.AssignWaveMix(size, mix.Shares, mix.Minimums, mix.Maximums, keep, holdWaveRng);
+            }
 
             var targets = Spawner.LiveProtectedCreatures;
 
@@ -1921,19 +1939,92 @@ namespace ACE.Server.WorldEvents
 
             if (plan.Roles.Any(r => r == HoldRole.Ranged))
             {
-                var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, pick.Band);
+                var pool = RangedPoolFor(pick.Band, waveNumber);
 
                 if (pool.Count > 0)
                     plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng);
                 else
                 {
-                    // No member with a real ranged attack: those slots seek instead, never a melee monster
-                    // standing in a ranged slot (warded, holding back) and then walking in.
+                    // No member with a real ranged attack, here or in a family of the same theme: those slots seek
+                    // instead, never a melee monster standing in a ranged slot (warded, holding back).
                     var moved = WorldEventHoldRules.ReassignRole(plan.Roles, HoldRole.Ranged, HoldRole.Seeker);
 
-                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no member with a real ranged attack; " +
-                             $"{moved} ranged slot(s) seek instead");
+                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: no member with a real ranged attack in the family " +
+                             $"or a family of its theme; {moved} ranged slot(s) seek instead");
                 }
+            }
+
+            if (plan.Assault)
+                AssignAssaultTargets(plan, pick, corrupted);
+        }
+
+        /// <summary>
+        /// How many extra monsters wave <paramref name="waveNumber"/> brings for a corrupted assault: assaultCount on an
+        /// assault wave of a waveMix Hold (never the finale), else 0.
+        /// </summary>
+        private int HoldAssaultExtra(HoldObjective hold, int waveNumber, bool finalWave)
+        {
+            var protect = hold != null && hold.IsWaveBased ? Composition?.Goal?.Protect : null;
+            var corrupted = protect?.WaveMix != null ? protect.EffectiveCorrupted : null;
+
+            if (corrupted == null || !corrupted.AssaultMode || Request?.ForcedWaveType != null)
+                return 0;
+
+            return WorldEventHoldRules.IsAssaultWave(waveNumber, corrupted.AssaultEveryWaves, corrupted.AssaultFromWave, finalWave)
+                ? Math.Clamp(corrupted.AssaultCount, 1, 5) : 0;
+        }
+
+        /// <summary>
+        /// The ranged pool for a wave: the roster's own members with a real ranged attack, else those of a catalog family
+        /// that shares a theme with the roster's (WorldEventRangedMembers.CompatiblePool). Logged when borrowed.
+        /// </summary>
+        private List<uint> RangedPoolFor(LevelBand band, int waveNumber)
+        {
+            var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, band);
+
+            if (pool.Count > 0)
+                return pool;
+
+            var rosterFamilies = Composition?.Families?.Select(f => f?.Id).Where(id => !string.IsNullOrWhiteSpace(id)).ToList() ?? new List<string>();
+
+            pool = WorldEventRangedMembers.CompatiblePool(rosterFamilies, WorldEventManager.Catalog?.Families, band, out var borrowedFrom, null, holdWaveRng);
+
+            if (pool.Count > 0)
+                log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: {string.Join("+", rosterFamilies)} has no member with a real ranged attack; " +
+                         $"ranged slots drawn from {borrowedFrom} (same theme): {string.Join(",", pool)}");
+
+            return pool;
+        }
+
+        /// <summary>
+        /// A corrupted assault: each corrupted slot is sent at one standing target (a different one each while enough
+        /// stand), and the wave's broadcast names it ("A Corrupted Grievver Shredder marches on Sir Draithon!").
+        /// </summary>
+        private void AssignAssaultTargets(HoldWavePlan plan, WavePick pick, CorruptedDef corrupted)
+        {
+            var targets = Spawner.LiveProtectedCreatures.Where(t => t != null && !t.IsDead).ToList();
+            var slots = Enumerable.Range(0, plan.Roles.Length).Where(i => plan.Roles[i] == HoldRole.Corrupted).ToList();
+
+            plan.CorruptedTargets = new Dictionary<int, uint>();
+            plan.AssaultCalls = new List<(string Monster, string Target)>();
+
+            if (targets.Count == 0 || slots.Count == 0)
+                return;
+
+            var picks = WorldEventHoldRules.AssaultTargets(targets.Count, slots.Count, holdWaveRng);
+            var trash = plan.ReplacedTrash ?? pick.Trash;
+
+            for (var k = 0; k < slots.Count; k++)
+            {
+                var index = slots[k];
+                var target = targets[picks[k]];
+
+                plan.CorruptedTargets[index] = target.Guid.Full;
+
+                var wcid = index < trash.Count ? trash[index] : (index - trash.Count < pick.Champions.Count ? pick.Champions[index - trash.Count] : 0);
+                var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == wcid)?.Name ?? "foe";
+
+                plan.AssaultCalls.Add((WorldEventHoldRules.Titled(corrupted.Prefix, name), target.Name));
             }
         }
 
@@ -1993,7 +2084,26 @@ namespace ACE.Server.WorldEvents
                         WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(wardLine));
                 }
 
-                if (plan.Roles != null && plan.Roles.Contains(HoldRole.Corrupted))
+                // A corrupted assault: one line per corrupted monster, naming the target it marches on.
+                if (plan.Assault && plan.AssaultCalls != null && plan.AssaultCalls.Count > 0)
+                {
+                    // Not Fill: its {target} is the breach target, and each line names its own.
+                    var pool = protect?.EffectiveCorrupted.AssaultAnnounce?.ToList() ?? new List<string>();
+
+                    foreach (var call in plan.AssaultCalls)
+                    {
+                        string template;
+
+                        lock (protectedLineRngSync)
+                            template = pool.Count > 0 ? pool[protectedLineRng.Next(pool.Count)] : null;
+
+                        var assaultLine = ComposeProtectedLine(new List<string> { WorldEventHoldRules.AssaultLine(template, call.Monster, call.Target) }, null);
+
+                        if (!string.IsNullOrEmpty(assaultLine))
+                            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(assaultLine));
+                    }
+                }
+                else if (plan.Roles != null && plan.Roles.Contains(HoldRole.Corrupted))
                 {
                     var corruptedLine = ComposeProtectedLine(Fill(protect?.EffectiveCorrupted.Announce), null);
 

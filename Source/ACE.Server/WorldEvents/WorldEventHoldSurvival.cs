@@ -148,9 +148,6 @@ namespace ACE.Server.WorldEvents
         /// <summary>Per shrine guid: when its ready effect last played.</summary>
         private readonly Dictionary<uint, double> shrineReadyPulseAt = new Dictionary<uint, double>();
 
-        /// <summary>How often a ready shrine replays its ready effect, in seconds.</summary>
-        internal const double ShrineReadyPulseSeconds = 8.0;
-
         /// <summary>A shrine farther than this from every target restores nobody.</summary>
         internal const double ShrineBindMetres = 8.0;
 
@@ -180,6 +177,7 @@ namespace ACE.Server.WorldEvents
 
             if (State != WorldEventState.Active)
             {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: run not active ({State})");
                 Tell(player, "The shrine is quiet.");
                 return true;
             }
@@ -191,6 +189,7 @@ namespace ACE.Server.WorldEvents
 
             if (now < readyAt)
             {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: resting, ready in {readyAt - now:0} s");
                 Tell(player, WorldEventHoldRules.ShrineCooldownLine(readyAt - now));
                 return true;
             }
@@ -199,6 +198,7 @@ namespace ACE.Server.WorldEvents
 
             if (target == null)
             {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: no standing target within {ShrineBindMetres:0} m");
                 Tell(player, "There is no one here for the shrine to restore.");
                 return true;
             }
@@ -217,13 +217,15 @@ namespace ACE.Server.WorldEvents
                     PlayScriptOn(target, protect.Shrine.UsedEffect);
                     SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Shrine, null), viaQueue: false);
 
-                    log.Info($"[WORLDEVENT] run={RunId} shrine used by {player.Name}: {target.Name} +{healed}; ready again in {cooldown:0} s");
+                    log.Info($"[WORLDEVENT] run={RunId} shrine used by {player.Name}: {target.Name} +{healed} health (now {target.Health.Current}/{target.Health.MaxValue}); ready again in {cooldown:0} s");
                     return;
                 }
 
                 // Nothing restored: give the use back.
                 lock (shrineSync)
                     shrineReadyAt.Remove(shrineGuid);
+
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: {target.Name} restored nothing ({outcome}); the use is given back");
 
                 Tell(player, WorldEventHoldRules.ShrineWastedLine(target.Name, outcome));
             });
@@ -232,8 +234,8 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// Once a second: a ready shrine replays its ready effect every <see cref="ShrineReadyPulseSeconds"/>, and plays
-        /// it the moment its cooldown ends. Never throws.
+        /// Once a second: a shrine plays its ready effect the moment it is ready (placed, or its rest over), and again
+        /// every protect.shrine.readyPulseSeconds while ready when that is set (0: no repeat). Never throws.
         /// </summary>
         private void TickHoldShrines()
         {
@@ -258,7 +260,7 @@ namespace ACE.Server.WorldEvents
                         shrineReadyAt.TryGetValue(item.Guid.Full, out var readyAt);
                         shrineReadyPulseAt.TryGetValue(item.Guid.Full, out var pulsedAt);
 
-                        due = WorldEventHoldRules.ShrineReadyPulseDue(now, readyAt, pulsedAt, ShrineReadyPulseSeconds);
+                        due = WorldEventHoldRules.ShrineReadyPulseDue(now, readyAt, pulsedAt, shrine.ReadyPulseSeconds);
 
                         if (due)
                             shrineReadyPulseAt[item.Guid.Full] = now;

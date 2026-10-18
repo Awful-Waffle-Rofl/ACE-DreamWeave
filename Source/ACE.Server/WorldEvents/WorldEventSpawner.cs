@@ -1975,7 +1975,15 @@ namespace ACE.Server.WorldEvents
                         role = HoldRole.Seeker;
                     }
 
-                    ApplyHoldRole(creature, role, plan);
+                    ApplyHoldRole(creature, role, plan, entryIndex);
+
+                    var ward = evt.Composition?.Goal?.Protect?.Ward;
+
+                    if (creature.WorldEventWarded && ward != null)
+                    {
+                        WorldEventEffectTables.EnsureCanPlay(creature, ward.RestoreEffect, WorldEventEffectTables.CreatureTable);
+                        WorldEventEffectTables.EnsureCanPlay(creature, ward.BreakEffect, WorldEventEffectTables.CreatureTable);
+                    }
                 }
                 else if (plan != null)
                 {
@@ -2455,6 +2463,10 @@ namespace ACE.Server.WorldEvents
                 // protect.showHealthBar (default true): sent to the client as attackable so it draws a health bar.
                 // Server-side Attackable stays false; nothing a player or pet does can damage it.
                 creature.WorldEventShowHealthBar = protect?.ShowHealthBar ?? true;
+
+                // The shrine's heal effect has to be able to show on the target (the knights have no effect table).
+                if (protect?.Shrine != null)
+                    WorldEventEffectTables.EnsureCanPlay(creature, protect.Shrine.UsedEffect, WorldEventEffectTables.HumanTable);
             }
 
             ApplyBossTether(evt, creature, kind);
@@ -2584,9 +2596,10 @@ namespace ACE.Server.WorldEvents
         ///   * Ranged: a seeker that holds the plan's distance;
         ///   * Seeker: a seeker that prefers the targets the breach squad is not on;
         ///   * Hunter: no seeker; goes for players, recent healers first.
+        ///   * Corrupted: a seeker; on an assault wave, locked on the target named for its index.
         /// Runners, ranged and seekers all avoid the breach target while another target stands.
         /// </summary>
-        public static void ApplyHoldRole(Creature creature, HoldRole role, HoldWavePlan plan)
+        public static void ApplyHoldRole(Creature creature, HoldRole role, HoldWavePlan plan, int entryIndex = -1)
         {
             if (creature == null || plan == null)
                 return;
@@ -2614,7 +2627,12 @@ namespace ACE.Server.WorldEvents
 
                 case HoldRole.Corrupted:
                     creature.WorldEventCorrupted = true;
-                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+
+                    // An assault monster goes for its one named target, and nothing else while it stands.
+                    if (plan.CorruptedTargets != null && plan.CorruptedTargets.TryGetValue(entryIndex, out var assaultTarget) && assaultTarget != 0)
+                        creature.WorldEventSeekForcedGuid = assaultTarget;
+                    else
+                        creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
                     break;
 
                 case HoldRole.Seeker:
@@ -2638,7 +2656,17 @@ namespace ACE.Server.WorldEvents
 
             wo.ItemUseable = ACE.Entity.Enum.Usable.Remote;
             wo.UseRadius = (float)Math.Clamp(shrine.UseRadius, 1, 10);
-            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.LongDesc, "Its waters restore the defender who stands beside it.");
+            // Its own words (a PK altar's use text would otherwise show on appraisal).
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ShortDesc);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ActivationTalk);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ActivationFailure);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.UseMessage);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.UsePkServerError);
+            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.LongDesc, "Asheron's blessing rests in this shrine. Use it to restore the defender who stands beside it.");
+            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.Use, "Double-click to restore the defender beside this shrine.");
+
+            // The ready cue must be able to show (the altar has no effect table of its own).
+            WorldEventEffectTables.EnsureCanPlay(wo, shrine.ReadyEffect, WorldEventEffectTables.CreatureTable);
         }
 
         /// <summary>
@@ -2665,6 +2693,10 @@ namespace ACE.Server.WorldEvents
 
                 if (mult > 1.0)
                     ApplyHealthMultiplier(evt, creature, mult);
+
+                // Its aura must be able to show on this body (some monsters have a short or empty effect table).
+                WorldEventEffectTables.EnsureCanPlay(creature, c.Effect, WorldEventEffectTables.CreatureTable);
+                WorldEventEffectTables.EnsureCanPlay(creature, c.ExtraEffect, WorldEventEffectTables.CreatureTable);
 
                 log.Info($"[WORLDEVENT] run={evt.RunId} corrupted wcid={creature.WeenieClassId} {creature.Name} scale=x{scale:F2} health=x{mult:F2}");
             }
@@ -2699,6 +2731,9 @@ namespace ACE.Server.WorldEvents
 
                 if (mult > 1.0)
                     ApplyHealthMultiplier(evt, creature, mult);
+
+                WorldEventEffectTables.EnsureCanPlay(creature, protect.BossEffect, WorldEventEffectTables.CreatureTable);
+                WorldEventEffectTables.EnsureCanPlay(creature, protect.BossArrivalEffect, WorldEventEffectTables.CreatureTable);
 
                 log.Info($"[WORLDEVENT] run={evt.RunId} hold finale boss wcid={creature.WeenieClassId} {creature.Name} " +
                          $"scale=x{scale:F2} health=x{mult:F2} -> {creature.Health.MaxValue}");

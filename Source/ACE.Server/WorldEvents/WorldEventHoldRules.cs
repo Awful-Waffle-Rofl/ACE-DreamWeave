@@ -609,6 +609,130 @@ namespace ACE.Server.WorldEvents
         /// corrupted monster <paramref name="empowerMult"/>; anyone else 1. <paramref name="nearestCorruptedDist"/>
         /// is the distance to the nearest OTHER living corrupted monster of the run (null when none).
         /// </summary>
+        // ---- the corrupted assault (D6 - pure) -------------------------------------------------------------------
+
+        /// <summary>
+        /// Whether wave <paramref name="waveNumber"/> is a corrupted assault: assaults on, never the finale, from
+        /// <paramref name="fromWave"/> on and every <paramref name="everyWaves"/> waves after it.
+        /// </summary>
+        public static bool IsAssaultWave(int waveNumber, int everyWaves, int fromWave, bool finale)
+        {
+            if (everyWaves <= 0 || finale || waveNumber < Math.Max(1, fromWave))
+                return false;
+
+            return (waveNumber - Math.Max(1, fromWave)) % everyWaves == 0;
+        }
+
+        /// <summary>
+        /// The waveMix shares, minimums and maximums in role order for the wave's own monsters: in assault mode no
+        /// corrupted among them (the assault's come on top, <see cref="AssignAssaultWave"/>). Unchanged when assaults are off.
+        /// </summary>
+        public static (double[] Shares, int[] Minimums, int[] Maximums) AssaultMix(IReadOnlyList<double> shares, IReadOnlyList<int> minimums,
+            IReadOnlyList<int> maximums, bool assaultMode)
+        {
+            var s = shares?.ToArray() ?? new double[0];
+            var mins = minimums?.ToArray() ?? new int[0];
+            var maxs = maximums?.ToArray() ?? new int[0];
+
+            var c = (int)HoldRole.Corrupted;
+
+            if (!assaultMode)
+                return (s, mins, maxs);
+
+            if (c < s.Length) s[c] = 0;
+            if (c < mins.Length) mins[c] = 0;
+            if (c < maxs.Length) maxs[c] = 0;
+
+            return (s, mins, maxs);
+        }
+
+        /// <summary>
+        /// The roles of an assault wave of <paramref name="size"/> (D6 - pure): <paramref name="assault"/> slots, never a
+        /// kept one (an elite, a champion), are Corrupted; the rest are an ordinary mixed wave of their own size
+        /// (<see cref="AssignWaveMix(int, IReadOnlyList{double}, IReadOnlyList{int}, IReadOnlyList{int}, ISet{int}, Random)"/>
+        /// with the corrupted role removed), so the assault never eats the breach squad or the ranged.
+        /// </summary>
+        public static HoldRole[] AssignAssaultWave(int size, int assault, IReadOnlyList<double> shares, IReadOnlyList<int> minimums,
+            IReadOnlyList<int> maximums, ISet<int> keepIndices, Random rng)
+        {
+            var roles = new HoldRole[Math.Max(0, size)];
+
+            if (size <= 0)
+                return roles;
+
+            rng ??= new Random();
+
+            var candidates = Enumerable.Range(0, size).Where(i => keepIndices == null || !keepIndices.Contains(i)).ToList();
+
+            for (var i = candidates.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (candidates[i], candidates[j]) = (candidates[j], candidates[i]);
+            }
+
+            var assaultSlots = new HashSet<int>(candidates.Take(Math.Clamp(assault, 0, candidates.Count)));
+            var rest = Enumerable.Range(0, size).Where(i => !assaultSlots.Contains(i)).ToList();
+
+            var innerKeep = new HashSet<int>();
+
+            for (var j = 0; j < rest.Count; j++)
+                if (keepIndices != null && keepIndices.Contains(rest[j]))
+                    innerKeep.Add(j);
+
+            var mix = AssaultMix(shares, minimums, maximums, true);
+            var inner = AssignWaveMix(rest.Count, mix.Shares, mix.Minimums, mix.Maximums, innerKeep, rng);
+
+            for (var j = 0; j < rest.Count; j++)
+                roles[rest[j]] = inner[j];
+
+            foreach (var i in assaultSlots)
+                roles[i] = HoldRole.Corrupted;
+
+            return roles;
+        }
+
+        /// <summary>
+        /// Which target each of <paramref name="count"/> assault monsters marches on: the standing targets in a shuffled
+        /// order, a different one each while enough stand, then round again. Empty when none stands.
+        /// </summary>
+        public static List<int> AssaultTargets(int standing, int count, Random rng)
+        {
+            var result = new List<int>();
+
+            if (standing <= 0 || count <= 0)
+                return result;
+
+            rng ??= new Random();
+
+            var order = Enumerable.Range(0, standing).ToList();
+
+            for (var i = order.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (order[i], order[j]) = (order[j], order[i]);
+            }
+
+            for (var k = 0; k < count; k++)
+                result.Add(order[k % order.Count]);
+
+            return result;
+        }
+
+        /// <summary>The call-out when an assault monster is sent (D6 - pure): {monster} and {target} filled; the default when the pool is empty.</summary>
+        public static string AssaultLine(string template, string monster, string target)
+        {
+            var line = string.IsNullOrWhiteSpace(template) ? "A {monster} marches on {target}!" : template;
+
+            return line.Replace("{monster}", string.IsNullOrWhiteSpace(monster) ? "corrupted foe" : monster.Trim())
+                       .Replace("{target}", string.IsNullOrWhiteSpace(target) ? "the envoys" : target.Trim());
+        }
+
+        /// <summary>
+        /// Whether a run monster's hit on a target goes through protect.minDeathSeconds (D6 - pure): every hit does,
+        /// except a corrupted monster's in assault mode, whose job is to break its one target unless players stop it.
+        /// </summary>
+        public static bool UsesDeathCap(bool attackerCorrupted, bool assaultMode) => !(attackerCorrupted && assaultMode);
+
         public static double EmpowerFactor(bool attackerIsCorrupted, double? nearestCorruptedDist, double radius, double empowerMult, double selfMult)
         {
             if (attackerIsCorrupted)
@@ -751,12 +875,16 @@ namespace ACE.Server.WorldEvents
         /// <summary>
         /// Whether a ready shrine plays its ready effect now (D6 - pure): ready (<paramref name="now"/> past
         /// <paramref name="readyAt"/>, 0 = never used), and either it has not pulsed since it became ready or the last
-        /// pulse is <paramref name="period"/> seconds old.
+        /// pulse is <paramref name="period"/> seconds old. A period of 0 means no repeat: once per time it becomes ready.
         /// </summary>
         public static bool ShrineReadyPulseDue(double now, double readyAt, double pulsedAt, double period)
         {
             if (now < readyAt)
                 return false;
+
+            // No repeat: once when it becomes ready (and once when it is first placed).
+            if (!(period > 0))
+                return pulsedAt <= 0 || pulsedAt < readyAt;
 
             return pulsedAt < readyAt || pulsedAt <= 0 || now - pulsedAt >= period;
         }

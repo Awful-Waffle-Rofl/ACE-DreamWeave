@@ -97,9 +97,36 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("empowerMult")]
         public double EmpowerMult { get; set; } = 1.5;
 
-        /// <summary>How much harder the corrupted monster itself hits the targets (1 to 5). Default 2.</summary>
+        /// <summary>How much harder the corrupted monster itself hits the targets (1 to 10). Default 2. In assault mode its hits also skip protect.minDeathSeconds.</summary>
         [JsonPropertyName("selfMult")]
         public double SelfMult { get; set; } = 2.0;
+
+        /// <summary>
+        /// The corrupted assault: every this many waves (from <see cref="AssaultFromWave"/>), never the finale, the wave
+        /// brings <see cref="AssaultCount"/> extra corrupted monsters, each sent at one named target and nothing else.
+        /// The other waves bring none. 0 (the default) = off: corrupted come in every mixed wave by waveMix.corrupted.
+        /// </summary>
+        [JsonPropertyName("assaultEveryWaves")]
+        public int AssaultEveryWaves { get; set; }
+
+        /// <summary>The first assault wave (1 to 10). Default 2.</summary>
+        [JsonPropertyName("assaultFromWave")]
+        public int AssaultFromWave { get; set; } = 2;
+
+        /// <summary>Corrupted monsters per assault (1 to 5), each on a different target while enough stand. Default 2.</summary>
+        [JsonPropertyName("assaultCount")]
+        public int AssaultCount { get; set; } = 2;
+
+        /// <summary>
+        /// One World Event line per assault monster, one picked at random: tokens {monster} (its name, "Corrupted Grievver
+        /// Shredder"), {target}, {family}, {Family}. Without lines: "A {monster} marches on {target}!".
+        /// </summary>
+        [JsonPropertyName("assaultAnnounce")]
+        public List<string> AssaultAnnounce { get; set; } = new List<string>();
+
+        /// <summary>True when the corrupted come as periodic assaults (<see cref="AssaultEveryWaves"/> above 0).</summary>
+        [JsonIgnore]
+        public bool AssaultMode => AssaultEveryWaves > 0;
 
         /// <summary>A World Event line, one picked at random, when a wave brings corrupted monsters.</summary>
         [JsonPropertyName("announce")]
@@ -113,33 +140,43 @@ namespace ACE.Server.WorldEvents.Defs
     /// </summary>
     public class ShrineDef
     {
-        /// <summary>The model. Default 19484, the Essence Font ("a rushing fountain of pure mana").</summary>
+        /// <summary>
+        /// The model. Default 855, the Altar of Asheron: a 2 m stone altar with no built-in particles. (The Essence Font,
+        /// 19484, is 6 m tall and carries a constant blue flame; not a shrine model.)
+        /// </summary>
         [JsonPropertyName("wcid")]
-        public uint Wcid { get; set; } = 19484;
+        public uint Wcid { get; set; } = 855;
 
         /// <summary>The name players see (letters and spaces, up to 30). Default Restoration Shrine.</summary>
         [JsonPropertyName("name")]
         public string Name { get; set; } = "Restoration Shrine";
 
-        /// <summary>Size (0.1 to 3). Default 0.5.</summary>
+        /// <summary>Size (0.1 to 3). Default 1.</summary>
         [JsonPropertyName("scale")]
-        public double Scale { get; set; } = 0.5;
+        public double Scale { get; set; } = 1.0;
 
-        /// <summary>Where it stands in the target's own frame: metres to its right. Default 2.5.</summary>
+        /// <summary>Where it stands in the target's own frame: metres to its right. Default 3.</summary>
         [JsonPropertyName("dx")]
-        public double Dx { get; set; } = 2.5;
+        public double Dx { get; set; } = 3.0;
 
-        /// <summary>Where it stands in the target's own frame: metres outward (negative is toward the anchor). Default -1.</summary>
+        /// <summary>Where it stands in the target's own frame: metres outward (negative is toward the anchor). Default -1.5.</summary>
         [JsonPropertyName("dy")]
-        public double Dy { get; set; } = -1;
+        public double Dy { get; set; } = -1.5;
 
         /// <summary>How far away a player may use it, in metres (1 to 10). Default 4.</summary>
         [JsonPropertyName("useRadius")]
         public double UseRadius { get; set; } = 4;
 
-        /// <summary>The effect on the shrine when it is ready again (a PlayScript name, or none). Default RestrictionEffectGreen.</summary>
+        /// <summary>The effect on the shrine when it is ready again (a PlayScript name, or none): a small brief cue, never a constant one. Default SkillUpGreen.</summary>
         [JsonPropertyName("readyEffect")]
-        public string ReadyEffect { get; set; } = "RestrictionEffectGreen";
+        public string ReadyEffect { get; set; } = "SkillUpGreen";
+
+        /// <summary>
+        /// How often a ready shrine replays its ready effect, in seconds (0 = only once, when it becomes ready; else 5 to
+        /// 120). Default 0.
+        /// </summary>
+        [JsonPropertyName("readyPulseSeconds")]
+        public double ReadyPulseSeconds { get; set; }
 
         /// <summary>The effect on the target when the shrine restores it (a PlayScript name, or none). Default HealthUpRed.</summary>
         [JsonPropertyName("usedEffect")]

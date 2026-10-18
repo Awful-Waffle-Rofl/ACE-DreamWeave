@@ -195,7 +195,8 @@ namespace ACE.Server.Tests
             var shrine = new ShrineDef();
             var decor = WorldEventHoldRules.ShrineDecor(shrine);
 
-            Assert.AreEqual(19484u, decor.Wcid, "the Essence Font");
+            Assert.AreEqual(855u, decor.Wcid, "the Altar of Asheron");
+            Assert.AreEqual(1f, decor.Scale, "normal size");
             Assert.IsTrue(decor.HoldShrine);
             Assert.IsTrue(decor.Snap, "on the ground");
 
@@ -209,6 +210,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Restoration Shrine", wo.Name);
             Assert.AreEqual(Usable.Remote, wo.ItemUseable, "the client lets a player use it");
             Assert.AreEqual(4f, wo.UseRadius);
+            Assert.IsNull(wo.GetProperty(ACE.Entity.Enum.Properties.PropertyString.ShortDesc), "no PK altar text on appraisal");
+            Assert.IsNull(wo.GetProperty(ACE.Entity.Enum.Properties.PropertyString.UseMessage));
+            StringAssert.Contains(wo.GetProperty(ACE.Entity.Enum.Properties.PropertyString.Use), "Double-click");
         }
 
         // ---- waves: smaller for few players, a breather between ----------------------------------------------
@@ -312,7 +316,7 @@ namespace ACE.Server.Tests
             var good = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ok, holdSeconds: 480), null, null);
 
             Assert.IsTrue(good.Goals.ContainsKey("hold_wards"), string.Join(" | ", good.Diagnostics));
-            Assert.AreEqual(19484u, good.Goals["hold_wards"].Protect.Shrine.Wcid, "an empty shrine block takes the defaults");
+            Assert.AreEqual(855u, good.Goals["hold_wards"].Protect.Shrine.Wcid, "an empty shrine block takes the defaults (the Altar of Asheron)");
         }
 
         [TestMethod]

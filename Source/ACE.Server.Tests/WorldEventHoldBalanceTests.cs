@@ -16,28 +16,41 @@ namespace ACE.Server.Tests
     /// The Hold balance simulation: a second-by-second model of a defend_envoys run that uses the REAL rules for
     /// wave size, the role mix, the cadence, the time-based damage slice and its cap, the heal reduction after a hit,
     /// the per-wave healing budget and the rescue cap. What it cannot know, it assumes, and says so:
-    ///   * a player kills an ordinary monster in <see cref="KillSeconds"/> (runners 0.6x that, corrupted 1.5x, the
-    ///     finale boss <see cref="BossKillSeconds"/>), plus <see cref="SwitchSeconds"/> to move to the next one;
-    ///   * monsters reach the targets <see cref="ArriveSeconds"/> after spawning (runners and ranged sooner);
-    ///   * "active defense": players kill corrupted first, then what is hurting the weakest target, and use a shrine
-    ///     when its target is under 60% (2 s of their time); "ignore": players only fight the hunters that come for
-    ///     them, and never touch a shrine.
-    /// Pass criteria (the owner's): active defense keeps at least one target alive, ignoring the targets loses, and
-    /// under active defense no target stays above 90% health for a whole wave.
+    ///   * a player kills an ordinary monster in <see cref="KillSeconds"/> (runners 0.6x that, corrupted their health
+    ///     multiple plus <see cref="CorruptedTravelSeconds"/>, the finale boss <see cref="BossKillSeconds"/>), plus
+    ///     <see cref="SwitchSeconds"/> to move to the next one. Calibrated on the 2026-10-18 solo run's log: about one
+    ///     ordinary kill every 5.5 s while busy, and the 39,150-health Warlord down in 48 s;
+    ///   * monsters reach the targets <see cref="ArriveSeconds"/> after spawning (runners and ranged sooner), and
+    ///     ranged monsters attack (the fixed hold), so every wave monster deals damage;
+    ///   * "active defense": players drop what they are doing for an arrived corrupted assault monster (up to
+    ///     <see cref="CorruptedHands"/> on one), then kill what is hurting the weakest target, and use a shrine when its
+    ///     target is under 60% (2 s of their time); "no focus": the same, but a corrupted monster is just another
+    ///     monster; "ignore": players only fight the hunters that come for them, and never touch a shrine.
+    /// Pass criteria (the owner's): active defense keeps at least one target alive, ignoring the targets loses,
+    /// ignoring the corrupted assault costs targets, and healing never makes them untouchable.
     /// </summary>
     [TestClass]
     public partial class WorldEventHoldBalanceTests
     {
         private const double KillSeconds = 4.0;
         private const double SwitchSeconds = 1.5;
-        private const double BossKillSeconds = 25.0;
-        private const double ArriveSeconds = 4.0;
+        private const double BossKillSeconds = 45.0;
+        private const double ArriveSeconds = 5.0;
+
+        /// <summary>Extra player time to reach a corrupted assault monster on another envoy.</summary>
+        private const double CorruptedTravelSeconds = 2.0;
 
         /// <summary>Extra player time to reach a ranged monster standing 18 m out (and break its ward in melee).</summary>
         private const double RangedTravelSeconds = 3.0;
         private const uint MaxHealth = 10000;
 
-        private enum Strategy { Active, Ignore }
+        /// <summary>Whether active defenders drop their task for a newly arrived corrupted monster (the assault broadcast).</summary>
+        internal static bool PreemptForCorrupted = true;
+
+        /// <summary>How many players at most focus one corrupted monster together.</summary>
+        private const int CorruptedHands = 3;
+
+        private enum Strategy { Active, Ignore, NoFocus }
 
         private sealed class Monster
         {
@@ -62,9 +75,11 @@ namespace ACE.Server.Tests
             public int TargetWaves;
             public double HealedTotal;
             public double DamageTotal;
+            public int Assaults;
+            public double AssaultDamage;
             public override string ToString() =>
                 $"{(Won ? "WIN " : "LOSS")} survivors={Survivors}/3 waves={WavesStarted} end={EndSeconds:0}s " +
-                $"healed={HealedTotal / MaxHealth * 100:0}% dmg={DamageTotal / MaxHealth * 100:0}% above90={WavesAbove90}/{TargetWaves}";
+                $"healed={HealedTotal / MaxHealth * 100:0}% dmg={DamageTotal / MaxHealth * 100:0}% above90={WavesAbove90}/{TargetWaves} assaults={Assaults} assaultDmg={AssaultDamage / MaxHealth * 100:0}%";
         }
 
         /// <summary>The shipped defend_envoys protect block when this machine has it, else the same numbers inline.</summary>
@@ -88,7 +103,7 @@ namespace ACE.Server.Tests
             return null;
         }
 
-        private static Result Simulate(ProtectDef p, int holdSeconds, int players, Strategy strategy, int seed)
+        private static Result Simulate(ProtectDef p, int holdSeconds, int players, Strategy strategy, int seed, StringBuilder trace = null)
         {
             var rng = new Random(seed);
 
@@ -154,6 +169,11 @@ namespace ACE.Server.Tests
                 return allowed;
             }
 
+            // An arrived corrupted monster with fewer than CorruptedHands players on it, the least-attended first.
+            Monster CorruptedNeedingHands(double now) => monsters
+                .Where(m => m.Alive && m.Role == HoldRole.Corrupted && now >= m.ArriveAt && playerTask.Count(x => x == m) < CorruptedHands)
+                .OrderBy(m => playerTask.Count(x => x == m)).FirstOrDefault();
+
             int LeastAttacked(int avoid)
             {
                 var best = -1;
@@ -197,11 +217,31 @@ namespace ACE.Server.Tests
                 }
                 else
                 {
-                    var counts = WorldEventHoldRules.WaveMixCounts(size, mix.Shares, mix.Minimums, mix.Maximums);
+                    // The corrupted assault: an assault wave brings assaultCount extra, all corrupted; others none.
+                    var c = p.EffectiveCorrupted;
+                    var assault = c.AssaultMode && WorldEventHoldRules.IsAssaultWave(waves, c.AssaultEveryWaves, c.AssaultFromWave, false);
+                    var limits = WorldEventHoldRules.AssaultMix(mix.Shares, mix.Minimums, mix.Maximums, c.AssaultMode);
+                    var counts = WorldEventHoldRules.WaveMixCounts(size, limits.Shares, limits.Minimums, limits.Maximums);
+
+                    if (assault)
+                        counts[(int)HoldRole.Corrupted] += c.AssaultCount;
+
+                    var assaultTargets = assault ? WorldEventHoldRules.AssaultTargets(aliveTargets.Count, counts[(int)HoldRole.Corrupted], rng) : null;
+                    var nextAssault = 0;
 
                     for (var r = 0; r < counts.Length; r++)
                         for (var k = 0; k < counts[r]; k++)
-                            batch.Add(new Monster { Role = (HoldRole)r });
+                        {
+                            var m = new Monster { Role = (HoldRole)r };
+
+                            if (assault && m.Role == HoldRole.Corrupted && assaultTargets.Count > 0)
+                                m.Target = aliveTargets[assaultTargets[nextAssault++ % assaultTargets.Count]];
+
+                            batch.Add(m);
+                        }
+
+                    if (assault)
+                        result.Assaults++;
                 }
 
                 foreach (var m in batch)
@@ -210,7 +250,7 @@ namespace ACE.Server.Tests
                     m.ArriveAt = now + (m.Role == HoldRole.Runner ? 2.5 : m.Role == HoldRole.Ranged ? 2.0 : ArriveSeconds) + (m.Boss ? p.FinaleBossLeadSeconds * 0 : 0);
                     m.WorkLeft = m.Boss ? BossKillSeconds
                         : m.Role == HoldRole.Runner ? KillSeconds * 0.6
-                        : m.Role == HoldRole.Corrupted ? KillSeconds * 1.5
+                        : m.Role == HoldRole.Corrupted ? KillSeconds * p.EffectiveCorrupted.HealthMult + CorruptedTravelSeconds
                         : m.Role == HoldRole.Ranged ? KillSeconds + RangedTravelSeconds
                         : KillSeconds;
 
@@ -218,9 +258,9 @@ namespace ACE.Server.Tests
 
                     if (m.Role == HoldRole.Hunter)
                         m.Target = -1;
-                    else if (m.Boss)
+                    else if (m.Boss || m.Target >= 0)
                     {
-                        // already set
+                        // already set (the boss, an assault monster)
                     }
                     else if (m.Role == HoldRole.Breach)
                         m.Target = breach;
@@ -258,6 +298,7 @@ namespace ACE.Server.Tests
                     var corruptedHere = on.Any(m => m.Role == HoldRole.Corrupted);
                     var corrupted = p.EffectiveCorrupted;
                     var dmg = 0.0;
+                    var uncapped = 0.0;
 
                     foreach (var m in on)
                     {
@@ -269,12 +310,18 @@ namespace ACE.Server.Tests
                         rate *= WorldEventHoldRules.EmpowerFactor(m.Role == HoldRole.Corrupted, corruptedHere ? 0 : (double?)null,
                             corrupted.EmpowerRadius, corrupted.EmpowerMult, corrupted.SelfMult);
 
-                        dmg += rate;
+                        if (WorldEventHoldRules.UsesDeathCap(m.Role == HoldRole.Corrupted, corrupted.AssaultMode))
+                            dmg += rate;
+                        else
+                            uncapped += rate;
                     }
 
-                    var capped = p.MinDeathSeconds > 0
+                    var capped = uncapped + (p.MinDeathSeconds > 0
                         ? WorldEventHoldRules.CapProtectedHit((float)dmg, MaxHealth, p.MinDeathSeconds, ref capTokens[i], ref capLastAt[i], 1_700_000_000d + t)
-                        : dmg;
+                        : dmg);
+
+                    if (uncapped > 0)
+                        result.AssaultDamage += Math.Min(uncapped, hp[i]);
 
                     hp[i] -= capped;
                     result.DamageTotal += capped;
@@ -300,6 +347,22 @@ namespace ACE.Server.Tests
                 {
                     var task = playerTask[pl];
 
+                    // Active defense answers the assault broadcast: a player on anything else drops it for a corrupted
+                    // monster that has arrived and has fewer than CorruptedHands players on it (groups focus it together).
+                    if (PreemptForCorrupted && strategy == Strategy.Active && task != null && task.Alive && task.Role != HoldRole.Corrupted)
+                    {
+                        var corruptedOpen = CorruptedNeedingHands(t);
+
+                        if (corruptedOpen != null)
+                        {
+                            playerTask[pl] = task = corruptedOpen;
+                            playerFree[pl] = t + SwitchSeconds;
+                        }
+                    }
+
+                    if (task != null && task.Alive && t < playerFree[pl])
+                        continue;
+
                     if (task != null && task.Alive)
                     {
                         task.WorkLeft -= 1;
@@ -324,7 +387,7 @@ namespace ACE.Server.Tests
                     if (t < playerFree[pl])
                         continue;
 
-                    if (strategy == Strategy.Active && p.Shrine != null)
+                    if (strategy != Strategy.Ignore && p.Shrine != null)
                     {
                         var low = Enumerable.Range(0, 3).Where(i => Alive(i) && hp[i] < MaxHealth * 0.6 && t >= shrineReady[i])
                             .OrderBy(i => hp[i]).DefaultIfEmpty(-1).First();
@@ -343,11 +406,12 @@ namespace ACE.Server.Tests
 
                     Monster pick = null;
 
-                    if (strategy == Strategy.Active)
+                    if (strategy != Strategy.Ignore)
                     {
                         var weakest = Enumerable.Range(0, 3).Where(Alive).OrderBy(i => hp[i]).ToList();
 
-                        pick = open.FirstOrDefault(m => m.Role == HoldRole.Corrupted)
+                        // NoFocus defends like Active but treats a corrupted monster as any other.
+                        pick = (strategy == Strategy.Active ? CorruptedNeedingHands(t) : null)
                             ?? weakest.Select(w => open.FirstOrDefault(m => m.Target == w && !m.Boss)).FirstOrDefault(m => m != null)
                             ?? open.FirstOrDefault(m => m.Target >= 0)
                             ?? open.FirstOrDefault();
@@ -358,6 +422,9 @@ namespace ACE.Server.Tests
                     if (pick != null)
                         playerTask[pl] = pick;
                 }
+
+                if (trace != null && t % 5 == 0)
+                    trace.AppendLine($"t={t} wave={waves} hp={hp[0]:0}/{hp[1]:0}/{hp[2]:0} alive=" + string.Join(",", monsters.Where(m => m.Alive).Select(m => $"{m.Role.ToString()[0]}{(m.Boss ? "B" : "")}->{m.Target}{(t >= m.ArriveAt ? "" : "~")}w{m.WorkLeft:0}")) + " tasks=" + string.Join(",", playerTask.Select(x => x == null ? "-" : x.Role.ToString()[0].ToString())));
 
                 // Clear regeneration and the between-waves heal.
                 for (var i = 0; i < 3; i++)
@@ -426,7 +493,9 @@ namespace ACE.Server.Tests
             return result;
         }
 
-        private static readonly int[] GroupSizes = { 1, 3, 10 };
+        private static readonly int[] GroupSizes = { 1, 2, 3, 5, 10 };
+
+        private const int Seeds = 40;
 
         private static string Report(ProtectDef p, int holdSeconds, out Dictionary<(int, Strategy), List<Result>> all)
         {
@@ -435,23 +504,30 @@ namespace ACE.Server.Tests
 
             foreach (var players in GroupSizes)
             {
-                foreach (var strategy in new[] { Strategy.Active, Strategy.Ignore })
+                foreach (var strategy in new[] { Strategy.Active, Strategy.NoFocus, Strategy.Ignore })
                 {
-                    var runs = Enumerable.Range(0, 20).Select(seed => Simulate(p, holdSeconds, players, strategy, seed)).ToList();
+                    var runs = Enumerable.Range(0, Seeds).Select(seed => Simulate(p, holdSeconds, players, strategy, seed)).ToList();
                     all[(players, strategy)] = runs;
 
-                    sb.AppendLine($"{players,2} player(s) {strategy,-6}: wins {runs.Count(r => r.Won)}/20, " +
-                                  $"survivors avg {runs.Average(r => r.Survivors):0.0} (min {runs.Min(r => r.Survivors)}), " +
+                    sb.AppendLine($"{players,2} player(s) {strategy,-7}: wins {runs.Count(r => r.Won)}/{Seeds}, " +
+                                  $"envoys left avg {runs.Average(r => r.Survivors):0.00} (0/1/2/3: {runs.Count(r => r.Survivors == 0)}/" +
+                                  $"{runs.Count(r => r.Survivors == 1)}/{runs.Count(r => r.Survivors == 2)}/{runs.Count(r => r.Survivors == 3)}), " +
                                   $"end avg {runs.Average(r => r.EndSeconds):0}s, waves {runs.Average(r => r.WavesStarted):0.0}, " +
-                                  $"target-waves above 90% {runs.Sum(r => r.WavesAbove90)}/{runs.Sum(r => r.TargetWaves)}");
+                                  $"assaults {runs.Average(r => r.Assaults):0.0}, target-waves above 90% {runs.Sum(r => r.WavesAbove90)}/{runs.Sum(r => r.TargetWaves)}");
                 }
             }
 
             return sb.ToString();
         }
 
+        /// <summary>
+        /// The owner's targets, on the shipped numbers: active defense (solo up to 10 players) never loses every envoy and
+        /// keeps at least 1.5 on average; ignoring the envoys always loses; defending without focusing the corrupted
+        /// assault loses clearly more envoys than focusing it; and healing never makes them untouchable (at most one
+        /// envoy-wave per run spent wholly above 90%, the opening wave's quiet side).
+        /// </summary>
         [TestMethod]
-        public void Balance_ActiveDefenseHolds_IgnoringLoses_HealingNeverMakesThemUntouchable()
+        public void Balance_ActiveDefenseHolds_IgnoringLoses_TheAssaultMustBeFocused()
         {
             var p = ShippedEnvoys(out var holdSeconds);
             var report = Report(p, holdSeconds, out var all);
@@ -461,12 +537,17 @@ namespace ACE.Server.Tests
             foreach (var players in GroupSizes)
             {
                 var active = all[(players, Strategy.Active)];
+                var noFocus = all[(players, Strategy.NoFocus)];
                 var ignore = all[(players, Strategy.Ignore)];
 
                 Assert.IsTrue(active.All(r => r.Won && r.Survivors >= 1), $"{players} player(s), active defense keeps at least one envoy alive\n{report}");
-                Assert.IsTrue(active.Average(r => r.Survivors) >= 1.0, $"{players} player(s): 1-2 envoys alive on average\n{report}");
+                Assert.IsTrue(active.Average(r => r.Survivors) >= 1.5, $"{players} player(s): active defense keeps 1.5 envoys or more on average\n{report}");
                 Assert.IsTrue(ignore.All(r => !r.Won), $"{players} player(s), ignoring the envoys loses\n{report}");
-                Assert.AreEqual(0, active.Sum(r => r.WavesAbove90), $"{players} player(s): no envoy stays above 90% for a whole wave\n{report}");
+                Assert.IsTrue(active.All(r => r.Assaults >= 2), $"{players} player(s): the corrupted assault comes at least twice\n{report}");
+                Assert.IsTrue(active.All(r => r.WavesAbove90 <= 1), $"{players} player(s): no envoy idles above 90% beyond one wave\n{report}");
+
+                // Focusing the corrupted assault matters at every group size.
+                Assert.IsTrue(noFocus.Average(r => r.Survivors) <= active.Average(r => r.Survivors) - 0.5, $"{players} player(s): ignoring the corrupted assault costs envoys\n{report}");
             }
         }
 

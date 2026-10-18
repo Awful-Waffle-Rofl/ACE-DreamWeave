@@ -545,7 +545,8 @@ namespace ACE.Server.WorldObjects
             // Before the cap, so even an empowered crowd cannot beat minDeathSeconds.
             amount = (float)(amount * attacker.WorldEventEmpowerFactor());
 
-            if (protect.MinDeathSeconds > 0)
+            // In assault mode a corrupted monster's hits skip the cap: it is sent to break its one target.
+            if (protect.MinDeathSeconds > 0 && ACE.Server.WorldEvents.WorldEventHoldRules.UsesDeathCap(attacker.WorldEventCorrupted, protect.EffectiveCorrupted.AssaultMode))
             {
                 amount = ACE.Server.WorldEvents.WorldEventHoldRules.CapProtectedHit(amount, maxHealth, protect.MinDeathSeconds,
                     ref worldEventProtectedCapTokens, ref worldEventProtectedCapLastAt, now);
@@ -762,34 +763,41 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Hold ranged waves (<see cref="WorldEventHoldDistance"/> above 0), called from the monster tick once
-        /// the target distance is known: a monster that can attack from range walks in to the hold distance,
-        /// stops, and shoots or casts from there, instead of the stock AI's habit of re-rolling a melee attack
-        /// (casters) or switching to melee when out of missile range (archers). Returns false, leaving the stock
-        /// AI in charge, for a monster with no ranged attack at all or whose spell cannot reach from where it
-        /// stands, so it still closes in when it has to. Monster thread only.
+        /// the target distance is known: a monster with a ranged attack picks it (its missile weapon with ammo, or
+        /// one of its offensive spells, never a buff or a debuff), walks in to the hold distance (or to the
+        /// attack's own range when that is shorter), stops, faces the target and attacks from there.
+        ///
+        /// Facing is set directly. A stock turn (StartTurn) marks the monster as moving, and this hold stops a
+        /// moving monster on its next tick, so the turn was cancelled every time and a held monster never faced
+        /// its target and never attacked (seen live 2026-10-18). Returns false, leaving the stock AI in charge,
+        /// only for a monster with no ranged attack at all. Monster thread only.
         /// </summary>
         public bool TickWorldEventRangedHold(float targetDist)
         {
             if (WorldEventHoldDistance <= 0 || AttackTarget == null || IsDead || PhysicsObj == null)
                 return false;
 
-            var canMissile = GetEquippedMissileWeapon() != null;
-            var canMagic = HasKnownSpells;
+            var canMissile = WorldEventCanFireMissile();
+            var canMagic = WorldEventHasOffensiveSpell();
 
             if (!WorldEvents.WorldEventHoldRules.HoldsRange(WorldEventHoldDistance, canMissile, canMagic))
                 return false;
 
+            // The attack first, so the monster knows how close it has to stand.
+            if (!WorldEventHasRangedAttackChosen(canMissile) && !SelectWorldEventRangedAttack(canMissile, canMagic))
+                return false;
+
             var hold = WorldEventHoldDistance;
 
-            // A missile weapon whose own range is shorter than the hold distance stops at its own range.
-            if (CurrentAttack == CombatType.Missile && MaxRange > 0 && MaxRange < hold)
+            // An attack whose own range is shorter than the hold distance stops at its own range.
+            if (MaxRange > 0 && MaxRange < hold)
                 hold = Math.Max(1.0f, MaxRange - 1.0f);
 
             if (WorldEvents.WorldEventHoldRules.RangedHoldShouldApproach(targetDist, hold))
             {
                 if (IsMoving)
                     Movement();
-                else if (!IsTurning)
+                else
                     StartWorldEventRangedApproach();
 
                 return true;
@@ -798,24 +806,10 @@ namespace ACE.Server.WorldObjects
             if (IsMoving)
                 StopWorldEventRangedApproach();
 
-            if (CurrentAttack == null || CurrentAttack == CombatType.Melee)
-            {
-                // No spell rolled this tick and no launcher: wait here rather than walk into melee.
-                if (!SelectWorldEventRangedAttack(canMissile, canMagic))
-                    return true;
-            }
-
-            // A spell that cannot reach from here: let the stock AI close the gap.
-            if (CurrentAttack == CombatType.Magic && targetDist > MaxRange)
-                return false;
+            IsTurning = false;
 
             if (!IsFacing(AttackTarget))
-            {
-                if (!IsTurning)
-                    StartTurn();
-
-                return true;
-            }
+                FaceTargetDirectly(AttackTarget);
 
             if (AttackReady())
                 Attack();
@@ -823,18 +817,24 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
-        /// <summary>A ranged attack for the hold: a spell when one rolls, else the missile weapon. False when neither is available this tick.</summary>
+        /// <summary>True when the attack already chosen is a ranged one the hold can use: the missile weapon, or an offensive spell.</summary>
+        private bool WorldEventHasRangedAttackChosen(bool canMissile)
+        {
+            if (CurrentAttack == CombatType.Missile)
+                return canMissile;
+
+            if (CurrentAttack == CombatType.Magic && CurrentSpell != null)
+                return WorldEvents.WorldEventRangedMembers.OffensiveSpellLookup(CurrentSpell.Id);
+
+            return false;
+        }
+
+        /// <summary>
+        /// A ranged attack for the hold: the missile weapon when it can fire, else one of the offensive spells
+        /// (weighted by their own chances). False when neither is available.
+        /// </summary>
         private bool SelectWorldEventRangedAttack(bool canMissile, bool canMagic)
         {
-            if (canMagic && TryRollSpell())
-            {
-                CurrentAttack = CombatType.Magic;
-                MaxRange = GetMaxRange();
-
-                if (CurrentAttack == CombatType.Magic)
-                    return true;
-            }
-
             if (canMissile)
             {
                 CurrentAttack = CombatType.Missile;
@@ -842,8 +842,63 @@ namespace ACE.Server.WorldObjects
                 return true;
             }
 
+            if (canMagic)
+            {
+                var spellId = 0;
+
+                try
+                {
+                    spellId = WorldEvents.WorldEventRangedMembers.PickOffensiveSpell(Biota.PropertiesSpellBook,
+                        WorldEvents.WorldEventRangedMembers.OffensiveSpellLookup, ACE.Common.ThreadSafeRandom.Next(0.0f, 1.0f));
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"[WORLDEVENT] ranged hold spell pick for {Name} 0x{Guid.Full:X8} failed", ex);
+                }
+
+                if (spellId != 0)
+                {
+                    CurrentSpell = new ACE.Server.Entity.Spell(spellId);
+                    CurrentAttack = CombatType.Magic;
+                    MaxRange = GetMaxRange();
+                    return true;
+                }
+            }
+
             CurrentAttack = null;
             return false;
+        }
+
+        /// <summary>A thrown weapon, or a launcher with ammunition equipped: what RangeAttack needs to fire.</summary>
+        private bool WorldEventCanFireMissile()
+        {
+            var weapon = GetEquippedMissileWeapon();
+
+            return weapon != null && (!weapon.IsAmmoLauncher || GetEquippedAmmo() != null);
+        }
+
+        /// <summary>Cached: whether this monster's spellbook holds an offensive spell (a projectile or Harm).</summary>
+        private bool? worldEventHasOffensiveSpell;
+
+        private bool WorldEventHasOffensiveSpell()
+        {
+            if (worldEventHasOffensiveSpell == null)
+            {
+                try
+                {
+                    var book = Biota.PropertiesSpellBook;
+
+                    worldEventHasOffensiveSpell = book != null && WorldEvents.WorldEventRangedMembers.PickOffensiveSpell(book,
+                        WorldEvents.WorldEventRangedMembers.OffensiveSpellLookup, 0) != 0;
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"[WORLDEVENT] offensive spell check for {Name} 0x{Guid.Full:X8} failed", ex);
+                    worldEventHasOffensiveSpell = false;
+                }
+            }
+
+            return worldEventHasOffensiveSpell.Value;
         }
 
         /// <summary>The stock chase move (StartTurn's move half), used to walk a ranged monster in; the hold tick stops it at the hold distance.</summary>

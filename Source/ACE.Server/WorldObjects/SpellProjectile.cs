@@ -1285,6 +1285,15 @@ namespace ACE.Server.WorldObjects
                         percent = damage / target.Health.MaxValue;
                 }
 
+                // World Events Hold: a run monster's bolt on a protected target is sized like its melee hits
+                // (protect.undefendedSeconds, the corrupted multiplier, the minDeathSeconds cap), the twin of the
+                // call at the top of Creature.TakeDamage, which this path never reaches. No-op for anyone else.
+                if (targetPlayer == null && damage > 0.0f && target.WorldEventProtected)
+                {
+                    damage = target.ScaleWorldEventProtectedHit(ProjectileSource, damage);
+                    percent = damage / target.Health.MaxValue;
+                }
+
                 // Monster combat effects: the non-player mirror of the Sanguine Ward call above, in the same
                 // slot and with the same convention - a REDUCTION before the vital write, so everything
                 // below sees the filtered hit. Spell damage is written straight to Health here and never

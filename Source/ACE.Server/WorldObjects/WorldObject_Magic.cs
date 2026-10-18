@@ -682,6 +682,11 @@ namespace ACE.Server.WorldObjects
             if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player && targetCreature.WorldEventWarded)
                 tryBoost = boost = -(int)Math.Round(targetCreature.ApplyWorldEventWard(ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, -tryBoost));
 
+            // World Events Hold: a run monster's Harm on a protected target is sized like its melee hits
+            // (protect.undefendedSeconds, the corrupted multiplier, the minDeathSeconds cap). No-op for anyone else.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player && targetCreature.WorldEventProtected)
+                tryBoost = boost = -(int)Math.Round(targetCreature.ScaleWorldEventProtectedHit(this, -tryBoost));
+
             if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player)
             {
                 // DirectHit for a Harm the caster cast; Secondary for an item/cloak proc (fromProc) or a

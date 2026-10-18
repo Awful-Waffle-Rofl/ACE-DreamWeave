@@ -353,15 +353,21 @@ namespace ACE.Server.Tests
                 Assert.IsNotNull(p.Corrupted, id);
                 Assert.AreEqual("Corrupted", p.Corrupted.Prefix, id);
                 Assert.AreEqual(1.5, p.Corrupted.Scale, 1e-9, $"{id}: corrupted 1.5x, easy to pick out");
-                Assert.AreEqual("EnchantUpPurple", p.Corrupted.ExtraEffect, id);
-                Assert.AreEqual(0.5, p.Portals.Scale, 1e-9, $"{id}: portals 1.43x the old 0.35");
+                Assert.AreEqual("VitaeDownBlack", p.Corrupted.Effect, $"{id}: a dark aura, not the purple of a lightning vuln");
+                Assert.AreEqual("none", p.Corrupted.ExtraEffect, id);
+                Assert.AreEqual(0.75, p.Portals.Scale, 1e-9, $"{id}: portals 1.5x the last 0.5");
+                Assert.AreEqual(2, p.Corrupted.AssaultEveryWaves, $"{id}: an assault every other wave");
+                Assert.AreEqual(2, p.Corrupted.AssaultFromWave, id);
+                Assert.AreEqual(2, p.Corrupted.AssaultCount, $"{id}: two corrupted per assault");
+                Assert.AreEqual(3.0, p.Corrupted.SelfMult, 1e-9, $"{id}: an assault monster hits its knight 3x as hard");
+                Assert.IsTrue(p.Corrupted.AssaultAnnounce.Count >= 2, id);
 
                 Assert.IsNotNull(p.Portals, id);
                 Assert.IsTrue(p.Portals.Count >= 3 && p.Portals.Count <= 5, id);
                 Assert.IsTrue(p.Portals.Radius > p.SpawnRadius, $"{id}: portals outside the spawn ring");
                 Assert.IsTrue(p.Portals.Parts.All(part => part.Wcid == 1002644 || part.Wcid == 1002645), $"{id}: the acid portal's rings");
 
-                foreach (var template in p.Ward.Announce.Concat(p.Corrupted.Announce))
+                foreach (var template in p.Ward.Announce.Concat(p.Corrupted.Announce).Concat(p.Corrupted.AssaultAnnounce.Select(a => WorldEventHoldRules.AssaultLine(a, "Corrupted Grievver Shredder", "Sir Draithon"))))
                 {
                     var line = WorldEventHoldRules.FillLine(template, "the Drudges", "envoy", "envoys", "Holtburg", 3, 3);
 

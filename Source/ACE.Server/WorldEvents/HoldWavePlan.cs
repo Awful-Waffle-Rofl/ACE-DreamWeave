@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Server.WorldEvents.Defs;
 
@@ -71,6 +72,15 @@ namespace ACE.Server.WorldEvents
         /// <summary>Finale: this batch is the rest of the final wave, sent after the boss.</summary>
         public bool FinaleEscort { get; set; }
 
+        /// <summary>Mixed, a corrupted assault wave: the target each corrupted monster marches on, by its index in the batch.</summary>
+        public Dictionary<int, uint> CorruptedTargets { get; set; }
+
+        /// <summary>Mixed, a corrupted assault wave: one call-out per corrupted monster (its name, its target's name), for the broadcast.</summary>
+        public List<(string Monster, string Target)> AssaultCalls { get; set; }
+
+        /// <summary>Mixed: this wave is a corrupted assault (protect.corrupted.assaultEveryWaves).</summary>
+        public bool Assault { get; set; }
+
         /// <summary>Mixed: how many of each role, for the log ("breach=2 runners=2 ...").</summary>
         public string RoleSummary()
         {
@@ -96,7 +106,8 @@ namespace ACE.Server.WorldEvents
                 case HoldWaveType.Hunters: return $"type=hunters hunters={Hunters}";
                 case HoldWaveType.Finale: return $"type=finale champion={(ChampionWcid == 0 ? "none" : $"{ChampionWcid} {ChampionName}")}";
                 case HoldWaveType.Mixed: return $"type=mixed breach=0x{BreachTargetGuid:X8} ({BreachTargetName}) side={BreachSide} {RoleSummary()} " +
-                                                $"runnerSpeed=x{RunRateMult:F2} runnerAttack=x{AttackSpeedMult:F2} runnerHealth=x{HealthMult:F2} holdDistance={HoldDistance:0.#}";
+                                                $"runnerSpeed=x{RunRateMult:F2} runnerAttack=x{AttackSpeedMult:F2} runnerHealth=x{HealthMult:F2} holdDistance={HoldDistance:0.#}" +
+                                                (Assault ? $" assault=[{string.Join(", ", AssaultCalls?.Select(c => $"{c.Monster} -> {c.Target}") ?? new string[0])}]" : "");
                 default: return "type=normal";
             }
         }
