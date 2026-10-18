@@ -80,6 +80,97 @@ namespace ACE.Server.WorldObjects
         /// <summary>Runtime-only, Hold finale: this monster is the finale boss (bigger, tougher, its effect replayed).</summary>
         public bool WorldEventFinaleBoss { get; set; }
 
+        /// <summary>Runtime-only, Hold mixed waves: a corrupted priority target (protect.corrupted).</summary>
+        public bool WorldEventCorrupted { get; set; }
+
+        /// <summary>Runtime-only, Hold mixed waves: this ranged monster carries the run's ward (protect.ward).</summary>
+        public bool WorldEventWarded { get; set; }
+
+        /// <summary>When the ward, once shattered, comes back (unix time; 0 = never shattered).</summary>
+        public double WorldEventWardDownUntil { get; set; }
+
+        /// <summary>True from a shatter until the restore effect has been played (WorldEvent's effect tick).</summary>
+        public bool WorldEventWardRestorePending { get; set; }
+
+        /// <summary>Whether this monster's ward is up at <paramref name="now"/>.</summary>
+        public bool IsWorldEventWardUp(double now) => WorldEventWarded && now >= WorldEventWardDownUntil;
+
+        /// <summary>
+        /// A hit of <paramref name="kind"/> on this monster, through its Hold ward (protect.ward): cut while the ward
+        /// is up, and a breaking kind shatters it for protect.ward.shatterSeconds with the break effect. Returns the
+        /// damage to apply; unchanged for every creature without a ward. Called on this creature's landblock thread
+        /// from DamageEvent (melee, missile), SpellProjectile and life magic (magic).
+        /// </summary>
+        public float ApplyWorldEventWard(WorldEvents.Defs.WorldEventCombatKinds kind, float damage)
+        {
+            return ApplyWorldEventWard(kind, damage, ACE.Common.Time.GetUnixTime());
+        }
+
+        /// <summary><see cref="ApplyWorldEventWard(WorldEvents.Defs.WorldEventCombatKinds, float)"/> at a given clock (the test seam).</summary>
+        public float ApplyWorldEventWard(WorldEvents.Defs.WorldEventCombatKinds kind, float damage, double now)
+        {
+            if (!WorldEventWarded)
+                return damage;
+
+            var ward = P_WorldEvent?.Composition?.Goal?.Protect?.Ward;
+
+            if (ward == null)
+                return damage;
+
+            var result = WorldEvents.WorldEventHoldRules.WardHit(damage, kind, IsWorldEventWardUp(now), ward.Reduction,
+                ward.ReducesKinds, ward.BreakOnKinds, out var outcome);
+
+            if (outcome == WorldEvents.WorldEventHoldRules.WardOutcome.Shattered)
+            {
+                WorldEventWardDownUntil = now + Math.Clamp(ward.ShatterSeconds, 1, 120);
+                WorldEventWardRestorePending = true;
+
+                if (WorldEvents.WorldEventHoldRules.TryParseBossEffect(ward.BreakEffect, out var effect) && effect != PlayScript.Invalid && CurrentLandblock != null)
+                    EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(Guid, effect, 1.0f));
+
+                log.Debug($"[WORLDEVENT] run={P_WorldEvent?.RunId} ward on {Name} 0x{Guid.Full:X8} shattered by {kind} for {ward.ShatterSeconds:0} s");
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// How much harder this wave monster hits a protected target because of the run's corrupted monsters
+        /// (protect.corrupted): selfMult for a corrupted one, empowerMult inside a living corrupted monster's
+        /// aura, else 1. Read on the protected target's landblock thread; the positions are a moment old at worst.
+        /// </summary>
+        public double WorldEventEmpowerFactor()
+        {
+            var evt = P_WorldEvent;
+            var protect = evt?.Composition?.Goal?.Protect;
+
+            if (protect?.WaveMix == null)
+                return 1.0;
+
+            var corrupted = protect.EffectiveCorrupted;
+
+            if (WorldEventCorrupted)
+                return WorldEvents.WorldEventHoldRules.EmpowerFactor(true, null, corrupted.EmpowerRadius, corrupted.EmpowerMult, corrupted.SelfMult);
+
+            if (Location == null)
+                return 1.0;
+
+            double? nearest = null;
+
+            foreach (var other in evt.Spawner.LiveWaveCreatures)
+            {
+                if (other == null || other == this || !other.WorldEventCorrupted || other.IsDead || other.Location == null)
+                    continue;
+
+                var d = Location.DistanceTo(other.Location);
+
+                if (nearest == null || d < nearest)
+                    nearest = d;
+            }
+
+            return WorldEvents.WorldEventHoldRules.EmpowerFactor(false, nearest, corrupted.EmpowerRadius, corrupted.EmpowerMult, corrupted.SelfMult);
+        }
+
         /// <summary>
         /// True when <paramref name="target"/> is a protected target and this creature is a monster placed by
         /// the same run. The only way any monster may damage a protected target.
@@ -448,6 +539,10 @@ namespace ACE.Server.WorldObjects
                 amount = ACE.Server.WorldEvents.WorldEventHoldRules.ProtectedHitDamage(maxHealth, interval, protect.UndefendedSeconds,
                     attacker.WorldEventAttackSpeedMult);
             }
+
+            // Corrupted monsters (protect.corrupted): one hits harder itself, and empowers the wave monsters near it.
+            // Before the cap, so even an empowered crowd cannot beat minDeathSeconds.
+            amount = (float)(amount * attacker.WorldEventEmpowerFactor());
 
             if (protect.MinDeathSeconds > 0)
             {

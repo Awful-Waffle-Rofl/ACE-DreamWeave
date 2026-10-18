@@ -485,6 +485,16 @@ namespace ACE.Server.WorldEvents
             get { lock (sync) return npcGuids.ToList(); }
         }
 
+        /// <summary>The live decor this run placed, a copy. Hold's portal pulse reads it.</summary>
+        public IReadOnlyList<WorldObject> LiveDecorObjects
+        {
+            get
+            {
+                lock (sync)
+                    return liveDecor.Where(wo => wo != null && !wo.IsDestroyed).ToList();
+            }
+        }
+
         /// <summary>The live WAVE creatures (trash, elites, overflow champions), a copy. Hold's wake pass reads it.</summary>
         public IReadOnlyList<Creature> LiveWaveCreatures
         {
@@ -1086,6 +1096,18 @@ namespace ACE.Server.WorldEvents
                 scene.AddRange(protect.Decor);
 
             scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, protect.TargetDecor));
+
+            // protect.portals: small portals around the outside of the spawn ring; every wave comes out of them.
+            if (protect.Portals != null)
+            {
+                var portals = protect.Portals;
+                var portalRing = WorldEventHoldRules.PortalOffsets(portals.Count, portals.Radius, portals.RotationDegrees);
+
+                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(portalRing, WorldEventHoldRules.ScalePortalParts(portals.Parts, portals.Scale)));
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} hold portals count={portals.Count} radius={portals.Radius:0.#} " +
+                         $"rotation={portals.RotationDegrees:0.#} scale={portals.Scale:0.##} parts={portals.Parts.Count}");
+            }
 
             log.Info($"[WORLDEVENT] run={evt.RunId} protect wcids={string.Join(",", Enumerable.Range(0, ring.Count).Select(protect.WcidFor))} " +
                      $"count={count} radius={radius:F1} scene={scene.Count} " +
@@ -2030,6 +2052,11 @@ namespace ACE.Server.WorldEvents
                 if (plan != null && entryIndex == plan.ChampionEntryIndex)
                     ApplyFinaleBoss(evt, creature, plan.ChampionName);
 
+                // A mixed wave's corrupted monster: titled, bigger, tougher (protect.corrupted). Its effect is
+                // replayed by WorldEvent.
+                if (creature.WorldEventCorrupted)
+                    ApplyCorrupted(evt, creature);
+
                 candidates.Add(candidate);
             }
 
@@ -2564,11 +2591,50 @@ namespace ACE.Server.WorldEvents
                 case HoldRole.Ranged:
                     creature.WorldEventHoldDistance = plan.HoldDistance;
                     creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    creature.WorldEventWarded = plan.Warded;
+                    break;
+
+                case HoldRole.Corrupted:
+                    creature.WorldEventCorrupted = true;
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
                     break;
 
                 case HoldRole.Seeker:
                     creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
                     break;
+            }
+        }
+
+        /// <summary>
+        /// A corrupted monster, before EnterWorld: titled (protect.corrupted.prefix), its size and health
+        /// multiplied. Logged. Never throws.
+        /// </summary>
+        private void ApplyCorrupted(WorldEvent evt, Creature creature)
+        {
+            var c = evt?.Composition?.Goal?.Protect?.EffectiveCorrupted;
+
+            if (c == null || creature == null)
+                return;
+
+            try
+            {
+                creature.Name = WorldEventHoldRules.Titled(c.Prefix, creature.Name);
+
+                var scale = (float)Math.Clamp(c.Scale, 1.0, 2.0);
+
+                if (scale != 1.0f)
+                    creature.ApplyRuntimeScaleMultiplier(scale);
+
+                var mult = Math.Clamp(c.HealthMult, 1.0, 5.0);
+
+                if (mult > 1.0)
+                    ApplyHealthMultiplier(evt, creature, mult);
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} corrupted wcid={creature.WeenieClassId} {creature.Name} scale=x{scale:F2} health=x{mult:F2}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} could not corrupt wcid {creature.WeenieClassId}", ex);
             }
         }
 

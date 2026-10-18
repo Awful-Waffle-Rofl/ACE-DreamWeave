@@ -742,6 +742,71 @@ namespace ACE.Server.WorldEvents
 
                 if (!protect.IsWaveBased)
                     return "has protect.waveMix without protect.waves";
+
+                var mix = protect.WaveMix;
+
+                if (mix.MinRanged < 0 || mix.MinRanged > 20 || mix.MinCorrupted < 0 || mix.MinCorrupted > 5
+                    || mix.MaxCorrupted < 0 || mix.MaxCorrupted > 10 || mix.MinCorrupted > mix.MaxCorrupted)
+                    return "has an invalid protect.waveMix minimum (minRanged 0 to 20, minCorrupted 0 to 5, maxCorrupted 0 to 10 and not below minCorrupted)";
+            }
+
+            if (protect.Ward != null)
+            {
+                var ward = protect.Ward;
+
+                if (!IsFinite(ward.Reduction) || ward.Reduction < 0 || ward.Reduction > 1)
+                    return "has an invalid protect.ward.reduction (0 to 1)";
+
+                if (!IsFinite(ward.ShatterSeconds) || ward.ShatterSeconds < 1 || ward.ShatterSeconds > 120)
+                    return "has an invalid protect.ward.shatterSeconds (1 to 120)";
+
+                if (!WorldEventHoldRules.TryParseCombatKinds(ward.Reduces, out var reduces))
+                    return "has an invalid protect.ward.reduces (melee, missile, magic)";
+
+                if (!WorldEventHoldRules.TryParseCombatKinds(ward.BreakOn, out var breakOn))
+                    return "has an invalid protect.ward.breakOn (melee, missile, magic)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(ward.BreakEffect, out _) || !WorldEventHoldRules.TryParseBossEffect(ward.RestoreEffect, out _))
+                    return "has an unknown protect.ward effect (a PlayScript name, or none)";
+
+                ward.ReducesKinds = reduces;
+                ward.BreakOnKinds = breakOn;
+            }
+
+            if (protect.Corrupted != null)
+            {
+                var c = protect.Corrupted;
+
+                if (!WorldEventHoldRules.IsValidBossPrefix(c.Prefix))
+                    return "has an invalid protect.corrupted.prefix (letters and spaces, up to 20)";
+
+                if (!IsFinite(c.Scale) || c.Scale < 1 || c.Scale > 2 || !IsFinite(c.HealthMult) || c.HealthMult < 1 || c.HealthMult > 5)
+                    return "has an invalid protect.corrupted scale or healthMult (scale 1 to 2, healthMult 1 to 5)";
+
+                if (!IsFinite(c.EmpowerRadius) || c.EmpowerRadius < 0 || c.EmpowerRadius > 50
+                    || !IsFinite(c.EmpowerMult) || c.EmpowerMult < 1 || c.EmpowerMult > 5 || !IsFinite(c.SelfMult) || c.SelfMult < 1 || c.SelfMult > 5)
+                    return "has an invalid protect.corrupted aura (empowerRadius 0 to 50, empowerMult and selfMult 1 to 5)";
+
+                if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _))
+                    return "has an invalid protect.corrupted effect (a PlayScript name or none, every 1 to 60 s)";
+            }
+
+            if (protect.Portals != null)
+            {
+                var p = protect.Portals;
+
+                if (p.Count < 1 || p.Count > 8)
+                    return "has an invalid protect.portals.count (1 to 8)";
+
+                if (!IsFinite(p.Radius) || p.Radius < 5 || p.Radius > 80 || !IsFinite(p.Scale) || p.Scale < 0.1 || p.Scale > 2
+                    || !IsFinite(p.Inset) || p.Inset < 0 || p.Inset > 10 || !IsFinite(p.RotationDegrees))
+                    return "has an invalid protect.portals layout (radius 5 to 80, scale 0.1 to 2, inset 0 to 10)";
+
+                if (p.Parts == null || p.Parts.Count == 0 || p.Parts.Any(part => part == null || part.Wcid == 0))
+                    return "has protect.portals with no parts (each needs a wcid)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(p.PulseEffect, out _))
+                    return "has an unknown protect.portals.pulseEffect (a PlayScript name, or none)";
             }
 
             return null;
@@ -761,6 +826,12 @@ namespace ACE.Server.WorldEvents
 
             if (protect.WaveMix != null)
                 protect.WaveMix.Announce = RepairLinePool(goalId, "waveMix.announce", protect.WaveMix.Announce, diagnostics);
+
+            if (protect.Ward != null)
+                protect.Ward.Announce = RepairLinePool(goalId, "ward.announce", protect.Ward.Announce, diagnostics);
+
+            if (protect.Corrupted != null)
+                protect.Corrupted.Announce = RepairLinePool(goalId, "corrupted.announce", protect.Corrupted.Announce, diagnostics);
 
             if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
                 diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +

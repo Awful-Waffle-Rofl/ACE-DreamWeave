@@ -678,6 +678,10 @@ namespace ACE.Server.WorldObjects
             // Harm landing on one. A filter wired at only two of the three is silently partial.
             var wardWasUp = false;
 
+            // World Events Hold ward (protect.ward): life magic that harms a warded ranged wave monster is magic damage.
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player && targetCreature.WorldEventWarded)
+                tryBoost = boost = -(int)Math.Round(targetCreature.ApplyWorldEventWard(ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, -tryBoost));
+
             if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player)
             {
                 // DirectHit for a Harm the caster cast; Secondary for an item/cloak proc (fromProc) or a

@@ -1273,6 +1273,18 @@ namespace ACE.Server.WorldObjects
                         percent = damage / target.Health.MaxValue;
                 }
 
+                // World Events Hold ward (protect.ward) on a ranged wave monster: a spell is magic, cut while the
+                // ward is up (or shattering it, if the goal says magic breaks it). No-op without a ward.
+                if (targetPlayer == null && damage > 0.0f && target.WorldEventWarded)
+                {
+                    var beforeHoldWard = damage;
+
+                    damage = target.ApplyWorldEventWard(ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, damage);
+
+                    if (damage != beforeHoldWard)
+                        percent = damage / target.Health.MaxValue;
+                }
+
                 // Monster combat effects: the non-player mirror of the Sanguine Ward call above, in the same
                 // slot and with the same convention - a REDUCTION before the vital write, so everything
                 // below sees the filtered hit. Spell damage is written straight to Health here and never

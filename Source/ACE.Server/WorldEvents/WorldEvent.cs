@@ -1259,7 +1259,33 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private IReadOnlyList<Position> WaveAnchors()
         {
+            // Hold protect.portals: every wave comes out of the portals, a few metres inside each.
+            var portals = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Portals : null;
+
+            if (portals != null && Composition?.AnchorPosition != null)
+                return PortalSpawnAnchors(Composition.AnchorPosition, portals);
+
             return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null, SpawnRadius);
+        }
+
+        /// <summary>
+        /// Where a Hold run's waves spawn with protect.portals: one point per portal, protect.portals.inset metres
+        /// inside it toward the anchor, facing the anchor. The spawner deals a wave's monsters round-robin over
+        /// these, so they pour in from every portal.
+        /// </summary>
+        public static IReadOnlyList<Position> PortalSpawnAnchors(Position anchor, PortalsDef portals)
+        {
+            var result = new List<Position>();
+
+            if (anchor == null || portals == null)
+                return result;
+
+            var radius = (float)Math.Max(1.0, portals.Radius - Math.Max(0, portals.Inset));
+
+            foreach (var bearing in WorldEventHoldRules.PortalBearings(portals.Count, portals.RotationDegrees))
+                result.Add(WorldEventGeometry.AtBearing(anchor, radius, bearing));
+
+            return result;
         }
 
         /// <summary>
@@ -1589,6 +1615,9 @@ namespace ACE.Server.WorldEvents
             holdWavesStarted++;
             holdLastWaveStartedAt = now;
 
+            // Hold protect.portals: the portals flare as the wave comes through.
+            PulseHoldPortals();
+
             if (holdPlan?.KeepCount != null)
                 holdLastWaveSize = Math.Min(holdLastWaveSize, Math.Max(1, holdPlan.KeepCount.Value) + (holdPlan.ChampionWcid != 0 ? 1 : 0));
             else if (holdPlan != null && holdPlan.ChampionWcid != 0)
@@ -1653,6 +1682,8 @@ namespace ACE.Server.WorldEvents
             try
             {
                 Spawner.SpawnWave(this, escort.Pick, WaveAnchors(), escort.WaveIndex, escort.Band, escort.HealthMult, escort.Plan);
+
+                PulseHoldPortals();
 
                 log.Info($"[WORLDEVENT] run={RunId} hold finale: the rest of the final wave arrives " +
                          $"({escort.Pick.Trash.Count + escort.Pick.Champions.Count} monsters)");
@@ -1861,7 +1892,7 @@ namespace ACE.Server.WorldEvents
             for (var i = 0; i < pick.Champions.Count; i++)
                 keep.Add(pick.Trash.Count + i);
 
-            plan.Roles = WorldEventHoldRules.AssignWaveMix(size, protect.WaveMix.Shares, keep, holdWaveRng);
+            plan.Roles = WorldEventHoldRules.AssignWaveMix(size, protect.WaveMix.Shares, protect.WaveMix.Minimums, protect.WaveMix.Maximums, keep, holdWaveRng);
 
             var targets = Spawner.LiveProtectedCreatures;
 
@@ -1886,6 +1917,7 @@ namespace ACE.Server.WorldEvents
 
             var ranged = protect.SpecialWave(HoldWaveType.Ranged) ?? new SpecialWaveDef();
             plan.HoldDistance = (float)Math.Clamp(ranged.HoldDistance, 5.0, 40.0);
+            plan.Warded = protect.Ward != null;
 
             if (plan.Roles.Any(r => r == HoldRole.Ranged))
             {
@@ -1943,6 +1975,24 @@ namespace ACE.Server.WorldEvents
 
                 if (breachTarget != null && !string.IsNullOrEmpty(breachLine))
                     SpeakLocally(breachTarget, breachLine, viaQueue: true);
+
+                // Each its own World Event line (three sentences at most apiece): the warded ranged, then the
+                // corrupted, when this wave has them.
+                if (plan.Warded && plan.Roles != null && plan.Roles.Contains(HoldRole.Ranged))
+                {
+                    var wardLine = ComposeProtectedLine(Fill(protect?.Ward?.Announce), null);
+
+                    if (!string.IsNullOrEmpty(wardLine))
+                        WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(wardLine));
+                }
+
+                if (plan.Roles != null && plan.Roles.Contains(HoldRole.Corrupted))
+                {
+                    var corruptedLine = ComposeProtectedLine(Fill(protect?.EffectiveCorrupted.Announce), null);
+
+                    if (!string.IsNullOrEmpty(corruptedLine))
+                        WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(corruptedLine));
+                }
 
                 return;
             }
@@ -3019,6 +3069,115 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>
+        /// Hold protect.portals: plays protect.portals.pulseEffect on every portal part this run placed, through
+        /// each part's own landblock queue, as a wave comes through. Never throws.
+        /// </summary>
+        private void PulseHoldPortals()
+        {
+            try
+            {
+                var portals = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Portals : null;
+
+                if (portals?.Parts == null || !WorldEventHoldRules.TryParseBossEffect(portals.PulseEffect, out var pulse)
+                    || pulse == ACE.Entity.Enum.PlayScript.Invalid)
+                    return;
+
+                var partWcids = new HashSet<uint>(portals.Parts.Where(p => p != null).Select(p => p.Wcid));
+
+                foreach (var part in Spawner.LiveDecorObjects)
+                {
+                    if (!partWcids.Contains(part.WeenieClassId) || part.CurrentLandblock == null)
+                        continue;
+
+                    var p = part;
+
+                    part.CurrentLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!p.IsDestroyed)
+                            p.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(p.Guid, pulse, 1.0f));
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} portal pulse threw", ex);
+            }
+        }
+
+        /// <summary>When the corrupted effect last played. World thread only.</summary>
+        private double holdCorruptedEffectAt;
+
+        /// <summary>Warded monsters whose arrival (ward up) effect has played. World thread only.</summary>
+        private readonly HashSet<uint> holdWardArrivals = new HashSet<uint>();
+
+        /// <summary>
+        /// Hold mixed waves' markers, once a second: the corrupted effect on every living corrupted monster every
+        /// protect.corrupted.effectSeconds; and a warded monster's restore effect when it arrives and each time its
+        /// ward comes back after a shatter. Never throws.
+        /// </summary>
+        private void TickHoldMarkerEffects(double now)
+        {
+            try
+            {
+                var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+                if (protect?.WaveMix == null)
+                    return;
+
+                var corrupted = protect.EffectiveCorrupted;
+                WorldEventHoldRules.TryParseBossEffect(corrupted.Effect, out var corruptedEffect);
+
+                var corruptedDue = corruptedEffect != ACE.Entity.Enum.PlayScript.Invalid && now - holdCorruptedEffectAt >= Math.Max(1.0, corrupted.EffectSeconds);
+
+                if (corruptedDue)
+                    holdCorruptedEffectAt = now;
+
+                var restoreEffect = ACE.Entity.Enum.PlayScript.Invalid;
+
+                if (protect.Ward != null)
+                    WorldEventHoldRules.TryParseBossEffect(protect.Ward.RestoreEffect, out restoreEffect);
+
+                foreach (var monster in Spawner.LiveWaveCreatures)
+                {
+                    if (monster == null || monster.IsDead || monster.CurrentLandblock == null)
+                        continue;
+
+                    var script = ACE.Entity.Enum.PlayScript.Invalid;
+
+                    if (monster.WorldEventCorrupted && corruptedDue)
+                        script = corruptedEffect;
+
+                    if (monster.WorldEventWarded && restoreEffect != ACE.Entity.Enum.PlayScript.Invalid)
+                    {
+                        var arrived = holdWardArrivals.Add(monster.Guid.Full);
+                        var restored = monster.WorldEventWardRestorePending && monster.IsWorldEventWardUp(ACE.Common.Time.GetUnixTime());
+
+                        if (restored)
+                            monster.WorldEventWardRestorePending = false;
+
+                        if (arrived || restored)
+                            script = restoreEffect;
+                    }
+
+                    if (script == ACE.Entity.Enum.PlayScript.Invalid)
+                        continue;
+
+                    var m = monster;
+
+                    monster.CurrentLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!m.IsDead && !m.IsDestroyed)
+                            m.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(m.Guid, script, 1.0f));
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} marker effects threw", ex);
+            }
+        }
+
         /// <summary>Finale bosses whose arrival effect has played. World thread only.</summary>
         private readonly HashSet<uint> holdBossArrivals = new HashSet<uint>();
 
@@ -3644,6 +3803,8 @@ namespace ACE.Server.WorldEvents
             TickHoldBetweenWaveHeals();
 
             TickHoldBossEffect(now);
+
+            TickHoldMarkerEffects(now);
 
             TickBossDamage();
 

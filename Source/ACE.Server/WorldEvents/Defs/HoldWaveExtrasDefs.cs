@@ -1,0 +1,143 @@
+using System.Collections.Generic;
+using System.Text.Json.Serialization;
+
+namespace ACE.Server.WorldEvents.Defs
+{
+    /// <summary>
+    /// protect.ward: the ward on a mixed wave's ranged monsters (Hold runs only). While it is up, the damage kinds
+    /// in <see cref="Reduces"/> are cut by <see cref="Reduction"/>. A hit of a kind in <see cref="BreakOn"/>
+    /// shatters it for <see cref="ShatterSeconds"/>, when everything hits normally; then it comes back. Each change
+    /// plays an effect on the monster. Player-facing text is ASCII only.
+    /// </summary>
+    public class WardDef
+    {
+        /// <summary>Share of damage taken off while the ward is up (0 to 1). Default 0.75.</summary>
+        [JsonPropertyName("reduction")]
+        public double Reduction { get; set; } = 0.75;
+
+        /// <summary>Seconds the ward stays down after it shatters (1 to 120). Default 10.</summary>
+        [JsonPropertyName("shatterSeconds")]
+        public double ShatterSeconds { get; set; } = 10;
+
+        /// <summary>Damage kinds the ward reduces: melee, missile, magic. Default missile and magic.</summary>
+        [JsonPropertyName("reduces")]
+        public List<string> Reduces { get; set; } = new List<string> { "missile", "magic" };
+
+        /// <summary>Damage kinds that shatter the ward: melee, missile, magic. Default melee.</summary>
+        [JsonPropertyName("breakOn")]
+        public List<string> BreakOn { get; set; } = new List<string> { "melee" };
+
+        /// <summary>The effect when the ward shatters (a PlayScript name, or none). Default ShieldDownBlue.</summary>
+        [JsonPropertyName("breakEffect")]
+        public string BreakEffect { get; set; } = "ShieldDownBlue";
+
+        /// <summary>The effect when the ward comes back, and when a warded monster arrives. Default ShieldUpBlue.</summary>
+        [JsonPropertyName("restoreEffect")]
+        public string RestoreEffect { get; set; } = "ShieldUpBlue";
+
+        /// <summary>A World Event line after the wave's own, one picked at random, when the wave has warded ranged.</summary>
+        [JsonPropertyName("announce")]
+        public List<string> Announce { get; set; } = new List<string>();
+
+        /// <summary>Parsed from <see cref="Reduces"/> at load. Never read from JSON.</summary>
+        [JsonIgnore]
+        public WorldEventCombatKinds ReducesKinds { get; set; } = WorldEventCombatKinds.Missile | WorldEventCombatKinds.Magic;
+
+        /// <summary>Parsed from <see cref="BreakOn"/> at load. Never read from JSON.</summary>
+        [JsonIgnore]
+        public WorldEventCombatKinds BreakOnKinds { get; set; } = WorldEventCombatKinds.Melee;
+    }
+
+    /// <summary>The kinds of damage a Hold ward tells apart.</summary>
+    [System.Flags]
+    public enum WorldEventCombatKinds
+    {
+        None = 0,
+        Melee = 1,
+        Missile = 2,
+        Magic = 4
+    }
+
+    /// <summary>
+    /// protect.corrupted: the mixed wave's corrupted monsters. Marked (title, size, a repeating effect), tougher,
+    /// and while one lives the wave monsters within <see cref="EmpowerRadius"/> of it hit the targets
+    /// <see cref="EmpowerMult"/> times as hard; the corrupted one itself hits them <see cref="SelfMult"/> times as hard.
+    /// </summary>
+    public class CorruptedDef
+    {
+        /// <summary>The title put in front of its name (letters and spaces, up to 20). Default Corrupted.</summary>
+        [JsonPropertyName("prefix")]
+        public string Prefix { get; set; } = "Corrupted";
+
+        /// <summary>Size multiplier (1 to 2). Default 1.25.</summary>
+        [JsonPropertyName("scale")]
+        public double Scale { get; set; } = 1.25;
+
+        /// <summary>Health multiplier (1 to 5). Default 1.5.</summary>
+        [JsonPropertyName("healthMult")]
+        public double HealthMult { get; set; } = 1.5;
+
+        /// <summary>The effect replayed on it (a PlayScript name, or none). Default ShieldUpPurple.</summary>
+        [JsonPropertyName("effect")]
+        public string Effect { get; set; } = "ShieldUpPurple";
+
+        /// <summary>How often the effect replays, in seconds (1 to 60). Default 3.</summary>
+        [JsonPropertyName("effectSeconds")]
+        public double EffectSeconds { get; set; } = 3;
+
+        /// <summary>The radius in metres of its empowering aura (0 to 50). Default 12.</summary>
+        [JsonPropertyName("empowerRadius")]
+        public double EmpowerRadius { get; set; } = 12;
+
+        /// <summary>How much harder wave monsters inside the aura hit the targets (1 to 5). Default 1.5.</summary>
+        [JsonPropertyName("empowerMult")]
+        public double EmpowerMult { get; set; } = 1.5;
+
+        /// <summary>How much harder the corrupted monster itself hits the targets (1 to 5). Default 2.</summary>
+        [JsonPropertyName("selfMult")]
+        public double SelfMult { get; set; } = 2.0;
+
+        /// <summary>A World Event line, one picked at random, when a wave brings corrupted monsters.</summary>
+        [JsonPropertyName("announce")]
+        public List<string> Announce { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// protect.portals: small portals placed evenly around the outside of the spawn ring when the run starts. Every
+    /// wave spawns at them (round-robin), and they flash when a wave comes through. Decor only: placed stuck,
+    /// never usable, removed at cleanup.
+    /// </summary>
+    public class PortalsDef
+    {
+        /// <summary>How many portals (1 to 8). Default 4.</summary>
+        [JsonPropertyName("count")]
+        public int Count { get; set; } = 4;
+
+        /// <summary>Their distance from the anchor in metres (5 to 80). Default 30.</summary>
+        [JsonPropertyName("radius")]
+        public double Radius { get; set; } = 30;
+
+        /// <summary>Compass bearing of the first portal (0 = north, clockwise). Default 45, between the targets.</summary>
+        [JsonPropertyName("rotationDegrees")]
+        public double RotationDegrees { get; set; } = 45;
+
+        /// <summary>Size of each portal against <see cref="Parts"/> as authored (0.1 to 2). Default 0.35.</summary>
+        [JsonPropertyName("scale")]
+        public double Scale { get; set; } = 0.35;
+
+        /// <summary>How far inside each portal (toward the anchor) monsters appear, in metres (0 to 10). Default 2.</summary>
+        [JsonPropertyName("inset")]
+        public double Inset { get; set; } = 2;
+
+        /// <summary>
+        /// One portal's decor, in the portal's own frame (dx right, dy outward, yaw relative), as authored at full
+        /// size; dx, dy, dz and scale are multiplied by <see cref="Scale"/>.
+        /// </summary>
+        [JsonPropertyName("parts")]
+        public List<DecorDef> Parts { get; set; } = new List<DecorDef>();
+
+        /// <summary>The effect played on every portal part when a wave spawns (a PlayScript name, or none). Default PortalExit.</summary>
+        [JsonPropertyName("pulseEffect")]
+        public string PulseEffect { get; set; } = "PortalExit";
+    }
+}

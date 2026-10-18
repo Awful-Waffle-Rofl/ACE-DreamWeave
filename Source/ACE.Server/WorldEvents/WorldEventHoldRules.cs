@@ -440,6 +440,221 @@ namespace ACE.Server.WorldEvents
             return counts;
         }
 
+        /// <summary>
+        /// <see cref="WaveMixCounts(int, IReadOnlyList{double})"/> with per-role limits (D6 - pure), in role order:
+        /// a role above its maximum (-1 = none) hands the extra to Seeker; a role below its minimum takes monsters
+        /// from the biggest other roles, never taking one below its own minimum or below 1 when its share is above
+        /// 0. A wave too small for every minimum fills them as far as it can. Always sums to the wave.
+        /// </summary>
+        public static int[] WaveMixCounts(int waveSize, IReadOnlyList<double> shares, IReadOnlyList<int> minimums, IReadOnlyList<int> maximums)
+        {
+            var counts = WaveMixCounts(waveSize, shares);
+            var roles = counts.Length;
+
+            int Min(int r) => minimums != null && r < minimums.Count ? Math.Max(0, minimums[r]) : 0;
+            int Max(int r) => maximums != null && r < maximums.Count ? maximums[r] : -1;
+            bool Wanted(int r) => shares != null && r < shares.Count && double.IsFinite(shares[r]) && shares[r] > 0;
+
+            // Maximums: the extra seeks.
+            for (var r = 0; r < roles; r++)
+            {
+                var max = Max(r);
+
+                if (max >= 0 && counts[r] > max && r != (int)HoldRole.Seeker)
+                {
+                    counts[(int)HoldRole.Seeker] += counts[r] - max;
+                    counts[r] = max;
+                }
+            }
+
+            // Minimums: taken from the biggest roles that can spare one.
+            for (var r = 0; r < roles; r++)
+            {
+                var min = Max(r) >= 0 ? Math.Min(Min(r), Max(r)) : Min(r);
+
+                while (counts[r] < min)
+                {
+                    var donor = Enumerable.Range(0, roles)
+                        .Where(d => d != r && counts[d] > Math.Max(Min(d), Wanted(d) ? 1 : 0))
+                        .OrderByDescending(d => counts[d])
+                        .DefaultIfEmpty(-1)
+                        .First();
+
+                    if (donor < 0)
+                        break;
+
+                    counts[donor]--;
+                    counts[r]++;
+                }
+            }
+
+            return counts;
+        }
+
+        // ---- ward, corrupted aura, portals (D6 - pure) ----------------------------------------------------
+
+        /// <summary>Parses a ward's damage kinds (melee, missile, magic; case-insensitive). False for anything else or an empty list.</summary>
+        public static bool TryParseCombatKinds(IEnumerable<string> names, out WorldEventCombatKinds kinds)
+        {
+            kinds = WorldEventCombatKinds.None;
+
+            if (names == null)
+                return false;
+
+            foreach (var name in names)
+            {
+                switch (name?.Trim().ToLowerInvariant())
+                {
+                    case "melee": kinds |= WorldEventCombatKinds.Melee; break;
+                    case "missile": kinds |= WorldEventCombatKinds.Missile; break;
+                    case "magic": kinds |= WorldEventCombatKinds.Magic; break;
+                    default: return false;
+                }
+            }
+
+            return kinds != WorldEventCombatKinds.None;
+        }
+
+        /// <summary>What a hit does to a ward (D6 - pure).</summary>
+        public enum WardOutcome
+        {
+            /// <summary>No ward, or a ward that ignores this kind: full damage.</summary>
+            None,
+
+            /// <summary>The ward cut the hit by its reduction.</summary>
+            Reduced,
+
+            /// <summary>The hit shattered the ward and landed in full.</summary>
+            Shattered
+        }
+
+        /// <summary>
+        /// A hit of <paramref name="kind"/> on a warded monster (D6 - pure). While the ward is up a breaking kind
+        /// shatters it (that hit lands in full), and a reduced kind is cut by <paramref name="reduction"/>. While it
+        /// is down every hit lands in full. Returns the damage to apply.
+        /// </summary>
+        public static float WardHit(float damage, WorldEventCombatKinds kind, bool wardUp, double reduction,
+            WorldEventCombatKinds reduces, WorldEventCombatKinds breakOn, out WardOutcome outcome)
+        {
+            outcome = WardOutcome.None;
+
+            if (!wardUp || !(damage > 0))
+                return damage;
+
+            if ((breakOn & kind) != 0)
+            {
+                outcome = WardOutcome.Shattered;
+                return damage;
+            }
+
+            if ((reduces & kind) != 0 && double.IsFinite(reduction) && reduction > 0)
+            {
+                outcome = WardOutcome.Reduced;
+                return (float)(damage * (1.0 - Math.Clamp(reduction, 0.0, 1.0)));
+            }
+
+            return damage;
+        }
+
+        /// <summary>
+        /// How much harder a wave monster hits a protected target because of corrupted monsters (D6 - pure): the
+        /// corrupted monster itself <paramref name="selfMult"/>; one within <paramref name="radius"/> of a living
+        /// corrupted monster <paramref name="empowerMult"/>; anyone else 1. <paramref name="nearestCorruptedDist"/>
+        /// is the distance to the nearest OTHER living corrupted monster of the run (null when none).
+        /// </summary>
+        public static double EmpowerFactor(bool attackerIsCorrupted, double? nearestCorruptedDist, double radius, double empowerMult, double selfMult)
+        {
+            if (attackerIsCorrupted)
+                return double.IsFinite(selfMult) && selfMult > 1 ? selfMult : 1.0;
+
+            if (nearestCorruptedDist == null || !(radius > 0) || !(nearestCorruptedDist.Value <= radius))
+                return 1.0;
+
+            return double.IsFinite(empowerMult) && empowerMult > 1 ? empowerMult : 1.0;
+        }
+
+        /// <summary>
+        /// A title in front of a name (D6 - pure): "Corrupted Shallows Gorger". The name is kept as it is (an elite
+        /// stays "Corrupted Elite ..."), and a name that already starts with the title is left alone.
+        /// </summary>
+        public static string Titled(string prefix, string name)
+        {
+            var bare = (name ?? "").Trim();
+
+            if (string.IsNullOrWhiteSpace(prefix))
+                return bare;
+
+            var p = prefix.Trim();
+
+            if (bare.StartsWith(p + " ", StringComparison.Ordinal))
+                return bare;
+
+            return string.IsNullOrEmpty(bare) ? p : $"{p} {bare}";
+        }
+
+        /// <summary>
+        /// Where the portals stand (D6 - pure): <paramref name="count"/> points evenly on a ring of
+        /// <paramref name="radius"/>, the first at compass bearing <paramref name="rotationDegrees"/>, each facing
+        /// outward like a target (so a portal's parts can be laid out with <see cref="PlaceTargetDecor"/>).
+        /// </summary>
+        public static List<RingOffset> PortalOffsets(int count, double radius, double rotationDegrees)
+        {
+            var offsets = new List<RingOffset>();
+
+            if (count <= 0 || !double.IsFinite(radius) || radius <= 0)
+                return offsets;
+
+            var rotation = double.IsFinite(rotationDegrees) ? rotationDegrees : 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                var degrees = ((rotation + 360.0 * i / count) % 360.0 + 360.0) % 360.0;
+                var radians = degrees * Math.PI / 180.0;
+
+                offsets.Add(new RingOffset((float)(radius * Math.Sin(radians)), (float)(radius * Math.Cos(radians)), OutwardYaw(degrees)));
+            }
+
+            return offsets;
+        }
+
+        /// <summary>The compass bearings, in radians (0 = north, clockwise), of <see cref="PortalOffsets"/> (D6 - pure).</summary>
+        public static List<double> PortalBearings(int count, double rotationDegrees)
+        {
+            var bearings = new List<double>();
+            var rotation = double.IsFinite(rotationDegrees) ? rotationDegrees : 0;
+
+            for (var i = 0; i < count; i++)
+                bearings.Add((((rotation + 360.0 * i / count) % 360.0 + 360.0) % 360.0) * Math.PI / 180.0);
+
+            return bearings;
+        }
+
+        /// <summary>
+        /// One portal's parts at <paramref name="scale"/> (D6 - pure): dx, dy, dz and scale multiplied, everything else
+        /// kept, so a full-size authored portal (the acid portal theme's rings) shrinks about its own base. Always
+        /// snapped: dz is metres above the ground under the portal.
+        /// </summary>
+        public static List<DecorDef> ScalePortalParts(IReadOnlyList<DecorDef> parts, double scale)
+        {
+            var s = (float)(double.IsFinite(scale) && scale > 0 ? scale : 1.0);
+
+            return (parts ?? new List<DecorDef>()).Where(p => p != null).Select(p => new DecorDef
+            {
+                Wcid = p.Wcid,
+                Dx = p.Dx * s,
+                Dy = p.Dy * s,
+                Dz = p.Dz * s,
+                Scale = (p.Scale > 0 ? p.Scale : 1f) * s,
+                Speed = p.Speed,
+                Inverted = p.Inverted,
+                Yaw = p.Yaw,
+                Pitch = p.Pitch,
+
+                // Always on the ground where the portal stands, which can be well above or below the anchor.
+                Snap = true
+            }).ToList();
+        }
+
         /// <summary>The attacker count an avoided target is given, so it is only ever picked when nothing else is in reach.</summary>
         public const int AvoidedTargetPenalty = 10000;
 
@@ -471,6 +686,13 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static HoldRole[] AssignWaveMix(int waveSize, IReadOnlyList<double> shares, ISet<int> keepIndices, Random rng)
         {
+            return AssignWaveMix(waveSize, shares, null, null, keepIndices, rng);
+        }
+
+        /// <summary><see cref="AssignWaveMix(int, IReadOnlyList{double}, ISet{int}, Random)"/> with per-role minimums and maximums (see the limited WaveMixCounts).</summary>
+        public static HoldRole[] AssignWaveMix(int waveSize, IReadOnlyList<double> shares, IReadOnlyList<int> minimums, IReadOnlyList<int> maximums,
+            ISet<int> keepIndices, Random rng)
+        {
             var roles = new HoldRole[Math.Max(0, waveSize)];
 
             if (waveSize <= 0)
@@ -478,7 +700,7 @@ namespace ACE.Server.WorldEvents
 
             rng ??= new Random();
 
-            var counts = WaveMixCounts(waveSize, shares);
+            var counts = WaveMixCounts(waveSize, shares, minimums, maximums);
             var bag = new List<HoldRole>();
 
             for (var r = 0; r < counts.Length; r++)

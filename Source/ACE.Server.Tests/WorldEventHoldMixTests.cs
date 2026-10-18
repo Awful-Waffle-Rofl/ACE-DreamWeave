@@ -103,36 +103,75 @@ namespace ACE.Server.Tests
 
         // ---- the wave mix -----------------------------------------------------------------------------------
 
-        /// <summary>The default split, in role order Seeker, Breach, Runner, Ranged, Hunter.</summary>
+        /// <summary>The default split, in role order Seeker, Breach, Runner, Ranged, Hunter, Corrupted.</summary>
         private static readonly double[] DefaultMix = new WaveMixDef().Shares;
+
+        private static readonly WaveMixDef DefaultMixDef = new WaveMixDef();
+
+        private static int[] DefaultCounts(int size) =>
+            WorldEventHoldRules.WaveMixCounts(size, DefaultMix, DefaultMixDef.Minimums, DefaultMixDef.Maximums);
 
         [TestMethod]
         public void WaveMix_DefaultSplit_EveryRoleInEveryWave()
         {
-            CollectionAssert.AreEqual(new[] { 0.25, 0.2, 0.2, 0.2, 0.15 }, DefaultMix);
+            CollectionAssert.AreEqual(new[] { 0.2, 0.15, 0.15, 0.3, 0.1, 0.1 }, DefaultMix);
+            Assert.AreEqual(3, DefaultMixDef.MinRanged);
+            Assert.AreEqual(1, DefaultMixDef.MinCorrupted);
+            Assert.AreEqual(2, DefaultMixDef.MaxCorrupted);
 
-            // Solo wave of 11: 3 seekers, 2 breach, 2 runners, 2 ranged, 2 hunters.
-            CollectionAssert.AreEqual(new[] { 3, 2, 2, 2, 2 }, WorldEventHoldRules.WaveMixCounts(11, DefaultMix));
+            // Solo staff wave of 11: 2 seekers, 2 breach, 2 runners, 3 ranged, 1 hunter, 1 corrupted.
+            CollectionAssert.AreEqual(new[] { 2, 2, 2, 3, 1, 1 }, DefaultCounts(11));
 
-            foreach (var size in new[] { 5, 8, 11, 13, 19, 27, 40 })
+            // One counted player (13): 3 / 2 / 2 / 4 / 1 / 1.
+            CollectionAssert.AreEqual(new[] { 3, 2, 2, 4, 1, 1 }, DefaultCounts(13));
+
+            foreach (var size in new[] { 8, 11, 13, 19, 27, 40 })
             {
-                var counts = WorldEventHoldRules.WaveMixCounts(size, DefaultMix);
+                var counts = DefaultCounts(size);
 
                 Assert.AreEqual(size, counts.Sum(), $"wave of {size}: every monster has a role");
                 Assert.IsTrue(counts.All(c => c >= 1), $"wave of {size}: every role is there ({string.Join(",", counts)})");
+                Assert.IsTrue(counts[(int)HoldRole.Ranged] >= 3, $"wave of {size}: at least 3 ranged");
+                Assert.IsTrue(counts[(int)HoldRole.Ranged] >= Math.Floor(size * 0.3), $"wave of {size}: about 30% ranged");
+                Assert.IsTrue(counts[(int)HoldRole.Corrupted] >= 1 && counts[(int)HoldRole.Corrupted] <= 2, $"wave of {size}: 1 or 2 corrupted");
 
-                for (var r = 0; r < counts.Length; r++)
-                    Assert.AreEqual(DefaultMix[r] * size, counts[r], 1.5, $"wave of {size}: role {(HoldRole)r} scales with the wave");
+                foreach (var r in new[] { HoldRole.Breach, HoldRole.Runner, HoldRole.Hunter })
+                    Assert.AreEqual(DefaultMix[(int)r] * size, counts[(int)r], 1.5, $"wave of {size}: role {r} scales with the wave");
             }
 
-            // Too small for every role: still sums, nothing invented.
-            Assert.AreEqual(3, WorldEventHoldRules.WaveMixCounts(3, DefaultMix).Sum());
+            Assert.AreEqual(2, DefaultCounts(40)[(int)HoldRole.Corrupted], "40 monsters: corrupted capped at 2");
+            Assert.AreEqual(1, DefaultCounts(11)[(int)HoldRole.Corrupted]);
+            Assert.AreEqual(2, DefaultCounts(19)[(int)HoldRole.Corrupted], "19 monsters: 2 corrupted");
+
+            // Too small for every minimum: still sums, nothing invented.
+            Assert.AreEqual(3, DefaultCounts(3).Sum());
+            Assert.AreEqual(5, DefaultCounts(5).Sum());
 
             // All shares zero: the whole wave seeks.
-            CollectionAssert.AreEqual(new[] { 6, 0, 0, 0, 0 }, WorldEventHoldRules.WaveMixCounts(6, new double[5]));
+            CollectionAssert.AreEqual(new[] { 6, 0, 0, 0, 0, 0 }, WorldEventHoldRules.WaveMixCounts(6, new double[6]));
 
-            // A role switched off gets nobody.
-            Assert.AreEqual(0, WorldEventHoldRules.WaveMixCounts(11, new[] { 0.5, 0.5, 0, 0, 0 })[(int)HoldRole.Runner]);
+            // A role switched off gets nobody, and its minimum is ignored.
+            var noRanged = new WaveMixDef { Ranged = 0 };
+            Assert.AreEqual(0, WorldEventHoldRules.WaveMixCounts(11, noRanged.Shares, noRanged.Minimums, noRanged.Maximums)[(int)HoldRole.Ranged]);
+            Assert.AreEqual(0, WorldEventHoldRules.WaveMixCounts(11, new[] { 0.5, 0.5, 0, 0, 0, 0 })[(int)HoldRole.Runner]);
+        }
+
+        [TestMethod]
+        public void WaveMix_Limits_MinimumsTakeFromTheBiggestRoles_MaximumsGoToSeekers()
+        {
+            // 10% corrupted of 40 is 4: capped at 2, the 2 extra seek.
+            var free = WorldEventHoldRules.WaveMixCounts(40, DefaultMix);
+            var limited = DefaultCounts(40);
+
+            Assert.AreEqual(4, free[(int)HoldRole.Corrupted]);
+            Assert.AreEqual(2, limited[(int)HoldRole.Corrupted]);
+            Assert.AreEqual(free[(int)HoldRole.Seeker] + 2, limited[(int)HoldRole.Seeker]);
+
+            // A minimum of 3 ranged in a wave of 8 (30% would be 2): taken from the biggest other role.
+            Assert.AreEqual(3, DefaultCounts(8)[(int)HoldRole.Ranged]);
+
+            // A minimum never takes another role below 1.
+            Assert.IsTrue(DefaultCounts(8).All(c => c >= 1));
         }
 
         [TestMethod]
@@ -141,11 +180,12 @@ namespace ACE.Server.Tests
             for (var seed = 0; seed < 50; seed++)
             {
                 var keep = new HashSet<int> { 2, 10 };
-                var roles = WorldEventHoldRules.AssignWaveMix(11, DefaultMix, keep, new Random(seed));
+                var roles = WorldEventHoldRules.AssignWaveMix(11, DefaultMix, DefaultMixDef.Minimums, DefaultMixDef.Maximums, keep, new Random(seed));
 
                 Assert.AreEqual(11, roles.Length);
                 Assert.AreEqual(2, roles.Count(r => r == HoldRole.Breach));
-                Assert.AreEqual(2, roles.Count(r => r == HoldRole.Ranged));
+                Assert.AreEqual(3, roles.Count(r => r == HoldRole.Ranged));
+                Assert.AreEqual(1, roles.Count(r => r == HoldRole.Corrupted));
                 Assert.AreNotEqual(HoldRole.Ranged, roles[2], "an elite keeps its own monster");
                 Assert.AreNotEqual(HoldRole.Ranged, roles[10], "an overflow champion keeps its own monster");
             }
@@ -156,6 +196,7 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(trash, WorldEventHoldRules.ReplaceRangedSlots(trash, new[] { HoldRole.Ranged }, new uint[0], new Random(1)),
                 "no ranged members: the slot keeps its monster");
         }
+
 
         [TestMethod]
         public void WaveMix_Roles_SetTheRightFlags()
@@ -228,7 +269,7 @@ namespace ACE.Server.Tests
             }
 
             Refused(@"""waveMix"": { ""breach"": 2 },", "protect.waveMix");
-            Refused(@"""waveMix"": { ""breach"": 0, ""runners"": 0, ""ranged"": 0, ""hunters"": 0, ""seekers"": 0 },", "protect.waveMix");
+            Refused(@"""waveMix"": { ""breach"": 0, ""runners"": 0, ""ranged"": 0, ""hunters"": 0, ""seekers"": 0, ""corrupted"": 0 },", "protect.waveMix");
             Refused(@"""finaleBossPrefix"": ""Warlord!"",", "protect.finaleBossPrefix");
             Refused(@"""finaleBossLeadSeconds"": 45,", "protect.finaleBossLeadSeconds");
             Refused(@"""bossArrivalEffect"": ""Fireworks"",", "protect.bossArrivalEffect");

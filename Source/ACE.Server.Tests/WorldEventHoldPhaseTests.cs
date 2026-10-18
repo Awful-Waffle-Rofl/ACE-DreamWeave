@@ -215,13 +215,15 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>Seconds until <paramref name="target"/> falls to <paramref name="attackers"/> run monsters each hitting every <paramref name="swingSeconds"/>, through the real scale and cap.</summary>
-        private static double SecondsUntilDown(Creature target, int attackers, double swingSeconds, ProtectDef protect, out double lost, float attackSpeedMult = 1.0f)
+        private static double SecondsUntilDown(Creature target, int attackers, double swingSeconds, ProtectDef protect, out double lost, float attackSpeedMult = 1.0f,
+            bool corrupt = false)
         {
             var monsters = Enumerable.Range(0, attackers).Select(_ =>
             {
                 var m = BuildHoldCreature();
                 m.P_WorldEvent = target.P_WorldEvent;
                 m.WorldEventAttackSpeedMult = attackSpeedMult;
+                m.WorldEventCorrupted = corrupt;
                 return m;
             }).ToList();
 

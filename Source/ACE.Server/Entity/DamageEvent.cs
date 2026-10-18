@@ -568,6 +568,17 @@ namespace ACE.Server.Entity
 
             DamageMitigated = DamageBeforeMitigation - Damage;
 
+            // World Events Hold ward (protect.ward) on a ranged wave monster: missile cut while it is up, melee
+            // shatters it. A no-op for every creature without a ward.
+            if (playerDefender == null && defender.WorldEventWarded)
+            {
+                Damage = defender.ApplyWorldEventWard(CombatType == CombatType.Missile
+                    ? ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Missile
+                    : ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Melee, Damage);
+
+                DamageMitigated = DamageBeforeMitigation - Damage;
+            }
+
             return Damage;
         }
 

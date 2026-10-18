@@ -56,6 +56,9 @@ namespace ACE.Server.WorldEvents
         /// <summary>Finale: the champion's index in the spawn batch, set by the spawner (-1 = none).</summary>
         public int ChampionEntryIndex { get; set; } = -1;
 
+        /// <summary>Mixed: the ranged carry the run's ward (protect.ward).</summary>
+        public bool Warded { get; set; }
+
         /// <summary>Mixed: one role per entry of the batch, in spawn order (null for any other wave).</summary>
         public HoldRole[] Roles { get; set; }
 
@@ -80,7 +83,7 @@ namespace ACE.Server.WorldEvents
                 counts[(int)r]++;
 
             return $"breach={counts[(int)HoldRole.Breach]} runners={counts[(int)HoldRole.Runner]} ranged={counts[(int)HoldRole.Ranged]} " +
-                   $"hunters={counts[(int)HoldRole.Hunter]} seekers={counts[(int)HoldRole.Seeker]}";
+                   $"hunters={counts[(int)HoldRole.Hunter]} seekers={counts[(int)HoldRole.Seeker]} corrupted={counts[(int)HoldRole.Corrupted]}";
         }
 
         public override string ToString()

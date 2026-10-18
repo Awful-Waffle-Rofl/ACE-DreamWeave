@@ -101,7 +101,10 @@ namespace ACE.Server.WorldEvents.Defs
         Ranged,
 
         /// <summary>Ignores the targets and goes for players, a recent healer first.</summary>
-        Hunter
+        Hunter,
+
+        /// <summary>A marked priority target: bigger, glowing, and the wave monsters near it hit the targets harder.</summary>
+        Corrupted
     }
 
     /// <summary>
@@ -114,19 +117,35 @@ namespace ACE.Server.WorldEvents.Defs
     public class WaveMixDef
     {
         [JsonPropertyName("breach")]
-        public double Breach { get; set; } = 0.2;
+        public double Breach { get; set; } = 0.15;
 
         [JsonPropertyName("runners")]
-        public double Runners { get; set; } = 0.2;
+        public double Runners { get; set; } = 0.15;
 
         [JsonPropertyName("ranged")]
-        public double Ranged { get; set; } = 0.2;
+        public double Ranged { get; set; } = 0.3;
 
         [JsonPropertyName("hunters")]
-        public double Hunters { get; set; } = 0.15;
+        public double Hunters { get; set; } = 0.1;
 
         [JsonPropertyName("seekers")]
-        public double Seekers { get; set; } = 0.25;
+        public double Seekers { get; set; } = 0.2;
+
+        /// <summary>Corrupted priority targets (protect.corrupted). Default 0.1, at least <see cref="MinCorrupted"/>, at most <see cref="MaxCorrupted"/>.</summary>
+        [JsonPropertyName("corrupted")]
+        public double Corrupted { get; set; } = 0.1;
+
+        /// <summary>At least this many ranged in every wave big enough to hold them (0 to 20). Default 3.</summary>
+        [JsonPropertyName("minRanged")]
+        public int MinRanged { get; set; } = 3;
+
+        /// <summary>At least this many corrupted per wave when the share is above 0 (0 to 5). Default 1.</summary>
+        [JsonPropertyName("minCorrupted")]
+        public int MinCorrupted { get; set; } = 1;
+
+        /// <summary>At most this many corrupted per wave (0 to 10); the rest go to seekers. Default 2.</summary>
+        [JsonPropertyName("maxCorrupted")]
+        public int MaxCorrupted { get; set; } = 2;
 
         /// <summary>
         /// The wave's World Event announcement, one picked at random, after "Wave n of N: ". Tokens: the usual
@@ -135,9 +154,17 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("announce")]
         public List<string> Announce { get; set; } = new List<string>();
 
-        /// <summary>The shares in role order: Seeker, Breach, Runner, Ranged, Hunter.</summary>
+        /// <summary>The shares in role order: Seeker, Breach, Runner, Ranged, Hunter, Corrupted.</summary>
         [JsonIgnore]
-        public double[] Shares => new[] { Seekers, Breach, Runners, Ranged, Hunters };
+        public double[] Shares => new[] { Seekers, Breach, Runners, Ranged, Hunters, Corrupted };
+
+        /// <summary>The per-role minimums in role order (only Ranged and Corrupted have one, and only while their share is above 0).</summary>
+        [JsonIgnore]
+        public int[] Minimums => new[] { 0, 0, 0, Ranged > 0 ? MinRanged : 0, 0, Corrupted > 0 ? MinCorrupted : 0 };
+
+        /// <summary>The per-role maximums in role order (-1 = none; only Corrupted has one).</summary>
+        [JsonIgnore]
+        public int[] Maximums => new[] { -1, -1, -1, -1, -1, MaxCorrupted };
     }
 
     /// <summary>

@@ -143,6 +143,24 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("waveMix")]
         public WaveMixDef WaveMix { get; set; }
 
+        /// <summary>Optional: the ward on mixed waves' ranged monsters (see WardDef). Absent: no ward.</summary>
+        [JsonPropertyName("ward")]
+        public WardDef Ward { get; set; }
+
+        /// <summary>Optional: how mixed waves' corrupted monsters look and what they do (see CorruptedDef). Absent: defaults.</summary>
+        [JsonPropertyName("corrupted")]
+        public CorruptedDef Corrupted { get; set; }
+
+        /// <summary>Optional: spawn portals around the ring; every wave comes out of them (see PortalsDef). Absent: no portals.</summary>
+        [JsonPropertyName("portals")]
+        public PortalsDef Portals { get; set; }
+
+        /// <summary>The corrupted settings in force (the defaults when the goal sets none).</summary>
+        [JsonIgnore]
+        public CorruptedDef EffectiveCorrupted => Corrupted ?? (defaultCorrupted ??= new CorruptedDef());
+
+        private CorruptedDef defaultCorrupted;
+
         /// <summary>The name the finale boss is given in front of its own ("Warlord"); blank keeps its name. ASCII only.</summary>
         [JsonPropertyName("finaleBossPrefix")]
         public string FinaleBossPrefix { get; set; } = DefaultFinaleBossPrefix;
