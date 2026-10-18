@@ -1561,7 +1561,30 @@ namespace ACE.Server.WorldEvents
 
             lastWaveIndexSpawned = WaveIndex;
 
-            Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
+            if (holdPlan != null && holdPlan.FinaleBossOnly && holdPlan.ChampionWcid != 0)
+            {
+                // The finale boss arrives alone; the rest of the final wave (with no copies of the boss's own
+                // monster) follows after protect.finaleBossLeadSeconds, sent by TickWaves. Until then the
+                // finale counts as not yet placed, so it cannot be won early.
+                Spawner.SpawnWave(this, WavePick.Empty, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
+
+                var escortPlan = new HoldWavePlan
+                {
+                    Type = HoldWaveType.Finale,
+                    WaveNumber = holdPlan.WaveNumber,
+                    FinaleEscort = true,
+                    ReplacedTrash = WorldEventHoldRules.WithoutBossLookalikes(pick.Trash, holdPlan.ChampionWcid, holdWaveRng)
+                };
+
+                var lead = Math.Clamp(Composition?.Goal?.Protect?.FinaleBossLeadSeconds ?? ProtectDef.DefaultFinaleBossLeadSeconds, 0, 30);
+
+                holdFinaleEscort = new HoldFinaleEscort(now + lead, pick, escortPlan, WaveIndex, band, healthMult);
+
+                log.Info($"[WORLDEVENT] run={RunId} hold finale: boss {holdPlan.ChampionName} sent alone; the rest of the wave " +
+                         $"({pick.Trash.Count + pick.Champions.Count}) follows in {lead:0.#} s");
+            }
+            else
+                Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
 
             holdWavesStarted++;
             holdLastWaveStartedAt = now;
@@ -1585,6 +1608,61 @@ namespace ACE.Server.WorldEvents
 
                 AnnounceHoldWave(holdPlan, holdWavesStarted, holdObjective.TargetWaves);
             }
+        }
+
+        /// <summary>The rest of a Hold final wave, waiting for its turn after the boss (see SpawnWave).</summary>
+        private sealed class HoldFinaleEscort
+        {
+            public readonly double At;
+            public readonly WavePick Pick;
+            public readonly HoldWavePlan Plan;
+            public readonly int WaveIndex;
+            public readonly LevelBand Band;
+            public readonly double HealthMult;
+
+            public HoldFinaleEscort(double at, WavePick pick, HoldWavePlan plan, int waveIndex, LevelBand band, double healthMult)
+            {
+                At = at;
+                Pick = pick;
+                Plan = plan;
+                WaveIndex = waveIndex;
+                Band = band;
+                HealthMult = healthMult;
+            }
+        }
+
+        /// <summary>The final wave's escort still to come (null when none is pending). World thread only.</summary>
+        private HoldFinaleEscort holdFinaleEscort;
+
+        /// <summary>True while the final wave's escort has not been sent yet.</summary>
+        internal bool HoldFinaleEscortPending => holdFinaleEscort != null;
+
+        /// <summary>
+        /// Sends the final wave's escort once its lead time is up (TickWaves, ahead of the cadence). Returns true
+        /// when it was sent this tick.
+        /// </summary>
+        private bool TickHoldFinaleEscort(double now)
+        {
+            var escort = holdFinaleEscort;
+
+            if (escort == null || now < escort.At)
+                return false;
+
+            holdFinaleEscort = null;
+
+            try
+            {
+                Spawner.SpawnWave(this, escort.Pick, WaveAnchors(), escort.WaveIndex, escort.Band, escort.HealthMult, escort.Plan);
+
+                log.Info($"[WORLDEVENT] run={RunId} hold finale: the rest of the final wave arrives " +
+                         $"({escort.Pick.Trash.Count + escort.Pick.Champions.Count} monsters)");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold finale escort spawn threw", ex);
+            }
+
+            return true;
         }
 
         /// <summary>Hold: how many monsters the last wave sent (its cadence's "most of the wave is dead" rule reads it).</summary>
@@ -1652,8 +1730,13 @@ namespace ACE.Server.WorldEvents
                 protect.SpecialWaveFromWave, protect.SpecialWaves, holdWaveRng, Request?.ForcedWaveType,
                 holdSpecialWaves, protect.MinSpecialWaves);
 
+            // protect.waveMix: every wave but the finale carries every role at once. --wave-type still forces a
+            // one-type wave, for testing one role on its own.
+            if (protect.WaveMix != null && type != HoldWaveType.Finale && Request?.ForcedWaveType == null)
+                type = HoldWaveType.Mixed;
+
             // A forced type the goal does not define is ignored (the def carries its settings and lines).
-            if (type != HoldWaveType.Normal && protect.SpecialWave(type) == null)
+            if (type != HoldWaveType.Normal && type != HoldWaveType.Mixed && protect.SpecialWave(type) == null)
             {
                 log.Warn($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: type {type} is not in protect.specialWaves; ordinary wave");
                 type = HoldWaveType.Normal;
@@ -1664,6 +1747,10 @@ namespace ACE.Server.WorldEvents
 
             switch (type)
             {
+                case HoldWaveType.Mixed:
+                    BuildMixedPlan(plan, protect, pick, waveNumber);
+                    break;
+
                 case HoldWaveType.Breach:
                 {
                     var targets = Spawner.LiveProtectedCreatures;
@@ -1734,7 +1821,10 @@ namespace ACE.Server.WorldEvents
 
                     var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == champion.Wcid)?.Name;
 
-                    plan.ChampionName = string.IsNullOrWhiteSpace(name) ? null : (champion.Synthetic ? "Champion " + name : name);
+                    // Always a clear title in front ("Warlord ..."), and the boss arrives alone first; the rest of
+                    // the final wave follows after protect.finaleBossLeadSeconds (SpawnWave / TickWaves).
+                    plan.ChampionName = WorldEventHoldRules.FinaleBossName(protect.FinaleBossPrefix, name);
+                    plan.FinaleBossOnly = true;
                     break;
                 }
             }
@@ -1749,6 +1839,63 @@ namespace ACE.Server.WorldEvents
                      (Request?.ForcedWaveType != null ? $" (--wave-type {Request.ForcedWaveType.Value.ToString().ToLowerInvariant()})" : ""));
 
             return plan.Type == HoldWaveType.Normal ? null : plan;
+        }
+
+        /// <summary>
+        /// A mixed wave (protect.waveMix): one role per monster (WorldEventHoldRules.AssignWaveMix), the breach
+        /// squad's target and side, the runner settings and ranged hold distance (from the goal's runners and
+        /// ranged specialWaves entries, else their defaults), and the Ranged slots redrawn from the family's
+        /// ranged and caster members. With no target standing, the breach squad seeks like everyone else; with
+        /// no ranged members, the Ranged slots keep their monster (logged).
+        /// </summary>
+        private void BuildMixedPlan(HoldWavePlan plan, ProtectDef protect, WavePick pick, int waveNumber)
+        {
+            var size = pick.Trash.Count + pick.Champions.Count;
+
+            // An elite or an overflow champion keeps its own monster, so it is never redrawn as Ranged.
+            var keep = new HashSet<int>();
+
+            if (pick.EliteIndex >= 0)
+                keep.Add(pick.EliteIndex);
+
+            for (var i = 0; i < pick.Champions.Count; i++)
+                keep.Add(pick.Trash.Count + i);
+
+            plan.Roles = WorldEventHoldRules.AssignWaveMix(size, protect.WaveMix.Shares, keep, holdWaveRng);
+
+            var targets = Spawner.LiveProtectedCreatures;
+
+            if (targets.Count > 0)
+            {
+                var target = targets[holdWaveRng.Next(targets.Count)];
+                plan.BreachTargetGuid = target.Guid.Full;
+                plan.BreachTargetName = target.Name;
+                plan.BreachSide = SideOfAnchor(target);
+            }
+            else
+            {
+                for (var i = 0; i < plan.Roles.Length; i++)
+                    if (plan.Roles[i] == HoldRole.Breach)
+                        plan.Roles[i] = HoldRole.Seeker;
+            }
+
+            var runners = protect.SpecialWave(HoldWaveType.Runners) ?? new SpecialWaveDef();
+            plan.RunRateMult = (float)Math.Clamp(runners.SpeedMult, 1.0, 3.0);
+            plan.AttackSpeedMult = (float)Math.Clamp(runners.AttackSpeedMult, 1.0, 3.0);
+            plan.HealthMult = Math.Clamp(runners.HealthMult, 0.1, 1.0);
+
+            var ranged = protect.SpecialWave(HoldWaveType.Ranged) ?? new SpecialWaveDef();
+            plan.HoldDistance = (float)Math.Clamp(ranged.HoldDistance, 5.0, 40.0);
+
+            if (plan.Roles.Any(r => r == HoldRole.Ranged))
+            {
+                var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, pick.Band);
+
+                if (pool.Count > 0)
+                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng);
+                else
+                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no ranged or caster members; ranged slots keep their monster");
+            }
         }
 
         /// <summary>Which compass side of the run's anchor <paramref name="target"/> stands on ("east").</summary>
@@ -1774,16 +1921,36 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void AnnounceHoldWave(HoldWavePlan plan, int waveNumber, int targetWaves)
         {
-            if (plan == null)
+            if (plan == null || plan.FinaleEscort)
                 return;
 
-            var def = Composition?.Goal?.Protect?.SpecialWave(plan.Type);
+            var protect = Composition?.Goal?.Protect;
+
+            List<string> Fill(IReadOnlyList<string> pool) =>
+                pool?.Select(l => WorldEventHoldRules.FillWaveTokens(l, plan.BreachSide, plan.ChampionName, plan.BreachTargetName)).ToList();
+
+            // A mixed wave: the goal's waveMix announcement names the breach squad's target, and that target
+            // calls out its side (the breach lines).
+            if (plan.Type == HoldWaveType.Mixed)
+            {
+                var mixAnnounce = ComposeProtectedLine(Fill(protect?.WaveMix?.Announce), null);
+
+                if (!string.IsNullOrEmpty(mixAnnounce))
+                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.HoldPhaseLine(WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, false), mixAnnounce));
+
+                var breachTarget = Spawner.LiveProtectedCreatures.FirstOrDefault(c => c.Guid.Full == plan.BreachTargetGuid);
+                var breachLine = ComposeProtectedLine(Fill(protect?.SpecialWave(HoldWaveType.Breach)?.Lines), null);
+
+                if (breachTarget != null && !string.IsNullOrEmpty(breachLine))
+                    SpeakLocally(breachTarget, breachLine, viaQueue: true);
+
+                return;
+            }
+
+            var def = protect?.SpecialWave(plan.Type);
 
             if (def == null)
                 return;
-
-            List<string> Fill(IReadOnlyList<string> pool) =>
-                pool?.Select(l => WorldEventHoldRules.FillWaveTokens(l, plan.BreachSide, plan.ChampionName)).ToList();
 
             var announce = ComposeProtectedLine(Fill(def.Announce), null);
 
@@ -1853,11 +2020,24 @@ namespace ACE.Server.WorldEvents
         /// <summary>The run's wave counts, for a wave-based Hold objective.</summary>
         internal HoldWaveCounts HoldWaveCounts =>
             new HoldWaveCounts(holdWavesStarted, Spawner.LandedWaveCount, Spawner.ClearedWaveCount, Spawner.LiveCount,
-                HoldResolvedWaves(holdWavesStarted, Spawner.ResolvedWaveCount, holdTickNow, holdLastWaveStartedAt, HoldWaveResolveGraceSeconds));
+                HoldResolvedWaves(holdWavesStarted, Spawner.ResolvedWaveCount, holdTickNow, holdLastWaveStartedAt, HoldWaveResolveGraceSeconds,
+                    HoldFinaleEscortPending));
 
         /// <summary>
         /// How many started waves count as resolved (D6 - pure): what the spawner reported, or every started
         /// wave once <paramref name="graceSeconds"/> have passed since the last one started.
+        /// </summary>
+        public static int HoldResolvedWaves(int started, int spawnerResolved, double now, double lastStartedAt, double graceSeconds,
+            bool finaleEscortPending)
+        {
+            var resolved = HoldResolvedWaves(started, spawnerResolved, now, lastStartedAt, graceSeconds);
+
+            // The boss has landed but the rest of the final wave is still to come: the finale is not placed yet.
+            return finaleEscortPending ? Math.Min(resolved, Math.Max(0, started - 1)) : resolved;
+        }
+
+        /// <summary>
+        /// <see cref="HoldResolvedWaves(int, int, double, double, double, bool)"/> with no finale escort pending.
         /// </summary>
         public static int HoldResolvedWaves(int started, int spawnerResolved, double now, double lastStartedAt, double graceSeconds)
         {
@@ -2796,13 +2976,13 @@ namespace ACE.Server.WorldEvents
                 if (Composition?.Goal?.TypeKind != GoalType.Hold || protect == null)
                     return;
 
-                if (!WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out var script) || script == ACE.Entity.Enum.PlayScript.Invalid)
-                    return;
+                WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out var pulse);
+                WorldEventHoldRules.TryParseBossEffect(protect.BossArrivalEffect, out var arrival);
 
-                if (now - holdBossEffectAt < Math.Max(2.0, protect.BossEffectSeconds))
-                    return;
+                var pulseDue = pulse != ACE.Entity.Enum.PlayScript.Invalid && now - holdBossEffectAt >= Math.Max(1.0, protect.BossEffectSeconds);
 
-                holdBossEffectAt = now;
+                if (pulseDue)
+                    holdBossEffectAt = now;
 
                 foreach (var boss in Spawner.LiveWaveCreatures)
                 {
@@ -2813,6 +2993,16 @@ namespace ACE.Server.WorldEvents
 
                     if (landblock == null)
                         continue;
+
+                    // The arrival effect once per boss, the first tick it is in the world; the pulse after that.
+                    var firstSight = holdBossArrivals.Add(boss.Guid.Full);
+                    var script = firstSight && arrival != ACE.Entity.Enum.PlayScript.Invalid ? arrival : (pulseDue ? pulse : ACE.Entity.Enum.PlayScript.Invalid);
+
+                    if (script == ACE.Entity.Enum.PlayScript.Invalid)
+                        continue;
+
+                    if (firstSight)
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale boss {boss.Name} 0x{boss.Guid.Full:X8} has arrived (effect {script})");
 
                     var b = boss;
 
@@ -2828,6 +3018,9 @@ namespace ACE.Server.WorldEvents
                 log.Error($"[WORLDEVENT] run={RunId} boss effect threw", ex);
             }
         }
+
+        /// <summary>Finale bosses whose arrival effect has played. World thread only.</summary>
+        private readonly HashSet<uint> holdBossArrivals = new HashSet<uint>();
 
         /// <summary>How many cleared waves the between-waves heal has already paid out for. World thread only.</summary>
         private int holdHealedForClears;
@@ -3301,6 +3494,10 @@ namespace ACE.Server.WorldEvents
         private void TickWaves(double now)
         {
             if (AnchorLandblock == null)
+                return;
+
+            // Hold finale: the rest of the final wave, once the boss has stood alone for its lead time.
+            if (TickHoldFinaleEscort(now))
                 return;
 
             if (holdFirstWavePending)

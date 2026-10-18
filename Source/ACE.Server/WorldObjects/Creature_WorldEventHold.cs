@@ -36,6 +36,22 @@ namespace ACE.Server.WorldObjects
         /// <summary>Runtime-only, Hold breach waves: the one target this seeker must go for while it stands (0 = none).</summary>
         public uint WorldEventSeekForcedGuid { get; set; }
 
+        /// <summary>
+        /// Runtime-only, Hold mixed waves: this seeker prefers any other target over this one (the breach squad's),
+        /// so the rest of the wave spreads over the other targets. Taken only when nothing else stands. 0 = none.
+        /// </summary>
+        public uint WorldEventSeekAvoidGuid { get; set; }
+
+        /// <summary>
+        /// Runtime-only, Hold protect.showHealthBar: the client is told this protected target is attackable, so it
+        /// draws a health bar (and a red name). Server-side Attackable stays false and every player and pet attack
+        /// is still refused (Player.CanDamage, CheckPKStatusVsTarget, Creature.CanDamage).
+        /// </summary>
+        public bool WorldEventShowHealthBar { get; set; }
+
+        /// <summary>The Attackable bit the CLIENT is sent: true for a protected target that shows its health bar.</summary>
+        public override bool ClientAttackable => base.ClientAttackable || (WorldEventProtected && WorldEventShowHealthBar);
+
         /// <summary>Runtime-only, Hold finale champion: this seeker always picks the healthiest target.</summary>
         public bool WorldEventSeekHealthiest { get; set; }
 
@@ -164,7 +180,11 @@ namespace ACE.Server.WorldObjects
             // ties, so the wave splits across the targets and the defenders have to split up too.
             if (best == null)
             {
-                var index = ACE.Server.WorldEvents.WorldEventHoldRules.PickLeastAttacked(attackerCounts, distances, MaxChaseRangeSq);
+                // A mixed wave's seekers, runners and ranged leave the breach squad's target alone while another stands.
+                var counts = ACE.Server.WorldEvents.WorldEventHoldRules.AvoidTarget(attackerCounts,
+                    usable.ConvertAll(t => t.Guid.Full), WorldEventSeekAvoidGuid);
+
+                var index = ACE.Server.WorldEvents.WorldEventHoldRules.PickLeastAttacked(counts, distances, MaxChaseRangeSq);
 
                 if (index < 0)
                     return false;

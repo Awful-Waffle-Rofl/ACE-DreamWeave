@@ -56,6 +56,33 @@ namespace ACE.Server.WorldEvents
         /// <summary>Finale: the champion's index in the spawn batch, set by the spawner (-1 = none).</summary>
         public int ChampionEntryIndex { get; set; } = -1;
 
+        /// <summary>Mixed: one role per entry of the batch, in spawn order (null for any other wave).</summary>
+        public HoldRole[] Roles { get; set; }
+
+        /// <summary>Mixed / breach: the breach target's name, for the announcement.</summary>
+        public string BreachTargetName { get; set; }
+
+        /// <summary>Finale: this batch is the boss alone; the rest of the wave follows after the lead time.</summary>
+        public bool FinaleBossOnly { get; set; }
+
+        /// <summary>Finale: this batch is the rest of the final wave, sent after the boss.</summary>
+        public bool FinaleEscort { get; set; }
+
+        /// <summary>Mixed: how many of each role, for the log ("breach=2 runners=2 ...").</summary>
+        public string RoleSummary()
+        {
+            if (Roles == null)
+                return "";
+
+            var counts = new int[System.Enum.GetValues(typeof(HoldRole)).Length];
+
+            foreach (var r in Roles)
+                counts[(int)r]++;
+
+            return $"breach={counts[(int)HoldRole.Breach]} runners={counts[(int)HoldRole.Runner]} ranged={counts[(int)HoldRole.Ranged]} " +
+                   $"hunters={counts[(int)HoldRole.Hunter]} seekers={counts[(int)HoldRole.Seeker]}";
+        }
+
         public override string ToString()
         {
             switch (Type)
@@ -65,6 +92,8 @@ namespace ACE.Server.WorldEvents
                 case HoldWaveType.Ranged: return $"type=ranged replaced={(ReplacedTrash == null ? "none" : ReplacedTrash.Count.ToString())} holdDistance={HoldDistance:0.#}";
                 case HoldWaveType.Hunters: return $"type=hunters hunters={Hunters}";
                 case HoldWaveType.Finale: return $"type=finale champion={(ChampionWcid == 0 ? "none" : $"{ChampionWcid} {ChampionName}")}";
+                case HoldWaveType.Mixed: return $"type=mixed breach=0x{BreachTargetGuid:X8} ({BreachTargetName}) side={BreachSide} {RoleSummary()} " +
+                                                $"runnerSpeed=x{RunRateMult:F2} runnerAttack=x{AttackSpeedMult:F2} runnerHealth=x{HealthMult:F2} holdDistance={HoldDistance:0.#}";
                 default: return "type=normal";
             }
         }

@@ -375,6 +375,225 @@ namespace ACE.Server.WorldEvents
             return targetDist > holdDistance + RangedHoldSlack;
         }
 
+        /// <summary>
+        /// How many of a <paramref name="waveSize"/> wave take each role (D6 - pure), from protect.waveMix's shares in
+        /// role order (Seeker, Breach, Runner, Ranged, Hunter). Largest-remainder rounding, so the counts always
+        /// sum to the wave. When the wave has room for every role with a share above 0, each gets at least one
+        /// (taken from the biggest role). Shares are normalised; all zero puts the whole wave on Seeker.
+        /// </summary>
+        public static int[] WaveMixCounts(int waveSize, IReadOnlyList<double> shares)
+        {
+            var roles = Enum.GetValues(typeof(HoldRole)).Length;
+            var counts = new int[roles];
+
+            if (waveSize <= 0)
+                return counts;
+
+            var clean = new double[roles];
+
+            for (var i = 0; i < roles && shares != null && i < shares.Count; i++)
+                clean[i] = double.IsFinite(shares[i]) && shares[i] > 0 ? shares[i] : 0;
+
+            var total = clean.Sum();
+
+            if (total <= 0)
+            {
+                counts[(int)HoldRole.Seeker] = waveSize;
+                return counts;
+            }
+
+            var exact = clean.Select(s => s / total * waveSize).ToArray();
+
+            for (var i = 0; i < roles; i++)
+                counts[i] = (int)Math.Floor(exact[i]);
+
+            var left = waveSize - counts.Sum();
+
+            foreach (var i in Enumerable.Range(0, roles).OrderByDescending(i => exact[i] - counts[i]).ThenBy(i => i))
+            {
+                if (left <= 0)
+                    break;
+
+                counts[i]++;
+                left--;
+            }
+
+            var wanted = Enumerable.Range(0, roles).Where(i => clean[i] > 0).ToList();
+
+            if (waveSize >= wanted.Count)
+            {
+                foreach (var i in wanted)
+                {
+                    if (counts[i] > 0)
+                        continue;
+
+                    var donor = Enumerable.Range(0, roles).OrderByDescending(j => counts[j]).First();
+
+                    if (counts[donor] <= 1)
+                        break;
+
+                    counts[donor]--;
+                    counts[i]++;
+                }
+            }
+
+            return counts;
+        }
+
+        /// <summary>The attacker count an avoided target is given, so it is only ever picked when nothing else is in reach.</summary>
+        public const int AvoidedTargetPenalty = 10000;
+
+        /// <summary>
+        /// Attacker counts with <paramref name="avoidGuid"/>'s target made a last resort (D6 - pure): its count is
+        /// raised by <see cref="AvoidedTargetPenalty"/> for the least-attacked pick. Unchanged when the guid is 0
+        /// or not among the targets. The lists are parallel.
+        /// </summary>
+        public static List<int> AvoidTarget(IReadOnlyList<int> attackers, IReadOnlyList<uint> guids, uint avoidGuid)
+        {
+            var result = attackers?.ToList() ?? new List<int>();
+
+            if (avoidGuid == 0 || guids == null)
+                return result;
+
+            for (var i = 0; i < result.Count && i < guids.Count; i++)
+            {
+                if (guids[i] == avoidGuid)
+                    result[i] += AvoidedTargetPenalty;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// One role per monster of a mixed wave (D6 - pure): <see cref="WaveMixCounts"/>, laid over the wave in a
+        /// random order. Ranged never lands on a <paramref name="keepIndices"/> entry (an elite or an overflow
+        /// champion, which keep their own monster), so those take another role, swapped with a plain slot.
+        /// </summary>
+        public static HoldRole[] AssignWaveMix(int waveSize, IReadOnlyList<double> shares, ISet<int> keepIndices, Random rng)
+        {
+            var roles = new HoldRole[Math.Max(0, waveSize)];
+
+            if (waveSize <= 0)
+                return roles;
+
+            rng ??= new Random();
+
+            var counts = WaveMixCounts(waveSize, shares);
+            var bag = new List<HoldRole>();
+
+            for (var r = 0; r < counts.Length; r++)
+                for (var k = 0; k < counts[r]; k++)
+                    bag.Add((HoldRole)r);
+
+            // Shuffle, so roles spread over the monster types the pick drew.
+            for (var i = bag.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (bag[i], bag[j]) = (bag[j], bag[i]);
+            }
+
+            for (var i = 0; i < waveSize; i++)
+                roles[i] = bag[i];
+
+            if (keepIndices != null)
+            {
+                foreach (var kept in keepIndices)
+                {
+                    if (kept < 0 || kept >= waveSize || roles[kept] != HoldRole.Ranged)
+                        continue;
+
+                    var swap = Enumerable.Range(0, waveSize).FirstOrDefault(i => !keepIndices.Contains(i) && roles[i] != HoldRole.Ranged, -1);
+
+                    if (swap >= 0)
+                        (roles[kept], roles[swap]) = (roles[swap], roles[kept]);
+                    else
+                        roles[kept] = HoldRole.Seeker;
+                }
+            }
+
+            return roles;
+        }
+
+        /// <summary>
+        /// A mixed wave's trash with its Ranged slots redrawn from the family's ranged and caster members (D6 -
+        /// pure). Other slots, and every slot when the pool is empty, keep their monster.
+        /// </summary>
+        public static List<uint> ReplaceRangedSlots(IReadOnlyList<uint> trash, IReadOnlyList<HoldRole> roles, IReadOnlyList<uint> rangedPool, Random rng)
+        {
+            var result = trash?.ToList() ?? new List<uint>();
+
+            if (rangedPool == null || rangedPool.Count == 0 || roles == null)
+                return result;
+
+            rng ??= new Random();
+
+            for (var i = 0; i < result.Count && i < roles.Count; i++)
+            {
+                if (roles[i] == HoldRole.Ranged)
+                    result[i] = rangedPool[rng.Next(rangedPool.Count)];
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// The final wave without copies of its boss (D6 - pure): every <paramref name="bossWcid"/> in
+        /// <paramref name="trash"/> is swapped for another monster of the same wave, so the boss is the only one of
+        /// its kind. Unchanged when the wave has nothing else to swap in.
+        /// </summary>
+        public static List<uint> WithoutBossLookalikes(IReadOnlyList<uint> trash, uint bossWcid, Random rng)
+        {
+            var result = trash?.ToList() ?? new List<uint>();
+            var others = result.Where(w => w != bossWcid).ToList();
+
+            if (bossWcid == 0 || others.Count == 0)
+                return result;
+
+            rng ??= new Random();
+
+            for (var i = 0; i < result.Count; i++)
+            {
+                if (result[i] == bossWcid)
+                    result[i] = others[rng.Next(others.Count)];
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// The finale boss's display name (D6 - pure): <paramref name="prefix"/> in front of its own name, with any
+        /// "Champion " or "Elite " a promotion put there taken off first ("Warlord Apostate Shock Trooper").
+        /// </summary>
+        public static string FinaleBossName(string prefix, string name)
+        {
+            var bare = (name ?? "").Trim();
+
+            foreach (var promoted in new[] { "Champion ", "Elite " })
+            {
+                if (bare.StartsWith(promoted, StringComparison.Ordinal))
+                    bare = bare.Substring(promoted.Length);
+            }
+
+            if (string.IsNullOrWhiteSpace(prefix))
+                return string.IsNullOrEmpty(bare) ? "the champion" : bare;
+
+            var p = prefix.Trim();
+
+            if (bare.StartsWith(p + " ", StringComparison.Ordinal))
+                return bare;
+
+            return string.IsNullOrEmpty(bare) ? p : $"{p} {bare}";
+        }
+
+        /// <summary>protect.finaleBossPrefix: blank, or letters and spaces up to 20 characters (D6 - pure).</summary>
+        public static bool IsValidBossPrefix(string prefix)
+        {
+            if (string.IsNullOrEmpty(prefix))
+                return true;
+
+            return prefix.Length <= 20 && prefix.All(c => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ');
+        }
+
         /// <summary>The label a phase broadcast starts with (D6 - pure): "Final wave" for the finale, else "Wave 4 of 7".</summary>
         public static string PhaseLabel(int waveNumber, int targetWaves, bool isFinale)
         {
@@ -443,7 +662,7 @@ namespace ACE.Server.WorldEvents
         /// <summary>Parses a special wave type name (case-insensitive). False for anything unknown or "normal".</summary>
         public static bool TryParseWaveType(string name, out HoldWaveType type)
         {
-            if (!string.IsNullOrWhiteSpace(name) && name.Trim().All(char.IsLetter) && Enum.TryParse(name.Trim(), true, out type) && type != HoldWaveType.Normal
+            if (!string.IsNullOrWhiteSpace(name) && name.Trim().All(char.IsLetter) && Enum.TryParse(name.Trim(), true, out type) && type != HoldWaveType.Normal && type != HoldWaveType.Mixed
                 && Enum.IsDefined(typeof(HoldWaveType), type))
                 return true;
 
@@ -612,6 +831,15 @@ namespace ACE.Server.WorldEvents
             return template
                 .Replace("{side}", string.IsNullOrWhiteSpace(side) ? "nearest" : side)
                 .Replace("{champion}", string.IsNullOrWhiteSpace(champion) ? "Their champion" : champion);
+        }
+
+        /// <summary><see cref="FillWaveTokens(string, string, string)"/> plus {target}: the breach squad's target by name ("one of us" when unknown).</summary>
+        public static string FillWaveTokens(string template, string side, string champion, string target)
+        {
+            if (string.IsNullOrEmpty(template))
+                return template;
+
+            return FillWaveTokens(template.Replace("{target}", string.IsNullOrWhiteSpace(target) ? "one of us" : target), side, champion);
         }
 
         /// <summary>

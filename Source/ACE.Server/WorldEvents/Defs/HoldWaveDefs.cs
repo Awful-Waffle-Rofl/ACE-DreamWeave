@@ -22,7 +22,10 @@ namespace ACE.Server.WorldEvents.Defs
         Hunters,
 
         /// <summary>The last counted wave: a family champion leads it, going for the healthiest target.</summary>
-        Finale
+        Finale,
+
+        /// <summary>A mixed wave (protect.waveMix): every role at once. Never rolled or forced; set by the wave mix.</summary>
+        Mixed
     }
 
     /// <summary>
@@ -80,6 +83,61 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>Parsed from <see cref="Type"/> at load. Never read from JSON.</summary>
         [JsonIgnore]
         public HoldWaveType TypeKind { get; set; }
+    }
+
+    /// <summary>The job one monster has in a mixed Hold wave (protect.waveMix).</summary>
+    public enum HoldRole
+    {
+        /// <summary>Goes for the targets, spread across the ones the breach squad is not on.</summary>
+        Seeker,
+
+        /// <summary>The breach squad: every one of them goes for the same target.</summary>
+        Breach,
+
+        /// <summary>Faster movement and attacks, lighter; always goes for the targets.</summary>
+        Runner,
+
+        /// <summary>A ranged or caster member that stops at the hold distance and attacks a target from there.</summary>
+        Ranged,
+
+        /// <summary>Ignores the targets and goes for players, a recent healer first.</summary>
+        Hunter
+    }
+
+    /// <summary>
+    /// protect.waveMix: every wave but the finale carries every role at once, each a share of the wave (they are
+    /// normalised to sum to 1, and every role with a share above 0 gets at least one monster once the wave has
+    /// room for all of them). The per-role settings (runner speeds and health, ranged hold distance, breach and
+    /// hunter lines) come from the matching protect.specialWaves entries when present. Player-facing text is
+    /// ASCII only.
+    /// </summary>
+    public class WaveMixDef
+    {
+        [JsonPropertyName("breach")]
+        public double Breach { get; set; } = 0.2;
+
+        [JsonPropertyName("runners")]
+        public double Runners { get; set; } = 0.2;
+
+        [JsonPropertyName("ranged")]
+        public double Ranged { get; set; } = 0.2;
+
+        [JsonPropertyName("hunters")]
+        public double Hunters { get; set; } = 0.15;
+
+        [JsonPropertyName("seekers")]
+        public double Seekers { get; set; } = 0.25;
+
+        /// <summary>
+        /// The wave's World Event announcement, one picked at random, after "Wave n of N: ". Tokens: the usual
+        /// ones plus {target} (the breach squad's target by name) and {side} (its side of the anchor).
+        /// </summary>
+        [JsonPropertyName("announce")]
+        public List<string> Announce { get; set; } = new List<string>();
+
+        /// <summary>The shares in role order: Seeker, Breach, Runner, Ranged, Hunter.</summary>
+        [JsonIgnore]
+        public double[] Shares => new[] { Seekers, Breach, Runners, Ranged, Hunters };
     }
 
     /// <summary>

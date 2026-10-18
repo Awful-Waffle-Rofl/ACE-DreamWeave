@@ -712,17 +712,37 @@ namespace ACE.Server.WorldEvents
             if (protect.MinSpecialWaves < 0 || protect.MinSpecialWaves > ProtectDef.MaxHoldWaves)
                 return $"has an invalid protect.minSpecialWaves (0 to {ProtectDef.MaxHoldWaves})";
 
-            if (!IsFinite(protect.FinaleBossScale) || protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2)
-                return "has an invalid protect.finaleBossScale (1 to 2)";
+            if (!IsFinite(protect.FinaleBossScale) || protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2.5)
+                return "has an invalid protect.finaleBossScale (1 to 2.5)";
 
             if (!IsFinite(protect.FinaleBossHealthMult) || protect.FinaleBossHealthMult < 1 || protect.FinaleBossHealthMult > 10)
                 return "has an invalid protect.finaleBossHealthMult (1 to 10)";
 
-            if (!IsFinite(protect.BossEffectSeconds) || protect.BossEffectSeconds < 2 || protect.BossEffectSeconds > 60)
-                return "has an invalid protect.bossEffectSeconds (2 to 60)";
+            if (!IsFinite(protect.BossEffectSeconds) || protect.BossEffectSeconds < 1 || protect.BossEffectSeconds > 60)
+                return "has an invalid protect.bossEffectSeconds (1 to 60)";
 
             if (!WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out _))
                 return "has an unknown protect.bossEffect (a PlayScript name such as ShieldUpRed, or none)";
+
+            if (!WorldEventHoldRules.TryParseBossEffect(protect.BossArrivalEffect, out _))
+                return "has an unknown protect.bossArrivalEffect (a PlayScript name such as LevelUp, or none)";
+
+            if (!IsFinite(protect.FinaleBossLeadSeconds) || protect.FinaleBossLeadSeconds < 0 || protect.FinaleBossLeadSeconds > 30)
+                return "has an invalid protect.finaleBossLeadSeconds (0 to 30)";
+
+            if (!WorldEventHoldRules.IsValidBossPrefix(protect.FinaleBossPrefix))
+                return "has an invalid protect.finaleBossPrefix (letters and spaces, up to 20)";
+
+            if (protect.WaveMix != null)
+            {
+                var shares = protect.WaveMix.Shares;
+
+                if (shares.Any(s => !IsFinite(s) || s < 0 || s > 1) || shares.Sum() <= 0)
+                    return "has an invalid protect.waveMix (each share 0 to 1, at least one above 0)";
+
+                if (!protect.IsWaveBased)
+                    return "has protect.waveMix without protect.waves";
+            }
 
             return null;
         }
@@ -738,6 +758,9 @@ namespace ACE.Server.WorldEvents
         {
             if (protect == null)
                 return;
+
+            if (protect.WaveMix != null)
+                protect.WaveMix.Announce = RepairLinePool(goalId, "waveMix.announce", protect.WaveMix.Announce, diagnostics);
 
             if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
                 diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +

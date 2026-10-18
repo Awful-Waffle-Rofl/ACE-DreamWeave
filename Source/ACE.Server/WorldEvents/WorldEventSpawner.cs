@@ -1932,7 +1932,12 @@ namespace ACE.Server.WorldEvents
                 // Hold special waves (HoldWavePlan). The finale champion is always a seeker that goes for the
                 // healthiest target; a breach sends every seeker at one target; hunters are taken from the
                 // NON-seekers, so a hunter wave still sends its seeker share at the targets.
-                if (plan != null)
+                if (plan != null && plan.Roles != null && entryIndex < plan.Roles.Length && entryIndex != plan.ChampionEntryIndex)
+                {
+                    // A mixed wave (protect.waveMix): this monster's own role.
+                    ApplyHoldRole(creature, plan.Roles[entryIndex], plan);
+                }
+                else if (plan != null)
                 {
                     if (entryIndex == plan.ChampionEntryIndex)
                     {
@@ -2010,7 +2015,8 @@ namespace ACE.Server.WorldEvents
                 ApplyHealthMultiplier(evt, creature, healthMult);
 
                 // Hold runner waves: lighter as well as faster.
-                if (plan != null && plan.Type == HoldWaveType.Runners && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex)
+                if (plan != null && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex
+                    && (plan.Type == HoldWaveType.Runners || (plan.Roles != null && entryIndex < plan.Roles.Length && plan.Roles[entryIndex] == HoldRole.Runner)))
                     ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * plan.HealthMult)));
 
                 // WP-24: a synthetic elite/champion (a role-0 member promoted because the band had no real
@@ -2022,7 +2028,7 @@ namespace ACE.Server.WorldEvents
                 // Hold finale boss: bigger and tougher than any wave monster, so the last phase reads as a boss
                 // fight (protect.finaleBossScale / finaleBossHealthMult). Its effect is replayed by WorldEvent.
                 if (plan != null && entryIndex == plan.ChampionEntryIndex)
-                    ApplyFinaleBoss(evt, creature);
+                    ApplyFinaleBoss(evt, creature, plan.ChampionName);
 
                 candidates.Add(candidate);
             }
@@ -2400,6 +2406,10 @@ namespace ACE.Server.WorldEvents
 
                 ApplyProtectedAppearance(creature);
                 creature.WorldEventProtected = true;
+
+                // protect.showHealthBar (default true): sent to the client as attackable so it draws a health bar.
+                // Server-side Attackable stays false; nothing a player or pet does can damage it.
+                creature.WorldEventShowHealthBar = protect?.ShowHealthBar ?? true;
             }
 
             ApplyBossTether(evt, creature, kind);
@@ -2523,10 +2533,50 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// One monster's role in a mixed Hold wave (D6 - runtime flags only, before EnterWorld):
+        ///   * Breach: a seeker locked on the breach target;
+        ///   * Runner: a seeker with the plan's run and attack speed;
+        ///   * Ranged: a seeker that holds the plan's distance;
+        ///   * Seeker: a seeker that prefers the targets the breach squad is not on;
+        ///   * Hunter: no seeker; goes for players, recent healers first.
+        /// Runners, ranged and seekers all avoid the breach target while another target stands.
+        /// </summary>
+        public static void ApplyHoldRole(Creature creature, HoldRole role, HoldWavePlan plan)
+        {
+            if (creature == null || plan == null)
+                return;
+
+            creature.WorldEventSeeker = role != HoldRole.Hunter;
+            creature.WorldEventHunter = role == HoldRole.Hunter;
+
+            switch (role)
+            {
+                case HoldRole.Breach:
+                    creature.WorldEventSeekForcedGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Runner:
+                    creature.WorldEventRunRateMult = plan.RunRateMult;
+                    creature.WorldEventAttackSpeedMult = plan.AttackSpeedMult;
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Ranged:
+                    creature.WorldEventHoldDistance = plan.HoldDistance;
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Seeker:
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+            }
+        }
+
+        /// <summary>
         /// A Hold finale boss, before EnterWorld: its size times protect.finaleBossScale (its held items too)
         /// and its health times protect.finaleBossHealthMult. Logged. Never throws.
         /// </summary>
-        private void ApplyFinaleBoss(WorldEvent evt, Creature creature)
+        private void ApplyFinaleBoss(WorldEvent evt, Creature creature, string bossName)
         {
             var protect = evt?.Composition?.Goal?.Protect;
 
@@ -2535,7 +2585,10 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var scale = (float)Math.Clamp(protect.FinaleBossScale, 1.0, 2.0);
+                var scale = (float)Math.Clamp(protect.FinaleBossScale, 1.0, 2.5);
+
+                if (!string.IsNullOrWhiteSpace(bossName))
+                    creature.Name = bossName;
 
                 if (scale != 1.0f)
                     creature.ApplyRuntimeScaleMultiplier(scale);

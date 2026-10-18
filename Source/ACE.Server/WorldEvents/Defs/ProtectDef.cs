@@ -118,10 +118,42 @@ namespace ACE.Server.WorldEvents.Defs
 
         public const double DefaultNextWaveAliveShare = 0.25;
         public const double DefaultMinWaveGapSeconds = 8;
-        public const double DefaultFinaleBossScale = 1.25;
-        public const double DefaultFinaleBossHealthMult = 2.0;
+        public const double DefaultFinaleBossScale = 1.75;
+        public const double DefaultFinaleBossHealthMult = 3.0;
         public const string DefaultBossEffect = "ShieldUpRed";
-        public const double DefaultBossEffectSeconds = 6;
+        public const double DefaultBossEffectSeconds = 3;
+        public const string DefaultBossArrivalEffect = "LevelUp";
+        public const string DefaultFinaleBossPrefix = "Warlord";
+        public const double DefaultFinaleBossLeadSeconds = 5;
+
+        /// <summary>
+        /// Whether players see a health bar when they select a target. The client only draws one for a creature it
+        /// is told is attackable, which also makes its name red, so true (the default) sends targets to the client
+        /// as attackable. The server still refuses every player and pet attack on them either way. False keeps the
+        /// friendly (non-red) name with no bar.
+        /// </summary>
+        [JsonPropertyName("showHealthBar")]
+        public bool ShowHealthBar { get; set; } = true;
+
+        /// <summary>
+        /// Optional, wave-based holds: every wave except the finale carries all the roles together (breach squad,
+        /// runners, ranged, hunters, seekers), in these shares. When set, the one-type-per-wave rolls
+        /// (specialWaveChance, minSpecialWaves) are not used; --wave-type still forces a one-type wave for testing.
+        /// </summary>
+        [JsonPropertyName("waveMix")]
+        public WaveMixDef WaveMix { get; set; }
+
+        /// <summary>The name the finale boss is given in front of its own ("Warlord"); blank keeps its name. ASCII only.</summary>
+        [JsonPropertyName("finaleBossPrefix")]
+        public string FinaleBossPrefix { get; set; } = DefaultFinaleBossPrefix;
+
+        /// <summary>The effect played once when the finale boss arrives (a PlayScript name, or none). Default LevelUp.</summary>
+        [JsonPropertyName("bossArrivalEffect")]
+        public string BossArrivalEffect { get; set; } = DefaultBossArrivalEffect;
+
+        /// <summary>Seconds the finale boss stands alone before the rest of the final wave arrives (0 to 30). Default 5.</summary>
+        [JsonPropertyName("finaleBossLeadSeconds")]
+        public double FinaleBossLeadSeconds { get; set; } = DefaultFinaleBossLeadSeconds;
 
         /// <summary>
         /// Optional: how many monsters each wave has (base / perParticipant / cap), replacing the source theme's
@@ -164,11 +196,11 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("minSpecialWaves")]
         public int MinSpecialWaves { get; set; }
 
-        /// <summary>The finale boss's size multiplier (1 to 2). Default 1.25.</summary>
+        /// <summary>The finale boss's size multiplier (1 to 2.5). Default 1.75.</summary>
         [JsonPropertyName("finaleBossScale")]
         public double FinaleBossScale { get; set; } = DefaultFinaleBossScale;
 
-        /// <summary>The finale boss's extra health multiplier (1 to 10), on top of its normal health. Default 2.</summary>
+        /// <summary>The finale boss's extra health multiplier (1 to 10), on top of its normal health. Default 3.</summary>
         [JsonPropertyName("finaleBossHealthMult")]
         public double FinaleBossHealthMult { get; set; } = DefaultFinaleBossHealthMult;
 
@@ -179,7 +211,7 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("bossEffect")]
         public string BossEffect { get; set; } = DefaultBossEffect;
 
-        /// <summary>How often the boss effect replays, in seconds (2 to 60). Default 6.</summary>
+        /// <summary>How often the boss effect replays, in seconds (1 to 60). Default 3.</summary>
         [JsonPropertyName("bossEffectSeconds")]
         public double BossEffectSeconds { get; set; } = DefaultBossEffectSeconds;
 
