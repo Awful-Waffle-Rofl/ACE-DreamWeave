@@ -385,6 +385,36 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
+        /// The cached value of a string property, without ever reading the database. At runtime every registered key is
+        /// cached from boot on (defaults first, then the database rows), so this sees every live value; a unit test has
+        /// no cache, and gets false. Used by hot per-tick readers (World Events Hold settings).
+        /// </summary>
+        internal static bool TryGetCachedString(string key, out string value)
+        {
+            if (key != null && CachedStringSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = null;
+            return false;
+        }
+
+        /// <summary>The cached value of a bool property, without reading the database. See <see cref="TryGetCachedString"/>.</summary>
+        internal static bool TryGetCachedBool(string key, out bool value)
+        {
+            if (key != null && CachedBooleanSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = false;
+            return false;
+        }
+
+        /// <summary>
         /// Modifies a string value in the cache and marks it for being synced on the next cycle
         /// </summary>
         /// <param name="key">The string key for the property</param>
@@ -928,6 +958,20 @@ namespace ACE.Server.Managers
             return new ReadOnlyDictionary<string, Property<double>>(all);
         }
 
+        /// <summary>
+        /// Adds the World Events Hold settings (world_events_hold_* and world_events_chain_*, all "" = not set) to the string
+        /// defaults. They are generated from HoldSettings' registry, never typed per key, so the key list has exactly one source.
+        /// </summary>
+        private static ReadOnlyDictionary<string, Property<string>> WithHoldSettings(ReadOnlyDictionary<string, Property<string>> baseline)
+        {
+            var all = new Dictionary<string, Property<string>>(baseline);
+
+            foreach (var (key, description) in ACE.Server.WorldEvents.HoldSettings.RegisteredStringDefaults())
+                all.Add(key, new Property<string>("", description));
+
+            return new ReadOnlyDictionary<string, Property<string>>(all);
+        }
+
         private static ReadOnlyDictionary<A, V> DictOf<A, V>(params (A, V)[] pairs)
         {
             return new ReadOnlyDictionary<A, V>(pairs.ToDictionary
@@ -1199,6 +1243,7 @@ namespace ACE.Server.Managers
                 ("world_events_boss_tether_enabled", new Property<bool>(true, "(non-retail function) World Events: confine a named boss to world_events_boss_tether_radius metres of where it spawned. The spawner stamps TetherRadius, HomeRadius (twice the tether) and DisableSticky on the boss at spawn; targeting then only ever considers players inside the tether, and stepping outside it forces an immediate retarget onto the nearest player who is still at the event instead of the passive walk home. Aimed at one player kiting a boss out of a 20-player fight. While this is false the spawner stamps none of those properties and the boss behaves exactly like any other monster")),
                 ("world_events_boss_throughput_scaling_enabled", new Property<bool>(true, "(non-retail function) World Events named-boss health: size the boss from the HP per second the group actually cleared during the wave phase (target kill time 300s) instead of the audience power curve. Ships enabled as standard content. Only bosses whose bosses.json entry carries a non-zero throughputFloorHealth take the new path; every other boss, and the whole system while this is false, keeps the power curve")),
                 ("world_event_death_protection", new Property<bool>(true, "(non-retail function) while a world event is Active, players dying within its radius suffer no vitae, item loss, or enchantment purge")),
+                ("world_events_hold_enabled", new Property<bool>(false, "(non-retail function) World Events: master switch for Hold goals (defend_envoys and its chain). Off (the default) refuses a Hold goal at start, from /worldevent and the web Admin panel, and keeps random rolls off Hold goals; a run already going finishes normally. The /worldevent hold settings commands work either way")),
                 ("world_events_enabled", new Property<bool>(true, "(non-retail function) master switch for the World Events system; /worldevent start refuses while false")),
                 ("world_events_ip_gate_enabled", new Property<bool>(true, "(non-retail function) World Events reward claim: one claim per IP address; exemptions in world_events_ip_exempt")),
                 ("world_events_participation_payout_enabled", new Property<bool>(true, "(non-retail function) World Events reward claim: a claimant with no damage or kill credit on the run receives the reward profile's coalWcid booby prize instead of the outcome crate. False restores the pre-change behaviour where every claimant gets the same crate. Inert for a reward profile whose coalWcid is 0")),
@@ -2277,7 +2322,7 @@ namespace ACE.Server.Managers
                 ));
 
         public static readonly ReadOnlyDictionary<string, Property<string>> DefaultStringProperties =
-            DictOf(
+            WithHoldSettings(DictOf(
                 ("account_vault_denylist", new Property<string>("", "WaffleACE Mule Vendor: comma-separated landblock entries (LLLL = that landblock in any realm, LLLL@R = realm R only) where summoning a mule vendor is refused. Empty by default. This is the emergency lever - a specific problem area - and it OUTRANKS account_vault_allowlist, so a landblock named in both is refused. Parsed exactly like mule_landblocks; a malformed entry is skipped with a logged warning, never thrown")),
                 ("dynamic_dungeons_banned_spell_ids", new Property<string>(ACE.Server.ThreadDungeons.DungeonSpellFilter.DefaultBannedSpellIds, "(non-retail function) Threads: comma-separated spell ids removed by id from every run creature's spell book regardless of projectile count, while dynamic_dungeons_strip_aoe_spells is true. Defaults to Exsanguinating Wave under both of its live ids (3940, 3999) and Poisoned Vitality (6167) - owner ruling 2026-09-08. Ban by ID ONLY: spell names repeat across ids in ace_world, so a name match would be ambiguous. Empty means the id list is off and only the projectile rule applies; a malformed entry is skipped with a logged warning, never thrown")),
                 ("dynamic_dungeons_survey_reset_timezone", new Property<string>("America/New_York", "(non-retail function) Threads: IANA or Windows time zone id whose wall clock defines the survey day. The survey window, count and all three payout tiers turn over together at dynamic_dungeons_survey_reset_hour in this zone. An unknown id falls back to a fixed UTC-5 offset with a logged warning")),
@@ -2325,6 +2370,6 @@ namespace ACE.Server.Managers
                 ("ml_digsite_bossrush_immune", new Property<string>(ACE.Server.MlDigsite.MlDigsiteBossMechanicRules.DefaultImmune, "(non-retail function) ML digsite encounters: numbers for the Boss Rush 'immune phases with adds' mechanic, whitespace-separated key=value. thresholds=<comma-separated health fractions, each in (0,1]> adds=<adds spawned per phase> timeout=<seconds after which the phase ends anyway>. The timeout is a failsafe, not a mechanic: without it one add lost to terrain would hard-lock the fight until the encounter TTL. A slot authored as immune50 ignores thresholds= and uses 0.50 alone")),
                 ("ml_digsite_bossrush_interrupt", new Property<string>(ACE.Server.MlDigsite.MlDigsiteBossMechanicRules.DefaultInterrupt, "(non-retail function) ML digsite encounters: numbers for the Boss Rush 'interrupt object' mechanic, whitespace-separated key=value. every=<seconds between windups> window=<seconds a player has to use the object> distance=<metres from the dig the object is placed> damage=<fraction of each nearby player's MAX health the missed hit deals> pulse=<seconds between repeats of the drum's visibility flare while the window is open>. Round 17: window 20 (was 12) and distance 15 (was 30). distance is clamped to [5, ml_digsite_boss_tether_radius - 5]: at or past the tether, running to the object would pull the boss off its leash and the interrupt would become a reset button. DAMAGE UNITS, the same convention every Boss Rush damage= uses: a value AT OR BELOW 1.0 is a FRACTION of each hit player's own max health, and a value above 1.0 is a flat pre-resistance number. The shipped 0.35 is therefore 35 percent of max health, which scales the same on a level 205 and a level 275 boss; the hit is additionally capped at one point short of current health, so it can never kill")),
                 ("ml_digsite_bossrush_safezones", new Property<string>(ACE.Server.MlDigsite.MlDigsiteBossMechanicRules.DefaultSafeZones, "(non-retail function) ML digsite encounters: numbers for the Boss Rush 'shifting safe zones' mechanic, whitespace-separated key=value. every=<seconds between cycles> telegraph=<seconds the marks are up before the hit> zones=<safe spots per cycle> saferadius=<metres around a mark that counts as safe> ring=<metres from the dig the marks are placed on> forgiveness=<misses that CANNOT kill> decay=<seconds without a miss that clears one> damage=<the hit a miss takes>. DAMAGE UNITS, the same convention every Boss Rush damage= uses: a value AT OR BELOW 1.0 is a FRACTION of the hit player's own max health, and a value above 1.0 is a flat pre-resistance number. The shipped 1.0 is therefore the player's WHOLE health bar, deliberately - the tester asked for 'room for 2 mistakes on instant-death hits', and a survivable number would make the forgiveness decorative. The first forgiveness misses are capped at one point short of the player's current health by construction, not by tuning; the next one is lethal"))
-                );
+                ));
     }
 }

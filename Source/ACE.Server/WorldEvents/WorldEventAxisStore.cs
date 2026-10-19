@@ -1152,6 +1152,54 @@ namespace ACE.Server.WorldEvents
             return kept;
         }
 
+        /// <summary>
+        /// Each goal's own JSON object by id (the first of a duplicated id), cloned so it outlives the document. Read by
+        /// HoldSettings to report whether a value came from goals.json. Empty when the file does not have the usual shape.
+        /// </summary>
+        private static Dictionary<string, JsonElement> RawGoalObjects(string json)
+        {
+            var raw = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+
+            try
+            {
+                using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    return raw;
+
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    if (!string.Equals(prop.Name, "goals", StringComparison.OrdinalIgnoreCase) || prop.Value.ValueKind != JsonValueKind.Array)
+                        continue;
+
+                    foreach (var item in prop.Value.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        foreach (var field in item.EnumerateObject())
+                        {
+                            if (string.Equals(field.Name, "id", StringComparison.OrdinalIgnoreCase) && field.Value.ValueKind == JsonValueKind.String)
+                            {
+                                var id = field.Value.GetString();
+
+                                if (id != null && !raw.ContainsKey(id))
+                                    raw[id] = item.Clone();
+
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // The typed parse above already reported the file; the source column then just reads "default".
+            }
+
+            return raw;
+        }
+
         private static Dictionary<string, GoalDef> ParseGoals(string json, List<string> diagnostics)
         {
             var result = new Dictionary<string, GoalDef>();
@@ -1171,8 +1219,13 @@ namespace ACE.Server.WorldEvents
                 return result;
             }
 
+            var rawGoals = RawGoalObjects(json);
+
             foreach (var goal in file.Goals ?? new List<GoalDef>())
             {
+                if (goal?.Id != null && rawGoals.TryGetValue(goal.Id, out var rawGoal))
+                    goal.RawJson = rawGoal;
+
                 if (!IsValidId(goal?.Id))
                 {
                     diagnostics.Add($"goals.json: entry with invalid or missing id '{goal?.Id}' dropped");

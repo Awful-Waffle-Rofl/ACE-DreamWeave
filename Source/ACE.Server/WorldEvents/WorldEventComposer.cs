@@ -108,6 +108,12 @@ namespace ACE.Server.WorldEvents
                 return false;
             }
 
+            if (goal.TypeKind == GoalType.Hold && !HoldSettings.HoldEnabled)
+            {
+                error = $"Hold goals are off ({HoldSettings.EnabledProperty}); '{goalId}' cannot start";
+                return false;
+            }
+
             var bossId = string.IsNullOrWhiteSpace(request.BossId) ? DefaultBossId : Normalize(request.BossId);
             var bossWasAuto = bossId == AutoBossId;
 
@@ -300,6 +306,10 @@ namespace ACE.Server.WorldEvents
                     if (requestedGoal != null && goalId != requestedGoal)
                         continue;
 
+                    // world_events_hold_enabled off: a random roll never lands on a Hold goal.
+                    if (store.Goals[goalId].TypeKind == GoalType.Hold && !HoldSettings.HoldEnabled)
+                        continue;
+
                     pairs.Add((source.Id, goalId));
                 }
             }
@@ -321,6 +331,13 @@ namespace ACE.Server.WorldEvents
                 familyCandidates = WorldEventFamilyPairing.CandidatePairs(catalog, floorLevel, out tier)
                     .Select(p => p.b == null ? new List<string> { p.a } : new List<string> { p.a, p.b })
                     .ToList();
+            }
+
+            if (pairs.Count == 0 && requestedGoal != null && store.Goals.TryGetValue(requestedGoal, out var askedGoal) &&
+                askedGoal.TypeKind == GoalType.Hold && !HoldSettings.HoldEnabled)
+            {
+                error = $"Hold goals are off ({HoldSettings.EnabledProperty}); '{requestedGoal}' cannot start";
+                return false;
             }
 
             if (pairs.Count == 0 || familyCandidates.Count == 0)

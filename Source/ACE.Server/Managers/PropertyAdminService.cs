@@ -210,7 +210,11 @@ namespace ACE.Server.Managers
         /// PvP rules lever key changed (Docs/Pvp/DESIGN.md "PvP rules (levers)"). A throw here is logged and swallowed - the
         /// setting has already changed, so the caller must still see Updated.
         /// </summary>
-        internal static Action<string> SettingUpdated = ACE.Server.Pvp.Rules.PvpRuleTunables.OnPropertyModified;
+        internal static Action<string> SettingUpdated = key =>
+        {
+            ACE.Server.Pvp.Rules.PvpRuleTunables.OnPropertyModified(key);
+            ACE.Server.WorldEvents.HoldSettings.OnPropertyModified(key);
+        };
 
         private static void NotifyUpdated(string key)
         {

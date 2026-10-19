@@ -101,5 +101,12 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonIgnore]
         public MvpRule RuleKind { get; set; }
+
+        /// <summary>
+        /// This goal's own object from goals.json, kept at load so HoldSettings can tell a value set in the file from the
+        /// code default (the "source" column of /worldevent hold settings). Null for a goal built in code.
+        /// </summary>
+        [JsonIgnore]
+        public System.Text.Json.JsonElement? RawJson { get; set; }
     }
 }
