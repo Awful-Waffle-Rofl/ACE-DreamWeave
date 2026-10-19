@@ -90,6 +90,42 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("claimReminder")]
         public List<string> ClaimReminder { get; set; } = new List<string>();
 
+        /// <summary>The value that rolls an axis at random, as before 2026-10-19.</summary>
+        public const string RandomAxis = "random";
+
+        public const string DefaultNextSource = "sky_rift";
+        public const string DefaultNextGoal = "kill_boss";
+        public const string DefaultNextBoss = "auto";
+
+        /// <summary>
+        /// The source every later stage uses (sources.json id), or "random". Default "sky_rift": the second stage is a
+        /// rift that drops a champion.
+        /// </summary>
+        [JsonPropertyName("nextSource")]
+        public string NextSource { get; set; } = DefaultNextSource;
+
+        /// <summary>The goal every later stage uses (goals.json id), or "random". Default "kill_boss": slay the champion.</summary>
+        [JsonPropertyName("nextGoal")]
+        public string NextGoal { get; set; } = DefaultNextGoal;
+
+        /// <summary>
+        /// The boss of every later stage (bosses.json id, "auto" for a named boss of the rolled family, "family_champion"),
+        /// or "random". Default "auto". Named bosses spawn at the World Events boss scale.
+        /// </summary>
+        [JsonPropertyName("nextBoss")]
+        public string NextBoss { get; set; } = DefaultNextBoss;
+
+        /// <summary>An axis value as the request takes it: null for "random" or blank, else the trimmed lowercase id.</summary>
+        public static string Pinned(string axis)
+        {
+            if (string.IsNullOrWhiteSpace(axis))
+                return null;
+
+            var id = axis.Trim().ToLowerInvariant();
+
+            return id == RandomAxis ? null : id;
+        }
+
         /// <summary>The reward id for <paramref name="stage"/> (1-based), or null when the list is empty.</summary>
         public string RewardForStage(int stage)
         {
@@ -193,11 +229,18 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static string AnnounceLine(string template, string familyDisplayName, string location, int seconds, string town)
         {
+            return AnnounceLine(template, familyDisplayName, location, seconds, town, null);
+        }
+
+        /// <summary>With {boss}, the next stage's champion by name ("their champion" when it has none).</summary>
+        public static string AnnounceLine(string template, string familyDisplayName, string location, int seconds, string town, string boss)
+        {
             var line = string.IsNullOrWhiteSpace(template) ? "{Family} regroup near {location}! They strike in {seconds} seconds." : template;
             var family = string.IsNullOrWhiteSpace(familyDisplayName) ? "the enemy" : familyDisplayName.Trim();
             var place = string.IsNullOrWhiteSpace(town) ? (string.IsNullOrWhiteSpace(location) ? "a town nearby" : location.Trim()) : town.Trim();
 
             return line.Replace("{town}", place)
+                       .Replace("{boss}", string.IsNullOrWhiteSpace(boss) ? "their champion" : boss.Trim())
                        .Replace("{Family}", Capitalize(family))
                        .Replace("{family}", family)
                        .Replace("{location}", string.IsNullOrWhiteSpace(location) ? "here" : location.Trim())
@@ -293,12 +336,23 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static bool TryPickNearTown(WorldEventTown town, Position reference, ChainDef chain, Random rng, out Position anchor, int attempts = 40)
         {
-            anchor = null;
             chain ??= new ChainDef();
+
+            return TryPickNearTown(town, reference, chain.TownSpotMinDistance, chain.TownSpotMaxDistance, rng, out anchor, attempts);
+        }
+
+        /// <summary><see cref="TryPickNearTown(WorldEventTown, Position, ChainDef, Random, out Position, int)"/> with explicit distances from the drop.</summary>
+        public static bool TryPickNearTown(WorldEventTown town, Position reference, double minDistance, double maxDistance, Random rng,
+            out Position anchor, int attempts = 40)
+        {
+            anchor = null;
+
+            if (reference == null)
+                return false;
 
             for (var i = 0; i < attempts; i++)
             {
-                var (dx, dy) = Offset(rng, chain.TownSpotMinDistance, chain.TownSpotMaxDistance);
+                var (dx, dy) = Offset(rng, minDistance, maxDistance);
                 var global = new Vector3(town.GlobalX + (float)dx, town.GlobalY + (float)dy, 0);
 
                 if (global.X < 0 || global.Y < 0 || global.X >= 255 * Position.BlockLength || global.Y >= 255 * Position.BlockLength)
@@ -326,9 +380,44 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
-        /// The next stage's request (D6 - pure): every axis rolled at random, at <paramref name="anchor"/>, with the lead
-        /// times of the countdown. The first stage's test settings (--level, --abandon) carry over, so a staff test chains
-        /// the same way; a forced wave type does not.
+        /// The stage settings' load check against the store (D6 - pure): an unknown source, goal or boss, or a goal the
+        /// source does not support. Empty when valid.
+        /// </summary>
+        public static List<string> NextStageProblems(ChainDef chain, IReadOnlyDictionary<string, SourceThemeDef> sources,
+            ICollection<string> goalIds, ICollection<string> bossIds)
+        {
+            var problems = new List<string>();
+
+            if (chain == null)
+                return problems;
+
+            var source = ChainDef.Pinned(chain.NextSource);
+            var goal = ChainDef.Pinned(chain.NextGoal);
+            var boss = ChainDef.Pinned(chain.NextBoss);
+
+            SourceThemeDef sourceDef = null;
+
+            if (source != null && (sources == null || !sources.TryGetValue(source, out sourceDef)))
+                problems.Add($"chain.nextSource '{source}' is not in sources.json");
+
+            if (goal != null && (goalIds == null || !goalIds.Contains(goal)))
+                problems.Add($"chain.nextGoal '{goal}' is not in goals.json");
+
+            if (sourceDef != null && goal != null && !(sourceDef.CompatibleGoals ?? new List<string>()).Contains(goal))
+                problems.Add($"chain.nextSource '{source}' does not support chain.nextGoal '{goal}' (its compatibleGoals)");
+
+            if (boss != null && boss != WorldEventComposer.AutoBossId && boss != "family_champion" && boss != WorldEventComposer.DefaultBossId
+                && (bossIds == null || !bossIds.Contains(boss)))
+                problems.Add($"chain.nextBoss '{boss}' is not in bosses.json (or auto, family_champion, none, random)");
+
+            return problems;
+        }
+
+        /// <summary>
+        /// The next stage's request (D6 - pure), at <paramref name="anchor"/>, with the lead times of the countdown. The
+        /// source, goal and boss are the chain's nextSource / nextGoal / nextBoss (by default a sky rift whose champion
+        /// must be slain); an axis set to "random" rolls, and the family always rolls. The first stage's test settings
+        /// (--level, --abandon) carry over, so a staff test chains the same way; a forced wave type does not.
         /// </summary>
         public static WorldEventRequest NextRequest(WorldEventRequest previous, ChainDef chain, int stage, int maxLength, uint rootRunId,
             uint previousRunId, Position anchor, string anchorLabel)
@@ -338,6 +427,10 @@ namespace ACE.Server.WorldEvents
             return new WorldEventRequest
             {
                 Random = true,
+                SourceId = chain != null ? ChainDef.Pinned(chain.NextSource) : null,
+                GoalId = chain != null ? ChainDef.Pinned(chain.NextGoal) : null,
+                BossId = chain != null ? ChainDef.Pinned(chain.NextBoss) : null,
+                TownReach = previous?.TownReach,
                 AnchorPosition = anchor,
                 AnchorLabel = anchorLabel,
                 Invoker = $"chain from run {previousRunId}",

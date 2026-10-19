@@ -137,5 +137,11 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>World Events chain: the first stage's goal chain settings, carried to every later stage (null = the run's own goal's).</summary>
         public ACE.Server.WorldEvents.Defs.ChainDef ChainSettings { get; set; }
+
+        /// <summary>World Events chain: the first stage's goal townReach, carried to every later stage (null = the run's own goal's).</summary>
+        public ACE.Server.WorldEvents.Defs.TownReachDef TownReach { get; set; }
+
+        /// <summary>World Events chain: towns a townReach re-roll must not move this stage to (the town the last stage was at).</summary>
+        public System.Collections.Generic.List<string> ExcludeTowns { get; set; }
     }
 }

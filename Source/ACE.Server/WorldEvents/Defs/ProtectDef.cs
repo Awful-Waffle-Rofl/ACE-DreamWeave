@@ -363,6 +363,10 @@ namespace ACE.Server.WorldEvents.Defs
 
         public const double DefaultBossMinKillSeconds = 50;
 
+        /// <summary>The targets look like they fight back (cosmetic only; WorldEventHoldDefense). Null: they stand at peace.</summary>
+        [JsonPropertyName("defendPose")]
+        public DefendPoseDef DefendPose { get; set; }
+
         /// <summary>
         /// Clear spawn area (WorldEventSpawnArea): before the scene is placed, the knight ring and each portal's path in
         /// are checked for buildings, trees, rocks and other objects. Null: no check.

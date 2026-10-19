@@ -309,6 +309,21 @@ namespace ACE.Server.WorldEvents
             var anchors = ParseAnchors(anchorsJson, diagnostics);
             var sources = ParseSources(sourcesJson, diagnostics, goals);
             var bosses = ParseBosses(bossesJson, diagnostics);
+
+            // A chain's later stages (nextSource / nextGoal / nextBoss) must name loaded axes that fit together; when
+            // they do not, those stages roll every axis at random instead. Only checked once sources load at all.
+            foreach (var goal in sources.Count == 0 ? Enumerable.Empty<GoalDef>() : goals.Values.Where(g => g?.Chain != null))
+            {
+                var problems = WorldEventChain.NextStageProblems(goal.Chain, sources, goals.Keys, bosses.Keys);
+
+                if (problems.Count == 0)
+                    continue;
+
+                foreach (var problem in problems)
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' {problem}; its later stages roll source, goal and boss at random");
+
+                goal.Chain.NextSource = goal.Chain.NextGoal = goal.Chain.NextBoss = ChainDef.RandomAxis;
+            }
             var speciesTables = ParseSpeciesTables(speciesFiles, diagnostics, notes, families);
 
             return new WorldEventAxisStore(sources, families, bosses, goals, rewards, anchors, speciesTables,
@@ -861,6 +876,11 @@ namespace ACE.Server.WorldEvents
                 || !IsFinite(protect.BossPullSeconds) || protect.BossPullSeconds < 3 || protect.BossPullSeconds > 60)
                 return "has an invalid boss pull (bossPullShare 0 or 0.01 to 0.5, bossPullWindowSeconds 2 to 30, bossPullSeconds 3 to 60)";
 
+            var poseError = WorldEventHoldDefense.Validate(protect.DefendPose);
+
+            if (poseError != null)
+                return poseError;
+
             if (protect.ClearArea != null)
             {
                 var a = protect.ClearArea;
@@ -1226,6 +1246,14 @@ namespace ACE.Server.WorldEvents
                 if (chainError != null)
                 {
                     diagnostics.Add($"goals.json: goal '{goal.Id}' {chainError}, dropped");
+                    continue;
+                }
+
+                var reachError = WorldEventTownReach.Validate(goal.TownReach);
+
+                if (reachError != null)
+                {
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' {reachError}, dropped");
                     continue;
                 }
 

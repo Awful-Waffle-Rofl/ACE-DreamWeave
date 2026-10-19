@@ -84,6 +84,13 @@ namespace ACE.Server.WorldEvents.Defs
         public ChainDef Chain { get; set; }
 
         /// <summary>
+        /// Optional: every location of this goal (and of the stages it chains into) must be a short walk from a Town
+        /// Network portal drop (WorldEventTownReach). Absent: no check.
+        /// </summary>
+        [JsonPropertyName("townReach")]
+        public TownReachDef TownReach { get; set; }
+
+        /// <summary>
         /// Computed at load time from <see cref="Type"/> (case-insensitive). Never read from JSON.
         /// </summary>
         [JsonIgnore]

@@ -381,7 +381,11 @@ namespace ACE.Server.WorldEvents
         {
             var name = string.IsNullOrWhiteSpace(noun) ? ProtectDef.DefaultNoun : noun;
 
-            return Global($"A {name} at {anchorName} is at {pct}% health!");
+            // "An envoy", "A ward": the article follows the noun's first letter.
+            var trimmed = name.Trim();
+            var article = trimmed.Length > 0 && "aeiou".IndexOf(char.ToLowerInvariant(trimmed[0])) >= 0 ? "An" : "A";
+
+            return Global($"{article} {trimmed} at {anchorName} is at {pct}% health!");
         }
 
         /// <summary>

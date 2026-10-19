@@ -488,6 +488,7 @@ namespace ACE.Server.WorldEvents
                 // spawn-area check refuses it.
                 var spots = new List<(Position Anchor, string Town)>();
                 var why = "no other town in the Town Network";
+                var originTownName = origin != null ? WorldEventTownIndex.Nearest(origin, WorldEventTownIndex.Towns)?.Town.Name : null;
 
                 if (chain == null || chain.ToAnotherTown)
                 {
@@ -558,6 +559,10 @@ namespace ACE.Server.WorldEvents
                         var next = WorldEventChain.NextRequest(request, chain, stage + 1, maxLength, root, evt.RunId, spot, spotLabel);
                         next.ChainSettings = chain;
 
+                        // The first stage's townReach holds for every later stage, whatever their own goal says.
+                        next.TownReach = WorldEventTownReach.Effective(evt.Composition?.Goal?.TownReach, request?.TownReach);
+                        next.ExcludeTowns = originTownName != null ? new List<string> { originTownName } : null;
+
                         // A stage reward rewards.json does not define pays the default instead (flagged at load).
                         if (next.RewardId != null && !Store.Rewards.Keys.Any(k => string.Equals(k, next.RewardId, StringComparison.OrdinalIgnoreCase)))
                             next.RewardId = null;
@@ -593,7 +598,8 @@ namespace ACE.Server.WorldEvents
                 var family = started.Composition?.FamilyDisplayName;
                 var seconds = chain?.CountdownSeconds ?? 120;
                 var template = chain?.Announce != null && chain.Announce.Count > 0 ? chain.Announce[chainRng.Next(chain.Announce.Count)] : null;
-                var line = WorldEventChain.AnnounceLine(template, family, label, seconds, townName);
+                var bossName = started.Composition?.Boss?.Kind == BossKind.Named ? started.Composition.Boss.DisplayName : null;
+                var line = WorldEventChain.AnnounceLine(template, family, label, seconds, townName, bossName);
 
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(line));
 
@@ -606,7 +612,8 @@ namespace ACE.Server.WorldEvents
                 log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded -> stage {stage + 1}/{maxLength} " +
                          $"run={started.RunId} at {label} ({distance:0} m away, {anchor.ToLOCString()}) source={started.Composition?.Source?.Id} " +
                          $"family={string.Join("+", started.Composition?.Families?.Select(f => f?.Id) ?? Enumerable.Empty<string>())} " +
-                         $"goal={started.Composition?.Goal?.Id} reward={started.Composition?.Reward?.Id}; starts in {seconds} s. Broadcast: {line}");
+                         $"goal={started.Composition?.Goal?.Id} boss={started.Composition?.Boss?.Id} reward={started.Composition?.Reward?.Id}; " +
+                         $"starts in {seconds} s. Broadcast: {line}");
             }
             catch (Exception ex)
             {
@@ -734,21 +741,17 @@ namespace ACE.Server.WorldEvents
                 // Hold protect.clearArea: the knights' ground and every portal's path must be clear of buildings, trees,
                 // rocks and other objects. Blocked portals move or are skipped; a blocked anchor moves to the nearest open
                 // spot, else the start is refused.
-                AreaPlan areaPlan = null;
-                Position movedAnchor = null;
-
-                if (composition.Goal?.TypeKind == GoalType.Hold && composition.Goal.Protect?.ClearArea != null && composition.AnchorPosition != null)
+                //
+                // goals.json townReach: the spot (after any clear-area move) must be a short walk from a Town Network portal
+                // drop. A spot that is not is re-rolled to the edge of the nearest towns, and logged.
+                if (!TryResolveStartSpot(composition, request, out var areaPlan, out var movedAnchor, out var rerollLabel, out error))
                 {
-                    var participants = Math.Max(1, WorldEventAudienceSampler.Sample(composition.AnchorPosition, 60f).Count);
-
-                    if (!WorldEventSpawnArea.TryResolve(composition.AnchorPosition, composition.Goal.Protect, participants, "start",
-                            out areaPlan, out movedAnchor, out var areaWhy))
-                    {
-                        error = $"no open ground for {composition.Goal.Id} here: {areaWhy}. Move to open ground, away from buildings, trees and rocks, and try again";
-                        refusal = WorldEventStartRefusal.CompositionFailed;
-                        return false;
-                    }
+                    refusal = WorldEventStartRefusal.CompositionFailed;
+                    return false;
                 }
+
+                if (rerollLabel != null && composition.Anchor != null)
+                    composition.Anchor.DisplayName = rerollLabel;
 
                 if (request.DryRun)
                 {
@@ -835,6 +838,140 @@ namespace ACE.Server.WorldEvents
                 evt = candidate;
                 return true;
             }
+        }
+
+        /// <summary>
+        /// Where a run really starts (live: reads the landscape; under <see cref="sync"/>). Two rules, each from goals.json:
+        ///   * protect.clearArea (Hold): the knights' ground and the portals' paths are clear, else the nearest open spot
+        ///     within its searchRadius;
+        ///   * townReach (the goal's, or the one its chain carried): the spot is within maxWalk of a Town Network portal drop.
+        /// The asked spot is tried first. When it fails either rule and townReach is set, it is re-rolled to the edge of the
+        /// nearest towns (spotMinDistance to spotMaxDistance from each drop, nearest town first), each re-roll checked the
+        /// same way and logged. <paramref name="moved"/> is the new spot (null when the asked one stands);
+        /// <paramref name="rerollLabel"/> names a re-rolled spot ("Holtburg (42.1N, 33.6E)"), null otherwise.
+        /// </summary>
+        private static bool TryResolveStartSpot(WorldEventComposition composition, WorldEventRequest request, out AreaPlan areaPlan,
+            out Position moved, out string rerollLabel, out string error)
+        {
+            areaPlan = null;
+            moved = null;
+            rerollLabel = null;
+            error = null;
+
+            var asked = composition?.AnchorPosition;
+
+            if (asked == null)
+                return true;
+
+            var goal = composition.Goal;
+            var reach = WorldEventTownReach.Effective(goal?.TownReach, request?.TownReach);
+            var checksArea = goal?.TypeKind == GoalType.Hold && goal.Protect?.ClearArea != null;
+            var towns = WorldEventTownIndex.Towns;
+            var tag = (request?.ChainStage ?? 1) > 1 ? $"chain stage {request.ChainStage}" : "start";
+
+            if (reach != null && towns.Count == 0)
+            {
+                log.Warn($"[WORLDEVENT] {tag} goal={goal?.Id}: townReach is set but the town index is empty; the spot is not checked");
+                reach = null;
+            }
+
+            var askedGlobal = asked.ToGlobal();
+            var rerollTowns = reach != null ? WorldEventTownReach.RerollTowns(towns, askedGlobal.X, askedGlobal.Y, reach, request?.ExcludeTowns) : new List<WorldEventTown>();
+            var rng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+            var failures = new List<string>();
+
+            for (var attempt = 0; attempt <= rerollTowns.Count; attempt++)
+            {
+                Position spot;
+                string town = null;
+
+                if (attempt == 0)
+                {
+                    spot = asked;
+
+                    if (reach != null && !WorldEventTownReach.IsReachable(spot, towns, reach.MaxWalk))
+                    {
+                        var where = WorldEventTownReach.Describe(spot, towns);
+                        failures.Add($"the asked spot is not reachable from the Town Network ({where})");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} spot {asked.ToLOCString()} is not reachable from the Town Network " +
+                                 $"({where}, more than the {reach.MaxWalk:0} m walk); re-rolling near {string.Join(", ", rerollTowns.Select(t => t.Name))}");
+                        continue;
+                    }
+                }
+                else
+                {
+                    var t = rerollTowns[attempt - 1];
+                    town = t.Name;
+
+                    if (!WorldEventChain.TryPickNearTown(t, asked, reach.SpotMinDistance, reach.SpotMaxDistance, rng, out spot))
+                    {
+                        failures.Add($"no open ground at the edge of {t.Name}");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} re-roll: no open ground {reach.SpotMinDistance:0} to {reach.SpotMaxDistance:0} m from {t.Name}'s portal drop; trying the next town");
+                        continue;
+                    }
+
+                    spot.Rotation = asked.Rotation;
+                }
+
+                AreaPlan plan = null;
+                Position areaMoved = null;
+
+                if (checksArea)
+                {
+                    var participants = Math.Max(1, WorldEventAudienceSampler.Sample(spot, 60f).Count);
+
+                    if (!WorldEventSpawnArea.TryResolve(spot, goal.Protect, participants, attempt == 0 ? tag : $"{tag} re-roll near {town}",
+                            out plan, out areaMoved, out var areaWhy))
+                    {
+                        if (reach == null)
+                        {
+                            error = $"no open ground for {goal.Id} here: {areaWhy}. Move to open ground, away from buildings, trees and rocks, and try again";
+                            return false;
+                        }
+
+                        failures.Add(attempt == 0 ? $"no open ground here ({areaWhy})" : $"no open ground near {town} ({areaWhy})");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} {(attempt == 0 ? "the asked spot" : $"the re-roll near {town}")} has no open ground ({areaWhy}); " +
+                                 (attempt < rerollTowns.Count ? "re-rolling" : "nothing left to try"));
+                        continue;
+                    }
+                }
+
+                var final = areaMoved ?? spot;
+
+                if (reach != null && !WorldEventTownReach.IsReachable(final, towns, reach.MaxWalk))
+                {
+                    var where = WorldEventTownReach.Describe(final, towns);
+                    failures.Add($"the open ground found is not reachable ({where})");
+                    log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} the open ground at {final.ToLOCString()} is not reachable from the Town Network ({where}); re-rolling");
+                    continue;
+                }
+
+                areaPlan = plan;
+                moved = attempt == 0 ? areaMoved : final;
+
+                if (reach != null)
+                {
+                    var where = WorldEventTownReach.Describe(final, towns);
+
+                    if (attempt > 0)
+                    {
+                        rerollLabel = WorldEventTownIndex.DescribeLabeled(town, final);
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} re-rolled to {rerollLabel} at {final.ToLOCString()} ({where}), " +
+                                 $"{final.DistanceTo(asked):0} m from the asked spot");
+                    }
+                    else
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} spot reachable from the Town Network: {where} (walk up to {reach.MaxWalk:0} m)");
+                }
+
+                return true;
+            }
+
+            error = $"no spot reachable from the Town Network for {goal?.Id}: {string.Join("; ", failures)}. " +
+                    $"Start within {reach?.MaxWalk ?? 0:0} m of a town's portal drop, on open ground";
+
+            log.Warn($"[WORLDEVENT] {tag} goal={goal?.Id} refused: {error}");
+
+            return false;
         }
 
         /// <summary>Admin stop. A no-op with a log line when nothing is running.</summary>

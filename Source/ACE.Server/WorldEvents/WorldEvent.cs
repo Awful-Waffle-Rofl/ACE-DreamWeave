@@ -3954,6 +3954,8 @@ namespace ACE.Server.WorldEvents
 
             TickHoldShrines();
 
+            TickHoldDefendPose(now);
+
             TickBossDamage();
 
             TickBossHealthMilestones();

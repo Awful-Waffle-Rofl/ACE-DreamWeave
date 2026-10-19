@@ -825,6 +825,10 @@ namespace ACE.Server.Tests
             var line = WorldEventAnnouncer.ProtectedHealthMilestoneLine("ward", "Holtburg", 50);
 
             StringAssert.EndsWith(line, "A ward at Holtburg is at 50% health!");
+
+            // Seen live 2026-10-19 as "A envoy at Holtburg ...".
+            StringAssert.EndsWith(WorldEventAnnouncer.ProtectedHealthMilestoneLine("envoy", "Holtburg (42.7N, 32.8E)", 75),
+                "An envoy at Holtburg (42.7N, 32.8E) is at 75% health!");
         }
 
         [TestMethod]

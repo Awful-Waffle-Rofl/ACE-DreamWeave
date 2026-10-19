@@ -277,7 +277,10 @@ namespace ACE.Server.Tests
                 AbandonAfterSeconds = 0, WipeGraceSeconds = 0, ForcedWaveType = HoldWaveType.Ranged };
             var anchor = new ACE.Entity.Position(0xCE950022, 100, 100, 20, 0, 0, 0, 1, 0);
 
-            var next = WorldEventChain.NextRequest(first, new ChainDef(), 2, 2, 41, 41, anchor, "Eastham (17.0N, 63.5E)");
+            // "random" on every axis: the 2026-10-18 behavior (the default now pins the sky rift champion; see
+            // Chain_SecondStage_DefaultsToTheSkyRiftChampion_AndRandomStillRolls).
+            var rolled = new ChainDef { NextSource = ChainDef.RandomAxis, NextGoal = ChainDef.RandomAxis, NextBoss = ChainDef.RandomAxis };
+            var next = WorldEventChain.NextRequest(first, rolled, 2, 2, 41, 41, anchor, "Eastham (17.0N, 63.5E)");
 
             Assert.IsTrue(next.Random);
             Assert.IsNull(next.SourceId);
