@@ -1034,6 +1034,11 @@ namespace ACE.Server.WorldEvents
 
             log.Info($"[WORLDEVENT] run={RunId} teaser lead={lead}s anchor={AnchorName}");
 
+            // A chained stage has no teaser of its own: the chain's announcement (chain.announce) already named the place and the
+            // countdown.
+            if (ChainStageNumber > 1)
+                return;
+
             try
             {
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.TeaserLine(Composition?.Source, AnchorName, lead, null), relayToDiscord: true);
@@ -1087,7 +1092,10 @@ namespace ACE.Server.WorldEvents
             // knows whether it is allowed to speak the matching end line.
             if (DeathProtectionEnabled())
             {
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
+                // Once per chain: a later stage does not repeat it when an earlier one said it.
+                if (!(Request?.ChainAsheronSpoke ?? false))
+                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
+
                 deathProtectionStartAnnounced = true;
             }
         }
@@ -1367,6 +1375,8 @@ namespace ACE.Server.WorldEvents
                                 Composition?.GoalDisplayName), relayToDiscord: true);
 
                             relayedToDiscord = true;
+
+                            ScheduleChainTieBack(now);
                         }
                     }
 
@@ -3502,6 +3512,144 @@ namespace ACE.Server.WorldEvents
                 WorldEventAnnouncer.Broadcast(line);
         }
 
+        // ---- World Events chain: pacing and story (2026-10-19) ---------------------------------------------------------
+
+        /// <summary>Which stage of its chain this run is (1 = the first, or no chain).</summary>
+        public int ChainStageNumber => Math.Max(1, Request?.ChainStage ?? 1);
+
+        /// <summary>The chain settings this run follows: the ones carried from the first stage, else its own goal's.</summary>
+        public ChainDef ChainSettingsInEffect => Request?.ChainSettings ?? Composition?.Goal?.Chain;
+
+        /// <summary>What the chain does after this run ends with <paramref name="outcome"/> (None when it is not part of a chain).</summary>
+        public WorldEventChain.Decision ChainDecisionFor(WorldEventOutcome outcome)
+        {
+            var maxLength = WorldEventChain.EffectiveMaxLength(Request?.ChainMaxLength ?? 0, Composition?.Goal?.Chain);
+
+            return WorldEventChain.Decide(outcome, ChainStageNumber, maxLength);
+        }
+
+        /// <summary>
+        /// The envoy who speaks for the chain: carried from the first stage, else one of this run's surviving protected
+        /// targets, picked at Finish. Null when none survived (a narrator speaks instead).
+        /// </summary>
+        public string ChainEnvoyName { get; private set; }
+
+        /// <summary>Asheron's opening line went out in this chain (this run or an earlier stage), so his closing line is owed.</summary>
+        public bool ChainAsheronSpoke => deathProtectionStartAnnounced || (Request?.ChainAsheronSpoke ?? false);
+
+        private void CaptureChainEnvoy()
+        {
+            try
+            {
+                if (ChainStageNumber > 1)
+                {
+                    ChainEnvoyName = Request?.ChainEnvoyName;
+                    return;
+                }
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold)
+                    return;
+
+                var survivors = Spawner.LiveProtectedCreatures;
+
+                if (survivors.Count == 0)
+                    return;
+
+                lock (protectedLineRngSync)
+                    ChainEnvoyName = survivors[protectedLineRng.Next(survivors.Count)].Name;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain envoy pick threw", ex);
+            }
+        }
+
+        /// <summary>The Town Network town nearest <paramref name="position"/>, or null.</summary>
+        internal static string TownNear(Position position)
+        {
+            try
+            {
+                return position != null ? WorldEventTownIndex.Nearest(position, WorldEventTownIndex.Towns)?.Town.Name : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// This run's story tokens. A later stage: {town} is the first stage's town and {nextTown} this one's. The first
+        /// stage: {town} is its own town and {nextTown} is <paramref name="nextTown"/>.
+        /// </summary>
+        public WorldEventChain.StoryTokens ChainStoryTokens(string nextTown = null, string champion = null)
+        {
+            var here = TownNear(Composition?.AnchorPosition);
+            var later = ChainStageNumber > 1;
+            var boss = Composition?.Boss;
+
+            return new WorldEventChain.StoryTokens
+            {
+                Envoy = ChainEnvoyName ?? (later ? Request?.ChainEnvoyName : null),
+                Family = later ? Request?.ChainFamily ?? Composition?.FamilyDisplayName : Composition?.FamilyDisplayName,
+                Town = later ? Request?.ChainFirstTown ?? here : here,
+                NextTown = later ? here : nextTown,
+                Champion = champion ?? (later && boss?.Kind == BossKind.Named ? boss.DisplayName : null)
+            };
+        }
+
+        /// <summary>
+        /// The chain ends with this run: its closing story line and Asheron's closing line, paced by chain.pacing (an abort:
+        /// only Asheron's, at once). <paramref name="thanksFirst"/>: the stage was won but the next could not start, so the
+        /// thank-you with the cache comes first. Lines due at once go out now; the rest through WorldEventLineSchedule.
+        /// </summary>
+        internal void ScheduleChainEnd(double now, WorldEventOutcome outcome, bool thanksFirst)
+        {
+            try
+            {
+                List<WorldEventChain.PacedLine> plan;
+
+                lock (protectedLineRngSync)
+                    plan = WorldEventChain.ChainEndPlan(ChainSettingsInEffect, outcome, ChainStoryTokens(), ChainAsheronSpoke, thanksFirst, protectedLineRng);
+
+                foreach (var line in plan.Where(l => l.Delay <= 0))
+                    WorldEventAnnouncer.Broadcast(line.Text);
+
+                WorldEventLineSchedule.Shared.AddPlan(now, plan.Where(l => l.Delay > 0));
+
+                log.Info($"[WORLDEVENT] run={RunId} chain stage {ChainStageNumber} ended {outcome}: the chain is over; " +
+                         $"{plan.Count} closing line(s) at [{string.Join(", ", plan.Select(l => $"{l.Delay:0.#} s"))}]");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain closing lines threw", ex);
+            }
+        }
+
+        /// <summary>A later stage has gone live: the line that ties it to the first, chain.pacing.tieBackSeconds later.</summary>
+        private void ScheduleChainTieBack(double now)
+        {
+            try
+            {
+                if (ChainStageNumber <= 1)
+                    return;
+
+                var chain = ChainSettingsInEffect;
+                string line;
+
+                lock (protectedLineRngSync)
+                    line = WorldEventChain.StoryLine(chain?.Story, WorldEventChain.StoryBeat.TieBack, ChainStoryTokens(), protectedLineRng);
+
+                if (line == null)
+                    return;
+
+                WorldEventLineSchedule.Shared.Add(now + Math.Max(0, chain?.Pacing?.TieBackSeconds ?? 0), line, () => State == WorldEventState.Active);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain tie-back line threw", ex);
+            }
+        }
+
         /// <summary>
         /// The hold succeeded: one surviving target thanks the defenders. Spoken through its landblock queue,
         /// which is the same queue Finish's cleanup destroys it through, so the line is heard first. Returns
@@ -4005,7 +4153,8 @@ namespace ACE.Server.WorldEvents
                 {
                     // Hold: a surviving target's thank-you, spoken locally BEFORE Finish queues the cleanup
                     // that removes it, and copied globally AFTER the outcome line.
-                    var successLine = SpeakProtectedSuccessLine();
+                    // Not when the chain goes on: the manager paces a thank-you that points to the cache instead.
+                    var successLine = ChainDecisionFor(WorldEventOutcome.Success) == WorldEventChain.Decision.Next ? null : SpeakProtectedSuccessLine();
 
                     Finish(WorldEventOutcome.Success);
 
@@ -4298,6 +4447,9 @@ namespace ACE.Server.WorldEvents
             finishInvoked = true;
             Outcome = outcome;
 
+            // Before cleanup removes the targets: who speaks for the chain from here on.
+            CaptureChainEnvoy();
+
             // Before anything below can start cleanup: see frozenProgressText.
             if (FreezesProgressAtFinish(Composition?.Goal))
             {
@@ -4365,8 +4517,22 @@ namespace ACE.Server.WorldEvents
                 // Asheron's Protection (WaffleACE): the matching end line, immediately after the ordinary
                 // outcome announcement, ONLY if the start line actually went out for this run - never on the
                 // property being toggled off mid-run with no corresponding start.
-                if (deathProtectionStartAnnounced)
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionEndLine);
+                // A chain: Asheron's line waits for the chain's end (the last stage, a loss or an abort), after its
+                // closing story line. While it goes on, the manager paces the stage change.
+                switch (ChainDecisionFor(outcome))
+                {
+                    case WorldEventChain.Decision.None:
+                        if (deathProtectionStartAnnounced)
+                            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionEndLine);
+                        break;
+
+                    case WorldEventChain.Decision.Next:
+                        break;
+
+                    default:
+                        ScheduleChainEnd(now, outcome, thanksFirst: false);
+                        break;
+                }
 
                 // BOSS-STANDARD.md section 2: a named boss that WON gets the last word, as a second
                 // global line right after the outcome. Nothing is said on a Success (the boss lost) and

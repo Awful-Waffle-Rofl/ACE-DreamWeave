@@ -293,7 +293,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(2, next.ChainStage);
             Assert.AreEqual(2, next.ChainMaxLength);
             Assert.AreEqual(41u, next.ChainRootRunId);
-            Assert.AreEqual(90, next.TeaserLeadSeconds);
+            Assert.AreEqual(98, next.TeaserLeadSeconds, "the countdown starts at the announcement, 8 s after the outcome (chain.pacing.announceSeconds)");
             Assert.AreEqual(30, next.AnnounceLeadSeconds);
         }
 

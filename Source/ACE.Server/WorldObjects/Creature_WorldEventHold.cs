@@ -658,8 +658,9 @@ namespace ACE.Server.WorldObjects
             // Before the cap, so even an empowered crowd cannot beat minDeathSeconds.
             amount = (float)(amount * attacker.WorldEventEmpowerFactor());
 
-            // In assault mode a corrupted monster's hits skip the cap: it is sent to break its one target.
-            if (protect.MinDeathSeconds > 0 && ACE.Server.WorldEvents.WorldEventHoldRules.UsesDeathCap(attacker.WorldEventCorrupted, protect.EffectiveCorrupted.AssaultMode))
+            // Every run monster's hit goes through the cap, a corrupted assault monster's included: on 2026-10-19 its
+            // uncapped hits stacked on top of a capped wave and killed a knight in 26 s against a 60 s floor.
+            if (protect.MinDeathSeconds > 0)
             {
                 amount = ACE.Server.WorldEvents.WorldEventHoldRules.CapProtectedHit(amount, maxHealth, protect.MinDeathSeconds,
                     ref worldEventProtectedCapTokens, ref worldEventProtectedCapLastAt, now);

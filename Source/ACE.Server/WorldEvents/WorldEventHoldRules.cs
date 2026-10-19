@@ -743,12 +743,6 @@ namespace ACE.Server.WorldEvents
             return (float)Math.Clamp(configured, 1.0, 2.5);
         }
 
-        /// <summary>
-        /// Whether a run monster's hit on a target goes through protect.minDeathSeconds (D6 - pure): every hit does,
-        /// except a corrupted monster's in assault mode, whose job is to break its one target unless players stop it.
-        /// </summary>
-        public static bool UsesDeathCap(bool attackerCorrupted, bool assaultMode) => !(attackerCorrupted && assaultMode);
-
         public static double EmpowerFactor(bool attackerIsCorrupted, double? nearestCorruptedDist, double radius, double empowerMult, double selfMult)
         {
             if (attackerIsCorrupted)

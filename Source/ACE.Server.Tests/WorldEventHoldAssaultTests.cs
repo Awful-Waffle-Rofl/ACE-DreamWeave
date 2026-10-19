@@ -389,39 +389,43 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void AssaultMonster_HitsSkipTheDeathCap_OtherwiseCapped()
+        public void AssaultMonster_HitsCountAgainstTheDeathCap()
         {
-            double LostIn20s(bool assaultMode)
+            // The live run of 2026-10-19: Sir Draithon died 26 s after wave 2 brought a corrupted assault monster (selfMult 3)
+            // onto him beside two breachers, against a 60 s floor, because the assault monster's hits skipped the cap.
+            double SecondsToKill(bool assaultMode)
             {
                 var (evt, protect) = BuildTimeScaledRun();
                 protect.WaveMix = new WaveMixDef();
-                protect.Corrupted = new CorruptedDef { AssaultEveryWaves = assaultMode ? 2 : 0, SelfMult = 2.5, EmpowerMult = 1.0 };
+                protect.Corrupted = new CorruptedDef { AssaultEveryWaves = assaultMode ? 2 : 0, SelfMult = 3.0, EmpowerMult = 1.5, EmpowerRadius = 50 };
 
                 var target = BuildFreshTarget(evt);
-                var start = target.Health.Current;
-
                 var crowd = Enumerable.Range(0, 6).Select(_ => NewRunMonster(evt)).ToList();
                 var corrupted = NewRunMonster(evt);
                 corrupted.WorldEventCorrupted = true;
 
-                for (var t = 0; t <= 20; t += 2)
+                for (var t = 0.0; t <= 600; t += 2)
                 {
                     foreach (var m in crowd)
                         target.UpdateVitalDelta(target.Health, -(int)target.ScaleWorldEventProtectedHit(m, 50f, T0 + t + 0.5));
 
                     target.UpdateVitalDelta(target.Health, -(int)target.ScaleWorldEventProtectedHit(corrupted, 50f, T0 + t + 0.6));
+
+                    if (target.Health.Current == 0)
+                        return t + 0.6;
                 }
 
-                return start - target.Health.Current;
+                return double.PositiveInfinity;
             }
 
-            var capped = LostIn20s(false);
-            var assault = LostIn20s(true);
+            foreach (var assault in new[] { true, false })
+            {
+                var seconds = SecondsToKill(assault);
 
-            Assert.IsTrue(assault > capped * 1.15, $"an assault monster adds its damage on top of a capped crowd ({assault:F0} against {capped:F0})");
-            Assert.IsTrue(WorldEventHoldRules.UsesDeathCap(false, true), "everyone else still goes through the cap");
-            Assert.IsFalse(WorldEventHoldRules.UsesDeathCap(true, true));
-            Assert.IsTrue(WorldEventHoldRules.UsesDeathCap(true, false), "corrupted without assaults: capped as before");
+                // The bucket starts full (DefaultCapBurstSeconds), so the floor is minDeathSeconds less that burst.
+                Assert.IsTrue(seconds >= 60 - WorldEventHoldRules.DefaultCapBurstSeconds - 1,
+                    $"assault={assault}: a knight under a crowd and a corrupted monster lasts the 60 s floor (died in {seconds:0.0} s)");
+            }
         }
 
         [TestMethod]

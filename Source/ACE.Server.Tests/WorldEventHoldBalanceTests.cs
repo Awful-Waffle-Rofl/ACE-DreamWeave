@@ -390,7 +390,7 @@ namespace ACE.Server.Tests
                     var corruptedHere = on.Any(m => m.Role == HoldRole.Corrupted);
                     var corrupted = p.EffectiveCorrupted;
                     var dmg = 0.0;
-                    var uncapped = 0.0;
+                    var assaultRate = 0.0;
 
                     foreach (var m in on)
                     {
@@ -402,18 +402,20 @@ namespace ACE.Server.Tests
                         rate *= WorldEventHoldRules.EmpowerFactor(m.Role == HoldRole.Corrupted, corruptedHere ? 0 : (double?)null,
                             corrupted.EmpowerRadius, corrupted.EmpowerMult, corrupted.SelfMult);
 
-                        if (WorldEventHoldRules.UsesDeathCap(m.Role == HoldRole.Corrupted, corrupted.AssaultMode))
-                            dmg += rate;
-                        else
-                            uncapped += rate;
+                        // Every hit counts against the cap, the corrupted assault monster's included (2026-10-19).
+                        dmg += rate;
+
+                        if (m.Role == HoldRole.Corrupted && corrupted.AssaultMode)
+                            assaultRate += rate;
                     }
 
-                    var capped = uncapped + (p.MinDeathSeconds > 0
+                    var capped = p.MinDeathSeconds > 0
                         ? WorldEventHoldRules.CapProtectedHit((float)dmg, MaxHealth, p.MinDeathSeconds, ref capTokens[i], ref capLastAt[i], 1_700_000_000d + t)
-                        : dmg);
+                        : dmg;
 
-                    if (uncapped > 0)
-                        result.AssaultDamage += Math.Min(uncapped, hp[i]);
+                    // The assault monster's share of what the cap let through.
+                    if (assaultRate > 0 && dmg > 0)
+                        result.AssaultDamage += Math.Min(capped * assaultRate / dmg, hp[i]);
 
                     hp[i] -= capped;
                     result.DamageTotal += capped;
@@ -633,7 +635,7 @@ namespace ACE.Server.Tests
         /// <summary>
         /// The owner's targets, on the shipped numbers: active defense (solo up to 10 players) never loses every envoy and
         /// keeps at least 1.5 on average; ignoring the envoys always loses; defending without focusing the corrupted
-        /// assault loses clearly more envoys than focusing it; and healing never makes them untouchable (at most one
+        /// assault lets it land at least twice the damage; and healing never makes them untouchable (at most one
         /// envoy-wave per run spent wholly above 90%, the opening wave's quiet side).
         /// </summary>
         [TestMethod]
@@ -656,15 +658,17 @@ namespace ACE.Server.Tests
                 Assert.IsTrue(active.All(r => r.Assaults >= 2), $"{players} player(s): the corrupted assault comes at least twice\n{report}");
                 Assert.IsTrue(active.All(r => r.WavesAbove90 <= 1), $"{players} player(s): no envoy idles above 90% beyond one wave\n{report}");
 
-                // Focusing the corrupted assault matters at every group size.
-                Assert.IsTrue(noFocus.Average(r => r.Survivors) <= active.Average(r => r.Survivors) - 0.5, $"{players} player(s): ignoring the corrupted assault costs envoys\n{report}");
+                // Focusing the corrupted assault matters at every group size. Since 2026-10-19 its hits count against
+                // minDeathSeconds, so it no longer kills an envoy on its own: an unfocused one lands at least twice the damage.
+                Assert.IsTrue(noFocus.Average(r => r.AssaultDamage) >= 2 * active.Average(r => r.AssaultDamage),
+                    $"{players} player(s): ignoring the corrupted assault lets it land far more damage\n{report}");
             }
         }
 
         /// <summary>
-        /// The model against the second live run (2026-10-18 20:16, solo, the shipped numbers, no shrine used because the
-        /// PK altar's prompt blocked it): that run kept 1 envoy. The model must give that outcome in a fair share of runs,
-        /// and keep between 1 and 2.5 on average, or its other answers mean nothing.
+        /// The model against the live solo runs, the hardest case (no shrine). The runs of 2026-10-18 20:16 and 2026-10-19 11:57
+        /// each lost envoys only because the corrupted assault skipped minDeathSeconds (fixed 2026-10-19). With the floor held,
+        /// solo active defense keeps every envoy but is no walkover: the weakest ends well below full health.
         /// </summary>
         [TestMethod]
         public void Balance_ModelReproducesTheLiveSoloRun()
@@ -674,9 +678,10 @@ namespace ACE.Server.Tests
 
             var runs = Enumerable.Range(0, 60).Select(seed => Simulate(p, holdSeconds, 1, Strategy.Active, seed)).ToList();
             var avg = runs.Average(r => r.Survivors);
+            var lowest = runs.Average(r => r.LowestEndHealth);
 
-            Assert.IsTrue(avg >= 1.0 && avg <= 2.5, $"solo, no shrine: {avg:0.00} envoys left on average");
-            Assert.IsTrue(runs.Count(r => r.Survivors == 1) >= 6, $"the live outcome (1 envoy) in at least 10% of runs: {runs.Count(r => r.Survivors == 1)}/60");
+            Assert.IsTrue(avg >= 1.0, $"solo, no shrine: {avg:0.00} envoys left on average");
+            Assert.IsTrue(lowest <= 0.6, $"solo, no shrine: the weakest envoy ends at {lowest * 100:0}% on average, so the fight still bites");
         }
 
         /// <summary>

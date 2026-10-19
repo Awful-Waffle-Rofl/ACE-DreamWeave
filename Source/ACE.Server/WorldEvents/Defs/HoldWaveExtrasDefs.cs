@@ -97,7 +97,7 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("empowerMult")]
         public double EmpowerMult { get; set; } = 1.5;
 
-        /// <summary>How much harder the corrupted monster itself hits the targets (1 to 10). Default 2. In assault mode its hits also skip protect.minDeathSeconds.</summary>
+        /// <summary>How much harder the corrupted monster itself hits the targets (1 to 10). Default 2. Its hits count against protect.minDeathSeconds like every other run monster's.</summary>
         [JsonPropertyName("selfMult")]
         public double SelfMult { get; set; } = 2.0;
 

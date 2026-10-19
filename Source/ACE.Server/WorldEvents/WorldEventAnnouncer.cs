@@ -328,7 +328,7 @@ namespace ACE.Server.WorldEvents
                     var killerName = topKiller?.Name ?? "none";
                     var killerKills = topKiller?.Kills ?? 0;
 
-                    line += $" Most kills: {killerName} ({killerKills}). {participants} defenders took part.";
+                    line += $" Most kills: {killerName} ({killerKills}). {DefendersTookPart(participants)}";
 
                     return line;
                 }
@@ -340,7 +340,7 @@ namespace ACE.Server.WorldEvents
 
                     return Global($"{goalName} at {anchorName} ended: {bossName ?? "the champion"} never " +
                         $"showed and the defenders hold the field. Most kills: {killerName} ({killerKills}). " +
-                        $"{participants} defenders took part.");
+                        $"{DefendersTookPart(participants)}");
                 }
 
                 case WorldEventOutcome.FailedTimeout:
@@ -364,6 +364,10 @@ namespace ACE.Server.WorldEvents
                     return Global($"The event at {anchorName} ended.");
             }
         }
+
+        /// <summary>"1 defender took part." or "3 defenders took part." (D6 - pure).</summary>
+        public static string DefendersTookPart(int participants) =>
+            $"{participants} {(participants == 1 ? "defender" : "defenders")} took part.";
 
         /// <summary>The {reason} for <see cref="WorldEventOutcome.FailedObjectiveLost"/>: "the wards were destroyed".</summary>
         public static string ObjectiveLostReason(string nounPlural)

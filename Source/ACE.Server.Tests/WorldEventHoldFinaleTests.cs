@@ -458,8 +458,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual("The fight moves to Holtburg! The Rats gather near Holtburg (42.1N, 33.6E), and you have 120 seconds to reach them.",
                 WorldEventChain.AnnounceLine("The fight moves to {town}! {Family} gather near {location}, and you have {seconds} seconds to reach them.",
                     "the Rats", "Holtburg (42.1N, 33.6E)", 120, "Holtburg"));
-
-            Assert.AreEqual("Your reward for this fight waits in the cache. Claim it before you go to Holtburg!", WorldEventChain.ReminderLine(null, "Holtburg"));
         }
 
         [TestMethod]
@@ -530,9 +528,6 @@ namespace ACE.Server.Tests
                 AssertPlayerLine(line, "Holtburg");
                 StringAssert.Contains(line, "120 seconds", "the countdown");
             }
-
-            foreach (var template in chain.ClaimReminder)
-                AssertPlayerLine(WorldEventChain.ReminderLine(template, "Holtburg"), "Holtburg");
 
             var standard = store.Rewards["standard"];
             var final = store.Rewards["chain_final"];

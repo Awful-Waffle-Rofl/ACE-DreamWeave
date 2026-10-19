@@ -1260,7 +1260,19 @@ namespace ACE.Server.WorldEvents
                 if (goal.Chain != null)
                 {
                     goal.Chain.Announce = RepairLinePool(goal.Id, "chain.announce", goal.Chain.Announce, diagnostics);
-                    goal.Chain.ClaimReminder = RepairLinePool(goal.Id, "chain.claimReminder", goal.Chain.ClaimReminder, diagnostics);
+                    goal.Chain.Pacing ??= new ChainPacingDef();
+
+                    var story = goal.Chain.Story ??= new ChainStoryDef();
+                    story.Thanks = RepairLinePool(goal.Id, "chain.story.thanks", story.Thanks, diagnostics);
+                    story.ThanksNarrator = RepairLinePool(goal.Id, "chain.story.thanksNarrator", story.ThanksNarrator, diagnostics);
+                    story.Reveal = RepairLinePool(goal.Id, "chain.story.reveal", story.Reveal, diagnostics);
+                    story.RevealNarrator = RepairLinePool(goal.Id, "chain.story.revealNarrator", story.RevealNarrator, diagnostics);
+                    story.TieBack = RepairLinePool(goal.Id, "chain.story.tieBack", story.TieBack, diagnostics);
+                    story.TieBackNarrator = RepairLinePool(goal.Id, "chain.story.tieBackNarrator", story.TieBackNarrator, diagnostics);
+                    story.ClosingSuccess = RepairLinePool(goal.Id, "chain.story.closingSuccess", story.ClosingSuccess, diagnostics);
+                    story.ClosingSuccessNarrator = RepairLinePool(goal.Id, "chain.story.closingSuccessNarrator", story.ClosingSuccessNarrator, diagnostics);
+                    story.ClosingFailure = RepairLinePool(goal.Id, "chain.story.closingFailure", story.ClosingFailure, diagnostics);
+                    story.ClosingFailureNarrator = RepairLinePool(goal.Id, "chain.story.closingFailureNarrator", story.ClosingFailureNarrator, diagnostics);
                 }
 
                 goal.TypeKind = typeKind;

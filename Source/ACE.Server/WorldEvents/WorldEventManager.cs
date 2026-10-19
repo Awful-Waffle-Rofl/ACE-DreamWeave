@@ -365,6 +365,10 @@ namespace ACE.Server.WorldEvents
 
                 nextTickTime = now + 1.0;
 
+                // Paced World Event lines (a stage change, the chain's end) whose time has come.
+                foreach (var line in WorldEventLineSchedule.Shared.TakeDue(now))
+                    WorldEventAnnouncer.Broadcast(line);
+
                 WorldEvent evt;
                 WorldEvent previous;
 
@@ -523,6 +527,7 @@ namespace ACE.Server.WorldEvents
                 if (spots.Count == 0)
                 {
                     log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded, but {why}; the chain ends");
+                    evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
                     return;
                 }
 
@@ -535,6 +540,7 @@ namespace ACE.Server.WorldEvents
                     if (Previous != null && Previous.State != WorldEventState.Done)
                     {
                         log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Previous.RunId} is still finishing; the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
                         return;
                     }
 
@@ -550,6 +556,7 @@ namespace ACE.Server.WorldEvents
                     else if (Current != null)
                     {
                         log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Current.RunId} has already started; the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
                         return;
                     }
 
@@ -562,6 +569,12 @@ namespace ACE.Server.WorldEvents
                         // The first stage's townReach holds for every later stage, whatever their own goal says.
                         next.TownReach = WorldEventTownReach.Effective(evt.Composition?.Goal?.TownReach, request?.TownReach);
                         next.ExcludeTowns = originTownName != null ? new List<string> { originTownName } : null;
+
+                        // The story carries on: the same envoy speaks, the first stage's attackers and town stay named.
+                        next.ChainEnvoyName = evt.ChainEnvoyName;
+                        next.ChainFamily = request?.ChainFamily ?? evt.Composition?.FamilyDisplayName;
+                        next.ChainFirstTown = request?.ChainFirstTown ?? originTownName;
+                        next.ChainAsheronSpoke = evt.ChainAsheronSpoke;
 
                         // A stage reward rewards.json does not define pays the default instead (flagged at load).
                         if (next.RewardId != null && !Store.Rewards.Keys.Any(k => string.Equals(k, next.RewardId, StringComparison.OrdinalIgnoreCase)))
@@ -587,6 +600,7 @@ namespace ACE.Server.WorldEvents
                         }
 
                         log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId}: the next stage could not start ({error}); the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
                         return;
                     }
                 }
@@ -601,11 +615,17 @@ namespace ACE.Server.WorldEvents
                 var bossName = started.Composition?.Boss?.Kind == BossKind.Named ? started.Composition.Boss.DisplayName : null;
                 var line = WorldEventChain.AnnounceLine(template, family, label, seconds, townName, bossName);
 
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(line));
+                // Paced (chain.pacing): the outcome line went out at 0 s; then the thank-you that points to the cache, the story
+                // beat, and this announcement, whose countdown the next stage was started with.
+                var now = Time.GetUnixTime();
+                var tokens = evt.ChainStoryTokens(townName ?? WorldEvent.TownNear(anchor), bossName);
+                List<WorldEventChain.PacedLine> plan;
 
-                // The finished stage keeps its cache for its claim window: remind the players there to take it first.
-                var reminderTemplate = chain?.ClaimReminder != null && chain.ClaimReminder.Count > 0 ? chain.ClaimReminder[chainRng.Next(chain.ClaimReminder.Count)] : null;
-                WorldEventAnnouncer.Local(evt, WorldEventChain.ReminderLine(reminderTemplate, townName ?? label));
+                lock (chainRng)
+                    plan = WorldEventChain.StageChangePlan(chain, tokens, line, chainRng);
+
+                var nextStage = started;
+                WorldEventLineSchedule.Shared.AddPlan(now, plan, () => nextStage.State < WorldEventState.Resolved);
 
                 var distance = origin != null ? anchor.DistanceTo(origin) : 0;
 
@@ -613,11 +633,22 @@ namespace ACE.Server.WorldEvents
                          $"run={started.RunId} at {label} ({distance:0} m away, {anchor.ToLOCString()}) source={started.Composition?.Source?.Id} " +
                          $"family={string.Join("+", started.Composition?.Families?.Select(f => f?.Id) ?? Enumerable.Empty<string>())} " +
                          $"goal={started.Composition?.Goal?.Id} boss={started.Composition?.Boss?.Id} reward={started.Composition?.Reward?.Id}; " +
-                         $"starts in {seconds} s. Broadcast: {line}");
+                         $"starts {seconds} s after its announcement. Lines at [{string.Join(", ", plan.Select(l => $"{l.Delay:0.#} s"))}]: " +
+                         string.Join(" | ", plan.Select(l => l.Text)));
             }
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] chain after run={evt?.RunId} threw; the chain ends", ex);
+
+                try
+                {
+                    if (evt != null && evt.Outcome == WorldEventOutcome.Success)
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                }
+                catch (Exception inner)
+                {
+                    log.Error($"[WORLDEVENT] chain closing after run={evt?.RunId} also threw", inner);
+                }
             }
         }
 

@@ -83,12 +83,13 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("stageRewards")]
         public List<string> StageRewards { get; set; } = new List<string>();
 
-        /// <summary>
-        /// Said locally at the finished stage as the chain moves on, one at random, so nobody leaves its cache behind: token
-        /// {town}. Without lines: "Your reward for this fight waits in the cache. Claim it before you go to {town}!".
-        /// </summary>
-        [JsonPropertyName("claimReminder")]
-        public List<string> ClaimReminder { get; set; } = new List<string>();
+        /// <summary>When each line of a stage change and of the chain's end goes out (seconds after the outcome line).</summary>
+        [JsonPropertyName("pacing")]
+        public ChainPacingDef Pacing { get; set; } = new ChainPacingDef();
+
+        /// <summary>The story lines that link the stages (see <see cref="ChainStoryDef"/>).</summary>
+        [JsonPropertyName("story")]
+        public ChainStoryDef Story { get; set; } = new ChainStoryDef();
 
         /// <summary>The value that rolls an axis at random, as before 2026-10-19.</summary>
         public const string RandomAxis = "random";
@@ -136,6 +137,85 @@ namespace ACE.Server.WorldEvents.Defs
 
             return string.IsNullOrWhiteSpace(id) ? null : id.Trim();
         }
+    }
+
+    /// <summary>
+    /// goals.json "chain.pacing": seconds after a stage's outcome line at which each following line goes out, so a stage
+    /// change reads in order instead of all at once. Each is 0 to 60.
+    /// </summary>
+    public class ChainPacingDef
+    {
+        /// <summary>A surviving envoy thanks the players and points them to the cache. Default 2.</summary>
+        [JsonPropertyName("thanksSeconds")]
+        public double ThanksSeconds { get; set; } = 2;
+
+        /// <summary>The story beat that explains why the fight moves on. Default 5.</summary>
+        [JsonPropertyName("storySeconds")]
+        public double StorySeconds { get; set; } = 5;
+
+        /// <summary>
+        /// The next stage's announcement (chain.announce). The countdown it names starts here, so the next stage goes
+        /// live countdownSeconds after this line. Default 8.
+        /// </summary>
+        [JsonPropertyName("announceSeconds")]
+        public double AnnounceSeconds { get; set; } = 8;
+
+        /// <summary>After a later stage goes live, the line that ties it back to the first. Default 3.</summary>
+        [JsonPropertyName("tieBackSeconds")]
+        public double TieBackSeconds { get; set; } = 3;
+
+        /// <summary>When the chain ends (last stage won, or any stage lost): the closing story line. Default 3.</summary>
+        [JsonPropertyName("closingSeconds")]
+        public double ClosingSeconds { get; set; } = 3;
+
+        /// <summary>When the chain ends: Asheron's closing line ("It is done..."). Default 6.</summary>
+        [JsonPropertyName("asheronSeconds")]
+        public double AsheronSeconds { get; set; } = 6;
+    }
+
+    /// <summary>
+    /// goals.json "chain.story": the lines that link the stages, one picked at random from a list. Each beat has an
+    /// envoy list (spoken by a surviving envoy, shown as "Sir Adarl: ...") and a narrator list (used when no envoy
+    /// survived). Tokens: {envoy} (the speaking envoy), {family} / {Family} (the first stage's attackers), {town} (the
+    /// first stage's town, where the envoys were attacked), {nextTown} (the town the chain moved on to), {champion} (the later stage's named boss, "their champion" without one). An empty
+    /// list skips that line, except thanks, which falls back to a built-in line so players always hear about the cache.
+    /// </summary>
+    public class ChainStoryDef
+    {
+        /// <summary>A stage was won and the chain goes on: the envoy thanks the players and points them to the cache.</summary>
+        [JsonPropertyName("thanks")]
+        public List<string> Thanks { get; set; } = new List<string>();
+
+        [JsonPropertyName("thanksNarrator")]
+        public List<string> ThanksNarrator { get; set; } = new List<string>();
+
+        /// <summary>Why the fight moves on: the attack was meant to stop the envoys' message, and its champion is at {nextTown}.</summary>
+        [JsonPropertyName("reveal")]
+        public List<string> Reveal { get; set; } = new List<string>();
+
+        [JsonPropertyName("revealNarrator")]
+        public List<string> RevealNarrator { get; set; } = new List<string>();
+
+        /// <summary>A later stage has gone live: the champion is the one who sent the first stage's attackers.</summary>
+        [JsonPropertyName("tieBack")]
+        public List<string> TieBack { get; set; } = new List<string>();
+
+        [JsonPropertyName("tieBackNarrator")]
+        public List<string> TieBackNarrator { get; set; } = new List<string>();
+
+        /// <summary>The last stage was won: the chain is closed.</summary>
+        [JsonPropertyName("closingSuccess")]
+        public List<string> ClosingSuccess { get; set; } = new List<string>();
+
+        [JsonPropertyName("closingSuccessNarrator")]
+        public List<string> ClosingSuccessNarrator { get; set; } = new List<string>();
+
+        /// <summary>A stage was lost: the chain ends there.</summary>
+        [JsonPropertyName("closingFailure")]
+        public List<string> ClosingFailure { get; set; } = new List<string>();
+
+        [JsonPropertyName("closingFailureNarrator")]
+        public List<string> ClosingFailureNarrator { get; set; } = new List<string>();
     }
 }
 
@@ -247,13 +327,155 @@ namespace ACE.Server.WorldEvents
                        .Replace("{seconds}", Math.Max(0, seconds).ToString());
         }
 
-        /// <summary>The claim reminder (D6 - pure): {town} filled; the default when there is no template.</summary>
-        public static string ReminderLine(string template, string town)
-        {
-            var line = string.IsNullOrWhiteSpace(template) ? "Your reward for this fight waits in the cache. Claim it before you go to {town}!" : template;
+        /// <summary>The thank-you used when chain.story.thanks is empty: it must still point players to the cache.</summary>
+        public const string DefaultThanks = "Well fought, friends! Take your reward from the cache.";
 
-            return line.Replace("{town}", string.IsNullOrWhiteSpace(town) ? "the next fight" : town.Trim());
+        /// <summary>The story beats (see <see cref="ChainStoryDef"/>).</summary>
+        public enum StoryBeat { Thanks, Reveal, TieBack, ClosingSuccess, ClosingFailure }
+
+        /// <summary>What fills a story line's tokens.</summary>
+        public sealed class StoryTokens
+        {
+            public string Envoy;
+            public string Family;
+            public string Town;
+            public string NextTown;
+            public string Champion;
         }
+
+        /// <summary>
+        /// One story line, ready to broadcast (D6 - pure): with a speaking envoy, from the beat's envoy list as
+        /// "[World Event] Sir Adarl: "..."", else from its narrator list as "[World Event] ...". Null when the list it
+        /// needs is empty (thanks falls back to <see cref="DefaultThanks"/>, or a narrator version of it).
+        /// </summary>
+        public static string StoryLine(ChainStoryDef story, StoryBeat beat, StoryTokens tokens, Random rng)
+        {
+            story ??= new ChainStoryDef();
+            tokens ??= new StoryTokens();
+            rng ??= new Random();
+
+            var envoy = string.IsNullOrWhiteSpace(tokens.Envoy) ? null : tokens.Envoy.Trim();
+
+            var (spoken, narrated) = beat switch
+            {
+                StoryBeat.Thanks => (story.Thanks, story.ThanksNarrator),
+                StoryBeat.Reveal => (story.Reveal, story.RevealNarrator),
+                StoryBeat.TieBack => (story.TieBack, story.TieBackNarrator),
+                StoryBeat.ClosingSuccess => (story.ClosingSuccess, story.ClosingSuccessNarrator),
+                _ => (story.ClosingFailure, story.ClosingFailureNarrator)
+            };
+
+            var pool = envoy != null ? spoken : narrated;
+            var template = WorldEventHoldRules.PickLine(pool, rng);
+
+            if (template == null && beat == StoryBeat.Thanks)
+                template = envoy != null ? DefaultThanks : "The battle is won. Your reward waits in the cache.";
+
+            if (template == null)
+                return null;
+
+            var text = FillStory(template, tokens);
+
+            return envoy != null ? WorldEventAnnouncer.ProtectedSpeechLine(envoy, text) : WorldEventAnnouncer.Global(text);
+        }
+
+        /// <summary>A story template with its tokens filled (D6 - pure); the first letter is capitalised.</summary>
+        public static string FillStory(string template, StoryTokens tokens)
+        {
+            tokens ??= new StoryTokens();
+
+            var family = string.IsNullOrWhiteSpace(tokens.Family) ? WorldEventHoldRules.DefaultFamilyText : tokens.Family.Trim();
+
+            var line = (template ?? "")
+                .Replace("{envoy}", string.IsNullOrWhiteSpace(tokens.Envoy) ? "the envoy" : tokens.Envoy.Trim())
+                .Replace("{Family}", Capitalize(family))
+                .Replace("{family}", family)
+                .Replace("{nextTown}", string.IsNullOrWhiteSpace(tokens.NextTown) ? "the next town" : tokens.NextTown.Trim())
+                .Replace("{town}", string.IsNullOrWhiteSpace(tokens.Town) ? "this place" : tokens.Town.Trim())
+                .Replace("{champion}", string.IsNullOrWhiteSpace(tokens.Champion) ? "their champion" : tokens.Champion.Trim())
+                .Trim();
+
+            return Capitalize(line);
+        }
+
+        /// <summary>One line of a paced sequence: when it goes out (seconds after the outcome line) and its text.</summary>
+        public readonly struct PacedLine
+        {
+            public PacedLine(double delay, string text, bool aboutNextStage = false)
+            {
+                Delay = delay;
+                Text = text;
+                AboutNextStage = aboutNextStage;
+            }
+
+            public double Delay { get; }
+            public string Text { get; }
+
+            /// <summary>The line speaks of the next stage, so it is dropped if that stage ends before it goes out.</summary>
+            public bool AboutNextStage { get; }
+        }
+
+        /// <summary>
+        /// A stage was won and the next one has started (D6 - pure): the thank-you with the cache, the story beat, then
+        /// the next stage's announcement, at chain.pacing's times. The outcome line itself went out at 0 s. Lines with no
+        /// text are left out.
+        /// </summary>
+        public static List<PacedLine> StageChangePlan(ChainDef chain, StoryTokens tokens, string announcement, Random rng)
+        {
+            chain ??= new ChainDef();
+            var pacing = chain.Pacing ?? new ChainPacingDef();
+
+            var plan = new List<PacedLine>
+            {
+                new PacedLine(pacing.ThanksSeconds, StoryLine(chain.Story, StoryBeat.Thanks, tokens, rng)),
+                new PacedLine(pacing.StorySeconds, StoryLine(chain.Story, StoryBeat.Reveal, tokens, rng), true),
+                new PacedLine(pacing.AnnounceSeconds, string.IsNullOrWhiteSpace(announcement) ? null : WorldEventAnnouncer.Global(announcement), true)
+            };
+
+            return plan.Where(l => !string.IsNullOrEmpty(l.Text)).OrderBy(l => l.Delay).ToList();
+        }
+
+        /// <summary>
+        /// The chain has ended (D6 - pure). A win or a loss: the closing story line at chain.pacing.closingSeconds and
+        /// Asheron's closing line (when his opening line went out) at asheronSeconds. An abort: only Asheron's line,
+        /// at once. <paramref name="thanksFirst"/>: a won stage whose next stage could not start also gets the
+        /// thank-you, and the closing lines move to the story and announce times.
+        /// </summary>
+        public static List<PacedLine> ChainEndPlan(ChainDef chain, WorldEventOutcome outcome, StoryTokens tokens, bool asheronSpoke,
+            bool thanksFirst, Random rng)
+        {
+            chain ??= new ChainDef();
+            var pacing = chain.Pacing ?? new ChainPacingDef();
+            var plan = new List<PacedLine>();
+            var asheron = asheronSpoke ? WorldEventAnnouncer.DeathProtectionEndLine : null;
+
+            if (IsAbort(outcome))
+            {
+                plan.Add(new PacedLine(0, asheron));
+            }
+            else
+            {
+                var won = outcome == WorldEventOutcome.Success || outcome == WorldEventOutcome.SuccessBossAbsent;
+                var closing = StoryLine(chain.Story, won ? StoryBeat.ClosingSuccess : StoryBeat.ClosingFailure, tokens, rng);
+
+                if (thanksFirst && won)
+                {
+                    plan.Add(new PacedLine(pacing.ThanksSeconds, StoryLine(chain.Story, StoryBeat.Thanks, tokens, rng)));
+                    plan.Add(new PacedLine(pacing.StorySeconds, closing));
+                    plan.Add(new PacedLine(pacing.AnnounceSeconds, asheron));
+                }
+                else
+                {
+                    plan.Add(new PacedLine(pacing.ClosingSeconds, closing));
+                    plan.Add(new PacedLine(pacing.AsheronSeconds, asheron));
+                }
+            }
+
+            return plan.Where(l => !string.IsNullOrEmpty(l.Text)).OrderBy(l => l.Delay).ToList();
+        }
+
+        private static bool IsAbort(WorldEventOutcome outcome) =>
+            outcome == WorldEventOutcome.AbortedAdmin || outcome == WorldEventOutcome.AbortedShutdown || outcome == WorldEventOutcome.AbortedError;
 
         private static string Capitalize(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s.Substring(1);
 
@@ -283,6 +505,12 @@ namespace ACE.Server.WorldEvents
             if (!double.IsFinite(chain.TownSpotMinDistance) || !double.IsFinite(chain.TownSpotMaxDistance) || chain.TownSpotMinDistance < 20
                 || chain.TownSpotMinDistance > 400 || chain.TownSpotMaxDistance <= chain.TownSpotMinDistance || chain.TownSpotMaxDistance > 600)
                 return "has an invalid chain town spot distance (townSpotMinDistance 20 to 400, townSpotMaxDistance above it and up to 600)";
+
+            var p = chain.Pacing;
+
+            if (p != null && new[] { p.ThanksSeconds, p.StorySeconds, p.AnnounceSeconds, p.TieBackSeconds, p.ClosingSeconds, p.AsheronSeconds }
+                    .Any(s => !double.IsFinite(s) || s < 0 || s > 60))
+                return "has an invalid chain.pacing (every value 0 to 60 seconds)";
 
             return null;
         }
@@ -422,7 +650,9 @@ namespace ACE.Server.WorldEvents
         public static WorldEventRequest NextRequest(WorldEventRequest previous, ChainDef chain, int stage, int maxLength, uint rootRunId,
             uint previousRunId, Position anchor, string anchorLabel)
         {
-            var leads = Leads(chain?.CountdownSeconds ?? 120, WorldEvent.DefaultAnnounceLeadSeconds);
+            // The countdown runs from the announcement, which goes out chain.pacing.announceSeconds after the outcome line.
+            var announceDelay = (int)Math.Round(Math.Clamp(chain?.Pacing?.AnnounceSeconds ?? 0, 0, 60));
+            var leads = Leads((chain?.CountdownSeconds ?? 120) + announceDelay, WorldEvent.DefaultAnnounceLeadSeconds);
 
             return new WorldEventRequest
             {

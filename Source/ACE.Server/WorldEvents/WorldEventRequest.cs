@@ -143,5 +143,17 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>World Events chain: towns a townReach re-roll must not move this stage to (the town the last stage was at).</summary>
         public System.Collections.Generic.List<string> ExcludeTowns { get; set; }
+
+        /// <summary>World Events chain story: the envoy who speaks for the chain (null = none survived; a narrator speaks).</summary>
+        public string ChainEnvoyName { get; set; }
+
+        /// <summary>World Events chain story: the first stage's attackers ("the Ruschks and the Mukkirs"), for {family}.</summary>
+        public string ChainFamily { get; set; }
+
+        /// <summary>World Events chain story: the town of the chain's first stage, where the envoys were attacked, for {town}.</summary>
+        public string ChainFirstTown { get; set; }
+
+        /// <summary>World Events chain: Asheron's opening line went out at an earlier stage, so his closing line is owed when the chain ends.</summary>
+        public bool ChainAsheronSpoke { get; set; }
     }
 }
