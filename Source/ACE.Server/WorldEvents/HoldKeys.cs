@@ -40,5 +40,29 @@ namespace ACE.Server.WorldEvents
         public const string HealReductionSeconds = "heal_reduction_seconds";
         public const string HealBetweenWaves = "heal_between_waves";
         public const string HealBudgetPerWave = "heal_budget_per_wave";
+
+        // ---- monsters ----
+        public const string ShareBreach = "share_breach";
+        public const string ShareRunners = "share_runners";
+        public const string ShareRanged = "share_ranged";
+        public const string ShareHunters = "share_hunters";
+        public const string ShareSeekers = "share_seekers";
+        public const string ShareCorrupted = "share_corrupted";
+        public const string MinBreach = "min_breach";
+        public const string MinRanged = "min_ranged";
+        public const string MinCorrupted = "min_corrupted";
+        public const string MaxCorrupted = "max_corrupted";
+        public const string RunnerHealthMult = "runner_health_mult";
+        public const string RunnerSpeedMult = "runner_speed_mult";
+        public const string RunnerAttackSpeedMult = "runner_attack_speed_mult";
+        public const string RangedKeepDistance = "ranged_keep_distance";
+        public const string CorruptedHealthMult = "corrupted_health_mult";
+        public const string CorruptedSelfMult = "corrupted_self_mult";
+        public const string CorruptedEmpowerMult = "corrupted_empower_mult";
+        public const string CorruptedAssaultEveryWaves = "corrupted_assault_every_waves";
+        public const string CorruptedAssaultFromWave = "corrupted_assault_from_wave";
+        public const string CorruptedAssaultCount = "corrupted_assault_count";
+        public const string CorruptedTint = "corrupted_tint";
+        public const string CasterShareOfRanged = "caster_share_of_ranged";
     }
 }

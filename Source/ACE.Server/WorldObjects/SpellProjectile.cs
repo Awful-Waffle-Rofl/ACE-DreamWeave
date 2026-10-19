@@ -1247,6 +1247,19 @@ namespace ACE.Server.WorldObjects
                 // Placed AFTER the cloak damage proc, matching the physical path's order, and inside the
                 // health branch so a Stamina/Mana Lowering drain is never absorbed - the barrier trades
                 // Mana for Health, which would be nonsense against a mana drain.
+                // World Events Hold (world_events_hold_<role>_player_damage_mult and the boss settings): a run monster's
+                // bolt on a player. Before the class barrier, like the physical path's multiplier. 1 for everyone else.
+                if (targetPlayer != null && ProjectileSource is Creature worldEventCaster && worldEventCaster.P_WorldEvent != null)
+                {
+                    var mult = worldEventCaster.WorldEventPlayerDamageMult;
+
+                    if (mult != 1.0)
+                    {
+                        damage = (float)(damage * mult);
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
                 if (targetPlayer != null)
                 {
                     var beforeMitigation = (uint)Math.Round(damage);

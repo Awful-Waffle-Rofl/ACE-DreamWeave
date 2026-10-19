@@ -187,6 +187,105 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// A caster (D6 - pure): its ranged attack is spells (offensive spells often enough) and it has no physical one (no
+        /// launcher with fitting ammunition, no thrown weapon). World Events Hold tunes casters apart from archers.
+        /// </summary>
+        public static bool IsCasterAttack(bool launcherWithAmmo, bool thrownWielded, double offensiveCastChance) =>
+            double.IsFinite(offensiveCastChance) && offensiveCastChance >= MinOffensiveCastChance && !launcherWithAmmo && !thrownWielded;
+
+        /// <summary>The constructed creature is a caster (<see cref="IsCasterAttack"/>). False on any error.</summary>
+        public static bool CreatureIsCaster(Creature creature)
+        {
+            if (creature == null)
+                return false;
+
+            try
+            {
+                var launcher = creature.GetEquippedMissileLauncher();
+                var weapon = creature.GetEquippedMissileWeapon();
+                var thrown = weapon != null && weapon.IsThrownWeapon;
+                var ammo = creature.GetEquippedAmmo();
+                var ammoFits = launcher != null && ammo != null && AmmoFits((int?)launcher.AmmoType, (int?)ammo.AmmoType);
+
+                var chance = OffensiveCastChance(creature.Biota?.PropertiesSpellBook?.ToList(), OffensiveSpellLookup);
+
+                return IsCasterAttack(ammoFits, thrown, chance);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"[WORLDEVENT] caster check for {creature.Name} ({creature.WeenieClassId}) failed; treated as not a caster", ex);
+                return false;
+            }
+        }
+
+        private static readonly ConcurrentDictionary<uint, bool> casterByWcid = new ConcurrentDictionary<uint, bool>();
+
+        /// <summary>Test seam: wcid to "is a caster" (<see cref="IsCasterAttack"/> over its weenie).</summary>
+        internal static Func<uint, bool> CasterLookup = LookUpCaster;
+
+        /// <summary>True when the weenie <paramref name="wcid"/> is a caster. Cached.</summary>
+        public static bool IsCasterWcid(uint wcid)
+        {
+            if (wcid == 0)
+                return false;
+
+            return casterByWcid.GetOrAdd(wcid, w =>
+            {
+                try
+                {
+                    return CasterLookup(w);
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"[WORLDEVENT] caster check for wcid {w} failed; treated as not a caster", ex);
+                    return false;
+                }
+            });
+        }
+
+        /// <summary>Forgets the cached caster answers (tests swap <see cref="CasterLookup"/>).</summary>
+        internal static void ClearCasterCache() => casterByWcid.Clear();
+
+        private static bool LookUpCaster(uint wcid)
+        {
+            var weenie = DatabaseManager.World.GetCachedWeenie(wcid);
+
+            if (weenie == null)
+                return false;
+
+            var launcherTypes = new List<int?>();
+            var ammoTypes = new List<int?>();
+            var thrown = false;
+
+            if (weenie.PropertiesCreateList != null)
+            {
+                foreach (var item in weenie.PropertiesCreateList)
+                {
+                    if (item == null || item.WeenieClassId == 0)
+                        continue;
+
+                    var itemWeenie = DatabaseManager.World.GetCachedWeenie(item.WeenieClassId);
+
+                    if (itemWeenie == null)
+                        continue;
+
+                    var wielded = (item.DestinationType & DestinationType.Wield) != 0;
+
+                    if (itemWeenie.WeenieType == WeenieType.MissileLauncher && wielded)
+                        launcherTypes.Add(itemWeenie.GetProperty(PropertyInt.AmmoType));
+                    else if (itemWeenie.WeenieType == WeenieType.Ammunition)
+                        ammoTypes.Add(itemWeenie.GetProperty(PropertyInt.AmmoType));
+                    else if (itemWeenie.WeenieType == WeenieType.Missile && wielded)
+                        thrown = true;
+                }
+            }
+
+            var ammoFits = launcherTypes.Any(l => ammoTypes.Any(a => AmmoFits(l, a)));
+
+            return IsCasterAttack(ammoFits, thrown, OffensiveCastChance(weenie.PropertiesSpellBook, OffensiveSpellLookup));
+        }
+
+        /// <summary>
         /// The ranged members a ranged slot draws from (D6 - pure apart from <see cref="IsRanged"/>): those inside
         /// <paramref name="band"/>, else every ranged member of the roster (a family with only out-of-band
         /// archers still gets ranged). Empty when the family has none at all.

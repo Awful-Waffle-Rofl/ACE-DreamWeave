@@ -75,7 +75,11 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Health multiplier (1 to 5). Default 1.5.</summary>
         [JsonPropertyName("healthMult")]
-        public double HealthMult { get; set; } = 1.5;
+        public double HealthMultJson { get; set; } = 1.5;
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedHealthMult) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double HealthMult { get => HoldSettings.Number(HoldKeys.CorruptedHealthMult, HealthMultJson); set => HealthMultJson = value; }
 
         /// <summary>The effect replayed on it (a PlayScript name, or none). Default ShieldUpPurple.</summary>
         [JsonPropertyName("effect")]
@@ -95,11 +99,19 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>How much harder wave monsters inside the aura hit the targets (1 to 5). Default 1.5.</summary>
         [JsonPropertyName("empowerMult")]
-        public double EmpowerMult { get; set; } = 1.5;
+        public double EmpowerMultJson { get; set; } = 1.5;
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedEmpowerMult) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double EmpowerMult { get => HoldSettings.Number(HoldKeys.CorruptedEmpowerMult, EmpowerMultJson); set => EmpowerMultJson = value; }
 
         /// <summary>How much harder the corrupted monster itself hits the targets (1 to 10). Default 2. Its hits count against protect.minDeathSeconds like every other run monster's.</summary>
         [JsonPropertyName("selfMult")]
-        public double SelfMult { get; set; } = 2.0;
+        public double SelfMultJson { get; set; } = 2.0;
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedSelfMult) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double SelfMult { get => HoldSettings.Number(HoldKeys.CorruptedSelfMult, SelfMultJson); set => SelfMultJson = value; }
 
         /// <summary>
         /// The corrupted assault: every this many waves (from <see cref="AssaultFromWave"/>), never the finale, the wave
@@ -107,15 +119,27 @@ namespace ACE.Server.WorldEvents.Defs
         /// The other waves bring none. 0 (the default) = off: corrupted come in every mixed wave by waveMix.corrupted.
         /// </summary>
         [JsonPropertyName("assaultEveryWaves")]
-        public int AssaultEveryWaves { get; set; }
+        public int AssaultEveryWavesJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedAssaultEveryWaves) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int AssaultEveryWaves { get => HoldSettings.Integer(HoldKeys.CorruptedAssaultEveryWaves, AssaultEveryWavesJson); set => AssaultEveryWavesJson = value; }
 
         /// <summary>The first assault wave (1 to 10). Default 2.</summary>
         [JsonPropertyName("assaultFromWave")]
-        public int AssaultFromWave { get; set; } = 2;
+        public int AssaultFromWaveJson { get; set; } = 2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedAssaultFromWave) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int AssaultFromWave { get => HoldSettings.Integer(HoldKeys.CorruptedAssaultFromWave, AssaultFromWaveJson); set => AssaultFromWaveJson = value; }
 
         /// <summary>Corrupted monsters per assault (1 to 5), each on a different target while enough stand. Default 2.</summary>
         [JsonPropertyName("assaultCount")]
-        public int AssaultCount { get; set; } = 2;
+        public int AssaultCountJson { get; set; } = 2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedAssaultCount) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int AssaultCount { get => HoldSettings.Integer(HoldKeys.CorruptedAssaultCount, AssaultCountJson); set => AssaultCountJson = value; }
 
         /// <summary>
         /// One World Event line per assault monster, one picked at random: tokens {monster} (its name, "Corrupted Grievver
@@ -139,11 +163,29 @@ namespace ACE.Server.WorldEvents.Defs
         /// textures keeps its look and relies on the aura (logged at spawn). Default none; the envoys use 0x04001381.
         /// </summary>
         [JsonPropertyName("tintPalette")]
-        public string TintPalette { get; set; } = "none";
+        public string TintPaletteJson { get; set; } = "none";
 
-        /// <summary>The parsed <see cref="TintPalette"/> (0 = none). Set at load.</summary>
+        /// <summary>In force: world_events_hold_corrupted_tint when set ("none" = no color), else goals.json (next spawn).</summary>
         [JsonIgnore]
-        public uint TintPaletteId { get; set; }
+        public string TintPalette { get => HoldSettings.Text(HoldKeys.CorruptedTint, TintPaletteJson); set => TintPaletteJson = value; }
+
+        /// <summary>The parsed goals.json <see cref="TintPalette"/> (0 = none). Set at load.</summary>
+        [JsonIgnore]
+        public uint TintPaletteIdJson { get; set; }
+
+        /// <summary>The palette in force (0 = none): the setting's when set and valid, else goals.json's.</summary>
+        [JsonIgnore]
+        public uint TintPaletteId
+        {
+            get
+            {
+                if (!HoldSettings.IsSet(HoldKeys.CorruptedTint))
+                    return TintPaletteIdJson;
+
+                return ACE.Server.WorldEvents.WorldEventTint.TryParsePalette(TintPalette, out var palette) ? palette : TintPaletteIdJson;
+            }
+            set => TintPaletteIdJson = value;
+        }
     }
 
     /// <summary>

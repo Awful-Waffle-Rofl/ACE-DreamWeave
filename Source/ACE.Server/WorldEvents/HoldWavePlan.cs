@@ -41,6 +41,9 @@ namespace ACE.Server.WorldEvents
         /// <summary>Ranged: the wave's trash wcids replaced by ranged and caster family members (null = unchanged).</summary>
         public IReadOnlyList<uint> ReplacedTrash { get; set; }
 
+        /// <summary>Slots redrawn by a role level offset (world_events_hold_<role>_level_offset): slot index to offset. Null = none.</summary>
+        public IReadOnlyDictionary<int, int> LevelOffsetSlots { get; set; }
+
         /// <summary>Hunters: how many non-seekers hunt players.</summary>
         public int Hunters { get; set; }
 

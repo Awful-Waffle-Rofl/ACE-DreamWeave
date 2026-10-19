@@ -1081,6 +1081,82 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// <see cref="ReplaceRangedSlots(IReadOnlyList{uint}, IReadOnlyList{HoldRole}, IReadOnlyList{uint}, Random)"/> with a caster
+        /// preference (world_events_hold_caster_share_of_ranged, D6 - pure): each Ranged slot draws a caster with chance
+        /// <paramref name="casterShare"/>, else an archer. With no share, or a pool of only one kind, exactly the plain draw.
+        /// </summary>
+        public static List<uint> ReplaceRangedSlots(IReadOnlyList<uint> trash, IReadOnlyList<HoldRole> roles, IReadOnlyList<uint> rangedPool, Random rng,
+            Func<uint, bool> isCaster, double? casterShare)
+        {
+            if (casterShare == null || isCaster == null || rangedPool == null || rangedPool.Count == 0)
+                return ReplaceRangedSlots(trash, roles, rangedPool, rng);
+
+            var casters = rangedPool.Where(isCaster).ToList();
+            var archers = rangedPool.Where(w => !isCaster(w)).ToList();
+
+            if (casters.Count == 0 || archers.Count == 0)
+                return ReplaceRangedSlots(trash, roles, rangedPool, rng);
+
+            var result = trash?.ToList() ?? new List<uint>();
+            rng ??= new Random();
+            var share = Math.Clamp(casterShare.Value, 0, 1);
+
+            for (var i = 0; i < result.Count && roles != null && i < roles.Count; i++)
+            {
+                if (roles[i] != HoldRole.Ranged)
+                    continue;
+
+                var pool = rng.NextDouble() < share ? casters : archers;
+                result[i] = pool[rng.Next(pool.Count)];
+            }
+
+            return result;
+        }
+
+        /// <summary>A level band moved by <paramref name="offset"/> levels, kept within 1 to 275 (D6 - pure).</summary>
+        public static LevelBand ShiftBand(LevelBand band, int offset)
+        {
+            var low = Math.Clamp(band.Low + offset, 1, 275);
+            var high = Math.Clamp(band.High + offset, low, 275);
+
+            return new LevelBand(low, high);
+        }
+
+        /// <summary>
+        /// Role level offsets (world_events_hold_&lt;role&gt;_level_offset, D6 - pure): every slot below <paramref name="trash"/>'s
+        /// count with an offset, and not in <paramref name="keep"/> (an elite, an overflow champion), is redrawn from the pool
+        /// for its offset. A slot whose pool is empty keeps its monster. Returns the new trash and the slots that moved.
+        /// </summary>
+        public static List<uint> RedrawForLevelOffsets(IReadOnlyList<uint> trash, ISet<int> keep, Func<int, int> offsetForSlot,
+            Func<int, IReadOnlyList<uint>> poolForSlot, Random rng, out Dictionary<int, int> moved)
+        {
+            moved = new Dictionary<int, int>();
+            var result = trash?.ToList() ?? new List<uint>();
+            rng ??= new Random();
+
+            for (var i = 0; i < result.Count; i++)
+            {
+                if (keep != null && keep.Contains(i))
+                    continue;
+
+                var offset = offsetForSlot?.Invoke(i) ?? 0;
+
+                if (offset == 0)
+                    continue;
+
+                var pool = poolForSlot?.Invoke(i);
+
+                if (pool == null || pool.Count == 0)
+                    continue;
+
+                result[i] = pool[rng.Next(pool.Count)];
+                moved[i] = offset;
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// The final wave without copies of its boss (D6 - pure): every <paramref name="bossWcid"/> in
         /// <paramref name="trash"/> is swapped for another monster of the same wave, so the boss is the only one of
         /// its kind. Unchanged when the wave has nothing else to swap in.

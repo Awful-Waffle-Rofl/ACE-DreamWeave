@@ -952,9 +952,14 @@ namespace ACE.Server.WorldEvents
                 // WavePick.EliteIndex - every other index is plain trash.
                 var isElite = i == pick.EliteIndex;
 
+                // A slot redrawn by a role level offset (world_events_hold_<role>_level_offset) keeps its moved level: no
+                // uplift back to the band, and its slot level (the combat guard's standard) moved with it.
+                var levelOffset = plan?.LevelOffsetSlots != null && plan.LevelOffsetSlots.TryGetValue(i, out var off) ? off : 0;
+
                 entries.Add(new SpawnEntry(trash[i], overflowChampion: false,
                     isElite ? WorldEventWaveEntryKind.Elite : WorldEventWaveEntryKind.Trash,
-                    isElite && pick.EliteSynthetic, pick.TrashUpliftAt(i), SlotLevelFor(pick, pick.TrashSlotLevelAt(i))));
+                    isElite && pick.EliteSynthetic, levelOffset != 0 ? 0 : pick.TrashUpliftAt(i),
+                    MovedSlotLevel(SlotLevelFor(pick, pick.TrashSlotLevelAt(i)), levelOffset)));
             }
 
             for (var i = 0; i < pick.Champions.Count; i++)
@@ -2039,6 +2044,13 @@ namespace ACE.Server.WorldEvents
 
                     if (plan.Type == HoldWaveType.Ranged && plan.HoldDistance > 0 && entryIndex != plan.ChampionEntryIndex)
                         creature.WorldEventHoldDistance = plan.HoldDistance;
+
+                    // The tuning role of a one-type wave's monster (world_events_hold_<role>_*); the finale boss has its own.
+                    if (entryIndex != plan.ChampionEntryIndex)
+                        creature.WorldEventHoldRole = plan.Type == HoldWaveType.Runners ? HoldDamageRole.Runner
+                            : plan.Type == HoldWaveType.Ranged && creature.WorldEventHoldDistance > 0
+                                ? (WorldEventRangedMembers.CreatureIsCaster(creature) ? HoldDamageRole.Caster : HoldDamageRole.Ranged)
+                                : creature.WorldEventCorrupted ? HoldDamageRole.Corrupted : HoldDamageRole.Melee;
                 }
 
                 // Band uplift (world_events_band_uplift): a roster member drawn BELOW its slot's natural band
@@ -2091,6 +2103,10 @@ namespace ACE.Server.WorldEvents
                 if (plan != null && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex
                     && (plan.Type == HoldWaveType.Runners || (plan.Roles != null && entryIndex < plan.Roles.Length && plan.Roles[entryIndex] == HoldRole.Runner)))
                     ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * plan.HealthMult)));
+
+                // Hold per-role settings (world_events_hold_<role>_health_mult, _attack_speed_mult); no-ops while not set.
+                if (plan != null && entryIndex != plan.ChampionEntryIndex)
+                    ApplyHoldRoleTuning(evt, creature);
 
                 // WP-24: a synthetic elite/champion (a role-0 member promoted because the band had no real
                 // one) is renamed and given a further health multiplier ON TOP of healthMult, here - before
@@ -2632,6 +2648,9 @@ namespace ACE.Server.WorldEvents
             creature.WorldEventSeeker = role != HoldRole.Hunter;
             creature.WorldEventHunter = role == HoldRole.Hunter;
 
+            // The role whose world_events_hold_<role>_* settings tune this monster.
+            creature.WorldEventHoldRole = DamageRoleFor(role, creature);
+
             switch (role)
             {
                 case HoldRole.Breach:
@@ -2663,6 +2682,51 @@ namespace ACE.Server.WorldEvents
                 case HoldRole.Seeker:
                     creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
                     break;
+            }
+        }
+
+        /// <summary>
+        /// The tuning role of a wave monster from its wave role (world_events_hold_&lt;role&gt;_*): the breach squad, seekers and
+        /// hunters are melee; a ranged slot is a caster when its ranged attack is spells only.
+        /// </summary>
+        public static HoldDamageRole DamageRoleFor(HoldRole role, Creature creature)
+        {
+            switch (role)
+            {
+                case HoldRole.Runner: return HoldDamageRole.Runner;
+                case HoldRole.Corrupted: return HoldDamageRole.Corrupted;
+                case HoldRole.Ranged: return WorldEventRangedMembers.CreatureIsCaster(creature) ? HoldDamageRole.Caster : HoldDamageRole.Ranged;
+                default: return HoldDamageRole.Melee;
+            }
+        }
+
+        /// <summary>
+        /// A Hold wave monster's new per-role settings, before EnterWorld: its health (melee, ranged, caster) and attack speed
+        /// (every role but runners, whose own setting goes through the wave plan). Nothing changes while a setting is not set.
+        /// </summary>
+        public static void ApplyHoldRoleTuning(WorldEvent evt, Creature creature)
+        {
+            if (creature == null || creature.WorldEventHoldRole == HoldDamageRole.None)
+                return;
+
+            try
+            {
+                var health = HoldSettings.RoleHealthMult(creature.WorldEventHoldRole);
+
+                if (health is double h && Math.Abs(h - 1.0) > 1e-9)
+                    ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * h)));
+
+                var speed = HoldSettings.RoleAttackSpeedMult(creature.WorldEventHoldRole);
+
+                if (speed is double s)
+                    creature.WorldEventAttackSpeedMult = (float)Math.Clamp(s, HoldSettings.RoleAttackSpeedMin, HoldSettings.RoleAttackSpeedMax);
+
+                if (health != null || speed != null)
+                    log.Debug($"[WORLDEVENT] run={evt?.RunId} {creature.Name} role={creature.WorldEventHoldRole} health={creature.Health.MaxValue} attackSpeed=x{creature.WorldEventAttackSpeedMult:0.##}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt?.RunId} role tuning for {creature.Name} threw", ex);
             }
         }
 
@@ -3518,6 +3582,9 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>The slot level to stamp on an entry: the recorded one, or <see cref="NoSlotLevel"/> for a pick that recorded none.</summary>
         internal static int SlotLevelFor(WavePick pick, int recorded) => pick.HasSlotLevels ? recorded : NoSlotLevel;
+
+        /// <summary>A slot level moved by a role level offset (D6 - pure); "no slot level" stays as it is.</summary>
+        internal static int MovedSlotLevel(int slotLevel, int offset) => offset == 0 || slotLevel == NoSlotLevel ? slotLevel : Math.Clamp(slotLevel + offset, 1, 275);
 
         /// <summary>
         /// The health a band-uplifted creature must be raised to, or 0 for "leave it" (pure, upward-only):

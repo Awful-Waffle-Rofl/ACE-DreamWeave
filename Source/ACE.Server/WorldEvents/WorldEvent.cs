@@ -1959,12 +1959,12 @@ namespace ACE.Server.WorldEvents
                         plan.Roles[i] = HoldRole.Seeker;
             }
 
-            var runners = protect.SpecialWave(HoldWaveType.Runners) ?? new SpecialWaveDef();
+            var runners = protect.SpecialWave(HoldWaveType.Runners) ?? new SpecialWaveDef { TypeKind = HoldWaveType.Runners };
             plan.RunRateMult = (float)Math.Clamp(runners.SpeedMult, 1.0, 3.0);
             plan.AttackSpeedMult = (float)Math.Clamp(runners.AttackSpeedMult, 1.0, 3.0);
             plan.HealthMult = Math.Clamp(runners.HealthMult, 0.1, 1.0);
 
-            var ranged = protect.SpecialWave(HoldWaveType.Ranged) ?? new SpecialWaveDef();
+            var ranged = protect.SpecialWave(HoldWaveType.Ranged) ?? new SpecialWaveDef { TypeKind = HoldWaveType.Ranged };
             plan.HoldDistance = (float)Math.Clamp(ranged.HoldDistance, 5.0, 40.0);
             plan.Warded = protect.Ward != null;
 
@@ -1973,7 +1973,8 @@ namespace ACE.Server.WorldEvents
                 var pool = RangedPoolFor(pick.Band, waveNumber);
 
                 if (pool.Count > 0)
-                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng);
+                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng,
+                        WorldEventRangedMembers.IsCasterWcid, HoldSettings.CasterShareOfRanged());
                 else
                 {
                     // No member with a real ranged attack, here or in a family of the same theme: those slots seek
@@ -1984,6 +1985,9 @@ namespace ACE.Server.WorldEvents
                              $"or a family of its theme; {moved} ranged slot(s) seek instead");
                 }
             }
+
+            // world_events_hold_<role>_level_offset: slots of a role with an offset are redrawn from the moved band.
+            ApplyRoleLevelOffsets(plan, pick, keep, waveNumber);
 
             if (plan.Assault)
                 AssignAssaultTargets(plan, pick, corrupted);

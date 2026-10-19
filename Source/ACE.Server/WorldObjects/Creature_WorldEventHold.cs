@@ -81,6 +81,21 @@ namespace ACE.Server.WorldObjects
         public bool WorldEventFinaleBoss { get; set; }
 
         /// <summary>
+        /// Runtime-only, Hold waves: the role whose settings tune this monster (world_events_hold_&lt;role&gt;_*): melee, runner,
+        /// ranged, caster or corrupted. None for everything else (the finale boss has its own).
+        /// </summary>
+        public ACE.Server.WorldEvents.HoldDamageRole WorldEventHoldRole { get; set; }
+
+        /// <summary>
+        /// This monster's hits on a player are multiplied by this (world_events_hold_&lt;role&gt;_player_damage_mult and the
+        /// boss settings; 1 for any creature of no World Event). Read on every hit, so a change applies live.
+        /// </summary>
+        public double WorldEventPlayerDamageMult => P_WorldEvent == null ? 1.0 : ACE.Server.WorldEvents.HoldSettings.PlayerDamageMultFor(this);
+
+        /// <summary>This monster's hits on a knight are multiplied by this (world_events_hold_&lt;role&gt;_npc_damage_mult; live), before the cap.</summary>
+        public double WorldEventNpcDamageMult => P_WorldEvent == null ? 1.0 : ACE.Server.WorldEvents.HoldSettings.NpcDamageMultFor(this);
+
+        /// <summary>
         /// Runtime-only, Hold finale boss (protect.bossTargetsProtected): the player a damage pull holds it on, until
         /// <see cref="WorldEventBossPullUntil"/> (unix time). Set by WorldEvent.TickHoldFinaleBoss on this boss's landblock thread.
         /// </summary>
@@ -663,6 +678,9 @@ namespace ACE.Server.WorldObjects
 
             // world_events_hold_knight_damage_taken_mult (1 = as before), also before the cap.
             amount = (float)(amount * protect.KnightDamageTakenMult);
+
+            // world_events_hold_<role>_npc_damage_mult (1 = as before): this monster's role, also before the cap.
+            amount = (float)(amount * attacker.WorldEventNpcDamageMult);
 
             // Every run monster's hit goes through the cap, a corrupted assault monster's included: on 2026-10-19 its
             // uncapped hits stacked on top of a capped wave and killed a knight in 26 s against a 60 s floor.

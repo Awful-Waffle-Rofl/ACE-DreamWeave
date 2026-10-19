@@ -56,25 +56,41 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Runners: the runners' health as a share of normal (0 to 1). Default 0.6.</summary>
         [JsonPropertyName("healthMult")]
-        public double HealthMult { get; set; } = 0.6;
+        public double HealthMultJson { get; set; } = 0.6;
+
+        /// <summary>In force: for the runners entry, world_events_hold_runner_health_mult when set, else goals.json (next wave).</summary>
+        [JsonIgnore]
+        public double HealthMult { get => TypeKind == HoldWaveType.Runners ? HoldSettings.Number(HoldKeys.RunnerHealthMult, HealthMultJson) : HealthMultJson; set => HealthMultJson = value; }
 
         /// <summary>Runners: run speed multiplier (1 to 3). Default 1.5.</summary>
         [JsonPropertyName("speedMult")]
-        public double SpeedMult { get; set; } = 1.5;
+        public double SpeedMultJson { get; set; } = 1.5;
+
+        /// <summary>In force: for the runners entry, world_events_hold_runner_speed_mult when set, else goals.json (next wave).</summary>
+        [JsonIgnore]
+        public double SpeedMult { get => TypeKind == HoldWaveType.Runners ? HoldSettings.Number(HoldKeys.RunnerSpeedMult, SpeedMultJson) : SpeedMultJson; set => SpeedMultJson = value; }
 
         /// <summary>
         /// Runners: attack speed multiplier (1 to 3). Default 1.5. Speeds up their swings, and their time-based
         /// damage to the targets by the same factor. Every runner is a seeker.
         /// </summary>
         [JsonPropertyName("attackSpeedMult")]
-        public double AttackSpeedMult { get; set; } = 1.5;
+        public double AttackSpeedMultJson { get; set; } = 1.5;
+
+        /// <summary>In force: for the runners entry, world_events_hold_runner_attack_speed_mult when set, else goals.json (next wave).</summary>
+        [JsonIgnore]
+        public double AttackSpeedMult { get => TypeKind == HoldWaveType.Runners ? HoldSettings.Number(HoldKeys.RunnerAttackSpeedMult, AttackSpeedMultJson) : AttackSpeedMultJson; set => AttackSpeedMultJson = value; }
 
         /// <summary>
         /// Ranged: the distance in metres (5 to 40) a ranged or caster monster stops at from its target and
         /// attacks from. It only closes in when it has no ranged attack or its spell cannot reach. Default 18.
         /// </summary>
         [JsonPropertyName("holdDistance")]
-        public double HoldDistance { get; set; } = 18;
+        public double HoldDistanceJson { get; set; } = 18;
+
+        /// <summary>In force: for the ranged entry, world_events_hold_ranged_keep_distance when set, else goals.json (next wave).</summary>
+        [JsonIgnore]
+        public double HoldDistance { get => TypeKind == HoldWaveType.Ranged ? HoldSettings.Number(HoldKeys.RangedKeepDistance, HoldDistanceJson) : HoldDistanceJson; set => HoldDistanceJson = value; }
 
         /// <summary>Hunters: how many of the wave hunt players instead of the targets. Default 2.</summary>
         [JsonPropertyName("hunters")]
@@ -117,39 +133,79 @@ namespace ACE.Server.WorldEvents.Defs
     public class WaveMixDef
     {
         [JsonPropertyName("breach")]
-        public double Breach { get; set; } = 0.15;
+        public double BreachJson { get; set; } = 0.15;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareBreach) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Breach { get => HoldSettings.Number(HoldKeys.ShareBreach, BreachJson); set => BreachJson = value; }
 
         [JsonPropertyName("runners")]
-        public double Runners { get; set; } = 0.15;
+        public double RunnersJson { get; set; } = 0.15;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareRunners) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Runners { get => HoldSettings.Number(HoldKeys.ShareRunners, RunnersJson); set => RunnersJson = value; }
 
         [JsonPropertyName("ranged")]
-        public double Ranged { get; set; } = 0.3;
+        public double RangedJson { get; set; } = 0.3;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareRanged) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Ranged { get => HoldSettings.Number(HoldKeys.ShareRanged, RangedJson); set => RangedJson = value; }
 
         [JsonPropertyName("hunters")]
-        public double Hunters { get; set; } = 0.1;
+        public double HuntersJson { get; set; } = 0.1;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareHunters) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Hunters { get => HoldSettings.Number(HoldKeys.ShareHunters, HuntersJson); set => HuntersJson = value; }
 
         [JsonPropertyName("seekers")]
-        public double Seekers { get; set; } = 0.2;
+        public double SeekersJson { get; set; } = 0.2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareSeekers) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Seekers { get => HoldSettings.Number(HoldKeys.ShareSeekers, SeekersJson); set => SeekersJson = value; }
 
         /// <summary>Corrupted priority targets (protect.corrupted). Default 0.1, at least <see cref="MinCorrupted"/>, at most <see cref="MaxCorrupted"/>.</summary>
         [JsonPropertyName("corrupted")]
-        public double Corrupted { get; set; } = 0.1;
+        public double CorruptedJson { get; set; } = 0.1;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShareCorrupted) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Corrupted { get => HoldSettings.Number(HoldKeys.ShareCorrupted, CorruptedJson); set => CorruptedJson = value; }
 
         /// <summary>At least this many in the breach squad, so the knight it hits really feels it (0 to 10). Default 0.</summary>
         [JsonPropertyName("minBreach")]
-        public int MinBreach { get; set; }
+        public int MinBreachJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.MinBreach) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MinBreach { get => HoldSettings.Integer(HoldKeys.MinBreach, MinBreachJson); set => MinBreachJson = value; }
 
         /// <summary>At least this many ranged in every wave big enough to hold them (0 to 20). Default 3.</summary>
         [JsonPropertyName("minRanged")]
-        public int MinRanged { get; set; } = 3;
+        public int MinRangedJson { get; set; } = 3;
+
+        /// <summary>In force: its Hold setting (HoldKeys.MinRanged) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MinRanged { get => HoldSettings.Integer(HoldKeys.MinRanged, MinRangedJson); set => MinRangedJson = value; }
 
         /// <summary>At least this many corrupted per wave when the share is above 0 (0 to 5). Default 1.</summary>
         [JsonPropertyName("minCorrupted")]
-        public int MinCorrupted { get; set; } = 1;
+        public int MinCorruptedJson { get; set; } = 1;
+
+        /// <summary>In force: its Hold setting (HoldKeys.MinCorrupted) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MinCorrupted { get => HoldSettings.Integer(HoldKeys.MinCorrupted, MinCorruptedJson); set => MinCorruptedJson = value; }
 
         /// <summary>At most this many corrupted per wave (0 to 10); the rest go to seekers. Default 2.</summary>
         [JsonPropertyName("maxCorrupted")]
-        public int MaxCorrupted { get; set; } = 2;
+        public int MaxCorruptedJson { get; set; } = 2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.MaxCorrupted) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MaxCorrupted { get => HoldSettings.Integer(HoldKeys.MaxCorrupted, MaxCorruptedJson); set => MaxCorruptedJson = value; }
 
         /// <summary>
         /// The wave's World Event announcement, one picked at random, after "Wave n of N: ". Tokens: the usual

@@ -579,6 +579,19 @@ namespace ACE.Server.Entity
                 DamageMitigated = DamageBeforeMitigation - Damage;
             }
 
+            // World Events Hold (world_events_hold_<role>_player_damage_mult and the boss settings): a run monster's hit on a
+            // player. 1 for every creature of no World Event, so this is a single field read for them.
+            if (playerDefender != null && attacker != null && attacker.P_WorldEvent != null)
+            {
+                var mult = attacker.WorldEventPlayerDamageMult;
+
+                if (mult != 1.0)
+                {
+                    Damage = (float)(Damage * mult);
+                    DamageMitigated = DamageBeforeMitigation - Damage;
+                }
+            }
+
             return Damage;
         }
 
