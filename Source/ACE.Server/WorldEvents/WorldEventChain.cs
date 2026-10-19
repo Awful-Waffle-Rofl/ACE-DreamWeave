@@ -666,7 +666,9 @@ namespace ACE.Server.WorldEvents
                 Invoker = $"chain from run {previousRunId}",
                 AnnounceLeadSeconds = leads.Announce,
                 TeaserLeadSeconds = leads.Teaser,
-                MinDurationSeconds = previous?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds,
+                // world_events_chain_champion_arrival_seconds: when the champion arrives (its stage's minimum duration).
+                MinDurationSeconds = HoldSettings.ChampionArrival(previous?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds,
+                    previous?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds),
                 MaxDurationSeconds = previous?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds,
                 AbandonAfterSeconds = previous?.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
                 WipeGraceSeconds = previous?.WipeGraceSeconds ?? WorldEvent.DefaultWipeGraceSeconds,

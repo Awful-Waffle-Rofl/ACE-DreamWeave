@@ -123,11 +123,10 @@ namespace ACE.Server.WorldEvents
         {
             var name = RoleName(c?.WorldEventHoldRole ?? HoldDamageRole.None);
 
-            return name == null ? 1.0 : Number($"{name}_npc_damage_mult", 1.0);
+            // The finale boss has no role: its enrage (world_events_hold_finale_enrage_*) when it hits a knight outside the boss path.
+            return name == null ? (c?.WorldEventFinaleBoss == true ? FinaleEnrageMult(c, ACE.Common.Time.GetUnixTime()) : 1.0) : Number($"{name}_npc_damage_mult", 1.0);
         }
 
-        /// <summary>The bosses' own player damage multipliers (finale, champion); 1 for anything else.</summary>
-        private static double BossPlayerDamageMult(Creature c) => 1.0;
 
         /// <summary>The health multiplier for a new-role monster (melee, ranged, caster); null when not set (as today).</summary>
         public static double? RoleHealthMult(HoldDamageRole role)

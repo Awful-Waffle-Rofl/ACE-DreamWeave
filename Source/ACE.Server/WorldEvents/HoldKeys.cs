@@ -96,5 +96,42 @@ namespace ACE.Server.WorldEvents
         public const string RangedSlack = "ranged_slack";
         public const string HealerMemorySeconds = "healer_memory_seconds";
         public const string WaveResolveGraceSeconds = "wave_resolve_grace_seconds";
+
+        // ---- bosses: the stage 1 finale ----
+        public const string FinaleHealthMult = "finale_health_mult";
+        public const string FinaleHealth = "finale_health";
+        public const string FinaleScale = "finale_scale";
+        public const string FinaleMinKillSeconds = "finale_min_kill_seconds";
+        public const string FinaleLeadSeconds = "finale_lead_seconds";
+        public const string FinaleTarget = "finale_target";
+        public const string FinaleSwapSeconds = "finale_swap_seconds";
+        public const string FinaleSwapMaxSeconds = "finale_swap_max_seconds";
+        public const string FinalePullShare = "finale_pull_share";
+        public const string FinalePullWindowSeconds = "finale_pull_window_seconds";
+        public const string FinalePullSeconds = "finale_pull_seconds";
+        public const string FinalePlayerDamageMult = "finale_player_damage_mult";
+        public const string FinaleLevelOffset = "finale_level_offset";
+        public const string FinaleAddCount = "finale_add_count";
+        public const string FinaleAddIntervalSeconds = "finale_add_interval_seconds";
+        public const string FinaleEnrageSeconds = "finale_enrage_seconds";
+        public const string FinaleEnrageMult = "finale_enrage_mult";
+        public const string FinaleBossWcid = "finale_boss_wcid";
+
+        // ---- bosses: the stage 2 champion ----
+        public const string ChampionHealthMult = "chain_champion_health_mult";
+        public const string ChampionHealth = "chain_champion_health";
+        public const string ChampionPlayerDamageMult = "chain_champion_player_damage_mult";
+        public const string ChampionLevelOffset = "chain_champion_level_offset";
+        public const string ChampionAddCount = "chain_champion_add_count";
+        public const string ChampionAddIntervalSeconds = "chain_champion_add_interval_seconds";
+        public const string ChampionEnrageSeconds = "chain_champion_enrage_seconds";
+        public const string ChampionEnrageMult = "chain_champion_enrage_mult";
+        public const string ChampionArrivalSeconds = "chain_champion_arrival_seconds";
+
+        // ---- internals: bosses ----
+        public const string FinaleFallbackScale = "finale_fallback_scale";
+        public const string FinaleHeightScaleMin = "finale_height_scale_min";
+        public const string FinaleHeightScaleMax = "finale_height_scale_max";
+        public const string BossDamageKeepSeconds = "boss_damage_keep_seconds";
     }
 }

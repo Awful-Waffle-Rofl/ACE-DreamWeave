@@ -655,6 +655,12 @@ namespace ACE.Server.WorldEvents
             get { lock (sync) return sourceGuids.Count > 0 && liveSourceGuids.Count == 0; }
         }
 
+        /// <summary>The placed boss (named boss or family champion), or null.</summary>
+        public Creature BossCreature
+        {
+            get { lock (sync) return boss; }
+        }
+
         /// <summary>0 until a champion is placed. WP-06's KillBoss objective reads this.</summary>
         public uint BossGuid
         {
@@ -2019,8 +2025,13 @@ namespace ACE.Server.WorldEvents
                 {
                     if (entryIndex == plan.ChampionEntryIndex)
                     {
-                        creature.WorldEventSeeker = true;
-                        creature.WorldEventSeekHealthiest = true;
+                        // world_events_hold_finale_target: npcs (the knights, as before), players (not a seeker at all), both
+                        // (a seeker that takes a player when one is nearer than any knight).
+                        var finaleTarget = evt.Composition?.Goal?.Protect?.FinaleTargetMode ?? ProtectDef.FinaleTargetNpcs;
+
+                        creature.WorldEventSeeker = finaleTarget != ProtectDef.FinaleTargetPlayers;
+                        creature.WorldEventSeekHealthiest = finaleTarget != ProtectDef.FinaleTargetPlayers;
+                        creature.WorldEventSeekEither = finaleTarget == ProtectDef.FinaleTargetBoth;
                         creature.WorldEventFinaleBoss = true;
                     }
                     else if (plan.Type == HoldWaveType.Runners)
@@ -2098,6 +2109,19 @@ namespace ACE.Server.WorldEvents
                 // EnterWorld. Health.Current is re-seeded from the new maximum in the same step, so the
                 // creature enters the world at full health rather than at its unscaled value.
                 ApplyHealthMultiplier(evt, creature, healthMult);
+
+                // A chained stage's champion (world_events_chain_champion_*): its enrage timer starts here, and a flat
+                // health set for it replaces the sizing above.
+                if (kind == WorldEventSpawnKind.Boss)
+                {
+                    creature.WorldEventBossSpawnedAt = ACE.Common.Time.GetUnixTime();
+
+                    if (HoldSettings.ChampionHealth(evt?.IsChainChampionStage ?? false) is int championHealth)
+                    {
+                        ApplyHealth(creature, championHealth);
+                        log.Info($"[WORLDEVENT] run={evt.RunId} chained champion {creature.Name} health set to {championHealth} (chain_champion_health)");
+                    }
+                }
 
                 // Hold runner waves: lighter as well as faster.
                 if (plan != null && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex
@@ -2859,7 +2883,7 @@ namespace ACE.Server.WorldEvents
                     var objScale = creature.ObjScale ?? 1.0f;
                     var match = target != null && own != null ? WorldEventFinaleBoss.HeightScale(target.Value, own.Value, objScale) : null;
 
-                    scale = match ?? (float)WorldEventFinaleBoss.FallbackNamedScale;
+                    scale = match ?? (float)HoldSettings.Number(HoldKeys.FinaleFallbackScale, WorldEventFinaleBoss.FallbackNamedScale);
                     sizing = match != null
                         ? $"x{scale:F2} (to {target:0.0} m, the median of {measured} named bosses; its model {own:0.00} m at ObjScale {objScale:0.##})"
                         : $"x{scale:F2} (fallback: no height could be read)";
@@ -2873,8 +2897,19 @@ namespace ACE.Server.WorldEvents
 
                 var mult = Math.Clamp(protect.FinaleBossHealthMult, 1.0, 10.0);
 
-                if (mult > 1.0)
+                // world_events_hold_finale_health: a flat max health in place of the multiplier.
+                var flat = protect.FinaleHealth;
+
+                if (flat != null)
+                    mult = 1.0;
+
+                if (flat is int flatHealth)
+                    ApplyHealth(creature, flatHealth);
+                else if (mult > 1.0)
                     ApplyHealthMultiplier(evt, creature, mult);
+
+                // The enrage timer (world_events_hold_finale_enrage_seconds) runs from here.
+                creature.WorldEventBossSpawnedAt = ACE.Common.Time.GetUnixTime();
 
                 WorldEventEffectTables.EnsureCanPlay(creature, protect.BossEffect, WorldEventEffectTables.CreatureTable);
                 WorldEventEffectTables.EnsureCanPlay(creature, protect.BossArrivalEffect, WorldEventEffectTables.CreatureTable);
@@ -3785,6 +3820,10 @@ namespace ACE.Server.WorldEvents
             var deadOrDestroyed = creature.IsDestroyed || creature.IsDead;
             var landblock = creature.CurrentLandblock;
 
+            // A flat chained-champion health (world_events_chain_champion_health) is not ratcheted.
+            if (HoldSettings.ChampionHealth(evt?.IsChainChampionStage ?? false) != null)
+                return;
+
             if (!BossRatchetReady(authoredBaseMax, newMult, deadOrDestroyed, landblock != null))
             {
                 // The one refusal worth a line, because it is the one that is TEMPORARY: a boss in the
@@ -4431,10 +4470,21 @@ namespace ACE.Server.WorldEvents
         ///
         /// A no-op for objective and champion spawns, which are not waves and have no band.
         /// </summary>
+        /// <summary>The wave index boss adds are spawned under (WorldEvent.TickBossTuning): not a wave.</summary>
+        public const int BossAddsWaveIndex = -1;
+
         private void LogWaveIfWave(WorldEvent evt, WorldEventSpawnKind kind, int waveIndex, LevelBand band, int placed)
         {
             if (kind != WorldEventSpawnKind.Wave)
                 return;
+
+            // Boss adds (world_events_hold_finale_add_count / chain_champion_add_count) come as wave index -1: not a wave, so
+            // they never count toward the waves resolved.
+            if (waveIndex == BossAddsWaveIndex)
+            {
+                log.Info($"[WORLDEVENT] run={evt.RunId} boss adds band={band.Low}-{band.High} spawned={placed} alive={LiveCount}");
+                return;
+            }
 
             System.Threading.Interlocked.Increment(ref resolvedWaveCount);
 

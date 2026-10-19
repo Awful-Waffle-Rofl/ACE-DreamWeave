@@ -337,7 +337,11 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Seconds the finale boss stands alone before the rest of the final wave arrives (0 to 30). Default 5.</summary>
         [JsonPropertyName("finaleBossLeadSeconds")]
-        public double FinaleBossLeadSeconds { get; set; } = DefaultFinaleBossLeadSeconds;
+        public double FinaleBossLeadSecondsJson { get; set; } = DefaultFinaleBossLeadSeconds;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleLeadSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double FinaleBossLeadSeconds { get => HoldSettings.Number(HoldKeys.FinaleLeadSeconds, FinaleBossLeadSecondsJson); set => FinaleBossLeadSecondsJson = value; }
 
         /// <summary>
         /// Optional: how many monsters each wave has (base / perParticipant / cap), replacing the source theme's
@@ -427,7 +431,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// read from the client DAT; WorldEventFinaleBoss.NamedBossHeight). Default 1.75; the envoys use 0.
         /// </summary>
         [JsonPropertyName("finaleBossScale")]
-        public double FinaleBossScale { get; set; } = DefaultFinaleBossScale;
+        public double FinaleBossScaleJson { get; set; } = DefaultFinaleBossScale;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleScale) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double FinaleBossScale { get => HoldSettings.Number(HoldKeys.FinaleScale, FinaleBossScaleJson); set => FinaleBossScaleJson = value; }
 
         /// <summary>
         /// The finale boss goes for the protected targets (WorldEventFinaleBoss): the healthiest first, named in a World
@@ -436,7 +444,37 @@ namespace ACE.Server.WorldEvents.Defs
         /// healthiest target like before, without the swap, the pull or the damage cap.
         /// </summary>
         [JsonPropertyName("bossTargetsProtected")]
-        public bool BossTargetsProtected { get; set; }
+        public bool BossTargetsProtectedJson { get; set; }
+
+        /// <summary>
+        /// In force: world_events_hold_finale_target "npcs" = true, "players" or "both" = false (the knight controller is
+        /// off); not set, goals.json (live for the controller; the boss's own seeking is set as it spawns).
+        /// </summary>
+        [JsonIgnore]
+        public bool BossTargetsProtected
+        {
+            get => HoldSettings.IsSet(HoldKeys.FinaleTarget) ? HoldSettings.Choice(HoldKeys.FinaleTarget, FinaleTargetNpcs) == FinaleTargetNpcs : BossTargetsProtectedJson;
+            set => BossTargetsProtectedJson = value;
+        }
+
+        public const string FinaleTargetNpcs = "npcs", FinaleTargetPlayers = "players", FinaleTargetBoth = "both";
+
+        /// <summary>Who the finale boss goes for: "npcs" (the knights, as goals.json sets it), "players", or "both" (whichever is nearer).</summary>
+        [JsonIgnore]
+        public string FinaleTargetMode => HoldSettings.Choice(HoldKeys.FinaleTarget, FinaleTargetNpcs);
+
+        /// <summary>world_events_hold_finale_health: a flat max health for the finale boss in place of the multiplier; null = not set.</summary>
+        [JsonIgnore]
+        public int? FinaleHealth => HoldSettings.IsSet(HoldKeys.FinaleHealth) ? HoldSettings.Integer(HoldKeys.FinaleHealth, 0) : (int?)null;
+
+        /// <summary>world_events_hold_finale_boss_wcid: a forced finale boss weenie; null = the family champion (as before).</summary>
+        [JsonIgnore]
+        public uint? FinaleBossWcid => HoldSettings.IsSet(HoldKeys.FinaleBossWcid) && HoldSettings.Integer(HoldKeys.FinaleBossWcid, 0) > 0
+            ? (uint)HoldSettings.Integer(HoldKeys.FinaleBossWcid, 0) : (uint?)null;
+
+        /// <summary>world_events_hold_finale_level_offset: the finale boss is picked as if the players were this many levels higher (0 = as before).</summary>
+        [JsonIgnore]
+        public int FinaleLevelOffset => HoldSettings.Integer(HoldKeys.FinaleLevelOffset, 0);
 
         /// <summary>
         /// The least time, in seconds, the finale boss alone needs to take a protected target from full health to 0
@@ -444,33 +482,57 @@ namespace ACE.Server.WorldEvents.Defs
         /// against minDeathSeconds, so the boss and the wave together never beat that floor. Default 50.
         /// </summary>
         [JsonPropertyName("bossMinKillSeconds")]
-        public double BossMinKillSeconds { get; set; } = DefaultBossMinKillSeconds;
+        public double BossMinKillSecondsJson { get; set; } = DefaultBossMinKillSeconds;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleMinKillSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossMinKillSeconds { get => HoldSettings.Number(HoldKeys.FinaleMinKillSeconds, BossMinKillSecondsJson); set => BossMinKillSecondsJson = value; }
 
         /// <summary>The finale boss swaps to a different target after a random time between this and bossSwapMaxSeconds (5 to 120). Default 15.</summary>
         [JsonPropertyName("bossSwapSeconds")]
-        public double BossSwapSeconds { get; set; } = 15;
+        public double BossSwapSecondsJson { get; set; } = 15;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleSwapSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossSwapSeconds { get => HoldSettings.Number(HoldKeys.FinaleSwapSeconds, BossSwapSecondsJson); set => BossSwapSecondsJson = value; }
 
         /// <summary>The upper end of the swap time (at least bossSwapSeconds, up to 120). Default 20.</summary>
         [JsonPropertyName("bossSwapMaxSeconds")]
-        public double BossSwapMaxSeconds { get; set; } = 20;
+        public double BossSwapMaxSecondsJson { get; set; } = 20;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleSwapMaxSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossSwapMaxSeconds { get => HoldSettings.Number(HoldKeys.FinaleSwapMaxSeconds, BossSwapMaxSecondsJson); set => BossSwapMaxSecondsJson = value; }
 
         /// <summary>
         /// Players pull the finale boss off a target by dealing this share of its max health within bossPullWindowSeconds
         /// (0.01 to 0.5; 0 = only a taunt pulls it). Default 0.06.
         /// </summary>
         [JsonPropertyName("bossPullShare")]
-        public double BossPullShare { get; set; } = 0.06;
+        public double BossPullShareJson { get; set; } = 0.06;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinalePullShare) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossPullShare { get => HoldSettings.Number(HoldKeys.FinalePullShare, BossPullShareJson); set => BossPullShareJson = value; }
 
         /// <summary>The window the pull damage is counted over, in seconds (2 to 30). Default 8.</summary>
         [JsonPropertyName("bossPullWindowSeconds")]
-        public double BossPullWindowSeconds { get; set; } = 8;
+        public double BossPullWindowSecondsJson { get; set; } = 8;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinalePullWindowSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossPullWindowSeconds { get => HoldSettings.Number(HoldKeys.FinalePullWindowSeconds, BossPullWindowSecondsJson); set => BossPullWindowSecondsJson = value; }
 
         /// <summary>
         /// How long a pull holds the boss on the player who dealt the most of that damage, in seconds (3 to 60); more
         /// damage in the window renews it. Default 10.
         /// </summary>
         [JsonPropertyName("bossPullSeconds")]
-        public double BossPullSeconds { get; set; } = 10;
+        public double BossPullSecondsJson { get; set; } = 10;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinalePullSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double BossPullSeconds { get => HoldSettings.Number(HoldKeys.FinalePullSeconds, BossPullSecondsJson); set => BossPullSecondsJson = value; }
 
         /// <summary>
         /// The World Event line each time the boss turns on a target, one at random: tokens {boss} and {target}.
@@ -514,7 +576,11 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>The finale boss's extra health multiplier (1 to 10), on top of its normal health. Default 3.</summary>
         [JsonPropertyName("finaleBossHealthMult")]
-        public double FinaleBossHealthMult { get; set; } = DefaultFinaleBossHealthMult;
+        public double FinaleBossHealthMultJson { get; set; } = DefaultFinaleBossHealthMult;
+
+        /// <summary>In force: its Hold setting (HoldKeys.FinaleHealthMult) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double FinaleBossHealthMult { get => HoldSettings.Number(HoldKeys.FinaleHealthMult, FinaleBossHealthMultJson); set => FinaleBossHealthMultJson = value; }
 
         /// <summary>
         /// The visible effect replayed on the finale boss (a PlayScript name, for example ShieldUpRed), or

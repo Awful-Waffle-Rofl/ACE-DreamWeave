@@ -1092,6 +1092,15 @@ world_events_cache_effect_script	world_events	cache	fork	no
 world_events_cache_wcid	world_events	cache	fork	no
 world_events_category_armor_mod_ceiling	world_events	category	fork	no
 world_events_category_resist_floor	world_events	category	fork	no
+world_events_chain_champion_add_count	world_events	hold champion	fork	no
+world_events_chain_champion_add_interval_seconds	world_events	hold champion	fork	no
+world_events_chain_champion_arrival_seconds	world_events	hold champion	fork	no
+world_events_chain_champion_enrage_mult	world_events	hold champion	fork	no
+world_events_chain_champion_enrage_seconds	world_events	hold champion	fork	no
+world_events_chain_champion_health	world_events	hold champion	fork	no
+world_events_chain_champion_health_mult	world_events	hold champion	fork	no
+world_events_chain_champion_level_offset	world_events	hold champion	fork	no
+world_events_chain_champion_player_damage_mult	world_events	hold champion	fork	no
 world_events_claim_window_seconds	world_events	claim	fork	no
 world_events_crowd_health_cap	world_events	crowd	fork	no
 world_events_crowd_health_per_participant	world_events	crowd	fork	no
@@ -1102,6 +1111,7 @@ world_events_elite_band_low	world_events	elite	fork	no
 world_events_enabled	world_events	enabled	fork	no
 world_events_family_floor_level	world_events	family	fork	no
 world_events_hold_abandon_seconds	world_events	hold waves	fork	no
+world_events_hold_boss_damage_keep_seconds	world_events	hold internals	fork	no
 world_events_hold_breather_seconds	world_events	hold waves	fork	no
 world_events_hold_cap_burst_seconds	world_events	hold internals	fork	no
 world_events_hold_caster_attack_speed_mult	world_events	hold monsters	fork	no
@@ -1127,6 +1137,27 @@ world_events_hold_defend_swing_max_seconds	world_events	hold knights	fork	no
 world_events_hold_defend_swing_seconds	world_events	hold knights	fork	no
 world_events_hold_enabled	world_events	hold	fork	no
 world_events_hold_final_wave_bonus	world_events	hold waves	fork	no
+world_events_hold_finale_add_count	world_events	hold finale	fork	no
+world_events_hold_finale_add_interval_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_boss_wcid	world_events	hold finale	fork	no
+world_events_hold_finale_enrage_mult	world_events	hold finale	fork	no
+world_events_hold_finale_enrage_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_fallback_scale	world_events	hold internals	fork	no
+world_events_hold_finale_health	world_events	hold finale	fork	no
+world_events_hold_finale_health_mult	world_events	hold finale	fork	no
+world_events_hold_finale_height_scale_max	world_events	hold internals	fork	no
+world_events_hold_finale_height_scale_min	world_events	hold internals	fork	no
+world_events_hold_finale_lead_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_level_offset	world_events	hold finale	fork	no
+world_events_hold_finale_min_kill_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_player_damage_mult	world_events	hold finale	fork	no
+world_events_hold_finale_pull_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_pull_share	world_events	hold finale	fork	no
+world_events_hold_finale_pull_window_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_scale	world_events	hold finale	fork	no
+world_events_hold_finale_swap_max_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_swap_seconds	world_events	hold finale	fork	no
+world_events_hold_finale_target	world_events	hold finale	fork	no
 world_events_hold_first_wave_delay_seconds	world_events	hold waves	fork	no
 world_events_hold_heal_between_waves	world_events	hold healing	fork	no
 world_events_hold_heal_budget_per_wave	world_events	hold healing	fork	no

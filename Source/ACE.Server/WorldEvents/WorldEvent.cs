@@ -948,6 +948,10 @@ namespace ACE.Server.WorldEvents
             // Admin test override (--level) BEFORE the floor, so it is what every scaling dial reads.
             var estimate = WorldEventRosterSelector.WithFloor(ApplyTestLevel(sampled, Request?.TestLevel));
 
+            // A chained champion stage (world_events_chain_champion_level_offset): sized as if the players were N levels higher.
+            if (IsChainChampionStage)
+                estimate = HoldSettings.ShiftAudience(estimate, HoldSettings.Integer(HoldKeys.ChampionLevelOffset, 0));
+
             Audience = estimate;
 
             var boss = Composition?.Boss;
@@ -969,7 +973,7 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                Spawner.RatchetBossHealth(this, mult);
+                Spawner.RatchetBossHealth(this, mult * HoldSettings.ChampionHealthMult(IsChainChampionStage));
             }
             catch (Exception ex)
             {
@@ -1600,6 +1604,7 @@ namespace ACE.Server.WorldEvents
             // pick actually drew from (pick.Band) rather than a single median-anchored band. The 5.2 log
             // line's band=lo-hi can therefore be wide for a mixed-level crowd, e.g. "40-317".
             var band = pick.Band;
+            lastWaveBand = band;
 
             // The 5.2 wave line is emitted by the spawner, from inside the landblock closure, once the whole
             // wave has been placed or skipped - so "spawned" is the count that actually entered the world and
@@ -1862,13 +1867,21 @@ namespace ACE.Server.WorldEvents
 
                 case HoldWaveType.Finale:
                 {
-                    var champion = WorldEventRosterSelector.PickChampion(Composition?.Roster, Audience);
+                    // world_events_hold_finale_level_offset: picked as if the players were N levels higher; and
+                    // world_events_hold_finale_boss_wcid forces the boss.
+                    var finaleAudience = HoldSettings.ShiftAudience(Audience, protect.FinaleLevelOffset);
+                    var champion = protect.FinaleBossWcid is uint forced
+                        ? new ChampionPick(forced, false)
+                        : WorldEventRosterSelector.PickChampion(Composition?.Roster, finaleAudience);
+
+                    if (protect.FinaleBossWcid != null)
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale: boss forced to wcid {champion.Wcid} (finale_boss_wcid)");
 
                     // The finale always has a boss: with no champion in band, the nearest-level member of the
                     // family is promoted (named "Champion ...", more health, bigger, the boss effect).
                     if (champion.Wcid == 0)
                     {
-                        champion = WorldEventRosterSelector.PickFinaleBossFallback(Composition?.Roster, Audience);
+                        champion = WorldEventRosterSelector.PickFinaleBossFallback(Composition?.Roster, finaleAudience);
 
                         if (champion.Wcid == 0)
                         {
@@ -1884,7 +1897,8 @@ namespace ACE.Server.WorldEvents
                     plan.ChampionUplift = champion.UpliftLevel;
                     plan.ChampionSlotLevel = champion.SlotLevel;
 
-                    var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == champion.Wcid)?.Name;
+                    var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == champion.Wcid)?.Name
+                               ?? WorldEventHoldTuningNames.WeenieName(champion.Wcid);
 
                     // Always a clear title in front ("Warlord ..."), and the boss arrives alone first; the rest of
                     // the final wave follows after protect.finaleBossLeadSeconds (SpawnWave / TickWaves).
@@ -2549,6 +2563,9 @@ namespace ACE.Server.WorldEvents
                 // the throughput flag and this boss's own floor put it on the measured path instead (C16),
                 // which is decided here, once, and also picks the rebase the spawner will apply.
                 healthMult = ResolveNamedBossSpawnMult(Composition.Boss);
+
+                // A chained stage's champion: world_events_chain_champion_health_mult on top of the sizing (1 = as before).
+                healthMult *= HoldSettings.ChampionHealthMult(IsChainChampionStage);
             }
             else
             {
@@ -2864,7 +2881,8 @@ namespace ACE.Server.WorldEvents
                 if (!enabled)
                     return;
 
-                var dials = BossDamageDialSource();
+                var dials = HoldSettings.ChampionDials(BossDamageDialSource(), IsChainChampionStage,
+                    Spawner.BossCreature?.WorldEventBossSpawnedAt ?? 0, ACE.Common.Time.GetUnixTime());
 
                 if (BossDamage.PendingHits < Math.Max(1, dials.SampleHits))
                     return;
@@ -4103,6 +4121,7 @@ namespace ACE.Server.WorldEvents
             TickHoldMarkerEffects(now);
 
             TickHoldKnightHealth();
+            TickBossTuning(now);
             TickHoldClearRegen();
 
             TickHoldShrines();

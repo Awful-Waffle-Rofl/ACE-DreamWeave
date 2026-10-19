@@ -80,6 +80,12 @@ namespace ACE.Server.WorldObjects
         /// <summary>Runtime-only, Hold finale: this monster is the finale boss (bigger, tougher, its effect replayed).</summary>
         public bool WorldEventFinaleBoss { get; set; }
 
+        /// <summary>Runtime-only: when this finale boss or champion was spawned (unix time), for its enrage timer. 0 for anything else.</summary>
+        public double WorldEventBossSpawnedAt { get; set; }
+
+        /// <summary>Runtime-only, Hold finale boss (world_events_hold_finale_target "both"): it goes for a player when one is nearer than any knight.</summary>
+        public bool WorldEventSeekEither { get; set; }
+
         /// <summary>
         /// Runtime-only, Hold waves: the role whose settings tune this monster (world_events_hold_&lt;role&gt;_*): melee, runner,
         /// ranged, caster or corrupted. None for everything else (the finale boss has its own).
@@ -126,7 +132,7 @@ namespace ACE.Server.WorldObjects
 
             lock (worldEventBossDamage)
             {
-                worldEventBossDamage.RemoveAll(e => now - e.At > WorldEventBossDamageKeepSeconds);
+                worldEventBossDamage.RemoveAll(e => now - e.At > ACE.Server.WorldEvents.HoldSettings.Number(ACE.Server.WorldEvents.HoldKeys.BossDamageKeepSeconds, WorldEventBossDamageKeepSeconds));
                 worldEventBossDamage.Add((now, player.Guid.Full, amount));
             }
         }
@@ -381,6 +387,10 @@ namespace ACE.Server.WorldObjects
                 best = usable[index];
             }
 
+            // world_events_hold_finale_target "both": a player nearer than the chosen knight is attacked instead.
+            if (WorldEventSeekEither && best?.PhysicsObj != null && NearerPlayerThan(PhysicsObj.get_distance_sq_to_object(best.PhysicsObj, true)))
+                return false;
+
             if (!IsVisibleTarget(best))
                 PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { best.PhysicsObj });
 
@@ -400,6 +410,26 @@ namespace ACE.Server.WorldObjects
             }
 
             return true;
+        }
+
+        /// <summary>True when a living player this monster may attack is nearer than <paramref name="distSq"/> (squared metres).</summary>
+        private bool NearerPlayerThan(double distSq)
+        {
+            try
+            {
+                foreach (var target in GetAttackTargets())
+                {
+                    if (target is Player player && !player.IsDead && player.PhysicsObj != null
+                        && PhysicsObj.get_distance_sq_to_object(player.PhysicsObj, true) < distSq)
+                        return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"[WORLDEVENT] {Name} nearest-player check failed; it keeps its knight", ex);
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -646,6 +676,9 @@ namespace ACE.Server.WorldObjects
 
                 // world_events_hold_knight_damage_taken_mult (1 = as before): after the boss's own bucket, before the shared floor.
                 dealt = (float)(dealt * protect.KnightDamageTakenMult);
+
+                // world_events_hold_finale_enrage_*: once enraged its hits are multiplied too (1 until then).
+                dealt = (float)(dealt * ACE.Server.WorldEvents.HoldSettings.FinaleEnrageMult(attacker, now));
 
                 // And the shared floor: the boss and the wave together never empty a target faster than minDeathSeconds.
                 if (protect.MinDeathSeconds > 0)

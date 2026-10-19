@@ -66,7 +66,10 @@ namespace ACE.Server.WorldEvents
 
             var scale = double.IsFinite(ownObjScale) && ownObjScale > 0 ? ownObjScale : 1.0;
 
-            return (float)Math.Clamp(targetHeight / (ownHeight * scale), MinHeightScale, MaxHeightScale);
+            var min = HoldSettings.Number(HoldKeys.FinaleHeightScaleMin, MinHeightScale);
+            var max = Math.Max(min, HoldSettings.Number(HoldKeys.FinaleHeightScaleMax, MaxHeightScale));
+
+            return (float)Math.Clamp(targetHeight / (ownHeight * scale), min, max);
         }
 
         /// <summary>A named boss's height in game (D6 - pure): its model's height times its ObjScale times the World Events boss multiplier.</summary>

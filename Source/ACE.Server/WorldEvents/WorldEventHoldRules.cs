@@ -1113,6 +1113,35 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
+        /// <summary>
+        /// A boss's adds (D6 - pure): <paramref name="count"/> ordinary (role 0) members drawn at random, from those in
+        /// <paramref name="band"/> when any are, else from all of them; never the boss's own monster. Empty when there is none.
+        /// </summary>
+        public static List<uint> PickAdds(IEnumerable<FamilyMember> members, LevelBand? band, uint bossWcid, int count, Random rng)
+        {
+            var result = new List<uint>();
+
+            if (members == null || count <= 0)
+                return result;
+
+            var ordinary = members.Where(m => m != null && m.Wcid != 0 && m.Role == 0 && m.Wcid != bossWcid).ToList();
+
+            if (band != null && ordinary.Any(m => band.Value.Contains(m.Level)))
+                ordinary = ordinary.Where(m => band.Value.Contains(m.Level)).ToList();
+
+            var pool = ordinary.Select(m => m.Wcid).Distinct().ToList();
+
+            if (pool.Count == 0)
+                return result;
+
+            rng ??= new Random();
+
+            for (var i = 0; i < count; i++)
+                result.Add(pool[rng.Next(pool.Count)]);
+
+            return result;
+        }
+
         /// <summary>A level band moved by <paramref name="offset"/> levels, kept within 1 to 275 (D6 - pure).</summary>
         public static LevelBand ShiftBand(LevelBand band, int offset)
         {
