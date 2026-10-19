@@ -83,7 +83,7 @@ namespace ACE.Server.WorldEvents.Objectives
         }
 
         /// <summary>A resolved wave count, kept within [1, <see cref="ProtectDef.MaxHoldWaves"/>].</summary>
-        public static int CapWaves(int resolved) => Math.Clamp(resolved, 1, ProtectDef.MaxHoldWaves);
+        public static int CapWaves(int resolved) => Math.Clamp(resolved, 1, ProtectDef.EffectiveMaxHoldWaves);
 
         /// <summary>The wave counts as of now.</summary>
         public HoldWaveCounts Waves => waves();
@@ -116,7 +116,7 @@ namespace ACE.Server.WorldEvents.Objectives
         /// </summary>
         public static bool WantsAnotherWave(int started, int target, double elapsed, double minSeconds)
         {
-            var cap = Math.Min(target, ProtectDef.MaxHoldWaves);
+            var cap = Math.Min(target, ProtectDef.EffectiveMaxHoldWaves);
 
             if (started >= cap)
                 return false;
@@ -161,7 +161,7 @@ namespace ACE.Server.WorldEvents.Objectives
         /// </summary>
         public static bool WavesWon(HoldWaveCounts counts, int target)
         {
-            var cap = Math.Min(target, ProtectDef.MaxHoldWaves);
+            var cap = Math.Min(target, ProtectDef.EffectiveMaxHoldWaves);
 
             // Resolved: the in-game bug where the run "won" 9 ms after the finale started, because the finale's
             // monsters (and its champion) had not been placed yet, so nothing of it was alive to count.

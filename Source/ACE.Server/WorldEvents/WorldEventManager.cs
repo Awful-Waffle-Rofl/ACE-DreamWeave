@@ -761,6 +761,15 @@ namespace ACE.Server.WorldEvents
                     return false;
                 }
 
+                // Hold settings: the run's time limit and abandon timer (world_events_hold_max_seconds / _abandon_seconds).
+                HoldSettings.ApplyRunTimers(request, composition.Goal);
+
+                if (request != null && !WorldEvent.ValidateDurations(request.MinDurationSeconds, request.MaxDurationSeconds, out error))
+                {
+                    refusal = WorldEventStartRefusal.InvalidDurations;
+                    return false;
+                }
+
                 // Hold: the hold must be able to finish inside the run, or it could only ever time out.
                 if (!WorldEvent.ValidateHoldDuration(composition.Goal,
                         request?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds, out error))

@@ -1214,7 +1214,7 @@ namespace ACE.Server.WorldEvents
 
             // Hold: monsters always arrive from outside the targets' ring, whichever layout the crowd gets.
             if (hold != null)
-                radius = Math.Max(radius, hold.MaxRingRadius + ProtectDef.MinSpawnClearance);
+                radius = Math.Max(radius, hold.MaxRingRadius + ProtectDef.EffectiveMinSpawnClearance);
 
             return (float)radius;
         }
@@ -2207,7 +2207,7 @@ namespace ACE.Server.WorldEvents
         {
             lock (protectedHealersSync)
             {
-                var stale = protectedHealers.Where(kv => now - kv.Value.At > ProtectedHealerMemorySeconds).Select(kv => kv.Key).ToList();
+                var stale = protectedHealers.Where(kv => now - kv.Value.At > HoldSettings.Number(HoldKeys.HealerMemorySeconds, ProtectedHealerMemorySeconds)).Select(kv => kv.Key).ToList();
 
                 foreach (var key in stale)
                     protectedHealers.Remove(key);
@@ -2225,7 +2225,7 @@ namespace ACE.Server.WorldEvents
         /// <summary>The run's wave counts, for a wave-based Hold objective.</summary>
         internal HoldWaveCounts HoldWaveCounts =>
             new HoldWaveCounts(holdWavesStarted, Spawner.LandedWaveCount, Spawner.ClearedWaveCount, Spawner.LiveCount,
-                HoldResolvedWaves(holdWavesStarted, Spawner.ResolvedWaveCount, holdTickNow, holdLastWaveStartedAt, HoldWaveResolveGraceSeconds,
+                HoldResolvedWaves(holdWavesStarted, Spawner.ResolvedWaveCount, holdTickNow, holdLastWaveStartedAt, HoldSettings.Number(HoldKeys.WaveResolveGraceSeconds, HoldWaveResolveGraceSeconds),
                     HoldFinaleEscortPending));
 
         /// <summary>
@@ -3955,7 +3955,7 @@ namespace ACE.Server.WorldEvents
 
             if (holdFirstWavePending)
             {
-                if (!HoldFirstWaveMayStart(Spawner.ProtectedPlacementResolved, now - ActiveAt, HoldObjective.PlacementGraceSeconds))
+                if (!HoldFirstWaveMayStart(Spawner.ProtectedPlacementResolved, now - ActiveAt, Composition?.Goal?.Protect?.FirstWaveDelaySeconds ?? HoldObjective.PlacementGraceSeconds))
                     return;
 
                 holdFirstWavePending = false;

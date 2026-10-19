@@ -253,11 +253,19 @@ namespace ACE.Server.WorldEvents.Defs
     {
         /// <summary>How many portals (1 to 8). Default 4.</summary>
         [JsonPropertyName("count")]
-        public int Count { get; set; } = 4;
+        public int CountJson { get; set; } = 4;
+
+        /// <summary>In force: its Hold setting (HoldKeys.PortalCount) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int Count { get => HoldSettings.Integer(HoldKeys.PortalCount, CountJson); set => CountJson = value; }
 
         /// <summary>Their distance from the anchor in metres (5 to 80). Default 30.</summary>
         [JsonPropertyName("radius")]
-        public double Radius { get; set; } = 30;
+        public double RadiusJson { get; set; } = 30;
+
+        /// <summary>In force: its Hold setting (HoldKeys.PortalRadius) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double Radius { get => HoldSettings.Number(HoldKeys.PortalRadius, RadiusJson); set => RadiusJson = value; }
 
         /// <summary>Compass bearing of the first portal (0 = north, clockwise). Default 45, between the targets.</summary>
         [JsonPropertyName("rotationDegrees")]

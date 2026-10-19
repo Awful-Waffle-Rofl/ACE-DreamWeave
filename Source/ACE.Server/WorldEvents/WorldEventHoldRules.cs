@@ -179,9 +179,9 @@ namespace ACE.Server.WorldEvents
         public static double HitInterval(double? lastHitAt, double now)
         {
             if (lastHitAt == null || !double.IsFinite(lastHitAt.Value) || !double.IsFinite(now))
-                return DefaultHitIntervalSeconds;
+                return HoldSettings.Number(HoldKeys.HitIntervalSeconds, DefaultHitIntervalSeconds);
 
-            return Math.Clamp(now - lastHitAt.Value, 0, MaxHitIntervalSeconds);
+            return Math.Clamp(now - lastHitAt.Value, 0, HoldSettings.Number(HoldKeys.HitIntervalMaxSeconds, MaxHitIntervalSeconds));
         }
 
         /// <summary>
@@ -399,7 +399,7 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static bool RangedHoldShouldApproach(double targetDist, double holdDistance)
         {
-            return targetDist > holdDistance + RangedHoldSlack;
+            return targetDist > holdDistance + HoldSettings.Number(HoldKeys.RangedSlack, RangedHoldSlack);
         }
 
         /// <summary>
@@ -1584,7 +1584,13 @@ namespace ACE.Server.WorldEvents
         /// <summary>How much bigger (in creatures) the final counted wave is, for a wave of <paramref name="baseSize"/>: a quarter more, at least one.</summary>
         public static int FinalWaveBonus(int baseSize)
         {
-            return Math.Max(1, (int)Math.Ceiling(Math.Max(0, baseSize) * 0.25));
+            // world_events_hold_final_wave_bonus (default 0.25); 0 on purpose means no bonus at all.
+            var share = HoldSettings.Number(HoldKeys.FinalWaveBonus, 0.25);
+
+            if (!(share > 0))
+                return 0;
+
+            return Math.Max(1, (int)Math.Ceiling(Math.Max(0, baseSize) * share));
         }
 
         /// <summary>
@@ -1619,7 +1625,7 @@ namespace ACE.Server.WorldEvents
 
             var rate = maxHealth / minDeathSeconds;
 
-            return (float)TakeFromBucket(requested, rate, rate * DefaultCapBurstSeconds, ref tokens, ref lastAt, now);
+            return (float)TakeFromBucket(requested, rate, rate * HoldSettings.Number(HoldKeys.CapBurstSeconds, DefaultCapBurstSeconds), ref tokens, ref lastAt, now);
         }
 
         /// <summary>

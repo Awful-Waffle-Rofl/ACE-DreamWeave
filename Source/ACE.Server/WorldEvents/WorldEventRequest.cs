@@ -104,6 +104,9 @@ namespace ACE.Server.WorldEvents
 
         public int AbandonAfterSeconds { get; set; } = WorldEvent.DefaultAbandonAfterSeconds;
 
+        /// <summary>True when the admin gave --abandon for this run, so world_events_hold_abandon_seconds does not replace it.</summary>
+        public bool AbandonExplicit { get; set; }
+
         public int WipeGraceSeconds { get; set; } = WorldEvent.DefaultWipeGraceSeconds;
 
         /// <summary>

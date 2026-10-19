@@ -170,15 +170,15 @@ namespace ACE.Server.WorldEvents.Defs
         /// call site instead of on the shared type.
         /// </summary>
         [JsonIgnore]
-        public int EffectiveWaveCountBase => WaveCount == null ? 0 : (int)WorldEventOverrides.Long("world_events_wave_count_base", WaveCount.Base);
+        public int EffectiveWaveCountBase => WaveCount == null ? 0 : WaveCount.OwnsBase ? WaveCount.Base : (int)WorldEventOverrides.Long("world_events_wave_count_base", WaveCount.Base);
 
         /// <summary><see cref="WaveCount"/>.PerParticipant, or world_events_wave_count_per_participant when non-zero.</summary>
         [JsonIgnore]
-        public double EffectiveWaveCountPerParticipant => WaveCount == null ? 0 : WorldEventOverrides.Double("world_events_wave_count_per_participant", WaveCount.PerParticipant);
+        public double EffectiveWaveCountPerParticipant => WaveCount == null ? 0 : WaveCount.OwnsPerParticipant ? WaveCount.PerParticipant : WorldEventOverrides.Double("world_events_wave_count_per_participant", WaveCount.PerParticipant);
 
         /// <summary><see cref="WaveCount"/>.Cap, or world_events_wave_count_cap when non-zero.</summary>
         [JsonIgnore]
-        public int EffectiveWaveCountCap => WaveCount == null ? 0 : (int)WorldEventOverrides.Long("world_events_wave_count_cap", WaveCount.Cap);
+        public int EffectiveWaveCountCap => WaveCount == null ? 0 : WaveCount.OwnsCap ? WaveCount.Cap : (int)WorldEventOverrides.Long("world_events_wave_count_cap", WaveCount.Cap);
 
         /// <summary>
         /// <see cref="ScaledCount.Resolve(int, double, int, int)"/> against the effective waveCount dials
@@ -190,13 +190,13 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         public int ResolveWaveCount(int participants)
         {
-            return WaveCount == null ? 0 : ScaledCount.Resolve(EffectiveWaveCountBase, EffectiveWaveCountPerParticipant, EffectiveWaveCountCap, participants);
+            return WaveCount == null ? 0 : ScaledCount.Resolve(EffectiveWaveCountBase, EffectiveWaveCountPerParticipant, EffectiveWaveCountCap, WaveCount.MapPlayers(participants));
         }
 
         /// <summary>The uncapped counterpart of <see cref="ResolveWaveCount"/> - see <see cref="ScaledCount.ResolveRaw(int)"/>.</summary>
         public int ResolveWaveCountRaw(int participants)
         {
-            return WaveCount == null ? 0 : ScaledCount.ResolveRaw(EffectiveWaveCountBase, EffectiveWaveCountPerParticipant, participants);
+            return WaveCount == null ? 0 : ScaledCount.ResolveRaw(EffectiveWaveCountBase, EffectiveWaveCountPerParticipant, WaveCount.MapPlayers(participants));
         }
 
         /// <summary><see cref="OverflowPerChampion"/>, or world_events_overflow_per_champion when non-zero.</summary>

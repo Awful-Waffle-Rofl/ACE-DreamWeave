@@ -64,5 +64,37 @@ namespace ACE.Server.WorldEvents
         public const string CorruptedAssaultCount = "corrupted_assault_count";
         public const string CorruptedTint = "corrupted_tint";
         public const string CasterShareOfRanged = "caster_share_of_ranged";
+
+        // ---- waves ----
+        public const string WaveCountBase = "wave_count_base";
+        public const string WaveCountPerPlayer = "wave_count_per_player";
+        public const string WaveCountCap = "wave_count_cap";
+        public const string MaxWaves = "max_waves";
+        public const string WaveSizeBase = "wave_size_base";
+        public const string WaveSizePerPlayer = "wave_size_per_player";
+        public const string WaveSizeCap = "wave_size_cap";
+        public const string WaveSizeBasePlayers = "wave_size_base_players";
+        public const string WaveSizeMaxPlayers = "wave_size_max_players";
+        public const string FinalWaveBonus = "final_wave_bonus";
+        public const string FirstWaveDelaySeconds = "first_wave_delay_seconds";
+        public const string WaveIntervalSeconds = "wave_interval_seconds";
+        public const string BreatherSeconds = "breather_seconds";
+        public const string MaxWaveIntervalSeconds = "max_wave_interval_seconds";
+        public const string NextWaveAliveShare = "next_wave_alive_share";
+        public const string SpawnRadius = "spawn_radius";
+        public const string PortalCount = "portal_count";
+        public const string PortalRadius = "portal_radius";
+        public const string HoldSeconds = "hold_seconds";
+        public const string MaxSeconds = "max_seconds";
+        public const string AbandonSeconds = "abandon_seconds";
+
+        // ---- internals (constants exposed) ----
+        public const string HitIntervalSeconds = "hit_interval_seconds";
+        public const string HitIntervalMaxSeconds = "hit_interval_max_seconds";
+        public const string CapBurstSeconds = "cap_burst_seconds";
+        public const string SpawnClearance = "spawn_clearance";
+        public const string RangedSlack = "ranged_slack";
+        public const string HealerMemorySeconds = "healer_memory_seconds";
+        public const string WaveResolveGraceSeconds = "wave_resolve_grace_seconds";
     }
 }

@@ -92,7 +92,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// Hold run bring the attackers in close enough to reach the targets.
         /// </summary>
         [JsonPropertyName("spawnRadius")]
-        public double SpawnRadius { get; set; }
+        public double SpawnRadiusJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.SpawnRadius) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double SpawnRadius { get => HoldSettings.Number(HoldKeys.SpawnRadius, SpawnRadiusJson); set => SpawnRadiusJson = value; }
 
         /// <summary>
         /// Optional: how many seconds ONE of the run's monsters, hitting a target continuously, takes to
@@ -340,7 +344,20 @@ namespace ACE.Server.WorldEvents.Defs
         /// waveCount for this goal. Absent keeps the theme's own size.
         /// </summary>
         [JsonPropertyName("waveSize")]
-        public ScaledCount WaveSize { get; set; }
+        public ScaledCount WaveSizeJson { get; set; }
+
+        /// <summary>
+        /// The wave size in force: goals.json's, with any of world_events_hold_wave_size_base / _per_player / _cap /
+        /// _base_players / _max_players laid over it (next wave). A dial set here wins over the global
+        /// world_events_wave_count_* for Hold; with none set this is goals.json's own object, as before.
+        /// </summary>
+        [JsonIgnore]
+        public ScaledCount WaveSize
+        {
+            get => HoldSettings.EffectiveCount(WaveSizeJson, HoldKeys.WaveSizeBase, HoldKeys.WaveSizePerPlayer, HoldKeys.WaveSizeCap,
+                HoldKeys.WaveSizeBasePlayers, HoldKeys.WaveSizeMaxPlayers);
+            set => WaveSizeJson = value;
+        }
 
         /// <summary>
         /// Optional: the most wave monsters alive at once for this goal, replacing the theme's maxAlive (which is
@@ -355,14 +372,22 @@ namespace ACE.Server.WorldEvents.Defs
         /// keeps the theme's cadence.
         /// </summary>
         [JsonPropertyName("waveIntervalSeconds")]
-        public double WaveIntervalSeconds { get; set; }
+        public double WaveIntervalSecondsJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.WaveIntervalSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double WaveIntervalSeconds { get => HoldSettings.Number(HoldKeys.WaveIntervalSeconds, WaveIntervalSecondsJson); set => WaveIntervalSecondsJson = value; }
 
         /// <summary>
         /// With <see cref="WaveIntervalSeconds"/>: the next wave also arrives early, as soon as no more than this
         /// share (0 to 1) of the last wave's size is still alive ("most of the wave is dead"). Default 0.25.
         /// </summary>
         [JsonPropertyName("nextWaveAliveShare")]
-        public double NextWaveAliveShare { get; set; } = DefaultNextWaveAliveShare;
+        public double NextWaveAliveShareJson { get; set; } = DefaultNextWaveAliveShare;
+
+        /// <summary>In force: its Hold setting (HoldKeys.NextWaveAliveShare) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double NextWaveAliveShare { get => HoldSettings.Number(HoldKeys.NextWaveAliveShare, NextWaveAliveShareJson); set => NextWaveAliveShareJson = value; }
 
         /// <summary>
         /// With <see cref="WaveIntervalSeconds"/>: true makes the next wave wait for BOTH the interval and
@@ -374,11 +399,19 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>With <see cref="NextWaveRequiresBoth"/>: the next wave comes after this long whatever is alive (0 to 600; 0 = no ceiling). Default 75.</summary>
         [JsonPropertyName("maxWaveIntervalSeconds")]
-        public double MaxWaveIntervalSeconds { get; set; } = 75;
+        public double MaxWaveIntervalSecondsJson { get; set; } = 75;
+
+        /// <summary>In force: its Hold setting (HoldKeys.MaxWaveIntervalSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double MaxWaveIntervalSeconds { get => HoldSettings.Number(HoldKeys.MaxWaveIntervalSeconds, MaxWaveIntervalSecondsJson); set => MaxWaveIntervalSecondsJson = value; }
 
         /// <summary>With <see cref="WaveIntervalSeconds"/>: never two waves closer together than this (0 to 60 s). Default 8.</summary>
         [JsonPropertyName("minWaveGapSeconds")]
-        public double MinWaveGapSeconds { get; set; } = DefaultMinWaveGapSeconds;
+        public double MinWaveGapSecondsJson { get; set; } = DefaultMinWaveGapSeconds;
+
+        /// <summary>In force: its Hold setting (HoldKeys.BreatherSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double MinWaveGapSeconds { get => HoldSettings.Number(HoldKeys.BreatherSeconds, MinWaveGapSecondsJson); set => MinWaveGapSecondsJson = value; }
 
         /// <summary>
         /// Wave-based holds: at least this many special waves (breach, runners, ranged, hunters) per run, spread
@@ -506,7 +539,27 @@ namespace ACE.Server.WorldEvents.Defs
         /// holdSeconds stays the safety cap either way.
         /// </summary>
         [JsonPropertyName("waves")]
-        public ScaledCount Waves { get; set; }
+        public ScaledCount WavesJson { get; set; }
+
+        /// <summary>The wave count in force: goals.json's with world_events_hold_wave_count_base / _per_player / _cap laid over it (next event).</summary>
+        [JsonIgnore]
+        public ScaledCount Waves
+        {
+            get => HoldSettings.EffectiveCount(WavesJson, HoldKeys.WaveCountBase, HoldKeys.WaveCountPerPlayer, HoldKeys.WaveCountCap, null, null);
+            set => WavesJson = value;
+        }
+
+        /// <summary>The most waves a hold may have: world_events_hold_max_waves when set, else <see cref="MaxHoldWaves"/>.</summary>
+        [JsonIgnore]
+        public static int EffectiveMaxHoldWaves => HoldSettings.Integer(HoldKeys.MaxWaves, MaxHoldWaves);
+
+        /// <summary>How long after Active the first wave may come, waiting for the knights: world_events_hold_first_wave_delay_seconds, else 5 s.</summary>
+        [JsonIgnore]
+        public double FirstWaveDelaySeconds => HoldSettings.Number(HoldKeys.FirstWaveDelaySeconds, ACE.Server.WorldEvents.Objectives.HoldObjective.PlacementGraceSeconds);
+
+        /// <summary>How far outside the widest ring waves spawn, at least: world_events_hold_spawn_clearance, else <see cref="MinSpawnClearance"/>.</summary>
+        [JsonIgnore]
+        public static double EffectiveMinSpawnClearance => HoldSettings.Number(HoldKeys.SpawnClearance, MinSpawnClearance);
 
         /// <summary>
         /// Wave-based holds only: the pacing target. The waves are spread so the last one starts no earlier than

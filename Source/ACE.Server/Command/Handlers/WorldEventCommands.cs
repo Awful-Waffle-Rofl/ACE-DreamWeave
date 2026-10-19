@@ -173,6 +173,7 @@ namespace ACE.Server.Command.Handlers
                 DryRun = parsed.Dry,
                 MinDurationSeconds = parsed.MinDurationSeconds,
                 AbandonAfterSeconds = parsed.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
+                AbandonExplicit = parsed.AbandonAfterSeconds != null,
 
                 // --abandon covers BOTH "nobody counted is here" timers. Staff never count as present or
                 // alive, so in a solo staff test the wipe rule fires 60 s after the first kill just as the

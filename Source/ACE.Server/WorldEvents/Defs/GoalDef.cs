@@ -44,7 +44,11 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Hold only: seconds from the run going Active until the hold succeeds.</summary>
         [JsonPropertyName("holdSeconds")]
-        public int HoldSeconds { get; set; }
+        public int HoldSecondsJson { get; set; }
+
+        /// <summary>In force: for a Hold goal, world_events_hold_hold_seconds when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int HoldSeconds { get => TypeKind == GoalType.Hold ? HoldSettings.Integer(HoldKeys.HoldSeconds, HoldSecondsJson) : HoldSecondsJson; set => HoldSecondsJson = value; }
 
         /// <summary>Hold only: the targets to protect. Required for a Hold goal, ignored by every other type.</summary>
         [JsonPropertyName("protect")]
