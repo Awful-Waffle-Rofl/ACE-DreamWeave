@@ -629,6 +629,9 @@ namespace ACE.Server.WorldObjects
                 var dealt = ACE.Server.WorldEvents.WorldEventFinaleBoss.CapHit(slice, maxHealth, protect.BossMinKillSeconds,
                     ref worldEventBossCapTokens, ref worldEventBossCapLastAt, now);
 
+                // world_events_hold_knight_damage_taken_mult (1 = as before): after the boss's own bucket, before the shared floor.
+                dealt = (float)(dealt * protect.KnightDamageTakenMult);
+
                 // And the shared floor: the boss and the wave together never empty a target faster than minDeathSeconds.
                 if (protect.MinDeathSeconds > 0)
                     dealt = ACE.Server.WorldEvents.WorldEventHoldRules.CapProtectedHit(dealt, maxHealth, protect.MinDeathSeconds,
@@ -657,6 +660,9 @@ namespace ACE.Server.WorldObjects
             // Corrupted monsters (protect.corrupted): one hits harder itself, and empowers the wave monsters near it.
             // Before the cap, so even an empowered crowd cannot beat minDeathSeconds.
             amount = (float)(amount * attacker.WorldEventEmpowerFactor());
+
+            // world_events_hold_knight_damage_taken_mult (1 = as before), also before the cap.
+            amount = (float)(amount * protect.KnightDamageTakenMult);
 
             // Every run monster's hit goes through the cap, a corrupted assault monster's included: on 2026-10-19 its
             // uncapped hits stacked on top of a capped wave and killed a knight in 26 s against a 60 s floor.

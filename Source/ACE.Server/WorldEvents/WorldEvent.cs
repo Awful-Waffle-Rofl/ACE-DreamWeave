@@ -4098,6 +4098,7 @@ namespace ACE.Server.WorldEvents
 
             TickHoldMarkerEffects(now);
 
+            TickHoldKnightHealth();
             TickHoldClearRegen();
 
             TickHoldShrines();

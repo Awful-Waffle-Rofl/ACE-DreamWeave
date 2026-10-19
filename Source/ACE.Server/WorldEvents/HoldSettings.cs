@@ -443,7 +443,19 @@ namespace ACE.Server.WorldEvents
             if (s == null || s.IsReused || string.IsNullOrWhiteSpace(raw))
                 return null;
 
-            return Parse(s, raw).Warning;
+            return Parse(s, raw).Warning ?? TextCheck(s.Key, raw);
+        }
+
+        /// <summary>The extra check of a Text setting that has a format (a list, a wcid map), or null when it is fine.</summary>
+        private static string TextCheck(string key, string raw)
+        {
+            switch (key)
+            {
+                case HoldKeys.KnightMaxHealthByWcid:
+                    return CheckKnightHealthByWcid(raw);
+                default:
+                    return null;
+            }
         }
 
         /// <summary>True when <paramref name="raw"/> parses for <paramref name="s"/> (out of range still parses; it is clamped).</summary>
@@ -566,7 +578,7 @@ namespace ACE.Server.WorldEvents
                 RawProperty = raw,
                 Overridden = set,
                 Clamped = set && parsed.Warning != null,
-                Warning = raw.Trim().Length == 0 ? null : parsed.Warning
+                Warning = raw.Trim().Length == 0 ? null : parsed.Warning ?? TextCheck(s.Key, raw)
             };
         }
 

@@ -102,7 +102,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// ProtectedHitDamage). 0 or absent (the default) leaves monster damage unscaled.
         /// </summary>
         [JsonPropertyName("undefendedSeconds")]
-        public double UndefendedSeconds { get; set; }
+        public double UndefendedSecondsJson { get; set; }
+
+        /// <summary>The value in force: world_events_hold_undefended_seconds when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double UndefendedSeconds { get => HoldSettings.Number(HoldKeys.UndefendedSeconds, UndefendedSecondsJson); set => UndefendedSecondsJson = value; }
 
         /// <summary>
         /// Optional: seconds taken off <see cref="UndefendedSeconds"/> for every participant beyond the first, down to
@@ -110,11 +114,17 @@ namespace ACE.Server.WorldEvents.Defs
         /// harder for the targets to stay under threat. 0 (the default) keeps one value for every group size.
         /// </summary>
         [JsonPropertyName("undefendedSecondsPerParticipant")]
-        public double UndefendedSecondsPerParticipant { get; set; }
+        public double UndefendedSecondsPerParticipantJson { get; set; }
+
+        [JsonIgnore]
+        public double UndefendedSecondsPerParticipant { get => HoldSettings.Number(HoldKeys.UndefendedSecondsPerParticipant, UndefendedSecondsPerParticipantJson); set => UndefendedSecondsPerParticipantJson = value; }
 
         /// <summary>The lowest <see cref="UndefendedSeconds"/> can go with <see cref="UndefendedSecondsPerParticipant"/> (0 = no floor).</summary>
         [JsonPropertyName("undefendedSecondsFloor")]
-        public double UndefendedSecondsFloor { get; set; }
+        public double UndefendedSecondsFloorJson { get; set; }
+
+        [JsonIgnore]
+        public double UndefendedSecondsFloor { get => HoldSettings.Number(HoldKeys.UndefendedSecondsFloor, UndefendedSecondsFloorJson); set => UndefendedSecondsFloorJson = value; }
 
         /// <summary>
         /// <see cref="UndefendedSeconds"/> for <paramref name="participants"/> players (D6 - pure): less
@@ -139,7 +149,10 @@ namespace ACE.Server.WorldEvents.Defs
         /// dies. 0 or absent (the default) means no cap.
         /// </summary>
         [JsonPropertyName("minDeathSeconds")]
-        public double MinDeathSeconds { get; set; }
+        public double MinDeathSecondsJson { get; set; }
+
+        [JsonIgnore]
+        public double MinDeathSeconds { get => HoldSettings.Number(HoldKeys.MinDeathSeconds, MinDeathSecondsJson); set => MinDeathSecondsJson = value; }
 
         public const double DefaultMinSeconds = 180;
         public const double DefaultMaxHealPerTenSeconds = 0.10;
@@ -365,7 +378,20 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>The targets look like they fight back (cosmetic only; WorldEventHoldDefense). Null: they stand at peace.</summary>
         [JsonPropertyName("defendPose")]
-        public DefendPoseDef DefendPose { get; set; }
+        public DefendPoseDef DefendPoseJson { get; set; }
+
+        /// <summary>
+        /// The pose in force: world_events_hold_defend_pose off hides it, on shows goals.json's (or the defaults when the goal
+        /// has none); not set, goals.json decides (live).
+        /// </summary>
+        [JsonIgnore]
+        public DefendPoseDef DefendPose
+        {
+            get => !HoldSettings.IsSet(HoldKeys.DefendPose) ? DefendPoseJson : HoldSettings.Toggle(HoldKeys.DefendPose, true) ? DefendPoseJson ?? (defaultDefendPose ??= new DefendPoseDef()) : null;
+            set => DefendPoseJson = value;
+        }
+
+        private DefendPoseDef defaultDefendPose;
 
         /// <summary>
         /// Clear spawn area (WorldEventSpawnArea): before the scene is placed, the knight ring and each portal's path in
@@ -488,7 +514,10 @@ namespace ACE.Server.WorldEvents.Defs
             if (best == null)
                 return (ResolveCount(participants), Radius);
 
-            return (Math.Clamp(best.Count, 1, MaxProtectedTargets), best.Radius);
+            // world_events_hold_knight_count wins over the crowd table's count too; the ring radius stays the table's.
+            var count = HoldSettings.IsSet(HoldKeys.KnightCount) ? ResolveCount(participants) : best.Count;
+
+            return (Math.Clamp(count, 1, MaxProtectedTargets), best.Radius);
         }
 
         /// <summary>How far outside the widest target ring the waves spawn, at least (metres).</summary>
@@ -538,7 +567,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// all are dead". Clamped at runtime to the number of targets actually placed.
         /// </summary>
         [JsonPropertyName("minSurvivors")]
-        public int MinSurvivors { get; set; } = DefaultMinSurvivors;
+        public int MinSurvivorsJson { get; set; } = DefaultMinSurvivors;
+
+        /// <summary>The fail condition in force: world_events_hold_min_survivors when set ("all" = 1, "any" = 3), else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MinSurvivors { get => HoldSettings.Integer(HoldKeys.MinSurvivors, MinSurvivorsJson); set => MinSurvivorsJson = value; }
 
         /// <summary>
         /// The fraction (0 to 1) of every wave's monsters that go straight for the targets instead of the
@@ -549,7 +582,10 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Broadcast a line as each target first drops to 75%, 50% and 25% health.</summary>
         [JsonPropertyName("healthMilestones")]
-        public bool HealthMilestones { get; set; } = true;
+        public bool HealthMilestonesJson { get; set; } = true;
+
+        [JsonIgnore]
+        public bool HealthMilestones { get => HoldSettings.Toggle(HoldKeys.HealthMilestones, HealthMilestonesJson); set => HealthMilestonesJson = value; }
 
         /// <summary>What one target is called in player-facing text, and its plural.</summary>
         [JsonPropertyName("noun")]
@@ -586,21 +622,51 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonIgnore]
         public string EffectiveNounPlural => !string.IsNullOrWhiteSpace(NounPlural) ? NounPlural : DefaultNounPlural;
 
-        /// <summary>The number of targets to place for <paramref name="participants"/> players, within [1, MaxProtectedTargets].</summary>
+        /// <summary>
+        /// The number of targets to place for <paramref name="participants"/> players, within [1, MaxProtectedTargets]:
+        /// world_events_hold_knight_count when set (next event), else protect.count.
+        /// </summary>
         public int ResolveCount(int participants)
         {
-            var count = Count?.Resolve(Math.Max(0, participants)) ?? 1;
+            var count = HoldSettings.IsSet(HoldKeys.KnightCount)
+                ? HoldSettings.Integer(HoldKeys.KnightCount, 1)
+                : Count?.Resolve(Math.Max(0, participants)) ?? 1;
 
             return Math.Clamp(count, 1, MaxProtectedTargets);
         }
 
         /// <summary>
-        /// The max health a target is actually given: <see cref="TimeScaledMaxHealth"/> while damage is
-        /// time-based, otherwise <see cref="ResolveHealth"/>.
+        /// The max health every target is given while damage is time-based: world_events_hold_knight_max_health when set,
+        /// else <see cref="TimeScaledMaxHealth"/>. The number changes nothing about how long a knight lasts (each hit is a
+        /// share of the max); it is the health bar's scale.
+        /// </summary>
+        [JsonIgnore]
+        public int KnightMaxHealth => HoldSettings.Integer(HoldKeys.KnightMaxHealth, TimeScaledMaxHealth);
+
+        /// <summary>world_events_hold_knight_damage_taken_mult: every monster hit on a knight times this, before the cap (1 = as before; live).</summary>
+        [JsonIgnore]
+        public double KnightDamageTakenMult => HoldSettings.Number(HoldKeys.KnightDamageTakenMult, 1.0);
+
+        /// <summary>
+        /// The max health a target is actually given: <see cref="KnightMaxHealth"/> while damage is time-based, otherwise
+        /// <see cref="ResolveHealth"/>.
         /// </summary>
         public int EffectiveMaxHealth(int participants)
         {
-            return IsTimeScaled ? TimeScaledMaxHealth : ResolveHealth(participants);
+            return IsTimeScaled ? KnightMaxHealth : ResolveHealth(participants);
+        }
+
+        /// <summary>
+        /// The max health of the target built from <paramref name="wcid"/>: its entry in
+        /// world_events_hold_knight_max_health_by_wcid ("2000005=12000,2000007=8000") when it has one, else
+        /// <see cref="EffectiveMaxHealth"/>. Read at placement and every second after (a change rescales a standing knight,
+        /// keeping its health percentage).
+        /// </summary>
+        public int EffectiveMaxHealthFor(uint wcid, int participants)
+        {
+            var byWcid = HoldSettings.KnightHealthByWcid();
+
+            return byWcid != null && byWcid.TryGetValue(wcid, out var hp) ? hp : EffectiveMaxHealth(participants);
         }
 
         /// <summary>The protect.health ScaledCount for <paramref name="participants"/> players. Never below 1. Raw-damage goals only.</summary>

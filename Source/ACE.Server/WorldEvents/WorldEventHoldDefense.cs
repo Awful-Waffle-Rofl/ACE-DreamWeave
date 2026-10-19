@@ -24,11 +24,23 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>The shortest time between two swings, in seconds (1 to 10). Default 2.</summary>
         [JsonPropertyName("swingSeconds")]
-        public double SwingSeconds { get; set; } = 2.0;
+        public double SwingSecondsJson { get; set; } = 2.0;
+
+        /// <summary>In force: world_events_hold_defend_swing_seconds when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double SwingSeconds { get => HoldSettings.Number(HoldKeys.DefendSwingSeconds, SwingSecondsJson); set => SwingSecondsJson = value; }
 
         /// <summary>The longest time between two swings, in seconds (swingSeconds to 10). Default 3.</summary>
         [JsonPropertyName("swingMaxSeconds")]
-        public double SwingMaxSeconds { get; set; } = 3.0;
+        public double SwingMaxSecondsJson { get; set; } = 3.0;
+
+        /// <summary>In force: world_events_hold_defend_swing_max_seconds when set, else goals.json; never below <see cref="SwingSeconds"/> (live).</summary>
+        [JsonIgnore]
+        public double SwingMaxSeconds
+        {
+            get => Math.Max(SwingSeconds, HoldSettings.Number(HoldKeys.DefendSwingMaxSeconds, SwingMaxSecondsJson));
+            set => SwingMaxSecondsJson = value;
+        }
 
         /// <summary>How long after the last monster leaves reach the target turns back outward, in seconds (0 to 30). Default 3.</summary>
         [JsonPropertyName("turnBackSeconds")]
@@ -164,8 +176,8 @@ namespace ACE.Server.WorldEvents
             if (!double.IsFinite(pose.Reach) || pose.Reach < 0.5 || pose.Reach > 6)
                 return "has an invalid protect.defendPose.reach (0.5 to 6)";
 
-            if (!double.IsFinite(pose.SwingSeconds) || !double.IsFinite(pose.SwingMaxSeconds) || pose.SwingSeconds < 1
-                || pose.SwingMaxSeconds < pose.SwingSeconds || pose.SwingMaxSeconds > 10)
+            if (!double.IsFinite(pose.SwingSecondsJson) || !double.IsFinite(pose.SwingMaxSecondsJson) || pose.SwingSecondsJson < 1
+                || pose.SwingMaxSecondsJson < pose.SwingSecondsJson || pose.SwingMaxSecondsJson > 10)
                 return "has an invalid protect.defendPose swing rhythm (swingSeconds 1 to 10, swingMaxSeconds not below it and up to 10)";
 
             if (!double.IsFinite(pose.TurnBackSeconds) || pose.TurnBackSeconds < 0 || pose.TurnBackSeconds > 30)

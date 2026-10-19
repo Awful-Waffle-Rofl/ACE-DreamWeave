@@ -2470,7 +2470,7 @@ namespace ACE.Server.WorldEvents
                 if (protect != null)
                 {
                     var participants = Math.Max(0, evt.ResolvedAudienceCount);
-                    var hp = protect.EffectiveMaxHealth(participants);
+                    var hp = protect.EffectiveMaxHealthFor(creature.WeenieClassId, participants);
 
                     if (ApplyHealth(creature, hp))
                         log.Warn($"[WORLDEVENT] run={evt.RunId} protected wcid={creature.WeenieClassId} health target={hp} " +

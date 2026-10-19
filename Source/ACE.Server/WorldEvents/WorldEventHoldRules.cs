@@ -1451,6 +1451,26 @@ namespace ACE.Server.WorldEvents
             return (int)Math.Floor(allowed);
         }
 
+        /// <summary>
+        /// A knight's current health after its max moves from <paramref name="oldMax"/> to <paramref name="newMax"/> (D6 - pure):
+        /// the same percentage, rounded, never 0 for a knight that was alive, never above the new max.
+        /// </summary>
+        public static uint RescaledHealth(uint current, uint oldMax, uint newMax)
+        {
+            if (newMax == 0)
+                return 0;
+
+            if (oldMax == 0)
+                return newMax;
+
+            var scaled = (uint)Math.Round((double)current / oldMax * newMax, MidpointRounding.AwayFromZero);
+
+            if (current > 0 && scaled == 0)
+                scaled = 1;
+
+            return Math.Min(newMax, scaled);
+        }
+
         /// <summary>The health one between-waves heal restores: max health times the fraction, at least 1 when the fraction is above 0.</summary>
         public static int BetweenWavesHeal(uint maxHealth, double fraction)
         {

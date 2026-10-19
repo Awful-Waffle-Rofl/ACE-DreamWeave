@@ -59,6 +59,71 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// Live knight health (world_events_hold_knight_max_health and _by_wcid): once a second, a standing knight whose max
+        /// health no longer matches its setting is rescaled on its own landblock, keeping its health percentage. Only for
+        /// time-based damage or a knight named in the by-wcid list, so with nothing set this never changes a knight.
+        /// </summary>
+        private void TickHoldKnightHealth()
+        {
+            try
+            {
+                var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+                if (protect == null)
+                    return;
+
+                var byWcid = HoldSettings.KnightHealthByWcid();
+                var participants = Math.Max(0, ResolvedAudienceCount);
+
+                foreach (var target in Spawner.LiveProtectedCreatures)
+                {
+                    if (target == null || target.IsDead || target.IsDestroyed)
+                        continue;
+
+                    if (!protect.IsTimeScaled && (byWcid == null || !byWcid.ContainsKey(target.WeenieClassId)))
+                        continue;
+
+                    var desired = protect.EffectiveMaxHealthFor(target.WeenieClassId, participants);
+
+                    if (desired <= 0 || desired == target.Health.MaxValue)
+                        continue;
+
+                    var landblock = target.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var t = target;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (t.IsDead || t.IsDestroyed || t.Health.MaxValue == desired)
+                                return;
+
+                            var before = t.Health.MaxValue;
+                            var current = WorldEventHoldRules.RescaledHealth(t.Health.Current, before, (uint)desired);
+
+                            WorldEventSpawner.ApplyHealth(t, desired);
+                            t.Health.Current = Math.Min(t.Health.MaxValue, current);
+
+                            log.Info($"[WORLDEVENT] run={RunId} knight {t.Name} max health {before} -> {t.Health.MaxValue} (setting), now {t.Health.Current}");
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} knight health rescale threw", ex);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} knight health tick threw", ex);
+            }
+        }
+
+        /// <summary>
         /// A wave monster of a Hold run died (from OnCreatureDied, on its landblock thread): a corrupted one heals
         /// every standing target (protect.corruptedKillHeal) and one of them says so; and a monster that was
         /// attacking a target, killed by a player or a pet, restores a little of that target (protect.rescueHeal).
