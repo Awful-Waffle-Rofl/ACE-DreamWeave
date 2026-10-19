@@ -481,18 +481,53 @@ namespace ACE.Server.WorldEvents
                         return;
                 }
 
-                if (!WorldEventChain.TryPickNearbyAnchor(evt.Composition?.AnchorPosition, chain, chainRng, out var anchor, out var why))
+                var origin = evt.Composition?.AnchorPosition;
+
+                // Where the next stage goes: a different town of the Town Network (chain.toAnotherTown), else the old
+                // 250 to 500 m spot. Up to three towns are tried, in case a town's edge has no open ground or the next goal's
+                // spawn-area check refuses it.
+                var spots = new List<(Position Anchor, string Town)>();
+                var why = "no other town in the Town Network";
+
+                if (chain == null || chain.ToAnotherTown)
+                {
+                    var towns = WorldEventTownIndex.Towns;
+                    var originTown = origin != null ? WorldEventTownIndex.Nearest(origin, towns)?.Town.Name : null;
+                    var originGlobal = origin?.ToGlobal() ?? default;
+                    var tried = new List<string>();
+
+                    for (var attempt = 0; attempt < 3 && origin != null && !origin.Indoors; attempt++)
+                    {
+                        var town = WorldEventChain.PickTown(towns, originGlobal.X, originGlobal.Y, originTown, chain, chainRng, tried);
+
+                        if (town == null)
+                            break;
+
+                        tried.Add(town.Value.Name);
+
+                        if (WorldEventChain.TryPickNearTown(town.Value, origin, chain, chainRng, out var townSpot))
+                            spots.Add((townSpot, town.Value.Name));
+                        else
+                            log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: no open ground at the edge of {town.Value.Name}; trying another town");
+                    }
+
+                    if (spots.Count == 0 && tried.Count > 0)
+                        why = $"no open ground near {string.Join(", ", tried)}";
+                    else if (spots.Count == 0 && originTown != null)
+                        why = $"no town other than {originTown} at least {chain?.TownMinDistance ?? 800:0} m away";
+                }
+                else if (WorldEventChain.TryPickNearbyAnchor(origin, chain, chainRng, out var nearby, out why))
+                    spots.Add((nearby, null));
+
+                if (spots.Count == 0)
                 {
                     log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded, but {why}; the chain ends");
                     return;
                 }
 
-                var label = WorldEventTownIndex.Describe(anchor);
-                var next = WorldEventChain.NextRequest(request, chain, stage + 1, maxLength, root, evt.RunId, anchor, label);
-                next.ChainSettings = chain;
-
-                WorldEvent started;
-                string error;
+                WorldEvent started = null;
+                Position anchor = null;
+                string label = null, townName = null, error = null;
 
                 lock (sync)
                 {
@@ -517,7 +552,28 @@ namespace ACE.Server.WorldEvents
                         return;
                     }
 
-                    if (!TryStart(next, out started, out error))
+                    foreach (var (spot, town) in spots)
+                    {
+                        var spotLabel = town != null ? WorldEventTownIndex.DescribeLabeled(town, spot) : WorldEventTownIndex.Describe(spot);
+                        var next = WorldEventChain.NextRequest(request, chain, stage + 1, maxLength, root, evt.RunId, spot, spotLabel);
+                        next.ChainSettings = chain;
+
+                        // A stage reward rewards.json does not define pays the default instead (flagged at load).
+                        if (next.RewardId != null && !Store.Rewards.Keys.Any(k => string.Equals(k, next.RewardId, StringComparison.OrdinalIgnoreCase)))
+                            next.RewardId = null;
+
+                        if (TryStart(next, out started, out error))
+                        {
+                            anchor = spot;
+                            label = spotLabel;
+                            townName = town;
+                            break;
+                        }
+
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: the next stage could not start at {spotLabel} ({error})");
+                    }
+
+                    if (started == null)
                     {
                         if (retired && evt.State != WorldEventState.Done)
                         {
@@ -530,19 +586,27 @@ namespace ACE.Server.WorldEvents
                     }
                 }
 
+                // The run may have moved its anchor to open ground (protect.clearArea): name where it really is.
+                anchor = started.Composition?.AnchorPosition ?? anchor;
+                label = townName != null ? WorldEventTownIndex.DescribeLabeled(townName, anchor) : WorldEventTownIndex.Describe(anchor);
+
                 var family = started.Composition?.FamilyDisplayName;
                 var seconds = chain?.CountdownSeconds ?? 120;
                 var template = chain?.Announce != null && chain.Announce.Count > 0 ? chain.Announce[chainRng.Next(chain.Announce.Count)] : null;
-                var line = WorldEventChain.AnnounceLine(template, family, label, seconds);
+                var line = WorldEventChain.AnnounceLine(template, family, label, seconds, townName);
 
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(line));
 
-                var distance = evt.Composition?.AnchorPosition != null ? anchor.DistanceTo(evt.Composition.AnchorPosition) : 0;
+                // The finished stage keeps its cache for its claim window: remind the players there to take it first.
+                var reminderTemplate = chain?.ClaimReminder != null && chain.ClaimReminder.Count > 0 ? chain.ClaimReminder[chainRng.Next(chain.ClaimReminder.Count)] : null;
+                WorldEventAnnouncer.Local(evt, WorldEventChain.ReminderLine(reminderTemplate, townName ?? label));
+
+                var distance = origin != null ? anchor.DistanceTo(origin) : 0;
 
                 log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded -> stage {stage + 1}/{maxLength} " +
                          $"run={started.RunId} at {label} ({distance:0} m away, {anchor.ToLOCString()}) source={started.Composition?.Source?.Id} " +
                          $"family={string.Join("+", started.Composition?.Families?.Select(f => f?.Id) ?? Enumerable.Empty<string>())} " +
-                         $"goal={started.Composition?.Goal?.Id}; starts in {seconds} s. Broadcast: {line}");
+                         $"goal={started.Composition?.Goal?.Id} reward={started.Composition?.Reward?.Id}; starts in {seconds} s. Broadcast: {line}");
             }
             catch (Exception ex)
             {
@@ -667,10 +731,36 @@ namespace ACE.Server.WorldEvents
                     return false;
                 }
 
+                // Hold protect.clearArea: the knights' ground and every portal's path must be clear of buildings, trees,
+                // rocks and other objects. Blocked portals move or are skipped; a blocked anchor moves to the nearest open
+                // spot, else the start is refused.
+                AreaPlan areaPlan = null;
+                Position movedAnchor = null;
+
+                if (composition.Goal?.TypeKind == GoalType.Hold && composition.Goal.Protect?.ClearArea != null && composition.AnchorPosition != null)
+                {
+                    var participants = Math.Max(1, WorldEventAudienceSampler.Sample(composition.AnchorPosition, 60f).Count);
+
+                    if (!WorldEventSpawnArea.TryResolve(composition.AnchorPosition, composition.Goal.Protect, participants, "start",
+                            out areaPlan, out movedAnchor, out var areaWhy))
+                    {
+                        error = $"no open ground for {composition.Goal.Id} here: {areaWhy}. Move to open ground, away from buildings, trees and rocks, and try again";
+                        refusal = WorldEventStartRefusal.CompositionFailed;
+                        return false;
+                    }
+                }
+
                 if (request.DryRun)
                 {
                     log.Info($"[WORLDEVENT] dry-run compose {composition.ToAxisSummary()}");
                     return true;
+                }
+
+                // The anchor moved to open ground: the composition's position is updated in place, so every reader agrees.
+                if (movedAnchor != null)
+                {
+                    composition.AnchorPosition.LandblockId = movedAnchor.LandblockId;
+                    composition.AnchorPosition.Pos = movedAnchor.Pos;
                 }
 
                 // The WP-06 objective factory needs a constructed event to read the composition from, so
@@ -692,6 +782,9 @@ namespace ACE.Server.WorldEvents
                 }
 
                 candidate.SetObjective(objective);
+
+                if (areaPlan != null)
+                    candidate.HoldPortalSpots = areaPlan.Portals;
 
                 Current = candidate;
 

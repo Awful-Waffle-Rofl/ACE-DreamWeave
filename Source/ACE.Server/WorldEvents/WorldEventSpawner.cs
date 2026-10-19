@@ -1105,7 +1105,11 @@ namespace ACE.Server.WorldEvents
             if (protect.Portals != null)
             {
                 var portals = protect.Portals;
-                var portalRing = WorldEventHoldRules.PortalOffsets(portals.Count, portals.Radius, portals.RotationDegrees);
+
+                // The spawn-area check's spots (moved or skipped around obstacles), else the configured ring.
+                var portalRing = evt.HoldPortalSpots != null && evt.HoldPortalSpots.Count > 0
+                    ? WorldEventSpawnArea.SpotOffsets(evt.HoldPortalSpots)
+                    : WorldEventHoldRules.PortalOffsets(portals.Count, portals.Radius, portals.RotationDegrees);
 
                 scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(portalRing, WorldEventHoldRules.ScalePortalParts(portals.Parts, portals.Scale)));
 
@@ -2741,7 +2745,18 @@ namespace ACE.Server.WorldEvents
                 WorldEventEffectTables.EnsureCanPlay(creature, c.Effect, WorldEventEffectTables.CreatureTable);
                 WorldEventEffectTables.EnsureCanPlay(creature, c.ExtraEffect, WorldEventEffectTables.CreatureTable);
 
-                log.Info($"[WORLDEVENT] run={evt.RunId} corrupted wcid={creature.WeenieClassId} {creature.Name} scale=x{scale:F2} health=x{mult:F2}");
+                // The tint over its whole palette (WorldEventTint), in the create message the client first sees.
+                var tint = "none";
+
+                if (c.TintPaletteId != 0)
+                {
+                    creature.WorldEventTintPalette = c.TintPaletteId;
+                    tint = WorldEventTint.CanShowOn(creature.SetupTableId)
+                        ? $"0x{c.TintPaletteId:X8}"
+                        : $"0x{c.TintPaletteId:X8} (cannot show: no palette textures on setup 0x{creature.SetupTableId:X8}; the aura marks it)";
+                }
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} corrupted wcid={creature.WeenieClassId} {creature.Name} scale=x{scale:F2} health=x{mult:F2} tint={tint}");
             }
             catch (Exception ex)
             {
@@ -2762,8 +2777,24 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var scale = WorldEventHoldRules.FinaleBossScale(protect.FinaleBossScale,
-                    ResolveBossScaleMultiplier(PropertyManager.GetDouble("world_events_boss_scale_multiplier").Item));
+                var bossMultiplier = ResolveBossScaleMultiplier(PropertyManager.GetDouble("world_events_boss_scale_multiplier").Item);
+                var scale = WorldEventHoldRules.FinaleBossScale(protect.FinaleBossScale, bossMultiplier);
+                var sizing = $"x{scale:F2}";
+
+                // finaleBossScale 0: as tall as the named World Events bosses (their median height in game), whatever this
+                // model's own height. Falls back to their median size multiplier when no height can be read.
+                if (protect.FinaleBossScale <= 0)
+                {
+                    var target = WorldEventFinaleBoss.NamedBossHeight(bossMultiplier, out var measured);
+                    var own = WorldEventFinaleBoss.SetupHeight(creature.SetupTableId);
+                    var objScale = creature.ObjScale ?? 1.0f;
+                    var match = target != null && own != null ? WorldEventFinaleBoss.HeightScale(target.Value, own.Value, objScale) : null;
+
+                    scale = match ?? (float)WorldEventFinaleBoss.FallbackNamedScale;
+                    sizing = match != null
+                        ? $"x{scale:F2} (to {target:0.0} m, the median of {measured} named bosses; its model {own:0.00} m at ObjScale {objScale:0.##})"
+                        : $"x{scale:F2} (fallback: no height could be read)";
+                }
 
                 if (!string.IsNullOrWhiteSpace(bossName))
                     creature.Name = bossName;
@@ -2780,7 +2811,7 @@ namespace ACE.Server.WorldEvents
                 WorldEventEffectTables.EnsureCanPlay(creature, protect.BossArrivalEffect, WorldEventEffectTables.CreatureTable);
 
                 log.Info($"[WORLDEVENT] run={evt.RunId} hold finale boss wcid={creature.WeenieClassId} {creature.Name} " +
-                         $"scale=x{scale:F2} health=x{mult:F2} -> {creature.Health.MaxValue}");
+                         $"scale={sizing} health=x{mult:F2} -> {creature.Health.MaxValue}");
             }
             catch (Exception ex)
             {

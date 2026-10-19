@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 using ACE.Common;
@@ -173,6 +174,13 @@ namespace ACE.Server.WorldEvents
             var giveFailed = false;
             var attemptedWcid = crateWcid;
 
+            // A winning claim's bonus crates (rewards.json bonusCrateWcids: the chain's final stage pays more).
+            var bonus = !payCoal && WorldEvent.PaysSuccessCrate(evt.Outcome)
+                ? (reward.BonusCrateWcids ?? new List<uint>()).Where(w => w != 0).ToList()
+                : new List<uint>();
+            var bonusGiven = 0;
+            var noRoom = false;
+
             // ONE critical section: evaluate, sibling-check, create, give, mark. See the class comment for
             // why the check and the mark must not be separate acquisitions.
             lock (evt.ClaimedCharacters)
@@ -198,7 +206,11 @@ namespace ACE.Server.WorldEvents
                         evt.ClaimedCharacters, evt.ClaimedAccounts, evt.ClaimedIps, exemptIps,
                         false, false, gateByIp);
 
-                if (denial == ClaimDenial.None)
+                // Every crate needs a pack slot; short of room, the claim stays open (nothing is marked).
+                if (denial == ClaimDenial.None && bonus.Count > 0 && player.GetFreeInventorySlots() < 1 + bonus.Count)
+                    noRoom = true;
+
+                if (denial == ClaimDenial.None && !noRoom)
                 {
                     // The payout wcid: coal when the rule above says so, otherwise the ordinary outcome
                     // crate. A content mistake in coalWcid must never deny a claim, so a failed coal create
@@ -243,8 +255,35 @@ namespace ACE.Server.WorldEvents
 
                         if (ipKey.Length > 0)
                             evt.ClaimedIps.Add(ipKey);
+
+                        // The bonus crates, after the claim is marked (room was checked above).
+                        foreach (var bonusWcid in bonus)
+                        {
+                            var extra = WorldObjectFactory.CreateNewWorldObject(bonusWcid);
+
+                            if (extra == null)
+                            {
+                                log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {bonusWcid} failed to create");
+                                continue;
+                            }
+
+                            if (player.TryCreateForGive(cache, extra))
+                                bonusGiven++;
+                            else
+                            {
+                                extra.Destroy();
+                                log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {bonusWcid} could not be given to {player.Name}");
+                            }
+                        }
                     }
                 }
+            }
+
+            if (noRoom)
+            {
+                TrySendTransientError(player, $"You need {1 + bonus.Count} free pack slots to take this reward.");
+                log.Info($"[WORLDEVENT] run={evt.RunId} claim-no-room char={player.Name} guid=0x{characterGuid:X8} needs={1 + bonus.Count} - not marked claimed, still retryable");
+                return true;
             }
 
             if (denial != ClaimDenial.None)
@@ -291,7 +330,7 @@ namespace ACE.Server.WorldEvents
             // payout= is a SEPARATE field appended after result=granted - never fold it into that token, or
             // "result=granted:coal" would break the monitoring queries that parse result= as exactly
             // granted or denied:<ClaimDenial name> (see ClaimDenial's doc comment).
-            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")}");
+            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")} reward={reward.Id} bonus={bonusGiven}");
 
             return true;
         }

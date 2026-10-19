@@ -82,6 +82,11 @@ namespace ACE.Server.Tests
             public double DamageTotal;
             public int Assaults;
             public double AssaultDamage;
+            public double BossDamage;
+            public int BossKills;
+            public int BossSwaps;
+            public int BossOnTargetSeconds;
+            public int BossPulledSeconds;
             public override string ToString() =>
                 $"{(Won ? "WIN " : "LOSS")} survivors={Survivors}/3 waves={WavesStarted} end={EndSeconds:0}s " +
                 $"healed={HealedTotal / MaxHealth * 100:0}% dmg={DamageTotal / MaxHealth * 100:0}% above90={WavesAbove90}/{TargetWaves} assaults={Assaults} assaultDmg={AssaultDamage / MaxHealth * 100:0}%";
@@ -140,7 +145,20 @@ namespace ACE.Server.Tests
             var healedWaves = 0;
             var breach = 0;
 
+            // The finale boss (protect.bossTargetsProtected): its own target, swap timer, pull, damage bucket and the player
+            // damage it has taken (for the pull), as WorldEventFinaleBoss rules them.
+            Monster boss = null;
+            var bossNextSwap = 0.0;
+            var bossPulledUntil = -1.0;
+            var bossTokens = new double[3];
+            var bossLastAt = new double[3];
+            var bossDamageLog = new List<(double At, uint Player, double Amount)>();
+            const uint BossMaxHealth = 30000;
+
             bool Alive(int i) => hp[i] > 0;
+
+            List<(uint Guid, uint Current, uint Max)> TargetHealth() =>
+                Enumerable.Range(0, 3).Select(i => ((uint)(i + 1), (uint)Math.Max(0, hp[i]), MaxHealth)).ToList();
 
             double HealShare(int i, double share, bool rescue, double now)
             {
@@ -213,7 +231,14 @@ namespace ACE.Server.Tests
                 {
                     // The finale: the boss on the healthiest, then the rest (seekShare seekers, the others for players).
                     var healthiest = Enumerable.Range(0, 3).Where(Alive).OrderByDescending(i => hp[i]).FirstOrDefault();
-                    batch.Add(new Monster { Role = HoldRole.Seeker, Boss = true, Target = healthiest });
+                    boss = new Monster { Role = HoldRole.Seeker, Boss = true, Target = healthiest };
+                    batch.Add(boss);
+
+                    if (p.BossTargetsProtected)
+                    {
+                        boss.Target = (int)WorldEventFinaleBoss.PickTarget(TargetHealth(), 0, false) - 1;
+                        bossNextSwap = now + ArriveSeconds + WorldEventFinaleBoss.SwapDelay(rng, p.BossSwapSeconds, p.BossSwapMaxSeconds);
+                    }
 
                     var rest = size + WorldEventHoldRules.FinalWaveBonus(p.WaveSize.Base);
 
@@ -289,13 +314,75 @@ namespace ACE.Server.Tests
                              liveCount, lastWaveSize, p.NextWaveAliveShare, p.NextWaveRequiresBoth, p.MaxWaveIntervalSeconds))
                     SpawnWave(t);
 
+                // The finale boss: a pull (enough player damage in the window) holds it on a player; otherwise it swaps to
+                // the healthiest other target on its timer, and takes the healthiest when its target falls.
+                var bossControlled = p.BossTargetsProtected && boss != null && boss.Alive;
+                var bossPulled = false;
+
+                if (bossControlled)
+                {
+                    var (recent, _) = WorldEventFinaleBoss.RecentDamage(bossDamageLog, t, p.BossPullWindowSeconds);
+
+                    if (WorldEventFinaleBoss.PullDue(recent, BossMaxHealth, p.BossPullShare))
+                        bossPulledUntil = t + p.BossPullSeconds;
+
+                    bossPulled = t < bossPulledUntil;
+                    var backFromPull = !bossPulled && bossPulledUntil >= 0 && t - bossPulledUntil < 1;
+
+                    if (!bossPulled && Enumerable.Range(0, 3).Any(Alive))
+                    {
+                        // Back from a pull it turns on a different target, as the controller does.
+                        var swap = t >= bossNextSwap || backFromPull;
+                        var current = boss.Target >= 0 && Alive(boss.Target) ? (uint)(boss.Target + 1) : 0u;
+                        var pick = (int)WorldEventFinaleBoss.PickTarget(TargetHealth(), current, swap) - 1;
+
+                        if (pick != boss.Target || swap)
+                            bossNextSwap = t + WorldEventFinaleBoss.SwapDelay(rng, p.BossSwapSeconds, p.BossSwapMaxSeconds);
+
+                        if (pick != boss.Target)
+                            result.BossSwaps++;
+
+                        boss.Target = pick;
+                    }
+
+                    // Its own damage: alone it needs bossMinKillSeconds to empty a target, and the shared floor holds it with
+                    // the rest of the wave (the boss hits first in a second, the wave takes what the floor has left).
+                    if (!bossPulled && t >= boss.ArriveAt && boss.Target >= 0 && Alive(boss.Target) && p.BossMinKillSeconds > 0)
+                    {
+                        var i = boss.Target;
+                        var hit = WorldEventFinaleBoss.CapHit(WorldEventFinaleBoss.HitDamage(MaxHealth, 1.0, p.BossMinKillSeconds), MaxHealth,
+                            p.BossMinKillSeconds, ref bossTokens[i], ref bossLastAt[i], 1_700_000_000d + t);
+
+                        if (p.MinDeathSeconds > 0)
+                            hit = WorldEventHoldRules.CapProtectedHit(hit, MaxHealth, p.MinDeathSeconds, ref capTokens[i], ref capLastAt[i], 1_700_000_000d + t);
+
+                        hp[i] -= hit;
+                        result.DamageTotal += hit;
+                        result.BossDamage += hit;
+                        lastHit[i] = t;
+                        result.BossOnTargetSeconds++;
+
+                        if (hp[i] <= 0)
+                        {
+                            hp[i] = 0;
+                            result.BossKills++;
+
+                            foreach (var m in monsters.Where(m => m.Alive && m.Target == i && !m.Boss))
+                                m.Target = LeastAttacked(-1);
+                        }
+                    }
+
+                    if (bossPulled)
+                        result.BossPulledSeconds++;
+                }
+
                 // Damage: every arrived attacker, time-based, the corrupted aura, the cap.
                 for (var i = 0; i < 3; i++)
                 {
                     if (!Alive(i))
                         continue;
 
-                    var on = monsters.Where(m => m.Alive && m.Target == i && t >= m.ArriveAt).ToList();
+                    var on = monsters.Where(m => m.Alive && m.Target == i && t >= m.ArriveAt && !(bossControlled && m.Boss)).ToList();
 
                     if (on.Count == 0)
                         continue;
@@ -354,6 +441,13 @@ namespace ACE.Server.Tests
 
                     // Active defense answers the assault broadcast: a player on anything else drops it for a corrupted
                     // monster that has arrived and has fewer than CorruptedHands players on it (groups focus it together).
+                    // The boss is only hit long enough to pull it: once it is held on a player, back to the escorts.
+                    if (task != null && task.Boss && bossPulled && monsters.Any(m => m.Alive && !m.Boss && m.Target >= 0 && t >= m.ArriveAt - 1 && !playerTask.Contains(m)))
+                    {
+                        playerTask[pl] = task = null;
+                        playerFree[pl] = t + SwitchSeconds;
+                    }
+
                     if (PreemptForCorrupted && strategy == Strategy.Active && task != null && task.Alive && task.Role != HoldRole.Corrupted)
                     {
                         var corruptedOpen = CorruptedNeedingHands(t);
@@ -371,6 +465,10 @@ namespace ACE.Server.Tests
                     if (task != null && task.Alive)
                     {
                         task.WorkLeft -= 1;
+
+                        // Damage to the boss counts toward pulling it (its whole health is BossKillSeconds of one player's work).
+                        if (task.Boss)
+                            bossDamageLog.Add((t, (uint)(pl + 1), BossMaxHealth / (BossKillSeconds * crowd)));
 
                         if (task.WorkLeft <= 0)
                         {
@@ -415,8 +513,13 @@ namespace ACE.Server.Tests
                     {
                         var weakest = Enumerable.Range(0, 3).Where(Alive).OrderBy(i => hp[i]).ToList();
 
+                        // Active defense pulls the boss off a target that is under 60% (one player on it is enough to hold it).
+                        var bossOnWeak = strategy != Strategy.Ignore && p.BossTargetsProtected && boss != null && boss.Alive && t >= boss.ArriveAt - 1
+                                         && !bossPulled && boss.Target >= 0 && Alive(boss.Target) && hp[boss.Target] < MaxHealth * 0.6 && !playerTask.Contains(boss);
+
                         // NoFocus defends like Active but treats a corrupted monster as any other.
                         pick = (strategy == Strategy.Active ? CorruptedNeedingHands(t) : null)
+                            ?? (bossOnWeak ? boss : null)
                             ?? weakest.Select(w => open.FirstOrDefault(m => m.Target == w && !m.Boss)).FirstOrDefault(m => m != null)
                             ?? open.FirstOrDefault(m => m.Target >= 0)
                             ?? open.FirstOrDefault();
@@ -518,7 +621,9 @@ namespace ACE.Server.Tests
                                   $"envoys left avg {runs.Average(r => r.Survivors):0.00} (0/1/2/3: {runs.Count(r => r.Survivors == 0)}/" +
                                   $"{runs.Count(r => r.Survivors == 1)}/{runs.Count(r => r.Survivors == 2)}/{runs.Count(r => r.Survivors == 3)}), " +
                                   $"end avg {runs.Average(r => r.EndSeconds):0}s, waves {runs.Average(r => r.WavesStarted):0.0}, " +
-                                  $"assaults {runs.Average(r => r.Assaults):0.0}, target-waves above 90% {runs.Sum(r => r.WavesAbove90)}/{runs.Sum(r => r.TargetWaves)}");
+                                  $"assaults {runs.Average(r => r.Assaults):0.0}, target-waves above 90% {runs.Sum(r => r.WavesAbove90)}/{runs.Sum(r => r.TargetWaves)}, " +
+                                  $"boss: dmg {runs.Average(r => r.BossDamage) / MaxHealth * 100:0}% on targets {runs.Average(r => r.BossOnTargetSeconds):0}s " +
+                                  $"pulled {runs.Average(r => r.BossPulledSeconds):0}s swaps {runs.Average(r => r.BossSwaps):0.0} kills {runs.Average(r => r.BossKills):0.00}");
                 }
             }
 
@@ -572,6 +677,58 @@ namespace ACE.Server.Tests
 
             Assert.IsTrue(avg >= 1.0 && avg <= 2.5, $"solo, no shrine: {avg:0.00} envoys left on average");
             Assert.IsTrue(runs.Count(r => r.Survivors == 1) >= 6, $"the live outcome (1 envoy) in at least 10% of runs: {runs.Count(r => r.Survivors == 1)}/60");
+        }
+
+        /// <summary>
+        /// The finale boss in the model (protect.bossTargetsProtected): with active defense it threatens the envoys (it lands
+        /// damage on them and swaps between them) but the finale still ends with at least one envoy alive, at every group size.
+        /// </summary>
+        [TestMethod]
+        public void Balance_FinaleBossThreatensTheEnvoysButActiveDefenseKeepsOne()
+        {
+            var p = ShippedEnvoys(out var holdSeconds);
+
+            Assert.IsTrue(p.BossTargetsProtected, "the envoys' boss goes for the envoys");
+
+            var sb = new StringBuilder();
+
+            foreach (var players in GroupSizes)
+            {
+                var runs = Enumerable.Range(0, Seeds).Select(seed => Simulate(p, holdSeconds, players, Strategy.Active, seed)).ToList();
+
+                sb.AppendLine($"{players} player(s): boss dmg {runs.Average(r => r.BossDamage) / MaxHealth * 100:0}%, on targets {runs.Average(r => r.BossOnTargetSeconds):0} s, " +
+                              $"pulled {runs.Average(r => r.BossPulledSeconds):0} s, swaps {runs.Average(r => r.BossSwaps):0.0}, kills {runs.Average(r => r.BossKills):0.00}, " +
+                              $"envoys left {runs.Average(r => r.Survivors):0.00}");
+
+                Assert.IsTrue(runs.All(r => r.Survivors >= 1), $"{players} player(s): the finale ends with an envoy alive\n{sb}");
+                Assert.IsTrue(runs.Average(r => r.BossDamage) > 0.05 * MaxHealth, $"{players} player(s): the boss threatens the envoys\n{sb}");
+            }
+
+            Console.WriteLine(sb);
+        }
+
+        /// <summary>The boss alone, hitting as fast as it likes, needs bossMinKillSeconds to take a full target to 0.</summary>
+        [TestMethod]
+        public void FinaleBoss_AloneNeedsAtLeastMinKillSeconds()
+        {
+            foreach (var interval in new[] { 0.25, 0.5, 1.0, 2.0, 3.5 })
+            {
+                double tokens = 0, lastAt = 0, health = MaxHealth, now = 1_700_000_000d, last = 0;
+                double? prev = null;
+
+                while (health > 0)
+                {
+                    var hit = WorldEventFinaleBoss.CapHit(WorldEventFinaleBoss.HitDamage(MaxHealth, WorldEventHoldRules.HitInterval(prev, now), 50), MaxHealth, 50,
+                        ref tokens, ref lastAt, now);
+
+                    prev = now;
+                    health -= hit;
+                    last = now;
+                    now += interval;
+                }
+
+                Assert.IsTrue(last - 1_700_000_000d >= 50 - 2.0 - interval, $"hits every {interval} s: down in {last - 1_700_000_000d:0.0} s");
+            }
         }
 
         [TestMethod]

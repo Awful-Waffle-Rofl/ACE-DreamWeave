@@ -131,6 +131,19 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>A World Event line, one picked at random, when a wave brings corrupted monsters.</summary>
         [JsonPropertyName("announce")]
         public List<string> Announce { get; set; } = new List<string>();
+
+        /// <summary>
+        /// The tint: a client palette (0x04xxxxxx) laid over the corrupted monster's whole palette (all 2048 colors), so
+        /// its body takes that color while keeping its shading. Written as "0x04001381" or a number; 0 or "none" = no
+        /// tint. Shows on every model whose textures use a palette (most creatures); a model with only true-color
+        /// textures keeps its look and relies on the aura (logged at spawn). Default none; the envoys use 0x04001381.
+        /// </summary>
+        [JsonPropertyName("tintPalette")]
+        public string TintPalette { get; set; } = "none";
+
+        /// <summary>The parsed <see cref="TintPalette"/> (0 = none). Set at load.</summary>
+        [JsonIgnore]
+        public uint TintPaletteId { get; set; }
     }
 
     /// <summary>
@@ -222,5 +235,48 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>The effect played on every portal part when a wave spawns (a PlayScript name, or none). Default PortalExit.</summary>
         [JsonPropertyName("pulseEffect")]
         public string PulseEffect { get; set; } = "PortalExit";
+    }
+
+    /// <summary>
+    /// protect.clearArea: the spawn-area check (WorldEventSpawnArea). Before a Hold run places its scene, the knight ring
+    /// and each portal's path in are checked against the landscape: buildings and their cells, trees, rocks and other
+    /// static or scenery objects, placed objects (NPCs, signs), water and slopes too steep to walk. A blocked portal is
+    /// moved along the ring or in and out; one that cannot be moved is skipped. When the knights cannot stand at the
+    /// anchor, or fewer than minPortals portals can be placed, the nearest open spot within searchRadius is used; with
+    /// none, the start is refused (or the chain looks elsewhere).
+    /// </summary>
+    public class ClearAreaDef
+    {
+        /// <summary>Clear ground needed around each knight (and its shrine and pennant), in metres (1 to 10). Default 4.</summary>
+        [JsonPropertyName("targetClearance")]
+        public double TargetClearance { get; set; } = 4;
+
+        /// <summary>Clear ground needed around each portal, in metres (1 to 10). Default 3.</summary>
+        [JsonPropertyName("portalClearance")]
+        public double PortalClearance { get; set; } = 3;
+
+        /// <summary>Clear width either side of a portal's path to the knights, in metres (0.5 to 5). Default 1.5.</summary>
+        [JsonPropertyName("pathClearance")]
+        public double PathClearance { get; set; } = 1.5;
+
+        /// <summary>How far a blocked portal may be turned along its ring, in degrees either way (0 to 60). Default 30.</summary>
+        [JsonPropertyName("maxPortalShiftDegrees")]
+        public double MaxPortalShiftDegrees { get; set; } = 30;
+
+        /// <summary>How far a blocked portal may be moved in or out, in metres (0 to 15). Default 8.</summary>
+        [JsonPropertyName("maxPortalShiftMetres")]
+        public double MaxPortalShiftMetres { get; set; } = 8;
+
+        /// <summary>The fewest portals a run may keep (1 to 8). Default 2.</summary>
+        [JsonPropertyName("minPortals")]
+        public int MinPortals { get; set; } = 2;
+
+        /// <summary>How far from the asked spot an open one is looked for, in metres (0 to 100; 0 = refuse at once). Default 40.</summary>
+        [JsonPropertyName("searchRadius")]
+        public double SearchRadius { get; set; } = 40;
+
+        /// <summary>Objects smaller than this radius are ignored (grass, flowers, small plants), in metres (0 to 2). Default 0.4.</summary>
+        [JsonPropertyName("ignoreRadius")]
+        public double IgnoreRadius { get; set; } = 0.4;
     }
 }

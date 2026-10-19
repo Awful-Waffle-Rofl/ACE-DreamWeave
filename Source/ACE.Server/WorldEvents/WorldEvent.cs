@@ -1267,7 +1267,7 @@ namespace ACE.Server.WorldEvents
             var portals = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Portals : null;
 
             if (portals != null && Composition?.AnchorPosition != null)
-                return PortalSpawnAnchors(Composition.AnchorPosition, portals);
+                return PortalSpawnAnchors(Composition.AnchorPosition, portals, HoldPortalSpots);
 
             return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null, SpawnRadius);
         }
@@ -1279,10 +1279,27 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static IReadOnlyList<Position> PortalSpawnAnchors(Position anchor, PortalsDef portals)
         {
+            return PortalSpawnAnchors(anchor, portals, null);
+        }
+
+        /// <summary>
+        /// <see cref="PortalSpawnAnchors(Position, PortalsDef)"/> at the portals the spawn-area check kept
+        /// (<paramref name="spots"/>: bearing and distance each), or at protect.portals' own ring when there are none.
+        /// </summary>
+        public static IReadOnlyList<Position> PortalSpawnAnchors(Position anchor, PortalsDef portals, IReadOnlyList<PortalSpot> spots)
+        {
             var result = new List<Position>();
 
             if (anchor == null || portals == null)
                 return result;
+
+            if (spots != null && spots.Count > 0)
+            {
+                foreach (var spot in spots)
+                    result.Add(WorldEventGeometry.AtBearing(anchor, (float)Math.Max(1.0, spot.Radius - Math.Max(0, portals.Inset)), spot.Bearing * Math.PI / 180.0));
+
+                return result;
+            }
 
             var radius = (float)Math.Max(1.0, portals.Radius - Math.Max(0, portals.Inset));
 
@@ -3928,6 +3945,8 @@ namespace ACE.Server.WorldEvents
             TickHoldBetweenWaveHeals();
 
             TickHoldBossEffect(now);
+
+            TickHoldFinaleBoss(now);
 
             TickHoldMarkerEffects(now);
 

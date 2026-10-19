@@ -125,8 +125,13 @@ namespace ACE.Server.WorldEvents
 
             string rewardId;
 
+            // A chain's first stage pays its goal's chain.stageRewards[0] (a later stage's request names its own).
+            var stageReward = request.ChainStage <= 1 ? goal.Chain?.RewardForStage(1) : null;
+
             if (!string.IsNullOrWhiteSpace(request.RewardId))
                 rewardId = Normalize(request.RewardId);
+            else if (!string.IsNullOrWhiteSpace(stageReward) && store.Rewards.ContainsKey(Normalize(stageReward)))
+                rewardId = Normalize(stageReward);
             else if (store.Rewards.ContainsKey(DefaultRewardId))
                 rewardId = DefaultRewardId;
             else

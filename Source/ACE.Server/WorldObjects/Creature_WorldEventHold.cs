@@ -80,8 +80,72 @@ namespace ACE.Server.WorldObjects
         /// <summary>Runtime-only, Hold finale: this monster is the finale boss (bigger, tougher, its effect replayed).</summary>
         public bool WorldEventFinaleBoss { get; set; }
 
+        /// <summary>
+        /// Runtime-only, Hold finale boss (protect.bossTargetsProtected): the player a damage pull holds it on, until
+        /// <see cref="WorldEventBossPullUntil"/> (unix time). Set by WorldEvent.TickHoldFinaleBoss on this boss's landblock thread.
+        /// </summary>
+        public Player WorldEventBossPullTarget { get; set; }
+
+        /// <summary>When the damage pull ends (unix time; 0 = none).</summary>
+        public double WorldEventBossPullUntil { get; set; }
+
+        /// <summary>Recent player damage to this finale boss: when, whose (a pet's counts for its owner), how much. Guarded by itself.</summary>
+        private readonly List<(double At, uint Player, double Amount)> worldEventBossDamage = new List<(double, uint, double)>();
+
+        /// <summary>The longest window kept in <see cref="worldEventBossDamage"/>, in seconds.</summary>
+        private const double WorldEventBossDamageKeepSeconds = 30;
+
+        /// <summary>
+        /// Records a player's (or their pet's) damage to this finale boss, for the pull (WorldEventCombatCreditHook, every
+        /// damaging write). A no-op for every creature that is not a finale boss. Any thread.
+        /// </summary>
+        public void NoteWorldEventBossDamage(WorldObject attacker, uint amount, double now)
+        {
+            if (!WorldEventFinaleBoss || amount == 0)
+                return;
+
+            var player = attacker as Player ?? (attacker as Pet)?.P_PetOwner;
+
+            if (player == null)
+                return;
+
+            lock (worldEventBossDamage)
+            {
+                worldEventBossDamage.RemoveAll(e => now - e.At > WorldEventBossDamageKeepSeconds);
+                worldEventBossDamage.Add((now, player.Guid.Full, amount));
+            }
+        }
+
+        /// <summary>A copy of the recent damage log (any thread).</summary>
+        public List<(double At, uint Player, double Amount)> WorldEventBossDamageSnapshot()
+        {
+            lock (worldEventBossDamage)
+                return new List<(double, uint, double)>(worldEventBossDamage);
+        }
+
+        /// <summary>
+        /// Who holds this seeker away from the protected targets right now: a live taunt (ApplyTaunt), else a live finale
+        /// boss damage pull. Null when nothing does, which is every seeker but a taunted or pulled one.
+        /// </summary>
+        public Creature WorldEventSeekerHeldBy(double now)
+        {
+            if (TauntTarget != null && ACE.Server.Entity.Timers.RunningTime < TauntExpiry && !TauntTarget.IsDead)
+                return TauntTarget;
+
+            if (WorldEventBossPullTarget is { } pull && now < WorldEventBossPullUntil && !pull.IsDead && !pull.Teleporting && pull.PhysicsObj != null)
+                return pull;
+
+            return null;
+        }
+
         /// <summary>Runtime-only, Hold mixed waves: a corrupted priority target (protect.corrupted).</summary>
         public bool WorldEventCorrupted { get; set; }
+
+        /// <summary>
+        /// Runtime-only, Hold corrupted monsters: the client palette laid over this creature's whole palette
+        /// (protect.corrupted.tintPalette; see WorldEventTint). 0 for every other creature. Set before EnterWorld.
+        /// </summary>
+        public uint WorldEventTintPalette { get; set; }
 
         /// <summary>Runtime-only, Hold mixed waves: this ranged monster carries the run's ward (protect.ward).</summary>
         public bool WorldEventWarded { get; set; }
@@ -201,6 +265,25 @@ namespace ACE.Server.WorldObjects
             {
                 WorldEventSeeker = false;
                 return false;
+            }
+
+            // A live taunt or a finale boss damage pull holds it on that player: a hit from anyone else (the seeker lock)
+            // must not send it back to a target early.
+            if (WorldEventSeekerHeldBy(ACE.Common.Time.GetUnixTime()) is { } holder)
+            {
+                if (!IsVisibleTarget(holder))
+                    PhysicsObj.ObjMaint.AddVisibleTargets(new List<PhysicsObj> { holder.PhysicsObj });
+
+                if (IsVisibleTarget(holder))
+                {
+                    if (AttackTarget != holder)
+                    {
+                        AttackTarget = holder;
+                        EmoteManager.OnNewEnemy(holder);
+                    }
+
+                    return true;
+                }
             }
 
             // Keep the current target while it stands - unless a breach has named a different one.
@@ -444,8 +527,8 @@ namespace ACE.Server.WorldObjects
             if (AttackTarget is Creature current && current.WorldEventProtected)
                 return false;
 
-            // An active taunt is the one thing allowed to hold a seeker elsewhere.
-            if (TauntTarget != null && ACE.Server.Entity.Timers.RunningTime < TauntExpiry && !TauntTarget.IsDead)
+            // An active taunt (or a finale boss damage pull) is the one thing allowed to hold a seeker elsewhere.
+            if (WorldEventSeekerHeldBy(ACE.Common.Time.GetUnixTime()) != null)
                 return false;
 
             var was = AttackTarget;
@@ -506,6 +589,10 @@ namespace ACE.Server.WorldObjects
         private double worldEventProtectedCapTokens;
         private double worldEventProtectedCapLastAt;
 
+        /// <summary>The finale boss's own bucket on this target (protect.bossMinKillSeconds).</summary>
+        private double worldEventBossCapTokens;
+        private double worldEventBossCapLastAt;
+
         /// <summary>
         /// <see cref="ScaleWorldEventProtectedHit(WorldObject, float)"/> at a given clock (the test seam):
         /// first the time-based slice (protect.undefendedSeconds), then the per-target rate cap
@@ -525,6 +612,32 @@ namespace ACE.Server.WorldObjects
             worldEventProtectedLastMonsterHitAt = now;
 
             var maxHealth = Health.MaxValue;
+
+            // The finale boss (protect.bossTargetsProtected): its hits are sized so that alone it needs bossMinKillSeconds to
+            // empty a target and its own bucket holds them to that; they also count against the shared minDeathSeconds cap (not the aura).
+            if (attacker.WorldEventFinaleBoss && protect.BossTargetsProtected && protect.BossMinKillSeconds > 0)
+            {
+                worldEventProtectedLastHitAt ??= new Dictionary<uint, double>();
+
+                double? lastBoss = worldEventProtectedLastHitAt.TryGetValue(attacker.Guid.Full, out var bossAt) ? bossAt : (double?)null;
+
+                worldEventProtectedLastHitAt[attacker.Guid.Full] = now;
+
+                var slice = ACE.Server.WorldEvents.WorldEventFinaleBoss.HitDamage(maxHealth,
+                    ACE.Server.WorldEvents.WorldEventHoldRules.HitInterval(lastBoss, now), protect.BossMinKillSeconds);
+
+                var dealt = ACE.Server.WorldEvents.WorldEventFinaleBoss.CapHit(slice, maxHealth, protect.BossMinKillSeconds,
+                    ref worldEventBossCapTokens, ref worldEventBossCapLastAt, now);
+
+                // And the shared floor: the boss and the wave together never empty a target faster than minDeathSeconds.
+                if (protect.MinDeathSeconds > 0)
+                    dealt = ACE.Server.WorldEvents.WorldEventHoldRules.CapProtectedHit(dealt, maxHealth, protect.MinDeathSeconds,
+                        ref worldEventProtectedCapTokens, ref worldEventProtectedCapLastAt, now);
+
+                P_WorldEvent?.NoteFinaleBossHit(attacker, this, dealt, now);
+
+                return dealt;
+            }
 
             if (protect.UndefendedSeconds > 0)
             {

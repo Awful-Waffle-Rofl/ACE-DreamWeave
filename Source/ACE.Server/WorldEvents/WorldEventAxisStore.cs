@@ -300,6 +300,12 @@ namespace ACE.Server.WorldEvents
             var families = ParseFamilies(familiesJson, diagnostics);
             var goals = ParseGoals(goalsJson, diagnostics);
             var rewards = ParseRewards(rewardsJson, diagnostics);
+
+            // A chain's stage rewards must name rewards.json profiles; an unknown one pays the default instead.
+            foreach (var goal in rewards.Count == 0 ? Enumerable.Empty<GoalDef>() : goals.Values.Where(g => g?.Chain != null))
+                foreach (var unknown in WorldEventChain.UnknownStageRewards(goal.Chain, rewards.Keys))
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' chain.stageRewards names '{unknown}', which rewards.json does not define; that stage pays the default");
+
             var anchors = ParseAnchors(anchorsJson, diagnostics);
             var sources = ParseSources(sourcesJson, diagnostics, goals);
             var bosses = ParseBosses(bossesJson, diagnostics);
@@ -836,6 +842,39 @@ namespace ACE.Server.WorldEvents
                 if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _)
                     || !WorldEventHoldRules.TryParseBossEffect(c.ExtraEffect, out _))
                     return "has an invalid protect.corrupted effect (a PlayScript name or none, every 1 to 60 s)";
+
+                if (!WorldEventTint.TryParsePalette(c.TintPalette, out var tint))
+                    return "has an invalid protect.corrupted.tintPalette (a client palette id 0x04000000 to 0x0400FFFF, or none)";
+
+                c.TintPaletteId = tint;
+            }
+
+            if (!IsFinite(protect.BossMinKillSeconds) || (protect.BossMinKillSeconds != 0 && (protect.BossMinKillSeconds < 20 || protect.BossMinKillSeconds > 300)))
+                return "has an invalid protect.bossMinKillSeconds (0, or 20 to 300)";
+
+            if (!IsFinite(protect.BossSwapSeconds) || !IsFinite(protect.BossSwapMaxSeconds) || protect.BossSwapSeconds < 5
+                || protect.BossSwapMaxSeconds < protect.BossSwapSeconds || protect.BossSwapMaxSeconds > 120)
+                return "has an invalid protect.bossSwapSeconds or bossSwapMaxSeconds (5 to 120, max not below the min)";
+
+            if (!IsFinite(protect.BossPullShare) || (protect.BossPullShare != 0 && (protect.BossPullShare < 0.01 || protect.BossPullShare > 0.5))
+                || !IsFinite(protect.BossPullWindowSeconds) || protect.BossPullWindowSeconds < 2 || protect.BossPullWindowSeconds > 30
+                || !IsFinite(protect.BossPullSeconds) || protect.BossPullSeconds < 3 || protect.BossPullSeconds > 60)
+                return "has an invalid boss pull (bossPullShare 0 or 0.01 to 0.5, bossPullWindowSeconds 2 to 30, bossPullSeconds 3 to 60)";
+
+            if (protect.ClearArea != null)
+            {
+                var a = protect.ClearArea;
+
+                if (!IsFinite(a.TargetClearance) || a.TargetClearance < 1 || a.TargetClearance > 10
+                    || !IsFinite(a.PortalClearance) || a.PortalClearance < 1 || a.PortalClearance > 10
+                    || !IsFinite(a.PathClearance) || a.PathClearance < 0.5 || a.PathClearance > 5
+                    || !IsFinite(a.MaxPortalShiftDegrees) || a.MaxPortalShiftDegrees < 0 || a.MaxPortalShiftDegrees > 60
+                    || !IsFinite(a.MaxPortalShiftMetres) || a.MaxPortalShiftMetres < 0 || a.MaxPortalShiftMetres > 15
+                    || a.MinPortals < 1 || a.MinPortals > 8
+                    || !IsFinite(a.SearchRadius) || a.SearchRadius < 0 || a.SearchRadius > 100
+                    || !IsFinite(a.IgnoreRadius) || a.IgnoreRadius < 0 || a.IgnoreRadius > 2)
+                    return "has an invalid protect.clearArea (targetClearance and portalClearance 1 to 10, pathClearance 0.5 to 5, " +
+                           "maxPortalShiftDegrees 0 to 60, maxPortalShiftMetres 0 to 15, minPortals 1 to 8, searchRadius 0 to 100, ignoreRadius 0 to 2)";
             }
 
             if (protect.Portals != null)
@@ -882,6 +921,9 @@ namespace ACE.Server.WorldEvents
                 protect.Corrupted.Announce = RepairLinePool(goalId, "corrupted.announce", protect.Corrupted.Announce, diagnostics);
                 protect.Corrupted.AssaultAnnounce = RepairLinePool(goalId, "corrupted.assaultAnnounce", protect.Corrupted.AssaultAnnounce, diagnostics);
             }
+
+            protect.BossTargetAnnounce = RepairLinePool(goalId, "bossTargetAnnounce", protect.BossTargetAnnounce, diagnostics);
+            protect.BossPulledAnnounce = RepairLinePool(goalId, "bossPulledAnnounce", protect.BossPulledAnnounce, diagnostics);
 
             if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
                 diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +
@@ -1188,7 +1230,10 @@ namespace ACE.Server.WorldEvents
                 }
 
                 if (goal.Chain != null)
+                {
                     goal.Chain.Announce = RepairLinePool(goal.Id, "chain.announce", goal.Chain.Announce, diagnostics);
+                    goal.Chain.ClaimReminder = RepairLinePool(goal.Id, "chain.claimReminder", goal.Chain.ClaimReminder, diagnostics);
+                }
 
                 goal.TypeKind = typeKind;
                 goal.RuleKind = ruleKind;

@@ -17,6 +17,14 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("successCrateWcid")]
         public uint SuccessCrateWcid { get; set; }
 
+        /// <summary>
+        /// Extra crates a winning claim gives on top of <see cref="SuccessCrateWcid"/>, one of each listed (a wcid twice gives
+        /// two). Never on a failed run or a coal payout. The claim needs a free pack slot for each crate, else it stays open
+        /// with a message. Empty (the default) gives the one crate as before; the chain's final stage profile uses it.
+        /// </summary>
+        [JsonPropertyName("bonusCrateWcids")]
+        public List<uint> BonusCrateWcids { get; set; } = new List<uint>();
+
         [JsonPropertyName("consolationCrateWcid")]
         public uint ConsolationCrateWcid { get; set; }
 

@@ -297,11 +297,78 @@ namespace ACE.Server.WorldEvents.Defs
         public int MinSpecialWaves { get; set; }
 
         /// <summary>
-        /// The finale boss's size multiplier: 1 to 2.5, or 0 to size it like every other World Events boss
-        /// (world_events_boss_scale_multiplier, 0.67 by default). Default 1.75; the envoys use 0.
+        /// The finale boss's size multiplier: 1 to 2.5, or 0 to make it as tall as the World Events named bosses
+        /// (bosses.json: the median of their own height times their ObjScale times world_events_boss_scale_multiplier,
+        /// read from the client DAT; WorldEventFinaleBoss.NamedBossHeight). Default 1.75; the envoys use 0.
         /// </summary>
         [JsonPropertyName("finaleBossScale")]
         public double FinaleBossScale { get; set; } = DefaultFinaleBossScale;
+
+        /// <summary>
+        /// The finale boss goes for the protected targets (WorldEventFinaleBoss): the healthiest first, named in a World
+        /// Event line, a different one every <see cref="BossSwapSeconds"/> to <see cref="BossSwapMaxSeconds"/>, and
+        /// players only while a taunt or a damage pull holds it, or no target stands. False (the default): it seeks the
+        /// healthiest target like before, without the swap, the pull or the damage cap.
+        /// </summary>
+        [JsonPropertyName("bossTargetsProtected")]
+        public bool BossTargetsProtected { get; set; }
+
+        /// <summary>
+        /// The least time, in seconds, the finale boss alone needs to take a protected target from full health to 0
+        /// (20 to 300; 0 = no cap of its own). Its hits are sized to it and held to it by their own bucket, and also count
+        /// against minDeathSeconds, so the boss and the wave together never beat that floor. Default 50.
+        /// </summary>
+        [JsonPropertyName("bossMinKillSeconds")]
+        public double BossMinKillSeconds { get; set; } = DefaultBossMinKillSeconds;
+
+        /// <summary>The finale boss swaps to a different target after a random time between this and bossSwapMaxSeconds (5 to 120). Default 15.</summary>
+        [JsonPropertyName("bossSwapSeconds")]
+        public double BossSwapSeconds { get; set; } = 15;
+
+        /// <summary>The upper end of the swap time (at least bossSwapSeconds, up to 120). Default 20.</summary>
+        [JsonPropertyName("bossSwapMaxSeconds")]
+        public double BossSwapMaxSeconds { get; set; } = 20;
+
+        /// <summary>
+        /// Players pull the finale boss off a target by dealing this share of its max health within bossPullWindowSeconds
+        /// (0.01 to 0.5; 0 = only a taunt pulls it). Default 0.06.
+        /// </summary>
+        [JsonPropertyName("bossPullShare")]
+        public double BossPullShare { get; set; } = 0.06;
+
+        /// <summary>The window the pull damage is counted over, in seconds (2 to 30). Default 8.</summary>
+        [JsonPropertyName("bossPullWindowSeconds")]
+        public double BossPullWindowSeconds { get; set; } = 8;
+
+        /// <summary>
+        /// How long a pull holds the boss on the player who dealt the most of that damage, in seconds (3 to 60); more
+        /// damage in the window renews it. Default 10.
+        /// </summary>
+        [JsonPropertyName("bossPullSeconds")]
+        public double BossPullSeconds { get; set; } = 10;
+
+        /// <summary>
+        /// The World Event line each time the boss turns on a target, one at random: tokens {boss} and {target}.
+        /// Default "{boss} turns on {target}!".
+        /// </summary>
+        [JsonPropertyName("bossTargetAnnounce")]
+        public List<string> BossTargetAnnounce { get; set; } = new List<string>();
+
+        /// <summary>
+        /// The local line when players pull the boss onto one of them: tokens {boss} and {player}. Default
+        /// "{boss} turns on {player}!".
+        /// </summary>
+        [JsonPropertyName("bossPulledAnnounce")]
+        public List<string> BossPulledAnnounce { get; set; } = new List<string>();
+
+        public const double DefaultBossMinKillSeconds = 50;
+
+        /// <summary>
+        /// Clear spawn area (WorldEventSpawnArea): before the scene is placed, the knight ring and each portal's path in
+        /// are checked for buildings, trees, rocks and other objects. Null: no check.
+        /// </summary>
+        [JsonPropertyName("clearArea")]
+        public ClearAreaDef ClearArea { get; set; }
 
         /// <summary>The finale boss's extra health multiplier (1 to 10), on top of its normal health. Default 3.</summary>
         [JsonPropertyName("finaleBossHealthMult")]
