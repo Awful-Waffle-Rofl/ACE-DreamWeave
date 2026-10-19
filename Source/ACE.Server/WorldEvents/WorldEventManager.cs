@@ -74,6 +74,80 @@ namespace ACE.Server.WorldEvents
         /// <summary>The one running event, or null. Cleared as soon as a run reaches Done.</summary>
         public static WorldEvent Current { get; private set; }
 
+        /// <summary>
+        /// World Events chain: a finished run kept in its reward claim window while the next stage of its chain is
+        /// <see cref="Current"/>. Still ticked (so its claim window and cleanup run as usual) and still pays its caches;
+        /// cleared when it reaches Done. Null otherwise.
+        /// </summary>
+        public static WorldEvent Previous { get; private set; }
+
+        /// <summary>Runs whose end has been checked for a chain, so each is handed over at most once.</summary>
+        private static readonly HashSet<uint> chainChecked = new HashSet<uint>();
+
+        private static readonly Random chainRng = new Random();
+
+        /// <summary>The live run with this id: <see cref="Current"/>, or a chained run's finishing <see cref="Previous"/>. Null otherwise.</summary>
+        public static WorldEvent FindRun(uint runId)
+        {
+            var current = Current;
+
+            if (current != null && current.RunId == runId)
+                return current;
+
+            var previous = Previous;
+
+            return previous != null && previous.RunId == runId ? previous : null;
+        }
+
+        /// <summary>The other live run beside <paramref name="evt"/> (Current or Previous), or null.</summary>
+        private static WorldEvent OtherRun(WorldEvent evt)
+        {
+            var current = Current;
+            var previous = Previous;
+
+            if (current != null && !ReferenceEquals(current, evt) && current.State != WorldEventState.Done)
+                return current;
+
+            if (previous != null && !ReferenceEquals(previous, evt) && previous.State != WorldEventState.Done)
+                return previous;
+
+            return null;
+        }
+
+        /// <summary>
+        /// <paramref name="keys"/> without the landblocks another live run holds (a chained stage standing next to the
+        /// finishing one): those stay permaloaded for it. Pure apart from reading the two run references.
+        /// </summary>
+        internal static IReadOnlyList<ulong> WithoutBlocksHeldByOtherRuns(WorldEvent evt, IReadOnlyList<ulong> keys)
+        {
+            var other = OtherRun(evt);
+
+            if (other == null || keys == null)
+                return keys ?? new List<ulong>();
+
+            return keys.Where(k => !other.IsHeldLandblock(k)).ToList();
+        }
+
+        /// <summary>
+        /// The permaload snapshot a staging run compares against, with the blocks another live run holds counted as not
+        /// permaloaded: that run leaves them to this one when it finishes, so this one releases them in its turn.
+        /// </summary>
+        internal static IReadOnlyDictionary<ulong, bool> PriorWithoutOtherRuns(WorldEvent evt, IReadOnlyDictionary<ulong, bool> prior)
+        {
+            var other = OtherRun(evt);
+
+            if (other == null || prior == null)
+                return prior;
+
+            var copy = new Dictionary<ulong, bool>(prior);
+
+            foreach (var key in prior.Keys)
+                if (other.IsHeldLandblock(key))
+                    copy[key] = false;
+
+            return copy;
+        }
+
         /// <summary>Immutable axis store. Reload swaps the reference; a running event keeps its own snapshot.</summary>
         public static WorldEventAxisStore Store { get; private set; } = WorldEventAxisStore.Empty;
 
@@ -292,11 +366,30 @@ namespace ACE.Server.WorldEvents
                 nextTickTime = now + 1.0;
 
                 WorldEvent evt;
+                WorldEvent previous;
 
                 lock (sync)
                 {
                     ClearCurrentIfDone();
                     evt = Current;
+                    previous = Previous;
+                }
+
+                // A chained run's finishing first stage: its claim window and cleanup go on as usual.
+                if (previous != null)
+                {
+                    try
+                    {
+                        previous.Tick(now);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[WORLDEVENT] run={previous.RunId} (finishing, chained) tick threw; finishing it", ex);
+                        previous.Finish(WorldEventOutcome.AbortedError);
+                    }
+
+                    lock (sync)
+                        ClearCurrentIfDone();
                 }
 
                 if (evt == null)
@@ -308,6 +401,9 @@ namespace ACE.Server.WorldEvents
 
                 lock (sync)
                     ClearCurrentIfDone();
+
+                // World Events chain: once a run has ended, a success may hand over to the next stage nearby.
+                TryChain(evt);
             }
             catch (Exception ex)
             {
@@ -334,6 +430,123 @@ namespace ACE.Server.WorldEvents
             {
                 log.Info($"[WORLDEVENT] run={Current.RunId} cleared (outcome={Current.Outcome})");
                 Current = null;
+            }
+
+            if (Previous != null && Previous.State == WorldEventState.Done)
+            {
+                log.Info($"[WORLDEVENT] run={Previous.RunId} cleared (outcome={Previous.Outcome}, finished beside a chained run)");
+                Previous = null;
+            }
+        }
+
+        /// <summary>
+        /// World Events chain (goals.json "chain"): called after every tick of the current run. Once it has ended (Resolved
+        /// or later), its outcome is checked exactly once:
+        ///   * a success with stages left: a spot 250 to 500 m away (chain.minDistance / maxDistance) on open ground, a
+        ///     random compatible source, family and goal there, starting chain.countdownSeconds later, announced to the
+        ///     world with its place. The finished run moves to <see cref="Previous"/> and keeps its claim window;
+        ///   * a failure or an abort, or the last stage: the chain ends.
+        /// Everything is logged with the chain's first run id and the stage. Never throws.
+        /// </summary>
+        private static void TryChain(WorldEvent evt)
+        {
+            try
+            {
+                if (evt == null || evt.State < WorldEventState.Resolved)
+                    return;
+
+                lock (sync)
+                {
+                    if (!chainChecked.Add(evt.RunId))
+                        return;
+                }
+
+                var request = evt.Request;
+                var chain = request?.ChainSettings ?? evt.Composition?.Goal?.Chain;
+                var maxLength = WorldEventChain.EffectiveMaxLength(request?.ChainMaxLength ?? 0, evt.Composition?.Goal?.Chain);
+                var stage = Math.Max(1, request?.ChainStage ?? 1);
+                var root = request != null && request.ChainRootRunId != 0 ? request.ChainRootRunId : evt.RunId;
+
+                switch (WorldEventChain.Decide(evt.Outcome, stage, maxLength))
+                {
+                    case WorldEventChain.Decision.None:
+                        return;
+
+                    case WorldEventChain.Decision.EndedByOutcome:
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} ended {evt.Outcome}; the chain ends");
+                        return;
+
+                    case WorldEventChain.Decision.EndedAtMax:
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded; that was the last stage, the chain is complete");
+                        return;
+                }
+
+                if (!WorldEventChain.TryPickNearbyAnchor(evt.Composition?.AnchorPosition, chain, chainRng, out var anchor, out var why))
+                {
+                    log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded, but {why}; the chain ends");
+                    return;
+                }
+
+                var label = WorldEventTownIndex.Describe(anchor);
+                var next = WorldEventChain.NextRequest(request, chain, stage + 1, maxLength, root, evt.RunId, anchor, label);
+                next.ChainSettings = chain;
+
+                WorldEvent started;
+                string error;
+
+                lock (sync)
+                {
+                    if (Previous != null && Previous.State != WorldEventState.Done)
+                    {
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Previous.RunId} is still finishing; the chain ends");
+                        return;
+                    }
+
+                    var retired = false;
+
+                    if (ReferenceEquals(Current, evt))
+                    {
+                        // The finished run keeps its claim window beside the next stage.
+                        Previous = evt;
+                        Current = null;
+                        retired = true;
+                    }
+                    else if (Current != null)
+                    {
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Current.RunId} has already started; the chain ends");
+                        return;
+                    }
+
+                    if (!TryStart(next, out started, out error))
+                    {
+                        if (retired && evt.State != WorldEventState.Done)
+                        {
+                            Current = evt;
+                            Previous = null;
+                        }
+
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId}: the next stage could not start ({error}); the chain ends");
+                        return;
+                    }
+                }
+
+                var family = started.Composition?.FamilyDisplayName;
+                var seconds = chain?.CountdownSeconds ?? 120;
+                var template = chain?.Announce != null && chain.Announce.Count > 0 ? chain.Announce[chainRng.Next(chain.Announce.Count)] : null;
+                var line = WorldEventChain.AnnounceLine(template, family, label, seconds);
+
+                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(line));
+
+                var distance = evt.Composition?.AnchorPosition != null ? anchor.DistanceTo(evt.Composition.AnchorPosition) : 0;
+
+                log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded -> stage {stage + 1}/{maxLength} " +
+                         $"run={started.RunId} at {label} ({distance:0} m away, {anchor.ToLOCString()}) source={started.Composition?.Source?.Id} " +
+                         $"family={string.Join("+", started.Composition?.Families?.Select(f => f?.Id) ?? Enumerable.Empty<string>())} " +
+                         $"goal={started.Composition?.Goal?.Id}; starts in {seconds} s. Broadcast: {line}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] chain after run={evt?.RunId} threw; the chain ends", ex);
             }
         }
 
@@ -612,6 +825,20 @@ namespace ACE.Server.WorldEvents
         {
             lock (sync)
             {
+                if (Previous != null && Previous.State != WorldEventState.Done)
+                {
+                    try
+                    {
+                        Previous.Finish(WorldEventOutcome.AbortedShutdown);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error("[WORLDEVENT] shutdown abort of the finishing chained run threw", ex);
+                    }
+                }
+
+                Previous = null;
+
                 if (Current == null || Current.State == WorldEventState.Done)
                 {
                     Current = null;
@@ -777,6 +1004,22 @@ namespace ACE.Server.WorldEvents
         /// hand back clones (see WorldEventParticipation's threading remarks), and this method only ever reads.
         /// </summary>
         public static string StatusText()
+        {
+            var text = StatusTextOfCurrent();
+            var previous = Previous;
+
+            if (previous != null && previous.State != WorldEventState.Done)
+                text += $" Run {previous.RunId} ({previous.Outcome}) is still in its claim window beside the chained run.";
+
+            var stage = Current?.Request?.ChainStage ?? 1;
+
+            if (stage > 1 && Current.State != WorldEventState.Done)
+                text += $" Chain stage {stage}/{Current.Request.ChainMaxLength} (first run {Current.Request.ChainRootRunId}).";
+
+            return text;
+        }
+
+        private static string StatusTextOfCurrent()
         {
             var evt = Current;
 

@@ -728,6 +728,22 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// The finale boss's size multiplier (D6 - pure): <paramref name="configured"/> (protect.finaleBossScale) within
+        /// 1 to 2.5, or, when it is 0 or less, <paramref name="worldEventBossScale"/>: the same multiplier every other World
+        /// Events boss gets (world_events_boss_scale_multiplier), so the Warlord is the size of the event's other bosses.
+        /// </summary>
+        public static float FinaleBossScale(double configured, float worldEventBossScale)
+        {
+            if (!double.IsFinite(configured))
+                return 1.0f;
+
+            if (configured <= 0)
+                return worldEventBossScale > 0 && float.IsFinite(worldEventBossScale) ? worldEventBossScale : 1.0f;
+
+            return (float)Math.Clamp(configured, 1.0, 2.5);
+        }
+
+        /// <summary>
         /// Whether a run monster's hit on a target goes through protect.minDeathSeconds (D6 - pure): every hit does,
         /// except a corrupted monster's in assault mode, whose job is to break its one target unless players stop it.
         /// </summary>

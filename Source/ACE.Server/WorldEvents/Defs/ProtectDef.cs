@@ -296,7 +296,10 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("minSpecialWaves")]
         public int MinSpecialWaves { get; set; }
 
-        /// <summary>The finale boss's size multiplier (1 to 2.5). Default 1.75.</summary>
+        /// <summary>
+        /// The finale boss's size multiplier: 1 to 2.5, or 0 to size it like every other World Events boss
+        /// (world_events_boss_scale_multiplier, 0.67 by default). Default 1.75; the envoys use 0.
+        /// </summary>
         [JsonPropertyName("finaleBossScale")]
         public double FinaleBossScale { get; set; } = DefaultFinaleBossScale;
 

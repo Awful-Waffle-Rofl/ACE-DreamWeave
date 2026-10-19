@@ -512,7 +512,7 @@ namespace ACE.Server.Tests
                 Assert.IsNotNull(p.WaveMix, id);
                 CollectionAssert.AreEqual(DefaultMix, p.WaveMix.Shares, id);
                 Assert.IsTrue(p.WaveMix.Announce.Count >= 2, id);
-                Assert.AreEqual(1.75, p.FinaleBossScale, 1e-9, id);
+                Assert.AreEqual(0, p.FinaleBossScale, 1e-9, $"{id}: the Warlord is sized like every other World Events boss");
                 Assert.AreEqual("Warlord", p.FinaleBossPrefix, id);
 
                 var hold = p.SpecialWave(HoldWaveType.Ranged).HoldDistance;

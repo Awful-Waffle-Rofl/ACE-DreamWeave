@@ -712,8 +712,8 @@ namespace ACE.Server.WorldEvents
             if (protect.MinSpecialWaves < 0 || protect.MinSpecialWaves > ProtectDef.MaxHoldWaves)
                 return $"has an invalid protect.minSpecialWaves (0 to {ProtectDef.MaxHoldWaves})";
 
-            if (!IsFinite(protect.FinaleBossScale) || protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2.5)
-                return "has an invalid protect.finaleBossScale (1 to 2.5)";
+            if (!IsFinite(protect.FinaleBossScale) || (protect.FinaleBossScale != 0 && (protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2.5)))
+                return "has an invalid protect.finaleBossScale (0 to match world event bosses, or 1 to 2.5)";
 
             if (!IsFinite(protect.FinaleBossHealthMult) || protect.FinaleBossHealthMult < 1 || protect.FinaleBossHealthMult > 10)
                 return "has an invalid protect.finaleBossHealthMult (1 to 10)";
@@ -1177,6 +1177,18 @@ namespace ACE.Server.WorldEvents
                     if (goal.Protect.IsTimeScaled && goal.Protect.Health != null)
                         diagnostics.Add($"goals.json: goal '{goal.Id}' sets protect.health, which is ignored because protect.undefendedSeconds makes damage time-based; remove it");
                 }
+
+                // The chain to a second event (any goal type).
+                var chainError = WorldEventChain.Validate(goal.Chain);
+
+                if (chainError != null)
+                {
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' {chainError}, dropped");
+                    continue;
+                }
+
+                if (goal.Chain != null)
+                    goal.Chain.Announce = RepairLinePool(goal.Id, "chain.announce", goal.Chain.Announce, diagnostics);
 
                 goal.TypeKind = typeKind;
                 goal.RuleKind = ruleKind;

@@ -125,5 +125,17 @@ namespace ACE.Server.WorldEvents
         /// type (breach, runners, ranged, hunters), as long as the goal defines it. Null rolls normally.
         /// </summary>
         public ACE.Server.WorldEvents.Defs.HoldWaveType? ForcedWaveType { get; set; }
+
+        /// <summary>World Events chain: which stage of a chain this run is (1 = a run nobody chained into).</summary>
+        public int ChainStage { get; set; } = 1;
+
+        /// <summary>World Events chain: the chain's length, carried from its first stage's goal (0 = not part of a chain).</summary>
+        public int ChainMaxLength { get; set; }
+
+        /// <summary>World Events chain: the first stage's run id (0 = this run is the first, or no chain).</summary>
+        public uint ChainRootRunId { get; set; }
+
+        /// <summary>World Events chain: the first stage's goal chain settings, carried to every later stage (null = the run's own goal's).</summary>
+        public ACE.Server.WorldEvents.Defs.ChainDef ChainSettings { get; set; }
     }
 }

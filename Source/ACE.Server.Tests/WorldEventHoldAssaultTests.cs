@@ -483,11 +483,11 @@ namespace ACE.Server.Tests
         // ---- the shrine ---------------------------------------------------------------------------------------------
 
         [TestMethod]
-        public void ShrineDefaults_TheAltarOfAsheron_NoConstantEffect()
+        public void ShrineDefaults_TheDreamWeaveShrine_NoConstantEffect()
         {
             var s = new ShrineDef();
 
-            Assert.AreEqual(855u, s.Wcid, "the Altar of Asheron: 2 m, no particles of its own");
+            Assert.AreEqual(2000008u, s.Wcid, "the DreamWeave Restoration Shrine, not a retail altar");
             Assert.AreEqual(1.0, s.Scale, 1e-9, "normal size");
             Assert.AreEqual(0, s.ReadyPulseSeconds, 1e-9, "the ready cue plays once, never on a loop");
             Assert.AreNotEqual("RestrictionEffectGreen", s.ReadyEffect);

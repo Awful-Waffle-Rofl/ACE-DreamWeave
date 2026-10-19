@@ -270,7 +270,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(5, p.HealReductionSeconds, 1e-9);
 
             Assert.IsNotNull(p.Shrine);
-            Assert.AreEqual(855u, p.Shrine.Wcid, "the Altar of Asheron, not the Essence Font and its constant blue flame");
+            Assert.AreEqual(2000008u, p.Shrine.Wcid, "its own shrine weenie: no PK altar prompt, no constant blue flame");
             Assert.AreEqual(1.0, p.Shrine.Scale, 1e-9, "normal size");
             Assert.AreEqual(20, p.Shrine.ReadyPulseSeconds, 1e-9, "a small cue every 20 s while ready, nothing constant");
             Assert.AreEqual("SkillUpGreen", p.Shrine.ReadyEffect);

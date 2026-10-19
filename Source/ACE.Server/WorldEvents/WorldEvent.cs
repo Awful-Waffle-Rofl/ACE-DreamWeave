@@ -1169,7 +1169,11 @@ namespace ACE.Server.WorldEvents
                 }
 
                 heldBlockKeys = new HashSet<ulong>(keys);
-                heldBlockKeysToRelease = WorldEventLandblockHold.ComputeRelease(prior, keys);
+
+                // A block permaloaded only because a finishing run (a chain's first stage) still holds it is ours to
+                // release too: that run leaves it to us (ReleaseLandblockHold).
+                heldBlockKeysToRelease = WorldEventLandblockHold.ComputeRelease(
+                    WorldEventManager.PriorWithoutOtherRuns(this, prior), keys);
 
                 log.Info($"[WORLDEVENT] run={RunId} hold blocks={keys.Count} release-at-finish={heldBlockKeysToRelease.Count} anchor=0x{landblock.Id.Raw:X8} instance={landblock.Instance}");
 
@@ -4709,13 +4713,22 @@ namespace ACE.Server.WorldEvents
             AnchorLandblock = null;
 
             if (landblockBridge == null || heldBlockKeysToRelease == null || heldBlockKeysToRelease.Count == 0)
+            {
+                heldBlockKeys = new HashSet<ulong>();
                 return;
+            }
 
-            landblockBridge.ReleasePermaload(heldBlockKeysToRelease);
+            // A chained run (WorldEventManager.Chain) may already stand on some of these blocks while this one
+            // finishes its claim window: those stay permaloaded for it.
+            var release = WorldEventManager.WithoutBlocksHeldByOtherRuns(this, heldBlockKeysToRelease);
 
-            log.Info($"[WORLDEVENT] run={RunId} released the permaload hold on {heldBlockKeysToRelease.Count} landblock(s)");
+            landblockBridge.ReleasePermaload(release);
+
+            log.Info($"[WORLDEVENT] run={RunId} released the permaload hold on {release.Count} landblock(s)" +
+                     (release.Count < heldBlockKeysToRelease.Count ? $" ({heldBlockKeysToRelease.Count - release.Count} kept for another run)" : ""));
 
             heldBlockKeysToRelease = new List<ulong>();
+            heldBlockKeys = new HashSet<ulong>();
         }
 
         /// <summary>

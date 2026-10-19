@@ -195,7 +195,7 @@ namespace ACE.Server.Tests
             var shrine = new ShrineDef();
             var decor = WorldEventHoldRules.ShrineDecor(shrine);
 
-            Assert.AreEqual(855u, decor.Wcid, "the Altar of Asheron");
+            Assert.AreEqual(2000008u, decor.Wcid, "the DreamWeave Restoration Shrine");
             Assert.AreEqual(1f, decor.Scale, "normal size");
             Assert.IsTrue(decor.HoldShrine);
             Assert.IsTrue(decor.Snap, "on the ground");
@@ -316,7 +316,7 @@ namespace ACE.Server.Tests
             var good = WorldEventAxisStore.Parse(null, null, HoldGoalsJson(ok, holdSeconds: 480), null, null);
 
             Assert.IsTrue(good.Goals.ContainsKey("hold_wards"), string.Join(" | ", good.Diagnostics));
-            Assert.AreEqual(855u, good.Goals["hold_wards"].Protect.Shrine.Wcid, "an empty shrine block takes the defaults (the Altar of Asheron)");
+            Assert.AreEqual(2000008u, good.Goals["hold_wards"].Protect.Shrine.Wcid, "an empty shrine block takes the defaults (the DreamWeave shrine)");
         }
 
         [TestMethod]

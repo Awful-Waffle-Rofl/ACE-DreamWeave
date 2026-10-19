@@ -355,7 +355,7 @@ namespace ACE.Server.Tests
                 Assert.AreEqual(1.5, p.Corrupted.Scale, 1e-9, $"{id}: corrupted 1.5x, easy to pick out");
                 Assert.AreEqual("VitaeDownBlack", p.Corrupted.Effect, $"{id}: a dark aura, not the purple of a lightning vuln");
                 Assert.AreEqual("none", p.Corrupted.ExtraEffect, id);
-                Assert.AreEqual(0.75, p.Portals.Scale, 1e-9, $"{id}: portals 1.5x the last 0.5");
+                Assert.AreEqual(0.9, p.Portals.Scale, 1e-9, $"{id}: portals 1.2x the last 0.75");
                 Assert.AreEqual(2, p.Corrupted.AssaultEveryWaves, $"{id}: an assault every other wave");
                 Assert.AreEqual(2, p.Corrupted.AssaultFromWave, id);
                 Assert.AreEqual(2, p.Corrupted.AssaultCount, $"{id}: two corrupted per assault");

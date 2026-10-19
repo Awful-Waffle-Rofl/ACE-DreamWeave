@@ -1338,6 +1338,22 @@ namespace ACE.Server.WorldEvents
                     continue;
                 }
 
+                // No retail use behavior on event props: a decor weenie of an interactive type (a PK altar, a portal,
+                // a lifestone, a switch, a chest...) is refused, and plain decor is never usable. The shrine must be a
+                // plain Generic: its only use is the Hold heal.
+                var verdict = DecorVerdict(wo.WeenieType, entry.HoldShrine);
+
+                if (verdict == DecorUse.Refuse)
+                {
+                    log.Error($"[WORLDEVENT] run={evt.RunId} decor wcid {entry.Wcid} ({wo.Name}) is a {wo.WeenieType}, which keeps its own " +
+                              $"use behavior; refused{(entry.HoldShrine ? " as a shrine (it must be a Generic)" : "")}");
+                    wo.Destroy();
+                    continue;
+                }
+
+                if (verdict == DecorUse.Inert)
+                    wo.ItemUseable = ACE.Entity.Enum.Usable.No;
+
                 // Hold protect.shrine: renamed and usable from a few metres, before the create packet goes out.
                 if (entry.HoldShrine)
                     ConfigureHoldShrine(wo, evt.Composition?.Goal?.Protect?.Shrine);
@@ -2641,6 +2657,33 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>What the spawner does with one event decor object (see <see cref="DecorVerdict"/>).</summary>
+        public enum DecorUse
+        {
+            /// <summary>Placed, never usable.</summary>
+            Inert,
+
+            /// <summary>Placed and usable: the Hold shrine, whose use the run handles.</summary>
+            HoldShrine,
+
+            /// <summary>Not placed: its weenie type carries its own use behavior.</summary>
+            Refuse
+        }
+
+        /// <summary>
+        /// The decor rule (D6 - pure): a shrine must be a plain Generic (its only use is the Hold heal); any other decor
+        /// must be a Generic or a light source (a campfire) and is made unusable. Every other weenie type (a PK altar,
+        /// a portal, a lifestone, a switch, a door, a chest, a creature...) keeps its own use behavior and is refused.
+        /// </summary>
+        public static DecorUse DecorVerdict(ACE.Entity.Enum.WeenieType type, bool isShrine)
+        {
+            if (isShrine)
+                return type == ACE.Entity.Enum.WeenieType.Generic ? DecorUse.HoldShrine : DecorUse.Refuse;
+
+            return type == ACE.Entity.Enum.WeenieType.Generic || type == ACE.Entity.Enum.WeenieType.LightSource
+                ? DecorUse.Inert : DecorUse.Refuse;
+        }
+
         /// <summary>
         /// A Hold restoration shrine, before it enters the world: named, and usable from protect.shrine.useRadius
         /// metres (Usable.Remote), so the client lets a player use it. What the use does is WorldEvent.TryUseHoldShrine;
@@ -2719,7 +2762,8 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var scale = (float)Math.Clamp(protect.FinaleBossScale, 1.0, 2.5);
+                var scale = WorldEventHoldRules.FinaleBossScale(protect.FinaleBossScale,
+                    ResolveBossScaleMultiplier(PropertyManager.GetDouble("world_events_boss_scale_multiplier").Item));
 
                 if (!string.IsNullOrWhiteSpace(bossName))
                     creature.Name = bossName;

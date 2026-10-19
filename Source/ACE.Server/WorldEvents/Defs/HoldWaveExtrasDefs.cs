@@ -141,11 +141,13 @@ namespace ACE.Server.WorldEvents.Defs
     public class ShrineDef
     {
         /// <summary>
-        /// The model. Default 855, the Altar of Asheron: a 2 m stone altar with no built-in particles. (The Essence Font,
-        /// 19484, is 6 m tall and carries a constant blue flame; not a shrine model.)
+        /// The weenie. Default 2000008, the DreamWeave Restoration Shrine: a plain Generic that copies only the retail Altar
+        /// model (1 m, no particles), with no PK/NPK switch, emotes or use actions. It must be a Generic (the spawner refuses
+        /// anything else): a retail altar keeps its own use behavior in the client (the Altar of Asheron, 855, showed the
+        /// NPK prompt), and the Essence Font (19484) is a 6 m constant blue flame.
         /// </summary>
         [JsonPropertyName("wcid")]
-        public uint Wcid { get; set; } = 855;
+        public uint Wcid { get; set; } = 2000008;
 
         /// <summary>The name players see (letters and spaces, up to 30). Default Restoration Shrine.</summary>
         [JsonPropertyName("name")]

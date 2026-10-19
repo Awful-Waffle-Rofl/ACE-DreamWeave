@@ -37,8 +37,13 @@ namespace ACE.Server.Tests
         private const double BossKillSeconds = 45.0;
         private const double ArriveSeconds = 5.0;
 
-        /// <summary>Extra player time to reach a corrupted assault monster on another envoy.</summary>
-        private const double CorruptedTravelSeconds = 2.0;
+        /// <summary>
+        /// Extra player time per corrupted assault monster, on top of its kill. Fitted to the second live run (2026-10-18
+        /// 20:16, solo, no shrine used, corrupted x3): it ended with 1 envoy; the model gives 1.9 on average at 2 s and
+        /// 0.5 at 3 s (it ticks whole seconds). The log measured about 17 s per corrupted from arrival; the model needs
+        /// less because it is pessimistic elsewhere (every monster attacks the moment it arrives).
+        /// </summary>
+        internal static double CorruptedTravelSeconds = 2.0;
 
         /// <summary>Extra player time to reach a ranged monster standing 18 m out (and break its ward in melee).</summary>
         private const double RangedTravelSeconds = 3.0;
@@ -549,6 +554,24 @@ namespace ACE.Server.Tests
                 // Focusing the corrupted assault matters at every group size.
                 Assert.IsTrue(noFocus.Average(r => r.Survivors) <= active.Average(r => r.Survivors) - 0.5, $"{players} player(s): ignoring the corrupted assault costs envoys\n{report}");
             }
+        }
+
+        /// <summary>
+        /// The model against the second live run (2026-10-18 20:16, solo, the shipped numbers, no shrine used because the
+        /// PK altar's prompt blocked it): that run kept 1 envoy. The model must give that outcome in a fair share of runs,
+        /// and keep between 1 and 2.5 on average, or its other answers mean nothing.
+        /// </summary>
+        [TestMethod]
+        public void Balance_ModelReproducesTheLiveSoloRun()
+        {
+            var p = ShippedEnvoys(out var holdSeconds);
+            p.Shrine = null;
+
+            var runs = Enumerable.Range(0, 60).Select(seed => Simulate(p, holdSeconds, 1, Strategy.Active, seed)).ToList();
+            var avg = runs.Average(r => r.Survivors);
+
+            Assert.IsTrue(avg >= 1.0 && avg <= 2.5, $"solo, no shrine: {avg:0.00} envoys left on average");
+            Assert.IsTrue(runs.Count(r => r.Survivors == 1) >= 6, $"the live outcome (1 envoy) in at least 10% of runs: {runs.Count(r => r.Survivors == 1)}/60");
         }
 
         [TestMethod]

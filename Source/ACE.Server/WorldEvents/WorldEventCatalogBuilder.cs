@@ -191,6 +191,59 @@ namespace ACE.Server.WorldEvents
             return weenie?.PropertiesSpellBook != null && weenie.PropertiesSpellBook.Count > 0;
         }
 
+        /// <summary>
+        /// Test seam: whether a motion table can move a creature (it has a walk or run cycle). Null when the dats are not
+        /// loaded, which counts as mobile.
+        /// </summary>
+        internal static Func<uint, bool?> MotionTableCanMove = ReadMotionTableCanMove;
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, bool?> motionTableCache =
+            new System.Collections.Concurrent.ConcurrentDictionary<uint, bool?>();
+
+        /// <summary>
+        /// The immobile rule (2026-10-18): a creature that never moves is never drawn for a wave, a ranged or corrupted
+        /// slot or a finale; other monsters path into it and stick. Immobile: AiImmobile set, or a motion table with no
+        /// walk and no run cycle (the T'thuun tendrils, eyestalks and tentacles, motion table 0x0900007B, carry no flag).
+        /// </summary>
+        public static bool IsImmobile(Weenie weenie)
+        {
+            if (weenie == null)
+                return false;
+
+            if (weenie.GetProperty(PropertyBool.AiImmobile) == true)
+                return true;
+
+            var table = weenie.GetProperty(PropertyDataId.MotionTable);
+
+            return table != null && table.Value != 0 && MotionTableCanMove(table.Value) == false;
+        }
+
+        /// <summary>The motion-table rule (D6 - pure): a walk (0x05) or run (0x07) cycle in any style can move it.</summary>
+        public static bool CyclesCanMove(IEnumerable<uint> cycleKeys)
+        {
+            return cycleKeys != null && cycleKeys.Any(k => (k & 0xFFFF) == 0x0005 || (k & 0xFFFF) == 0x0007);
+        }
+
+        private static bool? ReadMotionTableCanMove(uint tableId)
+        {
+            return motionTableCache.GetOrAdd(tableId, id =>
+            {
+                try
+                {
+                    if (ACE.DatLoader.DatManager.PortalDat == null)
+                        return null;
+
+                    var table = ACE.DatLoader.DatManager.PortalDat.ReadFromDat<ACE.DatLoader.FileTypes.MotionTable>(id);
+
+                    return table == null ? (bool?)null : CyclesCanMove(table.Cycles.Keys);
+                }
+                catch
+                {
+                    return null;
+                }
+            });
+        }
+
         public static WorldEventCatalog Build(IEnumerable<Weenie> weenies, out List<string> diagnostics)
         {
             return Build(weenies, null, out diagnostics);
@@ -306,6 +359,12 @@ namespace ACE.Server.WorldEvents
                 if (level == null)
                 {
                     diagnostics.Add($"wcid {wcid}: WorldEventCreature is set but Level is missing - dropped");
+                    continue;
+                }
+
+                if (IsImmobile(weenie))
+                {
+                    diagnostics.Add($"wcid {wcid}: never moves (AiImmobile, or no walk or run motion) - dropped");
                     continue;
                 }
 
@@ -427,6 +486,13 @@ namespace ACE.Server.WorldEvents
                     if (weenie.GetProperty(PropertyDataId.LinkedPortalOne) != null || weenie.GetProperty(PropertyDataId.LinkedPortalTwo) != null)
                     {
                         diagnostics.Add($"species/{table.Id}: wcid {wcid} summons a portal on death (LinkedPortalOne/Two, species rule R9) - dropped");
+                        seenWcids[wcid] = table.Id;
+                        continue;
+                    }
+
+                    if (IsImmobile(weenie))
+                    {
+                        diagnostics.Add($"species/{table.Id}: wcid {wcid} never moves (AiImmobile, or no walk or run motion) - dropped");
                         seenWcids[wcid] = table.Id;
                         continue;
                     }

@@ -94,8 +94,10 @@ namespace ACE.Server.WorldEvents
 
         private static bool Handle(WorldObject cache, Player player)
         {
-            var evt = WorldEventManager.Current;
             var runId = cache.GetProperty(PropertyInt.WorldEventId);
+
+            // The current run, or a chained run's finishing stage still in its claim window.
+            var evt = runId == null ? null : WorldEventManager.FindRun((uint)runId.Value);
 
             // A cache left over from a finished run must never pay. The run id stamp is applied at spawn
             // time by WorldEventRewardDelivery, so an unstamped cache (hand-spawned by an admin, say) also

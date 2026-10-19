@@ -77,6 +77,13 @@ namespace ACE.Server.WorldEvents.Defs
         public string FailTemplate { get; set; }
 
         /// <summary>
+        /// Optional: when a run of this goal succeeds, a second World Event starts nearby (WorldEventChain). Absent: no
+        /// chain. Any goal may carry it; the envoys do.
+        /// </summary>
+        [JsonPropertyName("chain")]
+        public ChainDef Chain { get; set; }
+
+        /// <summary>
         /// Computed at load time from <see cref="Type"/> (case-insensitive). Never read from JSON.
         /// </summary>
         [JsonIgnore]
