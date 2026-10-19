@@ -1099,7 +1099,12 @@ namespace ACE.Server.WorldEvents
 
             // protect.shrine: a restoration shrine beside each target, in the target's own frame.
             if (protect.Shrine != null)
-                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, new List<DecorDef> { WorldEventHoldRules.ShrineDecor(protect.Shrine) }));
+            {
+                // world_events_hold_shrine_count: only the first N knights get one (not set: every knight).
+                var shrineRing = protect.ShrineCount is int shrines ? ring.Take(Math.Max(0, shrines)).ToList() : ring;
+
+                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(shrineRing, new List<DecorDef> { WorldEventHoldRules.ShrineDecor(protect.Shrine) }));
+            }
 
             // protect.portals: small portals around the outside of the spawn ring; every wave comes out of them.
             if (protect.Portals != null)

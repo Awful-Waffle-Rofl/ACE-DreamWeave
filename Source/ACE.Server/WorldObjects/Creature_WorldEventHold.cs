@@ -684,7 +684,7 @@ namespace ACE.Server.WorldObjects
         /// healing (protect.maxHealPerTenSeconds above 0). Every other creature: false.
         /// </summary>
         public bool AcceptsWorldEventPlayerHeal =>
-            WorldEventProtected && !IsDead && (P_WorldEvent?.Composition?.Goal?.Protect?.MaxHealPerTenSeconds ?? 0) > 0;
+            WorldEventProtected && !IsDead && (P_WorldEvent?.Composition?.Goal?.Protect?.PlayerHealAllowed ?? false);
 
         /// <summary>
         /// The only spells a player may cast on a protected target (D6 - pure): a beneficial Boost that raises
@@ -757,7 +757,11 @@ namespace ACE.Server.WorldObjects
             if (healer != null)
                 P_WorldEvent?.NoteProtectedHealer(healer, now);
 
-            var converted = ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor, Health.MaxValue, protect.MaxHealPerTenSeconds,
+            // world_events_hold_player_heal off: player heals restore nothing; player_heal_mult scales what one heal is worth (1 = as before).
+            if (!protect.PlayerHealAllowed)
+                return 0;
+
+            var converted = ACE.Server.WorldEvents.WorldEventHoldRules.ConvertPlayerHeal(rawHeal * factor * protect.PlayerHealMult, Health.MaxValue, protect.MaxHealPerTenSeconds,
                 ref worldEventProtectedHealTokens, ref worldEventProtectedHealLastAt, now);
 
             // A player's heal counts against the same per-wave budget as every other source (only what it can

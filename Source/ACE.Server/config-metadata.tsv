@@ -1101,10 +1101,15 @@ world_events_elite_band_high	world_events	elite	fork	no
 world_events_elite_band_low	world_events	elite	fork	no
 world_events_enabled	world_events	enabled	fork	no
 world_events_family_floor_level	world_events	family	fork	no
+world_events_hold_corrupted_kill_heal	world_events	hold healing	fork	no
 world_events_hold_defend_pose	world_events	hold knights	fork	no
 world_events_hold_defend_swing_max_seconds	world_events	hold knights	fork	no
 world_events_hold_defend_swing_seconds	world_events	hold knights	fork	no
 world_events_hold_enabled	world_events	hold	fork	no
+world_events_hold_heal_between_waves	world_events	hold healing	fork	no
+world_events_hold_heal_budget_per_wave	world_events	hold healing	fork	no
+world_events_hold_heal_reduction_after_hit	world_events	hold healing	fork	no
+world_events_hold_heal_reduction_seconds	world_events	hold healing	fork	no
 world_events_hold_health_milestones	world_events	hold knights	fork	no
 world_events_hold_knight_count	world_events	hold knights	fork	no
 world_events_hold_knight_damage_taken_mult	world_events	hold knights	fork	no
@@ -1112,7 +1117,23 @@ world_events_hold_knight_max_health	world_events	hold knights	fork	no
 world_events_hold_knight_max_health_by_wcid	world_events	hold knights	fork	no
 world_events_hold_min_death_seconds	world_events	hold knights	fork	no
 world_events_hold_min_survivors	world_events	hold knights	fork	no
+world_events_hold_player_heal	world_events	hold healing	fork	no
+world_events_hold_player_heal_cap	world_events	hold healing	fork	no
+world_events_hold_player_heal_mult	world_events	hold healing	fork	no
+world_events_hold_regen_clear_radius	world_events	hold healing	fork	no
+world_events_hold_regen_interval_seconds	world_events	hold healing	fork	no
+world_events_hold_regen_per_second	world_events	hold healing	fork	no
+world_events_hold_rescue_cap_per_wave	world_events	hold healing	fork	no
+world_events_hold_rescue_heal	world_events	hold healing	fork	no
 world_events_hold_seek_share	world_events	hold	fork	no
+world_events_hold_shrine	world_events	hold healing	fork	no
+world_events_hold_shrine_bind_range	world_events	hold healing	fork	no
+world_events_hold_shrine_cooldown_seconds	world_events	hold healing	fork	no
+world_events_hold_shrine_count	world_events	hold healing	fork	no
+world_events_hold_shrine_heal	world_events	hold healing	fork	no
+world_events_hold_shrine_heals_all	world_events	hold healing	fork	no
+world_events_hold_shrine_player_cooldown_seconds	world_events	hold healing	fork	no
+world_events_hold_shrine_use_radius	world_events	hold healing	fork	no
 world_events_hold_undefended_seconds	world_events	hold knights	fork	no
 world_events_hold_undefended_seconds_floor	world_events	hold knights	fork	no
 world_events_hold_undefended_seconds_per_participant	world_events	hold knights	fork	no

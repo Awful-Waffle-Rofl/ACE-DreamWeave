@@ -306,8 +306,39 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        [ThreadStatic]
+        private static int fileValuesOnlyDepth;
+
+        /// <summary>
+        /// While the returned scope is open, on this thread every setting reads as not set, so the defs show goals.json's own
+        /// values. The axis loader validates under it: a live override never makes a reload drop a goal, and the file is
+        /// checked for what it says.
+        /// </summary>
+        public static IDisposable FileValuesOnly()
+        {
+            fileValuesOnlyDepth++;
+            return new FileValuesScope();
+        }
+
+        private sealed class FileValuesScope : IDisposable
+        {
+            private bool disposed;
+
+            public void Dispose()
+            {
+                if (disposed)
+                    return;
+
+                disposed = true;
+                fileValuesOnlyDepth--;
+            }
+        }
+
         private static Parsed Read(HoldSetting s)
         {
+            if (fileValuesOnlyDepth > 0)
+                return default;
+
             var raw = RawValue(s);
 
             if (raw.Length == 0 || raw.Trim().Length == 0)

@@ -297,6 +297,9 @@ namespace ACE.Server.WorldEvents
             List<string> diagnostics, List<string> notes,
             IEnumerable<(string fileName, string json)> speciesFiles = null)
         {
+            // The files are validated (and repaired) for what they say: a live Hold setting never makes a reload drop a goal.
+            using var fileValues = HoldSettings.FileValuesOnly();
+
             var families = ParseFamilies(familiesJson, diagnostics);
             var goals = ParseGoals(goalsJson, diagnostics);
             var rewards = ParseRewards(rewardsJson, diagnostics);

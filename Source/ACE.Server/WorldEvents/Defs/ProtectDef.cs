@@ -188,31 +188,59 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>Share of max health (0 to 1) every standing target regains when a corrupted monster dies. 0 = off.</summary>
         [JsonPropertyName("corruptedKillHeal")]
-        public double CorruptedKillHeal { get; set; }
+        public double CorruptedKillHealJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.CorruptedKillHeal) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double CorruptedKillHeal { get => HoldSettings.Number(HoldKeys.CorruptedKillHeal, CorruptedKillHealJson); set => CorruptedKillHealJson = value; }
 
         /// <summary>Share of max health (0 to 1) a target regains when a player uses its shrine. Needs <see cref="Shrine"/>.</summary>
         [JsonPropertyName("shrineHeal")]
-        public double ShrineHeal { get; set; } = 0.15;
+        public double ShrineHealJson { get; set; } = 0.15;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShrineHeal) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ShrineHeal { get => HoldSettings.Number(HoldKeys.ShrineHeal, ShrineHealJson); set => ShrineHealJson = value; }
 
         /// <summary>Seconds a shrine rests after a use (1 to 600). Default 45.</summary>
         [JsonPropertyName("shrineCooldownSeconds")]
-        public double ShrineCooldownSeconds { get; set; } = 45;
+        public double ShrineCooldownSecondsJson { get; set; } = 45;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ShrineCooldownSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ShrineCooldownSeconds { get => HoldSettings.Number(HoldKeys.ShrineCooldownSeconds, ShrineCooldownSecondsJson); set => ShrineCooldownSecondsJson = value; }
 
         /// <summary>Share of max health (0 to 1) a target regains when a monster that was attacking it is killed. 0 = off.</summary>
         [JsonPropertyName("rescueHeal")]
-        public double RescueHeal { get; set; }
+        public double RescueHealJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.RescueHeal) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double RescueHeal { get => HoldSettings.Number(HoldKeys.RescueHeal, RescueHealJson); set => RescueHealJson = value; }
 
         /// <summary>The most a target can regain from rescues per wave (0 to 1). Default 0.10.</summary>
         [JsonPropertyName("rescueCapPerWave")]
-        public double RescueCapPerWave { get; set; } = 0.10;
+        public double RescueCapPerWaveJson { get; set; } = 0.10;
+
+        /// <summary>In force: its Hold setting (HoldKeys.RescueCapPerWave) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double RescueCapPerWave { get => HoldSettings.Number(HoldKeys.RescueCapPerWave, RescueCapPerWaveJson); set => RescueCapPerWaveJson = value; }
 
         /// <summary>A target regenerates only with no hostile wave monster within this many metres (0 to 50). Default 10.</summary>
         [JsonPropertyName("clearRadius")]
-        public double ClearRadius { get; set; } = 10;
+        public double ClearRadiusJson { get; set; } = 10;
+
+        /// <summary>In force: its Hold setting (HoldKeys.RegenClearRadius) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ClearRadius { get => HoldSettings.Number(HoldKeys.RegenClearRadius, ClearRadiusJson); set => ClearRadiusJson = value; }
 
         /// <summary>Share of max health (0 to 0.1) a clear target regenerates each second. 0 = off.</summary>
         [JsonPropertyName("clearRegenPerSecond")]
-        public double ClearRegenPerSecond { get; set; }
+        public double ClearRegenPerSecondJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.RegenPerSecond) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ClearRegenPerSecond { get => HoldSettings.Number(HoldKeys.RegenPerSecond, ClearRegenPerSecondJson); set => ClearRegenPerSecondJson = value; }
 
         /// <summary>
         /// The most a target can regain per wave (0 to 1) across every heal source together: shrine, corrupted kills,
@@ -220,11 +248,62 @@ namespace ACE.Server.WorldEvents.Defs
         /// the next wave starts. 0 = no budget.
         /// </summary>
         [JsonPropertyName("healBudgetPerWave")]
-        public double HealBudgetPerWave { get; set; }
+        public double HealBudgetPerWaveJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.HealBudgetPerWave) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double HealBudgetPerWave { get => HoldSettings.Number(HoldKeys.HealBudgetPerWave, HealBudgetPerWaveJson); set => HealBudgetPerWaveJson = value; }
 
         /// <summary>Optional: a restoration shrine beside each target (see ShrineDef). Absent: no shrines.</summary>
         [JsonPropertyName("shrine")]
-        public ShrineDef Shrine { get; set; }
+        public ShrineDef ShrineJson { get; set; }
+
+        /// <summary>
+        /// The shrine in force: world_events_hold_shrine off turns shrines off (live: using one does nothing), on uses
+        /// goals.json's block or the defaults; not set, goals.json decides. Shrines are placed at the start.
+        /// </summary>
+        [JsonIgnore]
+        public ShrineDef Shrine
+        {
+            get => !HoldSettings.IsSet(HoldKeys.Shrine) ? ShrineJson : HoldSettings.Toggle(HoldKeys.Shrine, true) ? ShrineJson ?? (defaultShrine ??= new ShrineDef()) : null;
+            set => ShrineJson = value;
+        }
+
+        private ShrineDef defaultShrine;
+
+        /// <summary>world_events_hold_shrine_count: how many knights get a shrine (the first N); null = every knight (next event).</summary>
+        [JsonIgnore]
+        public int? ShrineCount => HoldSettings.IsSet(HoldKeys.ShrineCount) ? HoldSettings.Integer(HoldKeys.ShrineCount, MaxProtectedTargets) : (int?)null;
+
+        /// <summary>world_events_hold_shrine_heals_all: a shrine use heals every standing knight instead of the nearest (live).</summary>
+        [JsonIgnore]
+        public bool ShrineHealsAll => HoldSettings.Toggle(HoldKeys.ShrineHealsAll, false);
+
+        /// <summary>world_events_hold_shrine_player_cooldown_seconds: one player may use a shrine again only after this (0 = off; live).</summary>
+        [JsonIgnore]
+        public double ShrinePlayerCooldownSeconds => HoldSettings.Number(HoldKeys.ShrinePlayerCooldownSeconds, 0);
+
+        /// <summary>world_events_hold_shrine_bind_range: a shrine farther than this from every knight restores nobody (live).</summary>
+        [JsonIgnore]
+        public double ShrineBindRange => HoldSettings.Number(HoldKeys.ShrineBindRange, DefaultShrineBindRange);
+
+        public const double DefaultShrineBindRange = 8.0;
+
+        /// <summary>The shrine rest in force: 1 to 600 s from goals.json, and 0 allowed when an admin sets it on purpose.</summary>
+        [JsonIgnore]
+        public double EffectiveShrineCooldownSeconds => Math.Clamp(ShrineCooldownSeconds, HoldSettings.IsSet(HoldKeys.ShrineCooldownSeconds) ? 0 : 1, 600);
+
+        /// <summary>world_events_hold_regen_interval_seconds: clear regeneration is applied every this many seconds (default 1; live).</summary>
+        [JsonIgnore]
+        public double RegenIntervalSeconds => HoldSettings.Number(HoldKeys.RegenIntervalSeconds, 1);
+
+        /// <summary>world_events_hold_player_heal: players may heal knights at all (with player_heal_cap above 0; live).</summary>
+        [JsonIgnore]
+        public bool PlayerHealAllowed => HoldSettings.Toggle(HoldKeys.PlayerHeal, true) && MaxHealPerTenSeconds > 0;
+
+        /// <summary>world_events_hold_player_heal_mult: scales how much of a knight one player heal restores (1 = as before; live).</summary>
+        [JsonIgnore]
+        public double PlayerHealMult => HoldSettings.Number(HoldKeys.PlayerHealMult, 1.0);
 
         /// <summary>Optional: the ward on mixed waves' ranged monsters (see WardDef). Absent: no ward.</summary>
         [JsonPropertyName("ward")]
@@ -443,7 +522,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// fully cleared. 0 (the default) heals nothing.
         /// </summary>
         [JsonPropertyName("healBetweenWaves")]
-        public double HealBetweenWaves { get; set; }
+        public double HealBetweenWavesJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.HealBetweenWaves) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double HealBetweenWaves { get => HoldSettings.Number(HoldKeys.HealBetweenWaves, HealBetweenWavesJson); set => HealBetweenWavesJson = value; }
 
         /// <summary>
         /// Players may heal targets (heal spells and health kits): each heal becomes a share of max health,
@@ -451,7 +534,11 @@ namespace ACE.Server.WorldEvents.Defs
         /// of max health per target per ten seconds. 0 turns player healing of targets off. Default 0.10.
         /// </summary>
         [JsonPropertyName("maxHealPerTenSeconds")]
-        public double MaxHealPerTenSeconds { get; set; } = DefaultMaxHealPerTenSeconds;
+        public double MaxHealPerTenSecondsJson { get; set; } = DefaultMaxHealPerTenSeconds;
+
+        /// <summary>In force: its Hold setting (HoldKeys.PlayerHealCap) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double MaxHealPerTenSeconds { get => HoldSettings.Number(HoldKeys.PlayerHealCap, MaxHealPerTenSecondsJson); set => MaxHealPerTenSecondsJson = value; }
 
         /// <summary>True when the hold counts waves (<see cref="Waves"/> is set).</summary>
         [JsonIgnore]
@@ -477,11 +564,19 @@ namespace ACE.Server.WorldEvents.Defs
         /// <see cref="HealReductionAfterHit"/>, so heals buy time but cannot cancel an attacker on their own.
         /// </summary>
         [JsonPropertyName("healReductionSeconds")]
-        public double HealReductionSeconds { get; set; } = 5;
+        public double HealReductionSecondsJson { get; set; } = 5;
+
+        /// <summary>In force: its Hold setting (HoldKeys.HealReductionSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double HealReductionSeconds { get => HoldSettings.Number(HoldKeys.HealReductionSeconds, HealReductionSecondsJson); set => HealReductionSecondsJson = value; }
 
         /// <summary>How much healing on a recently hit target is reduced (0 to 1). 0 (default) means no reduction.</summary>
         [JsonPropertyName("healReductionAfterHit")]
-        public double HealReductionAfterHit { get; set; }
+        public double HealReductionAfterHitJson { get; set; }
+
+        /// <summary>In force: its Hold setting (HoldKeys.HealReductionAfterHit) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double HealReductionAfterHit { get => HoldSettings.Number(HoldKeys.HealReductionAfterHit, HealReductionAfterHitJson); set => HealReductionAfterHitJson = value; }
 
         /// <summary>
         /// Optional: target count and ring radius by crowd size, replacing <see cref="Count"/> and

@@ -178,6 +178,16 @@ namespace ACE.Server.WorldEvents
                 if (protect == null || !(protect.ClearRegenPerSecond > 0))
                     return;
 
+                // world_events_hold_regen_interval_seconds (default 1 = every tick): the same regen per second, applied in
+                // steps of the interval.
+                var interval = Math.Max(1, protect.RegenIntervalSeconds);
+                var now = ACE.Common.Time.GetUnixTime();
+
+                if (interval > 1 && now - lastClearRegenAt < interval - 0.01)
+                    return;
+
+                lastClearRegenAt = now;
+
                 var monsters = Spawner.LiveWaveCreatures.Where(m => m != null && !m.IsDead && m.Location != null)
                     .Select(m => m.Location).ToList();
 
@@ -194,7 +204,7 @@ namespace ACE.Server.WorldEvents
                     if (!WorldEventHoldRules.IsClear(nearest, protect.ClearRadius))
                         continue;
 
-                    QueueProtectedHeal(target, Math.Min(0.1, protect.ClearRegenPerSecond), false, "clear regen");
+                    QueueProtectedHeal(target, Math.Min(0.1, protect.ClearRegenPerSecond) * interval, false, "clear regen");
                 }
             }
             catch (Exception ex)
@@ -202,6 +212,9 @@ namespace ACE.Server.WorldEvents
                 log.Error($"[WORLDEVENT] run={RunId} clear regeneration threw", ex);
             }
         }
+
+        /// <summary>When clear regeneration was last applied (world_events_hold_regen_interval_seconds).</summary>
+        private double lastClearRegenAt;
 
         // ---- restoration shrines -------------------------------------------------------------------------------
 
@@ -213,8 +226,11 @@ namespace ACE.Server.WorldEvents
         /// <summary>Per shrine guid: when its ready effect last played.</summary>
         private readonly Dictionary<uint, double> shrineReadyPulseAt = new Dictionary<uint, double>();
 
-        /// <summary>A shrine farther than this from every target restores nobody.</summary>
-        internal const double ShrineBindMetres = 8.0;
+        /// <summary>Per player guid: when that player may use a shrine again (world_events_hold_shrine_player_cooldown_seconds).</summary>
+        private readonly Dictionary<uint, double> shrinePlayerReadyAt = new Dictionary<uint, double>();
+
+        /// <summary>A shrine farther than this from every target restores nobody (the default of world_events_hold_shrine_bind_range).</summary>
+        internal const double ShrineBindMetres = ProtectDef.DefaultShrineBindRange;
 
         /// <summary>True when <paramref name="item"/> is one of this run's restoration shrines.</summary>
         internal bool IsHoldShrine(WorldObject item)
@@ -252,48 +268,97 @@ namespace ACE.Server.WorldEvents
             lock (shrineSync)
                 shrineReadyAt.TryGetValue(item.Guid.Full, out readyAt);
 
-            if (now < readyAt)
+            if (WorldEventHoldRules.ShrineUseCheck(now, readyAt, 0, 0) == WorldEventHoldRules.ShrineUseState.ShrineResting)
             {
                 log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: resting, ready in {readyAt - now:0} s");
                 Tell(player, WorldEventHoldRules.ShrineCooldownLine(readyAt - now));
                 return true;
             }
 
-            var target = NearestProtected(item, ShrineBindMetres);
+            // world_events_hold_shrine_player_cooldown_seconds (0 = off): one player waits between any two shrine uses.
+            var playerCooldown = protect.ShrinePlayerCooldownSeconds;
+            double playerReadyAt;
+
+            lock (shrineSync)
+                shrinePlayerReadyAt.TryGetValue(player.Guid.Full, out playerReadyAt);
+
+            if (WorldEventHoldRules.ShrineUseCheck(now, 0, playerReadyAt, playerCooldown) == WorldEventHoldRules.ShrineUseState.PlayerResting)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: player cooldown, {playerReadyAt - now:0} s left");
+                Tell(player, WorldEventHoldRules.ShrinePlayerCooldownLine(playerReadyAt - now));
+                return true;
+            }
+
+            var bindRange = protect.ShrineBindRange;
+            var target = NearestProtected(item, bindRange);
 
             if (target == null)
             {
-                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: no standing target within {ShrineBindMetres:0} m");
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: no standing target within {bindRange:0} m");
                 Tell(player, "There is no one here for the shrine to restore.");
                 return true;
             }
 
-            var cooldown = Math.Clamp(protect.ShrineCooldownSeconds, 1, 600);
+            var cooldown = protect.EffectiveShrineCooldownSeconds;
 
             lock (shrineSync)
+            {
                 shrineReadyAt[item.Guid.Full] = now + cooldown;
 
+                if (playerCooldown > 0)
+                    shrinePlayerReadyAt[player.Guid.Full] = now + playerCooldown;
+            }
+
             var shrineGuid = item.Guid.Full;
+            var playerGuid = player.Guid.Full;
 
-            QueueProtectedHeal(target, protect.ShrineHeal, false, "shrine", (healed, outcome) =>
+            // world_events_hold_shrine_heals_all: every standing knight, else only the one beside the shrine.
+            var healed = protect.ShrineHealsAll
+                ? Spawner.LiveProtectedCreatures.Where(t => t != null && !t.IsDead).ToList()
+                : new List<Creature> { target };
+
+            var pending = healed.Count;
+            var anyHealed = false;
+
+            foreach (var knight in healed)
             {
-                if (healed > 0)
+                var k = knight;
+
+                QueueProtectedHeal(k, protect.ShrineHeal, false, "shrine", (amount, outcome) =>
                 {
-                    PlayScriptOn(target, protect.Shrine.UsedEffect);
-                    SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Shrine, null), viaQueue: false);
+                    bool last;
 
-                    log.Info($"[WORLDEVENT] run={RunId} shrine used by {player.Name}: {target.Name} +{healed} health (now {target.Health.Current}/{target.Health.MaxValue}); ready again in {cooldown:0} s");
-                    return;
-                }
+                    lock (shrineSync)
+                    {
+                        anyHealed |= amount > 0;
+                        last = --pending == 0;
+                    }
 
-                // Nothing restored: give the use back.
-                lock (shrineSync)
-                    shrineReadyAt.Remove(shrineGuid);
+                    if (amount > 0)
+                    {
+                        PlayScriptOn(k, protect.Shrine?.UsedEffect);
 
-                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: {target.Name} restored nothing ({outcome}); the use is given back");
+                        if (ReferenceEquals(k, target))
+                            SpeakLocally(k, ComposeProtectedLine(protect.Lines?.Shrine, null), viaQueue: false);
 
-                Tell(player, WorldEventHoldRules.ShrineWastedLine(target.Name, outcome));
-            });
+                        log.Info($"[WORLDEVENT] run={RunId} shrine used by {player.Name}: {k.Name} +{amount} health (now {k.Health.Current}/{k.Health.MaxValue}); ready again in {cooldown:0} s");
+                    }
+
+                    if (!last || anyHealed)
+                        return;
+
+                    // Nothing restored anywhere: give the use back (the player's own cooldown too).
+                    lock (shrineSync)
+                    {
+                        shrineReadyAt.Remove(shrineGuid);
+                        shrinePlayerReadyAt.Remove(playerGuid);
+                    }
+
+                    log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: {target.Name} restored nothing ({outcome}); the use is given back");
+
+                    Tell(player, WorldEventHoldRules.ShrineWastedLine(target.Name, outcome));
+                });
+            }
 
             return true;
         }

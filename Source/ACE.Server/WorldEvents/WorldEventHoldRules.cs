@@ -907,6 +907,31 @@ namespace ACE.Server.WorldEvents
             return $"The shrine is still gathering its strength. It will be ready in {s} second{(s == 1 ? "" : "s")}.";
         }
 
+        public enum ShrineUseState { Ready, ShrineResting, PlayerResting }
+
+        /// <summary>
+        /// Whether a shrine use may go ahead (D6 - pure): the shrine's own rest first, then the player's
+        /// (world_events_hold_shrine_player_cooldown_seconds; 0 = no player rest). Times are unix seconds, 0 = never used.
+        /// </summary>
+        public static ShrineUseState ShrineUseCheck(double now, double shrineReadyAt, double playerReadyAt, double playerCooldownSeconds)
+        {
+            if (now < shrineReadyAt)
+                return ShrineUseState.ShrineResting;
+
+            if (playerCooldownSeconds > 0 && now < playerReadyAt)
+                return ShrineUseState.PlayerResting;
+
+            return ShrineUseState.Ready;
+        }
+
+        /// <summary>What a player is told using a shrine before their own shrine cooldown is over (D6 - pure). ASCII.</summary>
+        public static string ShrinePlayerCooldownLine(double secondsLeft)
+        {
+            var s = (int)Math.Ceiling(Math.Max(1, secondsLeft));
+
+            return $"You must gather yourself before calling on a shrine again. You can in {s} second{(s == 1 ? "" : "s")}.";
+        }
+
         /// <summary>What a player is told when a shrine heal restores nothing (D6 - pure). ASCII.</summary>
         public static string ShrineWastedLine(string targetName, ProtectedHealOutcome outcome)
         {

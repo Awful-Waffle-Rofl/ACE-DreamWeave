@@ -180,7 +180,11 @@ namespace ACE.Server.WorldEvents.Defs
 
         /// <summary>How far away a player may use it, in metres (1 to 10). Default 4.</summary>
         [JsonPropertyName("useRadius")]
-        public double UseRadius { get; set; } = 4;
+        public double UseRadiusJson { get; set; } = 4;
+
+        /// <summary>In force: world_events_hold_shrine_use_radius when set, else goals.json (applied as shrines are placed).</summary>
+        [JsonIgnore]
+        public double UseRadius { get => HoldSettings.Number(HoldKeys.ShrineUseRadius, UseRadiusJson); set => UseRadiusJson = value; }
 
         /// <summary>The effect on the shrine when it is ready again (a PlayScript name, or none): a small brief cue, never a constant one. Default SkillUpGreen.</summary>
         [JsonPropertyName("readyEffect")]
