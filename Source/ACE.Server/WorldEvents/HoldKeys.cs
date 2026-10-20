@@ -174,5 +174,10 @@ namespace ACE.Server.WorldEvents
         public const string MinPresenceSeconds = "min_presence_seconds";
         public const string AfkSeconds = "afk_seconds";
         public const string AdminsCount = "admins_count";
+
+        // ---- messages ----
+        public const string Broadcast = "broadcast";
+        public const string Story = "story";
+        public const string MilestonePercents = "milestone_percents";
     }
 }

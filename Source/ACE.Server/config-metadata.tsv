@@ -1141,6 +1141,7 @@ world_events_hold_admins_count	world_events	hold participation	fork	no
 world_events_hold_afk_seconds	world_events	hold participation	fork	no
 world_events_hold_boss_damage_keep_seconds	world_events	hold internals	fork	no
 world_events_hold_breather_seconds	world_events	hold waves	fork	no
+world_events_hold_broadcast	world_events	hold messages	fork	no
 world_events_hold_cap_burst_seconds	world_events	hold internals	fork	no
 world_events_hold_caster_attack_speed_mult	world_events	hold monsters	fork	no
 world_events_hold_caster_health_mult	world_events	hold monsters	fork	no
@@ -1211,6 +1212,7 @@ world_events_hold_melee_health_mult	world_events	hold monsters	fork	no
 world_events_hold_melee_level_offset	world_events	hold monsters	fork	no
 world_events_hold_melee_npc_damage_mult	world_events	hold monsters	fork	no
 world_events_hold_melee_player_damage_mult	world_events	hold monsters	fork	no
+world_events_hold_milestone_percents	world_events	hold messages	fork	no
 world_events_hold_min_breach	world_events	hold monsters	fork	no
 world_events_hold_min_contribution	world_events	hold rewards	fork	no
 world_events_hold_min_corrupted	world_events	hold monsters	fork	no
@@ -1261,6 +1263,7 @@ world_events_hold_shrine_player_cooldown_seconds	world_events	hold healing	fork	
 world_events_hold_shrine_use_radius	world_events	hold healing	fork	no
 world_events_hold_spawn_clearance	world_events	hold internals	fork	no
 world_events_hold_spawn_radius	world_events	hold waves	fork	no
+world_events_hold_story	world_events	hold messages	fork	no
 world_events_hold_town_reach	world_events	hold chain	fork	no
 world_events_hold_undefended_seconds	world_events	hold knights	fork	no
 world_events_hold_undefended_seconds_floor	world_events	hold knights	fork	no

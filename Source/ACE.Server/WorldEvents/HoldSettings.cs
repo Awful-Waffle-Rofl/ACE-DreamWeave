@@ -495,6 +495,9 @@ namespace ACE.Server.WorldEvents
                     return CheckRewardId(key, raw);
                 case HoldKeys.ChainFullBonus:
                     return CheckWcidList(key, raw);
+                case HoldKeys.MilestonePercents:
+                    ParseMilestones(raw, out var milestoneProblem);
+                    return milestoneProblem;
                 case HoldKeys.CorruptedTint:
                     return WorldEventTint.TryParsePalette(raw, out _) ? null
                         : $"{HoldKeys.CorruptedTint}='{raw}' is not a palette id (0x04000000..0x0400FFFF) or none; goals.json's color stays";

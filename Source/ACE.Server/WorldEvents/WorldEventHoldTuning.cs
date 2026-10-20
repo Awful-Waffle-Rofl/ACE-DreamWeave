@@ -286,7 +286,7 @@ namespace ACE.Server.WorldEvents
             Spawner.SpawnWave(this, new WavePick(wcids, null), anchors, WorldEventSpawner.BossAddsWaveIndex, band, CrowdHealthMult * Pace.HealthMult);
 
             log.Info($"[WORLDEVENT] run={RunId} boss adds for {boss.Name}: {wcids.Count} ({string.Join(",", wcids)}); next in {interval:0} s");
-            BroadcastHoldLine($"{boss.Name} calls for aid!");
+            AnnounceInRun(WorldEventAnnouncer.Global($"{boss.Name} calls for aid!"));
         }
 
         private void TickEnrageLine(ACE.Server.WorldObjects.Creature boss, double mult, ref bool announced)
@@ -297,14 +297,28 @@ namespace ACE.Server.WorldEvents
             announced = true;
 
             log.Info($"[WORLDEVENT] run={RunId} {boss.Name} enrages: damage x{mult:0.##}");
-            BroadcastHoldLine($"{boss.Name} flies into a rage!");
+            AnnounceInRun(WorldEventAnnouncer.Global($"{boss.Name} flies into a rage!"));
         }
 
-        /// <summary>A World Event line from the Hold settings' own mechanics (adds, enrage).</summary>
-        private void BroadcastHoldLine(string text)
+        /// <summary>True when world_events_hold_broadcast is "local" for this run (a Hold run or chain stage).</summary>
+        internal bool AnnouncesLocally => IsHoldOrChain && HoldSettings.Choice(HoldKeys.Broadcast, HoldSettings.BroadcastWorld) == HoldSettings.BroadcastLocal;
+
+        /// <summary>
+        /// A World Event line during this run (waves, knights, bosses, progress, the chain's story): world-wide, as always,
+        /// or only to the players within the participant radius when world_events_hold_broadcast is "local". The teaser,
+        /// start, outcome and time-left lines are always world-wide.
+        /// </summary>
+        internal void AnnounceInRun(string line)
         {
-            WorldEventAnnouncer.Broadcast(text);
+            if (string.IsNullOrEmpty(line))
+                return;
+
+            if (AnnouncesLocally)
+                WorldEventAnnouncer.Local(this, line);
+            else
+                WorldEventAnnouncer.Broadcast(line);
         }
+
         /// <summary>
         /// world_events_hold_&lt;role&gt;_level_offset on a mixed wave: each slot of a role with an offset is redrawn from the
         /// roster's members in the wave's band moved by that offset (a ranged slot from the ranged members of its kind,

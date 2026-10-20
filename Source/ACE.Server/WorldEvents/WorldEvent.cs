@@ -2115,7 +2115,7 @@ namespace ACE.Server.WorldEvents
                 var mixAnnounce = ComposeProtectedLine(Fill(protect?.WaveMix?.Announce), null);
 
                 if (!string.IsNullOrEmpty(mixAnnounce))
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.HoldPhaseLine(WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, false), mixAnnounce));
+                    AnnounceInRun(WorldEventAnnouncer.HoldPhaseLine(WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, false), mixAnnounce));
 
                 var breachTarget = Spawner.LiveProtectedCreatures.FirstOrDefault(c => c.Guid.Full == plan.BreachTargetGuid);
                 var breachLine = ComposeProtectedLine(Fill(protect?.SpecialWave(HoldWaveType.Breach)?.Lines), null);
@@ -2130,7 +2130,7 @@ namespace ACE.Server.WorldEvents
                     var wardLine = ComposeProtectedLine(Fill(protect?.Ward?.Announce), null);
 
                     if (!string.IsNullOrEmpty(wardLine))
-                        WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(wardLine));
+                        AnnounceInRun(WorldEventAnnouncer.Global(wardLine));
                 }
 
                 // A corrupted assault: one line per corrupted monster, naming the target it marches on.
@@ -2149,7 +2149,7 @@ namespace ACE.Server.WorldEvents
                         var assaultLine = ComposeProtectedLine(new List<string> { WorldEventHoldRules.AssaultLine(template, call.Monster, call.Target) }, null);
 
                         if (!string.IsNullOrEmpty(assaultLine))
-                            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(assaultLine));
+                            AnnounceInRun(WorldEventAnnouncer.Global(assaultLine));
                     }
                 }
                 else if (plan.Roles != null && plan.Roles.Contains(HoldRole.Corrupted))
@@ -2157,7 +2157,7 @@ namespace ACE.Server.WorldEvents
                     var corruptedLine = ComposeProtectedLine(Fill(protect?.EffectiveCorrupted.Announce), null);
 
                     if (!string.IsNullOrEmpty(corruptedLine))
-                        WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(corruptedLine));
+                        AnnounceInRun(WorldEventAnnouncer.Global(corruptedLine));
                 }
 
                 return;
@@ -2174,7 +2174,7 @@ namespace ACE.Server.WorldEvents
             {
                 var label = WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, plan.Type == HoldWaveType.Finale);
 
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.HoldPhaseLine(label, announce));
+                AnnounceInRun(WorldEventAnnouncer.HoldPhaseLine(label, announce));
             }
 
             var targets = Spawner.LiveProtectedCreatures;
@@ -2425,7 +2425,7 @@ namespace ACE.Server.WorldEvents
                 var line = WorldEventAnnouncer.BossArrivedLine(bossName, AnchorName);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce boss_arrived");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
             }
             catch (Exception ex)
             {
@@ -2989,11 +2989,15 @@ namespace ACE.Server.WorldEvents
         /// tier already announced - can never return that tier a second time. The latch is on the TIER,
         /// never recomputed from the ratio alone.
         /// </summary>
-        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired)
+        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired) =>
+            DueBossHealthMilestones(current, max, fired, BossHealthMilestonePercents);
+
+        /// <summary>The same latch over <paramref name="tiers"/> (the knights' world_events_hold_milestone_percents).</summary>
+        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired, IReadOnlyList<int> tiers)
         {
             var due = new List<int>();
 
-            foreach (var pct in BossHealthMilestonePercents)
+            foreach (var pct in tiers ?? BossHealthMilestonePercents)
             {
                 if (fired.Contains(pct))
                     continue;
@@ -3051,7 +3055,7 @@ namespace ACE.Server.WorldEvents
                     var line = WorldEventAnnouncer.BossHealthMilestoneLine(boss.DisplayName, pct);
 
                     log.Info($"[WORLDEVENT] run={RunId} announce boss_health {pct}");
-                    WorldEventAnnouncer.Broadcast(line);
+                    AnnounceInRun(line);
                 }
             }
             catch (Exception ex)
@@ -3092,12 +3096,12 @@ namespace ACE.Server.WorldEvents
                     if (!protectedMilestonesFired.TryGetValue(guid, out var fired))
                         protectedMilestonesFired[guid] = fired = new HashSet<int>();
 
-                    foreach (var pct in DueBossHealthMilestones(current, max, fired))
+                    foreach (var pct in DueBossHealthMilestones(current, max, fired, HoldSettings.KnightMilestonePercents()))
                     {
                         if (protect.HealthMilestones)
                         {
                             log.Info($"[WORLDEVENT] run={RunId} announce protected_health guid=0x{guid:X8} {pct}");
-                            WorldEventAnnouncer.Broadcast(
+                            AnnounceInRun(
                                 WorldEventAnnouncer.ProtectedHealthMilestoneLine(protect.EffectiveNoun, AnchorName, pct));
                         }
 
@@ -3531,7 +3535,7 @@ namespace ACE.Server.WorldEvents
         private void DrainProtectedGlobalLines()
         {
             while (pendingProtectedGlobalLines.TryDequeue(out var line))
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
         }
 
         // ---- World Events chain: pacing and story (2026-10-19) ---------------------------------------------------------
@@ -3640,7 +3644,7 @@ namespace ACE.Server.WorldEvents
                     plan = WorldEventChain.ChainEndPlan(ChainSettingsInEffect, outcome, ChainStoryTokens(), ChainAsheronSpoke, thanksFirst, protectedLineRng);
 
                 foreach (var line in plan.Where(l => l.Delay <= 0))
-                    WorldEventAnnouncer.Broadcast(line.Text);
+                    AnnounceInRun(line.Text);
 
                 WorldEventLineSchedule.Shared.AddPlan(now, plan.Where(l => l.Delay > 0));
 
@@ -3810,7 +3814,7 @@ namespace ACE.Server.WorldEvents
                     ProgressText, displayWave, secondsRemaining);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce progress");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
             }
             catch (Exception ex)
             {
@@ -4190,7 +4194,7 @@ namespace ACE.Server.WorldEvents
                     Finish(WorldEventOutcome.Success);
 
                     if (successLine != null)
-                        WorldEventAnnouncer.Broadcast(successLine);
+                        AnnounceInRun(successLine);
 
                     return;
                 }

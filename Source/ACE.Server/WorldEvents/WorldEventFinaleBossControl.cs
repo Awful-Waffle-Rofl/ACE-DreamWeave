@@ -203,7 +203,7 @@ namespace ACE.Server.WorldEvents
                     var line = ComposeBossLine(protect.BossTargetAnnounce, t => WorldEventFinaleBoss.TargetLine(t, holdBossName, target.Name));
 
                     if (!string.IsNullOrEmpty(line))
-                        WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.Global(line));
+                        AnnounceInRun(WorldEventAnnouncer.Global(line));
 
                     holdBossAnnouncedHit = false;
                 }

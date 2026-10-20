@@ -461,6 +461,10 @@ namespace ACE.Server.WorldEvents
                 _ => (story.ClosingFailure, story.ClosingFailureNarrator)
             };
 
+            // world_events_hold_story off: no reveal, tie-back or closing story lines (the thanks stays: it points to the cache).
+            if (beat != StoryBeat.Thanks && !HoldSettings.Toggle(HoldKeys.Story, true))
+                return null;
+
             var pool = envoy != null ? spoken : narrated;
             var template = WorldEventHoldRules.PickLine(pool, rng);
 

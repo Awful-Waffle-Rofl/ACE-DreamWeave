@@ -367,7 +367,7 @@ namespace ACE.Server.WorldEvents
 
                 // Paced World Event lines (a stage change, the chain's end) whose time has come.
                 foreach (var line in WorldEventLineSchedule.Shared.TakeDue(now))
-                    WorldEventAnnouncer.Broadcast(line);
+                    AnnounceScheduled(line);
 
                 WorldEvent evt;
                 WorldEvent previous;
@@ -428,6 +428,24 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>Must be called under <see cref="sync"/>.</summary>
+        /// <summary>
+        /// A paced chain line (the thanks, story, announcement, closing): world-wide, or with world_events_hold_broadcast
+        /// "local", to the players near each live Hold run or chain stage.
+        /// </summary>
+        private static void AnnounceScheduled(string line)
+        {
+            var runs = new[] { Current, Previous }.Where(r => r != null && r.IsHoldOrChain).Distinct().ToList();
+
+            if (runs.Count == 0 || !runs.Any(r => r.AnnouncesLocally))
+            {
+                WorldEventAnnouncer.Broadcast(line);
+                return;
+            }
+
+            foreach (var run in runs)
+                WorldEventAnnouncer.Local(run, line);
+        }
+
         private static void ClearCurrentIfDone()
         {
             if (Current != null && Current.State == WorldEventState.Done)
