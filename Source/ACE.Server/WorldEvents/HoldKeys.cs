@@ -133,5 +133,30 @@ namespace ACE.Server.WorldEvents
         public const string FinaleHeightScaleMin = "finale_height_scale_min";
         public const string FinaleHeightScaleMax = "finale_height_scale_max";
         public const string BossDamageKeepSeconds = "boss_damage_keep_seconds";
+
+        // ---- chain ----
+        public const string Chain = "chain";
+        public const string ChainChance = "chain_chance";
+        public const string ChainMaxLength = "chain_max_length";
+        public const string ChainNextSource = "chain_next_source";
+        public const string ChainNextGoal = "chain_next_goal";
+        public const string ChainNextBoss = "chain_next_boss";
+        public const string ChainNextFamily = "chain_next_family";
+        public const string ChainTownNetwork = "chain_town_network";
+        public const string ChainTownMinDistance = "chain_town_min_distance";
+        public const string ChainTownMaxDistance = "chain_town_max_distance";
+        public const string ChainTownChoices = "chain_town_choices";
+        public const string ChainSpotMin = "chain_spot_min";
+        public const string ChainSpotMax = "chain_spot_max";
+        public const string TownReach = "town_reach";
+        public const string ChainCountdownSeconds = "chain_countdown_seconds";
+        public const string ChainArrivalSeconds = "chain_arrival_seconds";
+        public const string ChainThanksSeconds = "chain_thanks_seconds";
+        public const string ChainStorySeconds = "chain_story_seconds";
+        public const string ChainAnnounceSeconds = "chain_announce_seconds";
+        public const string ChainTieBackSeconds = "chain_tie_back_seconds";
+        public const string ChainClosingSeconds = "chain_closing_seconds";
+        public const string ChainAsheronSeconds = "chain_asheron_seconds";
+        public const string ChainAnnounceLeadSeconds = "chain_announce_lead_seconds";
     }
 }

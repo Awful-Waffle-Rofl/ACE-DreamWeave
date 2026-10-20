@@ -3547,7 +3547,13 @@ namespace ACE.Server.WorldEvents
         {
             var maxLength = WorldEventChain.EffectiveMaxLength(Request?.ChainMaxLength ?? 0, Composition?.Goal?.Chain);
 
-            return WorldEventChain.Decide(outcome, ChainStageNumber, maxLength);
+            var decision = WorldEventChain.Decide(outcome, ChainStageNumber, maxLength);
+
+            // world_events_chain (on/off) and world_events_chain_chance, rolled once per run so every reader agrees.
+            chainChanceRoll ??= ThreadSafeRandom.Next(0.0f, 1.0f);
+
+            return WorldEventChain.ApplySettings(decision, ChainStageNumber, HoldSettings.Toggle(HoldKeys.Chain, true),
+                HoldSettings.Number(HoldKeys.ChainChance, 1.0), chainChanceRoll.Value);
         }
 
         /// <summary>

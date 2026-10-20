@@ -471,7 +471,8 @@ namespace ACE.Server.WorldEvents
                 var stage = Math.Max(1, request?.ChainStage ?? 1);
                 var root = request != null && request.ChainRootRunId != 0 ? request.ChainRootRunId : evt.RunId;
 
-                switch (WorldEventChain.Decide(evt.Outcome, stage, maxLength))
+                // The run's own decision (with world_events_chain on/off and its chance roll), so the manager and the run agree.
+                switch (evt.ChainDecisionFor(evt.Outcome))
                 {
                     case WorldEventChain.Decision.None:
                         return;

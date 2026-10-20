@@ -37,6 +37,9 @@ namespace ACE.Server.WorldEvents
         private double nextFinaleAddsAt, nextChampionAddsAt;
         private bool finaleEnrageAnnounced, championEnrageAnnounced;
 
+        /// <summary>This run's roll against world_events_chain_chance, made once, the first time its chain decision is asked.</summary>
+        private double? chainChanceRoll;
+
         /// <summary>
         /// Once a second: the finale boss's and the chained champion's adds (every add interval while it lives) and their
         /// enrage line (once). Nothing happens while the add counts and enrage timers are not set. Never throws.

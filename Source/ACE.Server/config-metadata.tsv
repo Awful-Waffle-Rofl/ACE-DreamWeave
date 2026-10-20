@@ -1092,6 +1092,11 @@ world_events_cache_effect_script	world_events	cache	fork	no
 world_events_cache_wcid	world_events	cache	fork	no
 world_events_category_armor_mod_ceiling	world_events	category	fork	no
 world_events_category_resist_floor	world_events	category	fork	no
+world_events_chain	world_events	hold chain	fork	no
+world_events_chain_announce_lead_seconds	world_events	hold internals	fork	no
+world_events_chain_announce_seconds	world_events	hold chain	fork	no
+world_events_chain_arrival_seconds	world_events	hold chain	fork	no
+world_events_chain_asheron_seconds	world_events	hold chain	fork	no
 world_events_chain_champion_add_count	world_events	hold champion	fork	no
 world_events_chain_champion_add_interval_seconds	world_events	hold champion	fork	no
 world_events_chain_champion_arrival_seconds	world_events	hold champion	fork	no
@@ -1101,6 +1106,23 @@ world_events_chain_champion_health	world_events	hold champion	fork	no
 world_events_chain_champion_health_mult	world_events	hold champion	fork	no
 world_events_chain_champion_level_offset	world_events	hold champion	fork	no
 world_events_chain_champion_player_damage_mult	world_events	hold champion	fork	no
+world_events_chain_chance	world_events	hold chain	fork	no
+world_events_chain_closing_seconds	world_events	hold chain	fork	no
+world_events_chain_countdown_seconds	world_events	hold chain	fork	no
+world_events_chain_max_length	world_events	hold chain	fork	no
+world_events_chain_next_boss	world_events	hold chain	fork	no
+world_events_chain_next_family	world_events	hold chain	fork	no
+world_events_chain_next_goal	world_events	hold chain	fork	no
+world_events_chain_next_source	world_events	hold chain	fork	no
+world_events_chain_spot_max	world_events	hold chain	fork	no
+world_events_chain_spot_min	world_events	hold chain	fork	no
+world_events_chain_story_seconds	world_events	hold chain	fork	no
+world_events_chain_thanks_seconds	world_events	hold chain	fork	no
+world_events_chain_tie_back_seconds	world_events	hold chain	fork	no
+world_events_chain_town_choices	world_events	hold chain	fork	no
+world_events_chain_town_max_distance	world_events	hold chain	fork	no
+world_events_chain_town_min_distance	world_events	hold chain	fork	no
+world_events_chain_town_network	world_events	hold chain	fork	no
 world_events_claim_window_seconds	world_events	claim	fork	no
 world_events_crowd_health_cap	world_events	crowd	fork	no
 world_events_crowd_health_per_participant	world_events	crowd	fork	no
@@ -1227,6 +1249,7 @@ world_events_hold_shrine_player_cooldown_seconds	world_events	hold healing	fork	
 world_events_hold_shrine_use_radius	world_events	hold healing	fork	no
 world_events_hold_spawn_clearance	world_events	hold internals	fork	no
 world_events_hold_spawn_radius	world_events	hold waves	fork	no
+world_events_hold_town_reach	world_events	hold chain	fork	no
 world_events_hold_undefended_seconds	world_events	hold knights	fork	no
 world_events_hold_undefended_seconds_floor	world_events	hold knights	fork	no
 world_events_hold_undefended_seconds_per_participant	world_events	hold knights	fork	no

@@ -19,7 +19,11 @@ namespace ACE.Server.WorldEvents.Defs
     {
         /// <summary>The farthest the event may stand from a town's portal drop, in metres (50 to 1000). Default 250.</summary>
         [JsonPropertyName("maxWalk")]
-        public double MaxWalk { get; set; } = 250;
+        public double MaxWalkJson { get; set; } = 250;
+
+        /// <summary>In force: world_events_hold_town_reach when set, else goals.json (next event and next stage).</summary>
+        [JsonIgnore]
+        public double MaxWalk { get => HoldSettings.Number(HoldKeys.TownReach, MaxWalkJson); set => MaxWalkJson = value; }
 
         /// <summary>A re-rolled spot stands at least this far from the drop, in metres (20 to 400). Default 60.</summary>
         [JsonPropertyName("spotMinDistance")]

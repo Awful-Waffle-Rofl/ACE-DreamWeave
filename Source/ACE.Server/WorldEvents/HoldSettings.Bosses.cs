@@ -170,7 +170,7 @@ namespace ACE.Server.WorldEvents
         public static int ChampionArrival(int inherited, int maxDuration)
         {
             if (!IsSet(HoldKeys.ChampionArrivalSeconds))
-                return inherited;
+                return Math.Max(0, Math.Min(inherited, maxDuration - 30));
 
             return Math.Max(0, Math.Min(Integer(HoldKeys.ChampionArrivalSeconds, inherited), maxDuration - 30));
         }

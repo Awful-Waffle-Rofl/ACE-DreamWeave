@@ -25,11 +25,19 @@ namespace ACE.Server.WorldEvents.Defs
     {
         /// <summary>The most stages in one chain, the first included (2 to 5). Default 2.</summary>
         [JsonPropertyName("maxLength")]
-        public int MaxLength { get; set; } = 2;
+        public int MaxLengthJson { get; set; } = 2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainMaxLength) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int MaxLength { get => HoldSettings.Integer(HoldKeys.ChainMaxLength, MaxLengthJson); set => MaxLengthJson = value; }
 
         /// <summary>Seconds from the broadcast to the next stage's start (60 to 600). Default 120.</summary>
         [JsonPropertyName("countdownSeconds")]
-        public int CountdownSeconds { get; set; } = 120;
+        public int CountdownSecondsJson { get; set; } = 120;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainCountdownSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int CountdownSeconds { get => HoldSettings.Integer(HoldKeys.ChainCountdownSeconds, CountdownSecondsJson); set => CountdownSecondsJson = value; }
 
         /// <summary>The next stage is at least this far from the last one's centre, in metres (100 to 2000). Default 250.</summary>
         [JsonPropertyName("minDistance")]
@@ -53,27 +61,51 @@ namespace ACE.Server.WorldEvents.Defs
         /// townMaxDistance from the last stage. True by default; false keeps the old "250 to 500 m away" spot.
         /// </summary>
         [JsonPropertyName("toAnotherTown")]
-        public bool ToAnotherTown { get; set; } = true;
+        public bool ToAnotherTownJson { get; set; } = true;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainTownNetwork) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public bool ToAnotherTown { get => HoldSettings.Toggle(HoldKeys.ChainTownNetwork, ToAnotherTownJson); set => ToAnotherTownJson = value; }
 
         /// <summary>A town counts as different only this far (metres) from the last stage, so one town's two portals are never two towns (200 to 5000). Default 800.</summary>
         [JsonPropertyName("townMinDistance")]
-        public double TownMinDistance { get; set; } = 800;
+        public double TownMinDistanceJson { get; set; } = 800;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainTownMinDistance) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double TownMinDistance { get => HoldSettings.Number(HoldKeys.ChainTownMinDistance, TownMinDistanceJson); set => TownMinDistanceJson = value; }
 
         /// <summary>The farthest town to send players to, in metres (above townMinDistance, up to 30000). Default 8000.</summary>
         [JsonPropertyName("townMaxDistance")]
-        public double TownMaxDistance { get; set; } = 8000;
+        public double TownMaxDistanceJson { get; set; } = 8000;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainTownMaxDistance) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double TownMaxDistance { get => HoldSettings.Number(HoldKeys.ChainTownMaxDistance, TownMaxDistanceJson); set => TownMaxDistanceJson = value; }
 
         /// <summary>How many of the nearest eligible towns the pick is made from (1 to 10). Default 4.</summary>
         [JsonPropertyName("townChoices")]
-        public int TownChoices { get; set; } = 4;
+        public int TownChoicesJson { get; set; } = 4;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainTownChoices) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int TownChoices { get => HoldSettings.Integer(HoldKeys.ChainTownChoices, TownChoicesJson); set => TownChoicesJson = value; }
 
         /// <summary>The event stands this far from the town's portal drop, in metres: on open ground at its edge, not among its buildings (20 to 400). Default 60.</summary>
         [JsonPropertyName("townSpotMinDistance")]
-        public double TownSpotMinDistance { get; set; } = 60;
+        public double TownSpotMinDistanceJson { get; set; } = 60;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainSpotMin) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double TownSpotMinDistance { get => HoldSettings.Number(HoldKeys.ChainSpotMin, TownSpotMinDistanceJson); set => TownSpotMinDistanceJson = value; }
 
         /// <summary>And at most this far (above townSpotMinDistance, up to 600). Default 160.</summary>
         [JsonPropertyName("townSpotMaxDistance")]
-        public double TownSpotMaxDistance { get; set; } = 160;
+        public double TownSpotMaxDistanceJson { get; set; } = 160;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainSpotMax) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double TownSpotMaxDistance { get => HoldSettings.Number(HoldKeys.ChainSpotMax, TownSpotMaxDistanceJson); set => TownSpotMaxDistanceJson = value; }
 
         /// <summary>
         /// The reward profile (rewards.json id) each stage pays, first stage first; a stage past the end of the list uses
@@ -103,18 +135,30 @@ namespace ACE.Server.WorldEvents.Defs
         /// rift that drops a champion.
         /// </summary>
         [JsonPropertyName("nextSource")]
-        public string NextSource { get; set; } = DefaultNextSource;
+        public string NextSourceJson { get; set; } = DefaultNextSource;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainNextSource) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public string NextSource { get => HoldSettings.Text(HoldKeys.ChainNextSource, NextSourceJson); set => NextSourceJson = value; }
 
         /// <summary>The goal every later stage uses (goals.json id), or "random". Default "kill_boss": slay the champion.</summary>
         [JsonPropertyName("nextGoal")]
-        public string NextGoal { get; set; } = DefaultNextGoal;
+        public string NextGoalJson { get; set; } = DefaultNextGoal;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainNextGoal) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public string NextGoal { get => HoldSettings.Text(HoldKeys.ChainNextGoal, NextGoalJson); set => NextGoalJson = value; }
 
         /// <summary>
         /// The boss of every later stage (bosses.json id, "auto" for a named boss of the rolled family, "family_champion"),
         /// or "random". Default "auto". Named bosses spawn at the World Events boss scale.
         /// </summary>
         [JsonPropertyName("nextBoss")]
-        public string NextBoss { get; set; } = DefaultNextBoss;
+        public string NextBossJson { get; set; } = DefaultNextBoss;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainNextBoss) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public string NextBoss { get => HoldSettings.Text(HoldKeys.ChainNextBoss, NextBossJson); set => NextBossJson = value; }
 
         /// <summary>An axis value as the request takes it: null for "random" or blank, else the trimmed lowercase id.</summary>
         public static string Pinned(string axis)
@@ -147,30 +191,54 @@ namespace ACE.Server.WorldEvents.Defs
     {
         /// <summary>A surviving envoy thanks the players and points them to the cache. Default 2.</summary>
         [JsonPropertyName("thanksSeconds")]
-        public double ThanksSeconds { get; set; } = 2;
+        public double ThanksSecondsJson { get; set; } = 2;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainThanksSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ThanksSeconds { get => HoldSettings.Number(HoldKeys.ChainThanksSeconds, ThanksSecondsJson); set => ThanksSecondsJson = value; }
 
         /// <summary>The story beat that explains why the fight moves on. Default 5.</summary>
         [JsonPropertyName("storySeconds")]
-        public double StorySeconds { get; set; } = 5;
+        public double StorySecondsJson { get; set; } = 5;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainStorySeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double StorySeconds { get => HoldSettings.Number(HoldKeys.ChainStorySeconds, StorySecondsJson); set => StorySecondsJson = value; }
 
         /// <summary>
         /// The next stage's announcement (chain.announce). The countdown it names starts here, so the next stage goes
         /// live countdownSeconds after this line. Default 8.
         /// </summary>
         [JsonPropertyName("announceSeconds")]
-        public double AnnounceSeconds { get; set; } = 8;
+        public double AnnounceSecondsJson { get; set; } = 8;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainAnnounceSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double AnnounceSeconds { get => HoldSettings.Number(HoldKeys.ChainAnnounceSeconds, AnnounceSecondsJson); set => AnnounceSecondsJson = value; }
 
         /// <summary>After a later stage goes live, the line that ties it back to the first. Default 3.</summary>
         [JsonPropertyName("tieBackSeconds")]
-        public double TieBackSeconds { get; set; } = 3;
+        public double TieBackSecondsJson { get; set; } = 3;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainTieBackSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double TieBackSeconds { get => HoldSettings.Number(HoldKeys.ChainTieBackSeconds, TieBackSecondsJson); set => TieBackSecondsJson = value; }
 
         /// <summary>When the chain ends (last stage won, or any stage lost): the closing story line. Default 3.</summary>
         [JsonPropertyName("closingSeconds")]
-        public double ClosingSeconds { get; set; } = 3;
+        public double ClosingSecondsJson { get; set; } = 3;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainClosingSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double ClosingSeconds { get => HoldSettings.Number(HoldKeys.ChainClosingSeconds, ClosingSecondsJson); set => ClosingSecondsJson = value; }
 
         /// <summary>When the chain ends: Asheron's closing line ("It is done..."). Default 6.</summary>
         [JsonPropertyName("asheronSeconds")]
-        public double AsheronSeconds { get; set; } = 6;
+        public double AsheronSecondsJson { get; set; } = 6;
+
+        /// <summary>In force: its Hold setting (HoldKeys.ChainAsheronSeconds) when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public double AsheronSeconds { get => HoldSettings.Number(HoldKeys.ChainAsheronSeconds, AsheronSecondsJson); set => AsheronSecondsJson = value; }
     }
 
     /// <summary>
@@ -260,6 +328,25 @@ namespace ACE.Server.WorldEvents
                 return Decision.EndedByOutcome;
 
             return stage >= maxLength ? Decision.EndedAtMax : Decision.Next;
+        }
+
+        /// <summary>
+        /// The admin settings on a decision (D6 - pure): with world_events_chain off, or the chance roll missed
+        /// (world_events_chain_chance below 1 and <paramref name="roll"/> at or above it), a stage that would go on ends the
+        /// chain there instead (its closing lines play). Any other decision, and the defaults (on, chance 1), unchanged.
+        /// </summary>
+        public static Decision ApplySettings(Decision decision, int stage, bool chainOn, double chance, double roll)
+        {
+            if (decision != Decision.Next)
+                return decision;
+
+            if (!chainOn)
+                return Decision.EndedAtMax;
+
+            if (chance < 1 && roll >= Math.Clamp(chance, 0, 1))
+                return Decision.EndedAtMax;
+
+            return decision;
         }
 
         /// <summary>The chain length a run follows (D6 - pure): the one it inherited as a later stage, else its goal's, else none (0).</summary>
@@ -652,7 +739,11 @@ namespace ACE.Server.WorldEvents
         {
             // The countdown runs from the announcement, which goes out chain.pacing.announceSeconds after the outcome line.
             var announceDelay = (int)Math.Round(Math.Clamp(chain?.Pacing?.AnnounceSeconds ?? 0, 0, 60));
-            var leads = Leads((chain?.CountdownSeconds ?? 120) + announceDelay, WorldEvent.DefaultAnnounceLeadSeconds);
+            var leads = Leads((chain?.CountdownSeconds ?? 120) + announceDelay,
+                HoldSettings.Integer(HoldKeys.ChainAnnounceLeadSeconds, WorldEvent.DefaultAnnounceLeadSeconds));
+
+            // world_events_chain_arrival_seconds: the next stage's own time limit (else stage 1's); its champion arrives inside it.
+            var maxDuration = HoldSettings.ChainArrivalLimit(previous?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds);
 
             return new WorldEventRequest
             {
@@ -660,6 +751,9 @@ namespace ACE.Server.WorldEvents
                 SourceId = chain != null ? ChainDef.Pinned(chain.NextSource) : null,
                 GoalId = chain != null ? ChainDef.Pinned(chain.NextGoal) : null,
                 BossId = chain != null ? ChainDef.Pinned(chain.NextBoss) : null,
+
+                // world_events_chain_next_family: the next stage's monster family (not set or "random": it rolls, as before).
+                FamilyIds = HoldSettings.ChainNextFamily(),
                 TownReach = previous?.TownReach,
                 AnchorPosition = anchor,
                 AnchorLabel = anchorLabel,
@@ -667,9 +761,8 @@ namespace ACE.Server.WorldEvents
                 AnnounceLeadSeconds = leads.Announce,
                 TeaserLeadSeconds = leads.Teaser,
                 // world_events_chain_champion_arrival_seconds: when the champion arrives (its stage's minimum duration).
-                MinDurationSeconds = HoldSettings.ChampionArrival(previous?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds,
-                    previous?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds),
-                MaxDurationSeconds = previous?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds,
+                MinDurationSeconds = HoldSettings.ChampionArrival(previous?.MinDurationSeconds ?? WorldEvent.DefaultMinDurationSeconds, maxDuration),
+                MaxDurationSeconds = maxDuration,
                 AbandonAfterSeconds = previous?.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
                 WipeGraceSeconds = previous?.WipeGraceSeconds ?? WorldEvent.DefaultWipeGraceSeconds,
                 TestLevel = previous?.TestLevel,

@@ -484,6 +484,11 @@ namespace ACE.Server.WorldEvents
             {
                 case HoldKeys.KnightMaxHealthByWcid:
                     return CheckKnightHealthByWcid(raw);
+                case HoldKeys.ChainNextSource:
+                case HoldKeys.ChainNextGoal:
+                case HoldKeys.ChainNextBoss:
+                case HoldKeys.ChainNextFamily:
+                    return CheckChainAxis(key, raw);
                 case HoldKeys.CorruptedTint:
                     return WorldEventTint.TryParsePalette(raw, out _) ? null
                         : $"{HoldKeys.CorruptedTint}='{raw}' is not a palette id (0x04000000..0x0400FFFF) or none; goals.json's color stays";
