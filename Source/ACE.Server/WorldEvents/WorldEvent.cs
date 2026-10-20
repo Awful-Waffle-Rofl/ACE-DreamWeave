@@ -2893,7 +2893,7 @@ namespace ACE.Server.WorldEvents
                     return;
 
                 var sampled = WorldEventAudienceSampler.SampleTopMaxHealth(Composition?.AnchorPosition,
-                    Composition?.Source?.RewardRadius ?? 0f);
+                    EffectiveRewardRadius);
 
                 if (sampled > 0)
                     BossDamageTopMaxHealth = sampled;
@@ -4128,6 +4128,7 @@ namespace ACE.Server.WorldEvents
 
             TickHoldKnightHealth();
             TickBossTuning(now);
+            TickHoldPresence(now);
             TickHoldClearRegen();
 
             TickHoldShrines();
@@ -4306,7 +4307,7 @@ namespace ACE.Server.WorldEvents
         private void FeedWipeTimer(double now, int presence)
         {
             var anchor = Composition?.AnchorPosition;
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveRewardRadius;
 
             if (anchor == null || radius <= 0)
                 return;
@@ -4994,9 +4995,9 @@ namespace ACE.Server.WorldEvents
                 if (audienceSampler != null)
                     return audienceSampler();
 
-                var radius = Composition?.Source?.RewardRadius ?? 0f;
+                var radius = EffectiveRewardRadius;
 
-                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius);
+                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius, ParticipantFilter);
             }
             catch (Exception ex)
             {
@@ -5018,9 +5019,9 @@ namespace ACE.Server.WorldEvents
             if (presenceCounter != null)
                 return presenceCounter();
 
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveRewardRadius;
 
-            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius);
+            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius, ParticipantFilter);
         }
 
         private double Now() => clock();

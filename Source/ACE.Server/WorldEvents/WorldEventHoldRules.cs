@@ -1142,6 +1142,9 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
+        /// <summary>The AFK rule (D6 - pure): idle once <paramref name="afkSeconds"/> (above 0) have passed since the last activity.</summary>
+        public static bool IsIdle(double lastActiveAt, double now, double afkSeconds) => afkSeconds > 0 && now - lastActiveAt >= afkSeconds;
+
         /// <summary>A level band moved by <paramref name="offset"/> levels, kept within 1 to 275 (D6 - pure).</summary>
         public static LevelBand ShiftBand(LevelBand band, int offset)
         {

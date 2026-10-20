@@ -634,7 +634,7 @@ namespace ACE.Server.WorldEvents
             try
             {
                 var anchor = evt.Composition?.AnchorPosition;
-                var radius = evt.Composition?.Source?.RewardRadius ?? 0f;
+                var radius = evt.EffectiveRewardRadius;
 
                 LocalAt(anchor, radius, msg, $"run={evt.RunId} ");
             }

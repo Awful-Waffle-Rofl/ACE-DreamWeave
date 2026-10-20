@@ -28,6 +28,151 @@ namespace ACE.Server.WorldEvents
     /// <summary>World Events Hold: the live admin settings that act on a run (HoldSettings) and need the run's own state.</summary>
     public sealed partial class WorldEvent
     {
+        // ---- participation (world_events_hold_participant_radius, _min_presence_seconds, _afk_seconds, _admins_count) ----
+
+        /// <summary>
+        /// The radius players count within (presence, audience, rewards, local lines): world_events_hold_participant_radius
+        /// for a Hold run or chain stage when set, else the source's rewardRadius, as before.
+        /// </summary>
+        public float EffectiveRewardRadius
+        {
+            get
+            {
+                var source = Composition?.Source?.RewardRadius ?? 0f;
+
+                return IsHoldOrChain && HoldSettings.IsSet(HoldKeys.ParticipantRadius)
+                    ? (float)HoldSettings.Number(HoldKeys.ParticipantRadius, source)
+                    : source;
+            }
+        }
+
+        private sealed class PresenceRecord
+        {
+            public ACE.Entity.Position LastPosition;
+            public double LastActiveAt;
+            public double LastSeenAt;
+            public double ActiveSeconds;
+            public float LastDamage;
+        }
+
+        private readonly Dictionary<uint, PresenceRecord> presence = new Dictionary<uint, PresenceRecord>();
+        private readonly object presenceSync = new object();
+
+        /// <summary>
+        /// Who counts for a Hold run or chain stage when admins_count or the AFK rule is set; null otherwise, so the sampler
+        /// keeps its own staff rule exactly as before.
+        /// </summary>
+        private Func<ACE.Server.WorldObjects.Player, bool> ParticipantFilter
+        {
+            get
+            {
+                if (!IsHoldOrChain)
+                    return null;
+
+                var admins = HoldSettings.Toggle(HoldKeys.AdminsCount, false);
+                var afk = HoldSettings.Number(HoldKeys.AfkSeconds, 0);
+
+                if (!admins && !(afk > 0))
+                    return null;
+
+                var now = ACE.Common.Time.GetUnixTime();
+
+                return player =>
+                {
+                    if (!admins && !WorldEventAudienceSampler.CountsTowardAudience(player.Session?.AccessLevel))
+                        return false;
+
+                    return !(afk > 0) || !IsIdle(player, now, afk);
+                };
+            }
+        }
+
+        /// <summary>True when <paramref name="player"/> has been idle (no movement, no damage, or /afk) for <paramref name="afkSeconds"/>.</summary>
+        private bool IsIdle(ACE.Server.WorldObjects.Player player, double now, double afkSeconds)
+        {
+            if (player == null)
+                return true;
+
+            if (player.IsAfk)
+                return true;
+
+            lock (presenceSync)
+            {
+                // Not tracked yet: present for the first time, so not idle.
+                return presence.TryGetValue(player.Guid.Full, out var rec) && WorldEventHoldRules.IsIdle(rec.LastActiveAt, now, afkSeconds);
+            }
+        }
+
+        private double lastPresenceTickAt;
+
+        /// <summary>
+        /// Once a second while min_presence_seconds or afk_seconds is set: each player within the participant radius has
+        /// their active presence counted (idle time does not count once afk_seconds is set). Nothing is tracked otherwise.
+        /// </summary>
+        private void TickHoldPresence(double now)
+        {
+            try
+            {
+                var afk = HoldSettings.Number(HoldKeys.AfkSeconds, 0);
+                var minPresence = HoldSettings.Number(HoldKeys.MinPresenceSeconds, 0);
+                var anchor = Composition?.AnchorPosition;
+
+                if (!IsHoldOrChain || anchor == null || (!(afk > 0) && !(minPresence > 0)))
+                {
+                    lastPresenceTickAt = now;
+                    return;
+                }
+
+                var dt = lastPresenceTickAt > 0 ? Math.Clamp(now - lastPresenceTickAt, 0, 5) : 1.0;
+                lastPresenceTickAt = now;
+                var radius = EffectiveRewardRadius;
+
+                foreach (var player in ACE.Server.Managers.PlayerManager.GetAllOnline())
+                {
+                    var loc = player?.Location;
+
+                    if (loc == null || loc.Instance != anchor.Instance || loc.DistanceTo(anchor) > radius)
+                        continue;
+
+                    var damage = Participation != null && Participation.TryGetRecord(player.Guid.Full, out var ledger) ? ledger.Damage : 0f;
+
+                    lock (presenceSync)
+                    {
+                        if (!presence.TryGetValue(player.Guid.Full, out var rec))
+                        {
+                            presence[player.Guid.Full] = rec = new PresenceRecord { LastActiveAt = now, LastPosition = new ACE.Entity.Position(loc), LastDamage = damage };
+                        }
+                        else
+                        {
+                            var moved = rec.LastPosition == null || rec.LastPosition.DistanceTo(loc) > 0.5f;
+
+                            if (moved || damage > rec.LastDamage)
+                                rec.LastActiveAt = now;
+
+                            rec.LastPosition = new ACE.Entity.Position(loc);
+                            rec.LastDamage = damage;
+                        }
+
+                        rec.LastSeenAt = now;
+
+                        if (!(afk > 0) || (!player.IsAfk && !WorldEventHoldRules.IsIdle(rec.LastActiveAt, now, afk)))
+                            rec.ActiveSeconds += dt;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence tick threw", ex);
+            }
+        }
+
+        /// <summary>Seconds of (active) presence counted for a character on this run; 0 when not tracked.</summary>
+        internal double PresenceSecondsOf(uint characterGuid)
+        {
+            lock (presenceSync)
+                return presence.TryGetValue(characterGuid, out var rec) ? rec.ActiveSeconds : 0;
+        }
+
         /// <summary>True for a Hold run or any stage of a chain: the Hold reward and participation settings apply to it.</summary>
         internal bool IsHoldOrChain => Composition?.Goal?.TypeKind == GoalType.Hold || (Request?.ChainStage ?? 1) > 1;
 

@@ -50,7 +50,13 @@ namespace ACE.Server.WorldEvents
         /// landblock instance (a realm copy of a landblock is a different place with the same geometry, so
         /// a raw distance comparison across instances would count players who are not there).
         /// </summary>
-        public static AudienceEstimate Sample(Position anchor, float radius)
+        public static AudienceEstimate Sample(Position anchor, float radius) => Sample(anchor, radius, null);
+
+        /// <summary>
+        /// <see cref="Sample(Position, float)"/> with the run's own rule for who counts (World Events Hold:
+        /// world_events_hold_admins_count and the AFK rule). Null: the staff rule above, as always.
+        /// </summary>
+        public static AudienceEstimate Sample(Position anchor, float radius, Func<ACE.Server.WorldObjects.Player, bool> counts)
         {
             if (anchor == null || radius <= 0)
                 return new AudienceEstimate(0, 0, 0);
@@ -69,7 +75,7 @@ namespace ACE.Server.WorldEvents
                     if (loc.DistanceTo(anchor) > radius)
                         continue;
 
-                    if (!CountsTowardAudience(player.Session?.AccessLevel))
+                    if (counts != null ? !counts(player) : !CountsTowardAudience(player.Session?.AccessLevel))
                         continue;
 
                     levels.Add(player.Level ?? 1);
@@ -98,7 +104,10 @@ namespace ACE.Server.WorldEvents
         /// abandoned. So on exception this returns <see cref="int.MaxValue"/> instead of 0 - a broken scan
         /// must hold the run open, never end it.
         /// </summary>
-        public static int CountAliveNear(Position anchor, float radius)
+        public static int CountAliveNear(Position anchor, float radius) => CountAliveNear(anchor, radius, null);
+
+        /// <summary><see cref="CountAliveNear(Position, float)"/> with the run's own rule for who counts (null: the staff rule).</summary>
+        public static int CountAliveNear(Position anchor, float radius, Func<ACE.Server.WorldObjects.Player, bool> counts)
         {
             if (anchor == null || radius <= 0)
                 return 0;
@@ -117,7 +126,7 @@ namespace ACE.Server.WorldEvents
                     if (loc.DistanceTo(anchor) > radius)
                         continue;
 
-                    if (!CountsTowardAudience(player.Session?.AccessLevel))
+                    if (counts != null ? !counts(player) : !CountsTowardAudience(player.Session?.AccessLevel))
                         continue;
 
                     if (player.IsDead)

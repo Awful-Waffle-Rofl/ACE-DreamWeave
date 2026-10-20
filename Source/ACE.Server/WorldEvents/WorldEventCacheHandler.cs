@@ -177,7 +177,8 @@ namespace ACE.Server.WorldEvents
             // is fail-open toward the ordinary crate, never toward coal.
             var participationPayoutEnabled = PropertyManager.GetBool("world_events_participation_payout_enabled").Item;
             var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid)
-                && HoldSettings.MeetsMinContribution(evt, characterGuid);
+                && HoldSettings.MeetsMinContribution(evt, characterGuid)
+                && HoldSettings.MeetsMinPresence(evt, characterGuid);
             var payCoal = WorldEventClaimRules.PaysCoal(participationPayoutEnabled, reward.CoalWcid, hasCredit);
 
             // The account sibling snapshot reads PlayerManager, not event state, so it is taken OUTSIDE the

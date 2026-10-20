@@ -168,5 +168,11 @@ namespace ACE.Server.WorldEvents
         public const string KeepStageRewardsOnFail = "keep_stage_rewards_on_fail";
         public const string ChainFullBonus = "chain_full_bonus";
         public const string FailureReward = "failure_reward";
+
+        // ---- participation ----
+        public const string ParticipantRadius = "participant_radius";
+        public const string MinPresenceSeconds = "min_presence_seconds";
+        public const string AfkSeconds = "afk_seconds";
+        public const string AdminsCount = "admins_count";
     }
 }

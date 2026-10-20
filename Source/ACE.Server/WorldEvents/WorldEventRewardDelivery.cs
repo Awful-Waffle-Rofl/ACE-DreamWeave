@@ -111,7 +111,7 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
-            var rewardRadius = composition.Source?.RewardRadius ?? 0f;
+            var rewardRadius = evt.EffectiveRewardRadius;
             var audience = WorldEventAudienceSampler.Sample(anchor, rewardRadius);
 
             var count = ComputeCacheCount(audience.Count, HoldSettings.ParticipantsPerCacheFor(evt, reward.ParticipantsPerCache), reward.CacheCount, out var unclamped);
