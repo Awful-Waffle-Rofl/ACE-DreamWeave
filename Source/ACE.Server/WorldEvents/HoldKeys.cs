@@ -158,5 +158,15 @@ namespace ACE.Server.WorldEvents
         public const string ChainClosingSeconds = "chain_closing_seconds";
         public const string ChainAsheronSeconds = "chain_asheron_seconds";
         public const string ChainAnnounceLeadSeconds = "chain_announce_lead_seconds";
+
+        // ---- rewards ----
+        public const string ChainRewardStage1 = "chain_reward_stage1";
+        public const string ChainRewardStage2 = "chain_reward_stage2";
+        public const string ChainRewardFinal = "chain_reward_final";
+        public const string ParticipantsPerCache = "participants_per_cache";
+        public const string MinContribution = "min_contribution";
+        public const string KeepStageRewardsOnFail = "keep_stage_rewards_on_fail";
+        public const string ChainFullBonus = "chain_full_bonus";
+        public const string FailureReward = "failure_reward";
     }
 }

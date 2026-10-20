@@ -479,6 +479,10 @@ namespace ACE.Server.WorldEvents
 
                     case WorldEventChain.Decision.EndedByOutcome:
                         log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} ended {evt.Outcome}; the chain ends");
+
+                        // world_events_hold_keep_stage_rewards_on_fail off: an earlier stage's still-open cache closes with the chain.
+                        if (!HoldSettings.Toggle(HoldKeys.KeepStageRewardsOnFail, true) && Previous != null && Previous != evt && WorldEventChain.SameChain(Previous.RunId, Previous.Request?.ChainRootRunId ?? 0, root))
+                            Previous.CloseClaimWindow("the chain failed (keep_stage_rewards_on_fail off)");
                         return;
 
                     case WorldEventChain.Decision.EndedAtMax:

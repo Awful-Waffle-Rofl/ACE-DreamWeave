@@ -28,6 +28,27 @@ namespace ACE.Server.WorldEvents
     /// <summary>World Events Hold: the live admin settings that act on a run (HoldSettings) and need the run's own state.</summary>
     public sealed partial class WorldEvent
     {
+        /// <summary>True for a Hold run or any stage of a chain: the Hold reward and participation settings apply to it.</summary>
+        internal bool IsHoldOrChain => Composition?.Goal?.TypeKind == GoalType.Hold || (Request?.ChainStage ?? 1) > 1;
+
+        /// <summary>True for the last stage of a chain (stage 2 or later and no stage left): the full-chain bonus pays here.</summary>
+        internal bool IsFinalChainStage => (Request?.ChainStage ?? 1) > 1 && (Request?.ChainStage ?? 1) >= (Request?.ChainMaxLength ?? 0);
+
+        /// <summary>
+        /// Ends this run's claim window now (world_events_hold_keep_stage_rewards_on_fail off, the chain failed): its cache
+        /// refuses further claims and the run cleans up on its next tick. A no-op when the window is already over.
+        /// </summary>
+        internal void CloseClaimWindow(string why)
+        {
+            var now = ACE.Common.Time.GetUnixTime();
+
+            if (State != WorldEventState.Rewarding || (ClaimWindowEndsAt > 0 && ClaimWindowEndsAt <= now))
+                return;
+
+            ClaimWindowEndsAt = now;
+            log.Info($"[WORLDEVENT] run={RunId} claim window closed early: {why}");
+        }
+
         /// <summary>True for the champion stage of a chain (stage 2 or later, a kill_boss goal): world_events_chain_champion_* apply.</summary>
         internal bool IsChainChampionStage => (Request?.ChainStage ?? 1) > 1 && Composition?.Goal?.TypeKind == GoalType.KillBoss;
 

@@ -174,6 +174,12 @@ namespace ACE.Server.WorldEvents.Defs
         /// <summary>The reward id for <paramref name="stage"/> (1-based), or null when the list is empty.</summary>
         public string RewardForStage(int stage)
         {
+            // world_events_chain_reward_final (the last stage), _stage1, _stage2: a rewards.json id set live wins.
+            var live = HoldSettings.StageRewardOverride(stage, MaxLength);
+
+            if (live != null)
+                return live;
+
             if (StageRewards == null || StageRewards.Count == 0)
                 return null;
 
@@ -329,6 +335,9 @@ namespace ACE.Server.WorldEvents
 
             return stage >= maxLength ? Decision.EndedAtMax : Decision.Next;
         }
+
+        /// <summary>True when the run <paramref name="runId"/> (its chain root <paramref name="runRoot"/>, 0 for a first stage) belongs to the chain <paramref name="root"/> (D6 - pure).</summary>
+        public static bool SameChain(uint runId, uint runRoot, uint root) => root != 0 && (runRoot != 0 ? runRoot == root : runId == root);
 
         /// <summary>
         /// The admin settings on a decision (D6 - pure): with world_events_chain off, or the chance roll missed

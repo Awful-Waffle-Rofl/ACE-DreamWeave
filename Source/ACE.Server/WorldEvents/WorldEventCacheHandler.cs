@@ -143,6 +143,23 @@ namespace ACE.Server.WorldEvents
             //    window and pays the consolation crate; Aborted* outcomes never reach Rewarding at all.
             var crateWcid = WorldEvent.PaysSuccessCrate(evt.Outcome) ? reward.SuccessCrateWcid : reward.ConsolationCrateWcid;
 
+            // world_events_hold_failure_reward (Hold runs and their chain): consolation (as before), partial (the success
+            // crate, never a bonus), or none.
+            if (!WorldEvent.PaysSuccessCrate(evt.Outcome))
+            {
+                var failureMode = HoldSettings.FailureRewardFor(evt);
+
+                if (failureMode == HoldSettings.FailureRewardNone)
+                {
+                    log.Info($"[WORLDEVENT] run={evt.RunId} claim char={characterGuid} result=none (failure_reward none, outcome {evt.Outcome})");
+                    TrySendTransientError(player, "The defense failed, and the cache holds nothing for it.");
+                    return true;
+                }
+
+                if (failureMode == HoldSettings.FailureRewardPartial && reward.SuccessCrateWcid != 0)
+                    crateWcid = reward.SuccessCrateWcid;
+            }
+
             if (crateWcid == 0)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} claim refused: reward axis {reward.Id} has no crate wcid for outcome {evt.Outcome}");
@@ -159,7 +176,8 @@ namespace ACE.Server.WorldEvents
             // but guarded anyway) reads as "credit unknown", which resolves to hasCredit true so the fallback
             // is fail-open toward the ordinary crate, never toward coal.
             var participationPayoutEnabled = PropertyManager.GetBool("world_events_participation_payout_enabled").Item;
-            var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid);
+            var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid)
+                && HoldSettings.MeetsMinContribution(evt, characterGuid);
             var payCoal = WorldEventClaimRules.PaysCoal(participationPayoutEnabled, reward.CoalWcid, hasCredit);
 
             // The account sibling snapshot reads PlayerManager, not event state, so it is taken OUTSIDE the
@@ -176,7 +194,7 @@ namespace ACE.Server.WorldEvents
 
             // A winning claim's bonus crates (rewards.json bonusCrateWcids: the chain's final stage pays more).
             var bonus = !payCoal && WorldEvent.PaysSuccessCrate(evt.Outcome)
-                ? (reward.BonusCrateWcids ?? new List<uint>()).Where(w => w != 0).ToList()
+                ? (HoldSettings.FullChainBonusFor(evt) ?? reward.BonusCrateWcids ?? new List<uint>()).Where(w => w != 0).ToList()
                 : new List<uint>();
             var bonusGiven = 0;
             var noRoom = false;

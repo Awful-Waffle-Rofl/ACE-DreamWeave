@@ -1109,11 +1109,15 @@ world_events_chain_champion_player_damage_mult	world_events	hold champion	fork	n
 world_events_chain_chance	world_events	hold chain	fork	no
 world_events_chain_closing_seconds	world_events	hold chain	fork	no
 world_events_chain_countdown_seconds	world_events	hold chain	fork	no
+world_events_chain_full_bonus	world_events	hold rewards	fork	no
 world_events_chain_max_length	world_events	hold chain	fork	no
 world_events_chain_next_boss	world_events	hold chain	fork	no
 world_events_chain_next_family	world_events	hold chain	fork	no
 world_events_chain_next_goal	world_events	hold chain	fork	no
 world_events_chain_next_source	world_events	hold chain	fork	no
+world_events_chain_reward_final	world_events	hold rewards	fork	no
+world_events_chain_reward_stage1	world_events	hold rewards	fork	no
+world_events_chain_reward_stage2	world_events	hold rewards	fork	no
 world_events_chain_spot_max	world_events	hold chain	fork	no
 world_events_chain_spot_min	world_events	hold chain	fork	no
 world_events_chain_story_seconds	world_events	hold chain	fork	no
@@ -1158,6 +1162,7 @@ world_events_hold_defend_pose	world_events	hold knights	fork	no
 world_events_hold_defend_swing_max_seconds	world_events	hold knights	fork	no
 world_events_hold_defend_swing_seconds	world_events	hold knights	fork	no
 world_events_hold_enabled	world_events	hold	fork	no
+world_events_hold_failure_reward	world_events	hold rewards	fork	no
 world_events_hold_final_wave_bonus	world_events	hold waves	fork	no
 world_events_hold_finale_add_count	world_events	hold finale	fork	no
 world_events_hold_finale_add_interval_seconds	world_events	hold finale	fork	no
@@ -1190,6 +1195,7 @@ world_events_hold_health_milestones	world_events	hold knights	fork	no
 world_events_hold_hit_interval_max_seconds	world_events	hold internals	fork	no
 world_events_hold_hit_interval_seconds	world_events	hold internals	fork	no
 world_events_hold_hold_seconds	world_events	hold waves	fork	no
+world_events_hold_keep_stage_rewards_on_fail	world_events	hold rewards	fork	no
 world_events_hold_knight_count	world_events	hold knights	fork	no
 world_events_hold_knight_damage_taken_mult	world_events	hold knights	fork	no
 world_events_hold_knight_max_health	world_events	hold knights	fork	no
@@ -1204,11 +1210,13 @@ world_events_hold_melee_level_offset	world_events	hold monsters	fork	no
 world_events_hold_melee_npc_damage_mult	world_events	hold monsters	fork	no
 world_events_hold_melee_player_damage_mult	world_events	hold monsters	fork	no
 world_events_hold_min_breach	world_events	hold monsters	fork	no
+world_events_hold_min_contribution	world_events	hold rewards	fork	no
 world_events_hold_min_corrupted	world_events	hold monsters	fork	no
 world_events_hold_min_death_seconds	world_events	hold knights	fork	no
 world_events_hold_min_ranged	world_events	hold monsters	fork	no
 world_events_hold_min_survivors	world_events	hold knights	fork	no
 world_events_hold_next_wave_alive_share	world_events	hold waves	fork	no
+world_events_hold_participants_per_cache	world_events	hold rewards	fork	no
 world_events_hold_player_heal	world_events	hold healing	fork	no
 world_events_hold_player_heal_cap	world_events	hold healing	fork	no
 world_events_hold_player_heal_mult	world_events	hold healing	fork	no
