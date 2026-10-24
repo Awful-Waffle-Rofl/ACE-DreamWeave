@@ -41,7 +41,8 @@ namespace ACE.Server.Command.Handlers
             "reload | " +
             "properties [substring] (every world_events_ server property, one chat line each; '*' marks a non-default value) | " +
             "simulate [--players <n>] [--level <L>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] | " +
-            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list";
+            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list | " +
+            "hold settings [group|all|set|<name>] | hold set <name> <value> | hold reset <name|group|all> | hold export <name> [--all] | hold import <name> [--merge] | hold presets";
 
         private const string DisabledMessage = "World events are disabled (world_events_enabled).";
 
@@ -88,6 +89,10 @@ namespace ACE.Server.Command.Handlers
 
                     case "simulate":
                         HandleSimulate(session, rest);
+                        break;
+
+                    case "hold":
+                        HandleHold(session, rest);
                         break;
 
                     case "scene":
@@ -724,6 +729,135 @@ namespace ACE.Server.Command.Handlers
         private static void Reply(Session session, string message)
         {
             CommandHandlerHelper.WriteOutputInfo(session, message, ChatMessageType.Broadcast);
+        }
+
+        /// <summary>One "/worldevent hold ..." command, parsed (D6 - pure).</summary>
+        public sealed class HoldArgs
+        {
+            public string Verb;
+            public string Target;
+            public string Value;
+            public bool All;
+            public bool Merge;
+        }
+
+        public const string HoldUsage =
+            "hold settings [group|all|set|<name>] | hold set <name> <value> | hold reset <name|group|all> | " +
+            "hold export <name> [--all] | hold import <name> [--merge] | hold presets";
+
+        /// <summary>
+        /// Parses the words after "hold" (D6 - pure). A set value may have spaces (a list); --all and --merge are only for
+        /// export and import. False with a reason for anything else.
+        /// </summary>
+        public static bool TryParseHoldArgs(IReadOnlyList<string> words, out HoldArgs args, out string error)
+        {
+            args = new HoldArgs();
+            error = null;
+
+            if (words == null || words.Count == 0)
+            {
+                args.Verb = "settings";
+                return true;
+            }
+
+            args.Verb = words[0].Trim().ToLowerInvariant();
+            var rest = words.Skip(1).Where(w => !string.IsNullOrWhiteSpace(w)).ToList();
+
+            switch (args.Verb)
+            {
+                case "settings":
+                case "show":
+                    args.Verb = "settings";
+                    args.Target = rest.FirstOrDefault();
+                    return true;
+
+                case "set":
+                    if (rest.Count < 2)
+                    {
+                        error = "use: hold set <name> <value>";
+                        return false;
+                    }
+
+                    args.Target = rest[0];
+                    args.Value = string.Join(" ", rest.Skip(1));
+                    return true;
+
+                case "reset":
+                    if (rest.Count != 1)
+                    {
+                        error = "use: hold reset <name|group|all>";
+                        return false;
+                    }
+
+                    args.Target = rest[0];
+                    return true;
+
+                case "export":
+                case "import":
+                {
+                    var flag = args.Verb == "export" ? "--all" : "--merge";
+                    var names = rest.Where(w => !w.StartsWith("--", StringComparison.Ordinal)).ToList();
+                    var flags = rest.Where(w => w.StartsWith("--", StringComparison.Ordinal)).Select(w => w.ToLowerInvariant()).ToList();
+
+                    if (names.Count != 1 || flags.Any(f => f != flag))
+                    {
+                        error = $"use: hold {args.Verb} <name> [{flag}]";
+                        return false;
+                    }
+
+                    args.Target = names[0];
+                    args.All = flags.Contains("--all");
+                    args.Merge = flags.Contains("--merge");
+                    return true;
+                }
+
+                case "presets":
+                    return true;
+
+                default:
+                    error = $"unknown hold command '{args.Verb}'. {HoldUsage}";
+                    return false;
+            }
+        }
+
+        private static void HandleHold(Session session, string[] rest)
+        {
+            if (!TryParseHoldArgs(rest, out var args, out var error))
+            {
+                Reply(session, error);
+                return;
+            }
+
+            string reply;
+
+            switch (args.Verb)
+            {
+                case "settings":
+                    reply = HoldSettingsAdmin.Settings(args.Target);
+                    break;
+                case "set":
+                    reply = HoldSettingsAdmin.Set(args.Target, args.Value, session);
+                    break;
+                case "reset":
+                    reply = HoldSettingsAdmin.Reset(args.Target, session);
+                    break;
+                case "export":
+                    reply = HoldSettingsAdmin.Export(args.Target, args.All);
+                    Audit(session, $"hold export {args.Target}{(args.All ? " --all" : "")}: {reply}");
+                    break;
+                case "import":
+                    reply = HoldSettingsAdmin.Import(args.Target, args.Merge, session);
+                    break;
+                default:
+                    var presets = HoldSettingsAdmin.Presets();
+                    reply = presets.Count == 0 ? "No Hold presets yet (hold export <name>)." : "Hold presets: " + string.Join(", ", presets);
+                    break;
+            }
+
+            // One chat line per line of the reply, like "properties".
+            foreach (var line in (reply ?? "").Split('\n'))
+                if (line.Trim().Length > 0)
+                    Reply(session, line.TrimEnd('\r'));
         }
 
         private static void Audit(Session session, string message)

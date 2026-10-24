@@ -311,6 +311,22 @@ namespace ACE.Server.Managers.Market
 
                 case PropertyModifyOutcome.Updated:
                 case PropertyModifyOutcome.Unchanged:
+                {
+                    // A World Events Hold setting set out of range (clamped) or to something it cannot read says so.
+                    var warning = ACE.Server.WorldEvents.HoldSettings.WarningForProperty(key, body.Value);
+
+                    if (warning != null)
+                        return Results.Json(new
+                        {
+                            key,
+                            type,
+                            previous_value = result.PreviousText,
+                            current_value = result.CurrentText,
+                            changed = result.Outcome == PropertyModifyOutcome.Updated,
+                            warning
+                        }, Json);
+                }
+
                     return Results.Json(new
                     {
                         key,
