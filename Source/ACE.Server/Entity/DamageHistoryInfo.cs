@@ -42,8 +42,13 @@ namespace ACE.Server.Entity
             return attacker;
         }
 
+        /// <summary>The pet's owner, or null when this attacker is not a pet (or the owner is gone).</summary>
         public Player TryGetPetOwner()
         {
+            // Null for every attacker that is not a combat pet: the reference is only made for pets.
+            if (PetOwner == null)
+                return null;
+
             PetOwner.TryGetTarget(out var petOwner);
 
             return petOwner;

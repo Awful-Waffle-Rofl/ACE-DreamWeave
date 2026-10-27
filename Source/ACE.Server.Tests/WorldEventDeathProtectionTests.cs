@@ -384,5 +384,101 @@ namespace ACE.Server.Tests
                 WorldEventAnnouncer.BroadcastSink = previous;
             }
         }
+
+        // ---- the chain (2026-10-19): Asheron's closing line only when the whole chain ends ----------------------------
+
+        private static WorldEvent BuildChainEvent(int stage, bool asheronSpokeEarlier = false)
+        {
+            var composition = BuildComposition();
+            composition.Goal.Chain = new ChainDef
+            {
+                MaxLength = 2,
+                Story = new ChainStoryDef
+                {
+                    ClosingSuccessNarrator = new List<string> { "The plot dies with {champion}." },
+                    ClosingFailureNarrator = new List<string> { "The envoys have fallen." }
+                }
+            };
+
+            var request = new WorldEventRequest
+            {
+                SourceId = "ambush", FamilyId = "emberwrought", GoalId = "kill_count", AnnounceLeadSeconds = 0, Invoker = "test",
+                ChainStage = stage, ChainMaxLength = stage > 1 ? 2 : 0, ChainAsheronSpoke = asheronSpokeEarlier,
+                ChainSettings = stage > 1 ? composition.Goal.Chain : null
+            };
+
+            return new WorldEvent(1, composition, request, new FakeObjective(), () => new AudienceEstimate(3, 100, 150), () => T0,
+                deathProtectionFlag: () => true);
+        }
+
+        private static List<string> CaptureBroadcasts(Action body)
+        {
+            var broadcasts = new List<string>();
+            var previous = WorldEventAnnouncer.BroadcastSink;
+
+            try
+            {
+                WorldEventAnnouncer.BroadcastSink = broadcasts.Add;
+                WorldEventLineSchedule.Shared.Clear();
+                body();
+            }
+            finally
+            {
+                WorldEventAnnouncer.BroadcastSink = previous;
+            }
+
+            return broadcasts;
+        }
+
+        [TestMethod]
+        public void Chain_FirstStageWon_AsheronWaits_ForTheChainsEnd()
+        {
+            var broadcasts = CaptureBroadcasts(() =>
+            {
+                var evt = BuildChainEvent(1);
+                evt.Stage(T0);
+                evt.Finish(WorldEventOutcome.Success);
+            });
+
+            Assert.IsTrue(broadcasts.Contains(WorldEventAnnouncer.DeathProtectionStartLine));
+            Assert.IsFalse(broadcasts.Contains(WorldEventAnnouncer.DeathProtectionEndLine), "not between stages");
+            Assert.IsFalse(WorldEventLineSchedule.Shared.TakeDue(T0 + 600).Contains(WorldEventAnnouncer.DeathProtectionEndLine), "nor later");
+        }
+
+        [TestMethod]
+        public void Chain_FirstStageLost_ClosingLineThenAsheron()
+        {
+            var broadcasts = CaptureBroadcasts(() =>
+            {
+                var evt = BuildChainEvent(1);
+                evt.Stage(T0);
+                evt.Finish(WorldEventOutcome.FailedTimeout);
+            });
+
+            Assert.IsFalse(broadcasts.Contains(WorldEventAnnouncer.DeathProtectionEndLine), "not at once: paced after the outcome line");
+            Assert.AreEqual(0, WorldEventLineSchedule.Shared.TakeDue(T0 + 2.9).Count);
+            CollectionAssert.AreEqual(new[] { "[World Event] The envoys have fallen." }, WorldEventLineSchedule.Shared.TakeDue(T0 + 3).ToArray());
+            CollectionAssert.AreEqual(new[] { WorldEventAnnouncer.DeathProtectionEndLine }, WorldEventLineSchedule.Shared.TakeDue(T0 + 6).ToArray());
+        }
+
+        [TestMethod]
+        public void Chain_LastStage_NoSecondOpeningLine_ClosingOwedEvenIfStoppedBeforeItStarted()
+        {
+            var staged = CaptureBroadcasts(() => BuildChainEvent(2, asheronSpokeEarlier: true).Stage(T0));
+            Assert.IsFalse(staged.Contains(WorldEventAnnouncer.DeathProtectionStartLine), "Asheron spoke at stage 1 and does not repeat it");
+
+            var stopped = CaptureBroadcasts(() => BuildChainEvent(2, asheronSpokeEarlier: true).Finish(WorldEventOutcome.AbortedAdmin));
+            Assert.IsTrue(stopped.Contains(WorldEventAnnouncer.DeathProtectionEndLine), "a stage stopped in its countdown still ends the chain");
+
+            var won = CaptureBroadcasts(() =>
+            {
+                var evt = BuildChainEvent(2, asheronSpokeEarlier: true);
+                evt.Stage(T0);
+                evt.Finish(WorldEventOutcome.Success);
+            });
+            Assert.IsFalse(won.Contains(WorldEventAnnouncer.DeathProtectionEndLine));
+            CollectionAssert.AreEqual(new[] { "[World Event] The plot dies with their champion.", WorldEventAnnouncer.DeathProtectionEndLine },
+                WorldEventLineSchedule.Shared.TakeDue(T0 + 6).ToArray(), "the closing line, then Asheron");
+        }
     }
 }

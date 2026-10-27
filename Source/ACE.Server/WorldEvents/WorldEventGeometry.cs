@@ -213,6 +213,22 @@ namespace ACE.Server.WorldEvents
         /// because SetPosition may have moved the result into an adjacent landblock, after which its X/Y
         /// are relative to a different block and the difference would be meaningless.
         /// </summary>
+        /// <summary>
+        /// The point <paramref name="radius"/> metres from <paramref name="centre"/> at
+        /// <paramref name="bearingRadians"/> (0 = due north, clockwise), facing the centre. Used by Hold runs
+        /// to re-pick a wave spawn that landed indoors somewhere else on the same ring.
+        /// </summary>
+        public static Position AtBearing(Position centre, float radius, double bearingRadians)
+        {
+            if (centre == null)
+                return null;
+
+            var dx = (float)(Math.Sin(bearingRadians) * radius);
+            var dy = (float)(Math.Cos(bearingRadians) * radius);
+
+            return PlaceFacingCentre(centre, dx, dy);
+        }
+
         private static Position PlaceFacingCentre(Position centre, float dx, float dy)
         {
             var placed = Translate(centre, dx, dy);

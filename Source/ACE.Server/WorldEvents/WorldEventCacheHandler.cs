@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 using ACE.Common;
@@ -94,8 +95,10 @@ namespace ACE.Server.WorldEvents
 
         private static bool Handle(WorldObject cache, Player player)
         {
-            var evt = WorldEventManager.Current;
             var runId = cache.GetProperty(PropertyInt.WorldEventId);
+
+            // The current run, or a chained run's finishing stage still in its claim window.
+            var evt = runId == null ? null : WorldEventManager.FindRun((uint)runId.Value);
 
             // A cache left over from a finished run must never pay. The run id stamp is applied at spawn
             // time by WorldEventRewardDelivery, so an unstamped cache (hand-spawned by an admin, say) also
@@ -140,6 +143,23 @@ namespace ACE.Server.WorldEvents
             //    window and pays the consolation crate; Aborted* outcomes never reach Rewarding at all.
             var crateWcid = WorldEvent.PaysSuccessCrate(evt.Outcome) ? reward.SuccessCrateWcid : reward.ConsolationCrateWcid;
 
+            // world_events_hold_failure_reward (Hold runs and their chain): consolation (as before), partial (the success
+            // crate, never a bonus), or none.
+            if (!WorldEvent.PaysSuccessCrate(evt.Outcome))
+            {
+                var failureMode = HoldSettings.FailureRewardFor(evt);
+
+                if (failureMode == HoldSettings.FailureRewardNone)
+                {
+                    log.Info($"[WORLDEVENT] run={evt.RunId} claim char={characterGuid} result=none (failure_reward none, outcome {evt.Outcome})");
+                    TrySendTransientError(player, "The defense failed, and the cache holds nothing for it.");
+                    return true;
+                }
+
+                if (failureMode == HoldSettings.FailureRewardPartial && reward.SuccessCrateWcid != 0)
+                    crateWcid = reward.SuccessCrateWcid;
+            }
+
             if (crateWcid == 0)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} claim refused: reward axis {reward.Id} has no crate wcid for outcome {evt.Outcome}");
@@ -156,7 +176,9 @@ namespace ACE.Server.WorldEvents
             // but guarded anyway) reads as "credit unknown", which resolves to hasCredit true so the fallback
             // is fail-open toward the ordinary crate, never toward coal.
             var participationPayoutEnabled = PropertyManager.GetBool("world_events_participation_payout_enabled").Item;
-            var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid);
+            var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid)
+                && HoldSettings.MeetsMinContribution(evt, characterGuid)
+                && HoldSettings.MeetsMinPresence(evt, characterGuid);
             var payCoal = WorldEventClaimRules.PaysCoal(participationPayoutEnabled, reward.CoalWcid, hasCredit);
 
             // The account sibling snapshot reads PlayerManager, not event state, so it is taken OUTSIDE the
@@ -170,6 +192,13 @@ namespace ACE.Server.WorldEvents
             var createFailed = false;
             var giveFailed = false;
             var attemptedWcid = crateWcid;
+
+            // A winning claim's bonus crates (rewards.json bonusCrateWcids: the chain's final stage pays more).
+            var bonus = !payCoal && WorldEvent.PaysSuccessCrate(evt.Outcome)
+                ? (HoldSettings.FullChainBonusFor(evt) ?? reward.BonusCrateWcids ?? new List<uint>()).Where(w => w != 0).ToList()
+                : new List<uint>();
+            var bonusGiven = 0;
+            var noRoom = false;
 
             // ONE critical section: evaluate, sibling-check, create, give, mark. See the class comment for
             // why the check and the mark must not be separate acquisitions.
@@ -196,7 +225,11 @@ namespace ACE.Server.WorldEvents
                         evt.ClaimedCharacters, evt.ClaimedAccounts, evt.ClaimedIps, exemptIps,
                         false, false, gateByIp);
 
-                if (denial == ClaimDenial.None)
+                // Every crate needs a pack slot; short of room, the claim stays open (nothing is marked).
+                if (denial == ClaimDenial.None && bonus.Count > 0 && player.GetFreeInventorySlots() < 1 + bonus.Count)
+                    noRoom = true;
+
+                if (denial == ClaimDenial.None && !noRoom)
                 {
                     // The payout wcid: coal when the rule above says so, otherwise the ordinary outcome
                     // crate. A content mistake in coalWcid must never deny a claim, so a failed coal create
@@ -241,8 +274,35 @@ namespace ACE.Server.WorldEvents
 
                         if (ipKey.Length > 0)
                             evt.ClaimedIps.Add(ipKey);
+
+                        // The bonus crates, after the claim is marked (room was checked above).
+                        foreach (var bonusWcid in bonus)
+                        {
+                            var extra = WorldObjectFactory.CreateNewWorldObject(bonusWcid);
+
+                            if (extra == null)
+                            {
+                                log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {bonusWcid} failed to create");
+                                continue;
+                            }
+
+                            if (player.TryCreateForGive(cache, extra))
+                                bonusGiven++;
+                            else
+                            {
+                                extra.Destroy();
+                                log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {bonusWcid} could not be given to {player.Name}");
+                            }
+                        }
                     }
                 }
+            }
+
+            if (noRoom)
+            {
+                TrySendTransientError(player, $"You need {1 + bonus.Count} free pack slots to take this reward.");
+                log.Info($"[WORLDEVENT] run={evt.RunId} claim-no-room char={player.Name} guid=0x{characterGuid:X8} needs={1 + bonus.Count} - not marked claimed, still retryable");
+                return true;
             }
 
             if (denial != ClaimDenial.None)
@@ -289,7 +349,7 @@ namespace ACE.Server.WorldEvents
             // payout= is a SEPARATE field appended after result=granted - never fold it into that token, or
             // "result=granted:coal" would break the monitoring queries that parse result= as exactly
             // granted or denied:<ClaimDenial name> (see ClaimDenial's doc comment).
-            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")}");
+            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")} reward={reward.Id} bonus={bonusGiven}");
 
             return true;
         }

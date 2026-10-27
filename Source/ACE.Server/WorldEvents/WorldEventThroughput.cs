@@ -177,7 +177,17 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public static bool Counts(uint guid, uint bossGuid, bool isDecor, bool isNpc)
         {
-            if (guid == 0 || isDecor || isNpc)
+            return Counts(guid, bossGuid, isDecor, isNpc, isProtected: false);
+        }
+
+        /// <summary>
+        /// <see cref="Counts(uint, uint, bool, bool)"/> plus the Hold goal's protected targets, which never
+        /// count: the MONSTERS clear a ward, not the players, so its health says nothing about the group's
+        /// pace and must not size a boss.
+        /// </summary>
+        public static bool Counts(uint guid, uint bossGuid, bool isDecor, bool isNpc, bool isProtected)
+        {
+            if (guid == 0 || isDecor || isNpc || isProtected)
                 return false;
 
             return guid != bossGuid;

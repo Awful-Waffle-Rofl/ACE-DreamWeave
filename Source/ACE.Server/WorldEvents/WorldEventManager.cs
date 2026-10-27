@@ -74,6 +74,80 @@ namespace ACE.Server.WorldEvents
         /// <summary>The one running event, or null. Cleared as soon as a run reaches Done.</summary>
         public static WorldEvent Current { get; private set; }
 
+        /// <summary>
+        /// World Events chain: a finished run kept in its reward claim window while the next stage of its chain is
+        /// <see cref="Current"/>. Still ticked (so its claim window and cleanup run as usual) and still pays its caches;
+        /// cleared when it reaches Done. Null otherwise.
+        /// </summary>
+        public static WorldEvent Previous { get; private set; }
+
+        /// <summary>Runs whose end has been checked for a chain, so each is handed over at most once.</summary>
+        private static readonly HashSet<uint> chainChecked = new HashSet<uint>();
+
+        private static readonly Random chainRng = new Random();
+
+        /// <summary>The live run with this id: <see cref="Current"/>, or a chained run's finishing <see cref="Previous"/>. Null otherwise.</summary>
+        public static WorldEvent FindRun(uint runId)
+        {
+            var current = Current;
+
+            if (current != null && current.RunId == runId)
+                return current;
+
+            var previous = Previous;
+
+            return previous != null && previous.RunId == runId ? previous : null;
+        }
+
+        /// <summary>The other live run beside <paramref name="evt"/> (Current or Previous), or null.</summary>
+        private static WorldEvent OtherRun(WorldEvent evt)
+        {
+            var current = Current;
+            var previous = Previous;
+
+            if (current != null && !ReferenceEquals(current, evt) && current.State != WorldEventState.Done)
+                return current;
+
+            if (previous != null && !ReferenceEquals(previous, evt) && previous.State != WorldEventState.Done)
+                return previous;
+
+            return null;
+        }
+
+        /// <summary>
+        /// <paramref name="keys"/> without the landblocks another live run holds (a chained stage standing next to the
+        /// finishing one): those stay permaloaded for it. Pure apart from reading the two run references.
+        /// </summary>
+        internal static IReadOnlyList<ulong> WithoutBlocksHeldByOtherRuns(WorldEvent evt, IReadOnlyList<ulong> keys)
+        {
+            var other = OtherRun(evt);
+
+            if (other == null || keys == null)
+                return keys ?? new List<ulong>();
+
+            return keys.Where(k => !other.IsHeldLandblock(k)).ToList();
+        }
+
+        /// <summary>
+        /// The permaload snapshot a staging run compares against, with the blocks another live run holds counted as not
+        /// permaloaded: that run leaves them to this one when it finishes, so this one releases them in its turn.
+        /// </summary>
+        internal static IReadOnlyDictionary<ulong, bool> PriorWithoutOtherRuns(WorldEvent evt, IReadOnlyDictionary<ulong, bool> prior)
+        {
+            var other = OtherRun(evt);
+
+            if (other == null || prior == null)
+                return prior;
+
+            var copy = new Dictionary<ulong, bool>(prior);
+
+            foreach (var key in prior.Keys)
+                if (other.IsHeldLandblock(key))
+                    copy[key] = false;
+
+            return copy;
+        }
+
         /// <summary>Immutable axis store. Reload swaps the reference; a running event keeps its own snapshot.</summary>
         public static WorldEventAxisStore Store { get; private set; } = WorldEventAxisStore.Empty;
 
@@ -291,12 +365,35 @@ namespace ACE.Server.WorldEvents
 
                 nextTickTime = now + 1.0;
 
+                // Paced World Event lines (a stage change, the chain's end) whose time has come.
+                foreach (var line in WorldEventLineSchedule.Shared.TakeDue(now))
+                    AnnounceScheduled(line);
+
                 WorldEvent evt;
+                WorldEvent previous;
 
                 lock (sync)
                 {
                     ClearCurrentIfDone();
                     evt = Current;
+                    previous = Previous;
+                }
+
+                // A chained run's finishing first stage: its claim window and cleanup go on as usual.
+                if (previous != null)
+                {
+                    try
+                    {
+                        previous.Tick(now);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[WORLDEVENT] run={previous.RunId} (finishing, chained) tick threw; finishing it", ex);
+                        previous.Finish(WorldEventOutcome.AbortedError);
+                    }
+
+                    lock (sync)
+                        ClearCurrentIfDone();
                 }
 
                 if (evt == null)
@@ -308,6 +405,9 @@ namespace ACE.Server.WorldEvents
 
                 lock (sync)
                     ClearCurrentIfDone();
+
+                // World Events chain: once a run has ended, a success may hand over to the next stage nearby.
+                TryChain(evt);
             }
             catch (Exception ex)
             {
@@ -328,12 +428,250 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>Must be called under <see cref="sync"/>.</summary>
+        /// <summary>
+        /// A paced chain line (the thanks, story, announcement, closing): world-wide, or with world_events_hold_broadcast
+        /// "local", to the players near each live Hold run or chain stage.
+        /// </summary>
+        private static void AnnounceScheduled(string line)
+        {
+            var runs = new[] { Current, Previous }.Where(r => r != null && r.IsHoldOrChain).Distinct().ToList();
+
+            if (runs.Count == 0 || !runs.Any(r => r.AnnouncesLocally))
+            {
+                WorldEventAnnouncer.Broadcast(line);
+                return;
+            }
+
+            foreach (var run in runs)
+                WorldEventAnnouncer.Local(run, line);
+        }
+
         private static void ClearCurrentIfDone()
         {
             if (Current != null && Current.State == WorldEventState.Done)
             {
                 log.Info($"[WORLDEVENT] run={Current.RunId} cleared (outcome={Current.Outcome})");
                 Current = null;
+            }
+
+            if (Previous != null && Previous.State == WorldEventState.Done)
+            {
+                log.Info($"[WORLDEVENT] run={Previous.RunId} cleared (outcome={Previous.Outcome}, finished beside a chained run)");
+                Previous = null;
+            }
+        }
+
+        /// <summary>
+        /// World Events chain (goals.json "chain"): called after every tick of the current run. Once it has ended (Resolved
+        /// or later), its outcome is checked exactly once:
+        ///   * a success with stages left: a spot 250 to 500 m away (chain.minDistance / maxDistance) on open ground, a
+        ///     random compatible source, family and goal there, starting chain.countdownSeconds later, announced to the
+        ///     world with its place. The finished run moves to <see cref="Previous"/> and keeps its claim window;
+        ///   * a failure or an abort, or the last stage: the chain ends.
+        /// Everything is logged with the chain's first run id and the stage. Never throws.
+        /// </summary>
+        private static void TryChain(WorldEvent evt)
+        {
+            try
+            {
+                if (evt == null || evt.State < WorldEventState.Resolved)
+                    return;
+
+                lock (sync)
+                {
+                    if (!chainChecked.Add(evt.RunId))
+                        return;
+                }
+
+                var request = evt.Request;
+                var chain = request?.ChainSettings ?? evt.Composition?.Goal?.Chain;
+                var maxLength = WorldEventChain.EffectiveMaxLength(request?.ChainMaxLength ?? 0, evt.Composition?.Goal?.Chain);
+                var stage = Math.Max(1, request?.ChainStage ?? 1);
+                var root = request != null && request.ChainRootRunId != 0 ? request.ChainRootRunId : evt.RunId;
+
+                // The run's own decision (with world_events_chain on/off and its chance roll), so the manager and the run agree.
+                switch (evt.ChainDecisionFor(evt.Outcome))
+                {
+                    case WorldEventChain.Decision.None:
+                        return;
+
+                    case WorldEventChain.Decision.EndedByOutcome:
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} ended {evt.Outcome}; the chain ends");
+
+                        // world_events_hold_keep_stage_rewards_on_fail off: an earlier stage's still-open cache closes with the chain.
+                        if (!HoldSettings.Toggle(HoldKeys.KeepStageRewardsOnFail, true) && Previous != null && Previous != evt && WorldEventChain.SameChain(Previous.RunId, Previous.Request?.ChainRootRunId ?? 0, root))
+                            Previous.CloseClaimWindow("the chain failed (keep_stage_rewards_on_fail off)");
+                        return;
+
+                    case WorldEventChain.Decision.EndedAtMax:
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded; that was the last stage, the chain is complete");
+                        return;
+                }
+
+                var origin = evt.Composition?.AnchorPosition;
+
+                // Where the next stage goes: a different town of the Town Network (chain.toAnotherTown), else the old
+                // 250 to 500 m spot. Up to three towns are tried, in case a town's edge has no open ground or the next goal's
+                // spawn-area check refuses it.
+                var spots = new List<(Position Anchor, string Town)>();
+                var why = "no other town in the Town Network";
+                var originTownName = origin != null ? WorldEventTownIndex.Nearest(origin, WorldEventTownIndex.Towns)?.Town.Name : null;
+
+                if (chain == null || chain.ToAnotherTown)
+                {
+                    var towns = WorldEventTownIndex.Towns;
+                    var originTown = origin != null ? WorldEventTownIndex.Nearest(origin, towns)?.Town.Name : null;
+                    var originGlobal = origin?.ToGlobal() ?? default;
+                    var tried = new List<string>();
+
+                    for (var attempt = 0; attempt < 3 && origin != null && !origin.Indoors; attempt++)
+                    {
+                        var town = WorldEventChain.PickTown(towns, originGlobal.X, originGlobal.Y, originTown, chain, chainRng, tried);
+
+                        if (town == null)
+                            break;
+
+                        tried.Add(town.Value.Name);
+
+                        if (WorldEventChain.TryPickNearTown(town.Value, origin, chain, chainRng, out var townSpot))
+                            spots.Add((townSpot, town.Value.Name));
+                        else
+                            log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: no open ground at the edge of {town.Value.Name}; trying another town");
+                    }
+
+                    if (spots.Count == 0 && tried.Count > 0)
+                        why = $"no open ground near {string.Join(", ", tried)}";
+                    else if (spots.Count == 0 && originTown != null)
+                        why = $"no town other than {originTown} at least {chain?.TownMinDistance ?? 800:0} m away";
+                }
+                else if (WorldEventChain.TryPickNearbyAnchor(origin, chain, chainRng, out var nearby, out why))
+                    spots.Add((nearby, null));
+
+                if (spots.Count == 0)
+                {
+                    log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded, but {why}; the chain ends");
+                    evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                    return;
+                }
+
+                WorldEvent started = null;
+                Position anchor = null;
+                string label = null, townName = null, error = null;
+
+                lock (sync)
+                {
+                    if (Previous != null && Previous.State != WorldEventState.Done)
+                    {
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Previous.RunId} is still finishing; the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                        return;
+                    }
+
+                    var retired = false;
+
+                    if (ReferenceEquals(Current, evt))
+                    {
+                        // The finished run keeps its claim window beside the next stage.
+                        Previous = evt;
+                        Current = null;
+                        retired = true;
+                    }
+                    else if (Current != null)
+                    {
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: run {Current.RunId} has already started; the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                        return;
+                    }
+
+                    foreach (var (spot, town) in spots)
+                    {
+                        var spotLabel = town != null ? WorldEventTownIndex.DescribeLabeled(town, spot) : WorldEventTownIndex.Describe(spot);
+                        var next = WorldEventChain.NextRequest(request, chain, stage + 1, maxLength, root, evt.RunId, spot, spotLabel);
+                        next.ChainSettings = chain;
+
+                        // The first stage's townReach holds for every later stage, whatever their own goal says.
+                        next.TownReach = WorldEventTownReach.Effective(evt.Composition?.Goal?.TownReach, request?.TownReach);
+                        next.ExcludeTowns = originTownName != null ? new List<string> { originTownName } : null;
+
+                        // The story carries on: the same envoy speaks, the first stage's attackers and town stay named.
+                        next.ChainEnvoyName = evt.ChainEnvoyName;
+                        next.ChainFamily = request?.ChainFamily ?? evt.Composition?.FamilyDisplayName;
+                        next.ChainFirstTown = request?.ChainFirstTown ?? originTownName;
+                        next.ChainAsheronSpoke = evt.ChainAsheronSpoke;
+
+                        // A stage reward rewards.json does not define pays the default instead (flagged at load).
+                        if (next.RewardId != null && !Store.Rewards.Keys.Any(k => string.Equals(k, next.RewardId, StringComparison.OrdinalIgnoreCase)))
+                            next.RewardId = null;
+
+                        if (TryStart(next, out started, out error))
+                        {
+                            anchor = spot;
+                            label = spotLabel;
+                            townName = town;
+                            break;
+                        }
+
+                        log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength}: the next stage could not start at {spotLabel} ({error})");
+                    }
+
+                    if (started == null)
+                    {
+                        if (retired && evt.State != WorldEventState.Done)
+                        {
+                            Current = evt;
+                            Previous = null;
+                        }
+
+                        log.Warn($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId}: the next stage could not start ({error}); the chain ends");
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                        return;
+                    }
+                }
+
+                // The run may have moved its anchor to open ground (protect.clearArea): name where it really is.
+                anchor = started.Composition?.AnchorPosition ?? anchor;
+                label = townName != null ? WorldEventTownIndex.DescribeLabeled(townName, anchor) : WorldEventTownIndex.Describe(anchor);
+
+                var family = started.Composition?.FamilyDisplayName;
+                var seconds = chain?.CountdownSeconds ?? 120;
+                var template = chain?.Announce != null && chain.Announce.Count > 0 ? chain.Announce[chainRng.Next(chain.Announce.Count)] : null;
+                var bossName = started.Composition?.Boss?.Kind == BossKind.Named ? started.Composition.Boss.DisplayName : null;
+                var line = WorldEventChain.AnnounceLine(template, family, label, seconds, townName, bossName);
+
+                // Paced (chain.pacing): the outcome line went out at 0 s; then the thank-you that points to the cache, the story
+                // beat, and this announcement, whose countdown the next stage was started with.
+                var now = Time.GetUnixTime();
+                var tokens = evt.ChainStoryTokens(townName ?? WorldEvent.TownNear(anchor), bossName);
+                List<WorldEventChain.PacedLine> plan;
+
+                lock (chainRng)
+                    plan = WorldEventChain.StageChangePlan(chain, tokens, line, chainRng);
+
+                var nextStage = started;
+                WorldEventLineSchedule.Shared.AddPlan(now, plan, () => nextStage.State < WorldEventState.Resolved);
+
+                var distance = origin != null ? anchor.DistanceTo(origin) : 0;
+
+                log.Info($"[WORLDEVENT] chain root={root} stage {stage}/{maxLength} run={evt.RunId} succeeded -> stage {stage + 1}/{maxLength} " +
+                         $"run={started.RunId} at {label} ({distance:0} m away, {anchor.ToLOCString()}) source={started.Composition?.Source?.Id} " +
+                         $"family={string.Join("+", started.Composition?.Families?.Select(f => f?.Id) ?? Enumerable.Empty<string>())} " +
+                         $"goal={started.Composition?.Goal?.Id} boss={started.Composition?.Boss?.Id} reward={started.Composition?.Reward?.Id}; " +
+                         $"starts {seconds} s after its announcement. Lines at [{string.Join(", ", plan.Select(l => $"{l.Delay:0.#} s"))}]: " +
+                         string.Join(" | ", plan.Select(l => l.Text)));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] chain after run={evt?.RunId} threw; the chain ends", ex);
+
+                try
+                {
+                    if (evt != null && evt.Outcome == WorldEventOutcome.Success)
+                        evt.ScheduleChainEnd(Time.GetUnixTime(), evt.Outcome, thanksFirst: true);
+                }
+                catch (Exception inner)
+                {
+                    log.Error($"[WORLDEVENT] chain closing after run={evt?.RunId} also threw", inner);
+                }
             }
         }
 
@@ -446,10 +784,49 @@ namespace ACE.Server.WorldEvents
                     return false;
                 }
 
+                // Hold settings: the run's time limit and abandon timer (world_events_hold_max_seconds / _abandon_seconds).
+                HoldSettings.ApplyRunTimers(request, composition.Goal);
+
+                if (request != null && !WorldEvent.ValidateDurations(request.MinDurationSeconds, request.MaxDurationSeconds, out error))
+                {
+                    refusal = WorldEventStartRefusal.InvalidDurations;
+                    return false;
+                }
+
+                // Hold: the hold must be able to finish inside the run, or it could only ever time out.
+                if (!WorldEvent.ValidateHoldDuration(composition.Goal,
+                        request?.MaxDurationSeconds ?? WorldEvent.DefaultMaxDurationSeconds, out error))
+                {
+                    refusal = WorldEventStartRefusal.InvalidDurations;
+                    return false;
+                }
+
+                // Hold protect.clearArea: the knights' ground and every portal's path must be clear of buildings, trees,
+                // rocks and other objects. Blocked portals move or are skipped; a blocked anchor moves to the nearest open
+                // spot, else the start is refused.
+                //
+                // goals.json townReach: the spot (after any clear-area move) must be a short walk from a Town Network portal
+                // drop. A spot that is not is re-rolled to the edge of the nearest towns, and logged.
+                if (!TryResolveStartSpot(composition, request, out var areaPlan, out var movedAnchor, out var rerollLabel, out error))
+                {
+                    refusal = WorldEventStartRefusal.CompositionFailed;
+                    return false;
+                }
+
+                if (rerollLabel != null && composition.Anchor != null)
+                    composition.Anchor.DisplayName = rerollLabel;
+
                 if (request.DryRun)
                 {
                     log.Info($"[WORLDEVENT] dry-run compose {composition.ToAxisSummary()}");
                     return true;
+                }
+
+                // The anchor moved to open ground: the composition's position is updated in place, so every reader agrees.
+                if (movedAnchor != null)
+                {
+                    composition.AnchorPosition.LandblockId = movedAnchor.LandblockId;
+                    composition.AnchorPosition.Pos = movedAnchor.Pos;
                 }
 
                 // The WP-06 objective factory needs a constructed event to read the composition from, so
@@ -471,6 +848,9 @@ namespace ACE.Server.WorldEvents
                 }
 
                 candidate.SetObjective(objective);
+
+                if (areaPlan != null)
+                    candidate.HoldPortalSpots = areaPlan.Portals;
 
                 Current = candidate;
 
@@ -521,6 +901,140 @@ namespace ACE.Server.WorldEvents
                 evt = candidate;
                 return true;
             }
+        }
+
+        /// <summary>
+        /// Where a run really starts (live: reads the landscape; under <see cref="sync"/>). Two rules, each from goals.json:
+        ///   * protect.clearArea (Hold): the knights' ground and the portals' paths are clear, else the nearest open spot
+        ///     within its searchRadius;
+        ///   * townReach (the goal's, or the one its chain carried): the spot is within maxWalk of a Town Network portal drop.
+        /// The asked spot is tried first. When it fails either rule and townReach is set, it is re-rolled to the edge of the
+        /// nearest towns (spotMinDistance to spotMaxDistance from each drop, nearest town first), each re-roll checked the
+        /// same way and logged. <paramref name="moved"/> is the new spot (null when the asked one stands);
+        /// <paramref name="rerollLabel"/> names a re-rolled spot ("Holtburg (42.1N, 33.6E)"), null otherwise.
+        /// </summary>
+        private static bool TryResolveStartSpot(WorldEventComposition composition, WorldEventRequest request, out AreaPlan areaPlan,
+            out Position moved, out string rerollLabel, out string error)
+        {
+            areaPlan = null;
+            moved = null;
+            rerollLabel = null;
+            error = null;
+
+            var asked = composition?.AnchorPosition;
+
+            if (asked == null)
+                return true;
+
+            var goal = composition.Goal;
+            var reach = WorldEventTownReach.Effective(goal?.TownReach, request?.TownReach);
+            var checksArea = goal?.TypeKind == GoalType.Hold && goal.Protect?.ClearArea != null;
+            var towns = WorldEventTownIndex.Towns;
+            var tag = (request?.ChainStage ?? 1) > 1 ? $"chain stage {request.ChainStage}" : "start";
+
+            if (reach != null && towns.Count == 0)
+            {
+                log.Warn($"[WORLDEVENT] {tag} goal={goal?.Id}: townReach is set but the town index is empty; the spot is not checked");
+                reach = null;
+            }
+
+            var askedGlobal = asked.ToGlobal();
+            var rerollTowns = reach != null ? WorldEventTownReach.RerollTowns(towns, askedGlobal.X, askedGlobal.Y, reach, request?.ExcludeTowns) : new List<WorldEventTown>();
+            var rng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+            var failures = new List<string>();
+
+            for (var attempt = 0; attempt <= rerollTowns.Count; attempt++)
+            {
+                Position spot;
+                string town = null;
+
+                if (attempt == 0)
+                {
+                    spot = asked;
+
+                    if (reach != null && !WorldEventTownReach.IsReachable(spot, towns, reach.MaxWalk))
+                    {
+                        var where = WorldEventTownReach.Describe(spot, towns);
+                        failures.Add($"the asked spot is not reachable from the Town Network ({where})");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} spot {asked.ToLOCString()} is not reachable from the Town Network " +
+                                 $"({where}, more than the {reach.MaxWalk:0} m walk); re-rolling near {string.Join(", ", rerollTowns.Select(t => t.Name))}");
+                        continue;
+                    }
+                }
+                else
+                {
+                    var t = rerollTowns[attempt - 1];
+                    town = t.Name;
+
+                    if (!WorldEventChain.TryPickNearTown(t, asked, reach.SpotMinDistance, reach.SpotMaxDistance, rng, out spot))
+                    {
+                        failures.Add($"no open ground at the edge of {t.Name}");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} re-roll: no open ground {reach.SpotMinDistance:0} to {reach.SpotMaxDistance:0} m from {t.Name}'s portal drop; trying the next town");
+                        continue;
+                    }
+
+                    spot.Rotation = asked.Rotation;
+                }
+
+                AreaPlan plan = null;
+                Position areaMoved = null;
+
+                if (checksArea)
+                {
+                    var participants = Math.Max(1, WorldEventAudienceSampler.Sample(spot, 60f).Count);
+
+                    if (!WorldEventSpawnArea.TryResolve(spot, goal.Protect, participants, attempt == 0 ? tag : $"{tag} re-roll near {town}",
+                            out plan, out areaMoved, out var areaWhy))
+                    {
+                        if (reach == null)
+                        {
+                            error = $"no open ground for {goal.Id} here: {areaWhy}. Move to open ground, away from buildings, trees and rocks, and try again";
+                            return false;
+                        }
+
+                        failures.Add(attempt == 0 ? $"no open ground here ({areaWhy})" : $"no open ground near {town} ({areaWhy})");
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} {(attempt == 0 ? "the asked spot" : $"the re-roll near {town}")} has no open ground ({areaWhy}); " +
+                                 (attempt < rerollTowns.Count ? "re-rolling" : "nothing left to try"));
+                        continue;
+                    }
+                }
+
+                var final = areaMoved ?? spot;
+
+                if (reach != null && !WorldEventTownReach.IsReachable(final, towns, reach.MaxWalk))
+                {
+                    var where = WorldEventTownReach.Describe(final, towns);
+                    failures.Add($"the open ground found is not reachable ({where})");
+                    log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} the open ground at {final.ToLOCString()} is not reachable from the Town Network ({where}); re-rolling");
+                    continue;
+                }
+
+                areaPlan = plan;
+                moved = attempt == 0 ? areaMoved : final;
+
+                if (reach != null)
+                {
+                    var where = WorldEventTownReach.Describe(final, towns);
+
+                    if (attempt > 0)
+                    {
+                        rerollLabel = WorldEventTownIndex.DescribeLabeled(town, final);
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} re-rolled to {rerollLabel} at {final.ToLOCString()} ({where}), " +
+                                 $"{final.DistanceTo(asked):0} m from the asked spot");
+                    }
+                    else
+                        log.Info($"[WORLDEVENT] {tag} goal={goal?.Id} spot reachable from the Town Network: {where} (walk up to {reach.MaxWalk:0} m)");
+                }
+
+                return true;
+            }
+
+            error = $"no spot reachable from the Town Network for {goal?.Id}: {string.Join("; ", failures)}. " +
+                    $"Start within {reach?.MaxWalk ?? 0:0} m of a town's portal drop, on open ground";
+
+            log.Warn($"[WORLDEVENT] {tag} goal={goal?.Id} refused: {error}");
+
+            return false;
         }
 
         /// <summary>Admin stop. A no-op with a log line when nothing is running.</summary>
@@ -604,6 +1118,20 @@ namespace ACE.Server.WorldEvents
         {
             lock (sync)
             {
+                if (Previous != null && Previous.State != WorldEventState.Done)
+                {
+                    try
+                    {
+                        Previous.Finish(WorldEventOutcome.AbortedShutdown);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error("[WORLDEVENT] shutdown abort of the finishing chained run threw", ex);
+                    }
+                }
+
+                Previous = null;
+
                 if (Current == null || Current.State == WorldEventState.Done)
                 {
                     Current = null;
@@ -769,6 +1297,22 @@ namespace ACE.Server.WorldEvents
         /// hand back clones (see WorldEventParticipation's threading remarks), and this method only ever reads.
         /// </summary>
         public static string StatusText()
+        {
+            var text = StatusTextOfCurrent();
+            var previous = Previous;
+
+            if (previous != null && previous.State != WorldEventState.Done)
+                text += $" Run {previous.RunId} ({previous.Outcome}) is still in its claim window beside the chained run.";
+
+            var stage = Current?.Request?.ChainStage ?? 1;
+
+            if (stage > 1 && Current.State != WorldEventState.Done)
+                text += $" Chain stage {stage}/{Current.Request.ChainMaxLength} (first run {Current.Request.ChainRootRunId}).";
+
+            return text;
+        }
+
+        private static string StatusTextOfCurrent()
         {
             var evt = Current;
 

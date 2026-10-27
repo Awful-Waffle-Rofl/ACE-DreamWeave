@@ -130,6 +130,19 @@ namespace ACE.Server.Entity
 
         public bool Overpower;
 
+        /// <summary>
+        /// World Events Hold: a run monster hitting one of its own run's protected targets. Such a hit always
+        /// lands and skips the body part, armor, shield and resistance steps: the target's TakeDamage replaces
+        /// the amount with a time-based slice of its health anyway, so only "did it land" matters. Without
+        /// this, a target copied from an NPC with no body parts (every hit read as evaded) or high defense
+        /// skills (most hits dodged) could not be hurt at all.
+        /// </summary>
+        public bool WorldEventProtectedHit;
+
+        /// <summary>Whether a hit from <paramref name="attacker"/> on <paramref name="defender"/> is a protected-target hit (see <see cref="WorldEventProtectedHit"/>).</summary>
+        public static bool IsWorldEventProtectedHit(Creature attacker, Creature defender) =>
+            attacker != null && defender != null && attacker.IsWorldEventProtectedTargetFor(defender);
+
 
         // player defender
         public BodyPart BodyPart;
@@ -310,6 +323,8 @@ namespace ACE.Server.Entity
             if (defender.Invincible)
                 return 0.0f;
 
+            WorldEventProtectedHit = IsWorldEventProtectedHit(attacker, defender);
+
             // overpower
             if (attacker.Overpower != null)
                 Overpower = Creature.GetOverpower(attacker, defender);
@@ -336,14 +351,18 @@ namespace ACE.Server.Entity
             // and clamped by monster_effect_avoidance_cap inside; no-op unless its weenie authored one.
             // Reported as an evade because that is what it is from the attacker's side: the attack simply
             // did not land, and no block/parry synergy exists on the monster side to distinguish.
-            if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
+            // (A World Events protected target never avoids its own run's monsters.)
+            if (!WorldEventProtectedHit)
             {
-                Evaded = true;
-                return 0.0f;
+                if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
+                {
+                    Evaded = true;
+                    return 0.0f;
+                }
             }
 
-            // evasion chance
-            if (!Overpower)
+            // evasion chance (a World Events protected target never dodges its own run's monsters)
+            if (!Overpower && !WorldEventProtectedHit)
             {
                 EvasionChance = GetEvadeChance(attacker, defender);
                 if (EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f))
@@ -460,6 +479,15 @@ namespace ACE.Server.Entity
                 }
             }
 
+            // World Events Hold: no body part, armor, shield or resistance for a protected target; at least 1,
+            // so TakeDamage always sees a hit to turn into its time-based slice.
+            if (WorldEventProtectedHit)
+            {
+                Damage = Math.Max(1.0f, DamageBeforeMitigation);
+                DamageMitigated = 0.0f;
+                return Damage;
+            }
+
             // armor rending and cleaving
             var armorRendingMod = 1.0f;
             if (Weapon != null && Weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
@@ -539,6 +567,30 @@ namespace ACE.Server.Entity
             Damage = DamageBeforeMitigation * ArmorMod * ShieldMod * ResistanceMod * DamageResistanceRatingMod;
 
             DamageMitigated = DamageBeforeMitigation - Damage;
+
+            // World Events Hold ward (protect.ward) on a ranged wave monster: missile cut while it is up, melee
+            // shatters it. A no-op for every creature without a ward.
+            if (playerDefender == null && defender.WorldEventWarded)
+            {
+                Damage = defender.ApplyWorldEventWard(CombatType == CombatType.Missile
+                    ? ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Missile
+                    : ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Melee, Damage);
+
+                DamageMitigated = DamageBeforeMitigation - Damage;
+            }
+
+            // World Events Hold (world_events_hold_<role>_player_damage_mult and the boss settings): a run monster's hit on a
+            // player. 1 for every creature of no World Event, so this is a single field read for them.
+            if (playerDefender != null && attacker != null && attacker.P_WorldEvent != null)
+            {
+                var mult = attacker.WorldEventPlayerDamageMult;
+
+                if (mult != 1.0)
+                {
+                    Damage = (float)(Damage * mult);
+                    DamageMitigated = DamageBeforeMitigation - Damage;
+                }
+            }
 
             return Damage;
         }

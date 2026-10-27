@@ -58,6 +58,17 @@ namespace ACE.Server.WorldObjects
 
         public override ACE.Entity.ObjDesc CalculateObjDesc()
         {
+            var objDesc = CalculateCreatureObjDesc();
+
+            // World Events Hold: a corrupted monster's tint (protect.corrupted.tintPalette) over its whole palette. 0 (every
+            // other creature) changes nothing.
+            WorldEvents.WorldEventTint.Apply(objDesc, WorldEventTintPalette);
+
+            return objDesc;
+        }
+
+        private ACE.Entity.ObjDesc CalculateCreatureObjDesc()
+        {
             ACE.Entity.ObjDesc objDesc = new ACE.Entity.ObjDesc();
             ClothingTable item;
 

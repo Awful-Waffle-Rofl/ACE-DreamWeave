@@ -395,6 +395,10 @@ namespace ACE.Server.WorldObjects
             // also comes through here and is exempted inside. A no-op (one field read) for every creature that is not a crystal.
             amount = ApplyBattlegroundDefenderReduction(source, amount);
 
+            // World Events Hold: a monster's hit on a protected target is sized to protect.undefendedSeconds
+            // (Creature_WorldEventHold). A no-op (one field read) for every creature that is not protected.
+            amount = ScaleWorldEventProtectedHit(source, amount);
+
             var tryDamage = (int)Math.Round(amount);
 
             // monster combat effects: incoming-damage filters (a ward subtracting, a reflect answering) get

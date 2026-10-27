@@ -32,6 +32,10 @@ namespace ACE.Server.Managers.Market
             MapAdminPost(a, "/v1/admin/world-events/start", (ctx, principal, rawBody) =>
                 WorldEventReply(service => service.Start(ParseWorldEventBody<WorldEventStartBody>(rawBody), principal.AccountName)));
 
+            // World Events Hold settings, read-only (editing is the generic settings editor): value, source, range, applies.
+            MapAdmin(a, "/v1/admin/world-events/hold-settings", (ctx, principal) =>
+                WorldEventReply(service => service.HoldSettings()));
+
             MapAdminPost(a, "/v1/admin/world-events/stop", (ctx, principal, rawBody) =>
                 WorldEventReply(service => service.Stop(ParseWorldEventBody<WorldEventStopBody>(rawBody), principal.AccountName)));
         }

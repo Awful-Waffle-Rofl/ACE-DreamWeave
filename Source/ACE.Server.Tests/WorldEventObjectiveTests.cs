@@ -418,7 +418,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Factory_Hold_ReturnsAnError()
+        public void Factory_HoldWithoutProtect_ReturnsAnError()
         {
             var goal = new GoalDef { Id = "hold", DisplayName = "Hold", Type = "Hold", TypeKind = GoalType.Hold, HoldSeconds = 60 };
             var evt = BuildEvent(goal, BossDef.None);
@@ -427,6 +427,34 @@ namespace ACE.Server.Tests
 
             Assert.IsNull(objective);
             StringAssert.Contains(error, "Hold");
+            StringAssert.Contains(error, "protect");
+        }
+
+        [TestMethod]
+        public void Factory_HoldWithProtect_BuildsAHoldObjective()
+        {
+            var goal = new GoalDef
+            {
+                Id = "hold_wards", DisplayName = "Defend the Wards", Type = "Hold", TypeKind = GoalType.Hold,
+                HoldSeconds = 60, MvpRule = "MostKills", RuleKind = MvpRule.MostKills,
+                Protect = new ProtectDef
+                {
+                    Wcid = 2000001,
+                    Count = new ScaledCount { Base = 1, PerParticipant = 0, Cap = 3 },
+                    Health = new ScaledCount { Base = 1000, PerParticipant = 0, Cap = 1000 }
+                }
+            };
+
+            var evt = BuildEvent(goal, BossDef.None);
+
+            var objective = WorldEventObjectiveFactory.Create(evt, out var error);
+
+            Assert.IsNull(error);
+            Assert.IsInstanceOfType(objective, typeof(HoldObjective));
+
+            // Nothing is placed yet (no landblock in a test), so the objective is neither met nor failed.
+            Assert.IsFalse(objective.IsComplete);
+            Assert.IsNull(objective.FailureOutcome);
         }
 
         [TestMethod]

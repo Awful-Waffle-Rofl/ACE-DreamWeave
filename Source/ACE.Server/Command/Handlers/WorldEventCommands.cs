@@ -33,15 +33,16 @@ namespace ACE.Server.Command.Handlers
 
         // TECH-DESIGN 5.3, one line per subcommand collapsed onto one usage string per CommandHandlerAttribute.
         private const string Usage =
-            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
-            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--dry] | " +
+            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] [--abandon <seconds>] [--level <n>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
+            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--abandon <seconds> (abandon and wipe timers; 0 = never, for solo staff tests)] [--level <n> (test participant level 1-275)] [--wave-type <breach|runners|ranged|hunters> (Hold: force every non-finale wave)] [--dry] | " +
             "stop [fail|abort] | " +
             "status | " +
             "list [axes|families|presets] | " +
             "reload | " +
             "properties [substring] (every world_events_ server property, one chat line each; '*' marks a non-default value) | " +
             "simulate [--players <n>] [--level <L>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] | " +
-            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list";
+            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list | " +
+            "hold settings [group|all|set|<name>] | hold set <name> <value> | hold reset <name|group|all> | hold export <name> [--all] | hold import <name> [--merge] | hold presets";
 
         private const string DisabledMessage = "World events are disabled (world_events_enabled).";
 
@@ -88,6 +89,10 @@ namespace ACE.Server.Command.Handlers
 
                     case "simulate":
                         HandleSimulate(session, rest);
+                        break;
+
+                    case "hold":
+                        HandleHold(session, rest);
                         break;
 
                     case "scene":
@@ -172,6 +177,15 @@ namespace ACE.Server.Command.Handlers
                 Invoker = session.Player.Name,
                 DryRun = parsed.Dry,
                 MinDurationSeconds = parsed.MinDurationSeconds,
+                AbandonAfterSeconds = parsed.AbandonAfterSeconds ?? WorldEvent.DefaultAbandonAfterSeconds,
+                AbandonExplicit = parsed.AbandonAfterSeconds != null,
+
+                // --abandon covers BOTH "nobody counted is here" timers. Staff never count as present or
+                // alive, so in a solo staff test the wipe rule fires 60 s after the first kill just as the
+                // abandon rule would; --abandon 0 has to turn both off for the test to run its full length.
+                WipeGraceSeconds = WipeGraceFor(parsed.AbandonAfterSeconds),
+                TestLevel = parsed.TestLevel,
+                ForcedWaveType = parsed.ForcedWaveType,
                 Random = parsed.Random,
                 TeaserLeadSeconds = parsed.TeaserLeadSeconds
             };
@@ -717,6 +731,135 @@ namespace ACE.Server.Command.Handlers
             CommandHandlerHelper.WriteOutputInfo(session, message, ChatMessageType.Broadcast);
         }
 
+        /// <summary>One "/worldevent hold ..." command, parsed (D6 - pure).</summary>
+        public sealed class HoldArgs
+        {
+            public string Verb;
+            public string Target;
+            public string Value;
+            public bool All;
+            public bool Merge;
+        }
+
+        public const string HoldUsage =
+            "hold settings [group|all|set|<name>] | hold set <name> <value> | hold reset <name|group|all> | " +
+            "hold export <name> [--all] | hold import <name> [--merge] | hold presets";
+
+        /// <summary>
+        /// Parses the words after "hold" (D6 - pure). A set value may have spaces (a list); --all and --merge are only for
+        /// export and import. False with a reason for anything else.
+        /// </summary>
+        public static bool TryParseHoldArgs(IReadOnlyList<string> words, out HoldArgs args, out string error)
+        {
+            args = new HoldArgs();
+            error = null;
+
+            if (words == null || words.Count == 0)
+            {
+                args.Verb = "settings";
+                return true;
+            }
+
+            args.Verb = words[0].Trim().ToLowerInvariant();
+            var rest = words.Skip(1).Where(w => !string.IsNullOrWhiteSpace(w)).ToList();
+
+            switch (args.Verb)
+            {
+                case "settings":
+                case "show":
+                    args.Verb = "settings";
+                    args.Target = rest.FirstOrDefault();
+                    return true;
+
+                case "set":
+                    if (rest.Count < 2)
+                    {
+                        error = "use: hold set <name> <value>";
+                        return false;
+                    }
+
+                    args.Target = rest[0];
+                    args.Value = string.Join(" ", rest.Skip(1));
+                    return true;
+
+                case "reset":
+                    if (rest.Count != 1)
+                    {
+                        error = "use: hold reset <name|group|all>";
+                        return false;
+                    }
+
+                    args.Target = rest[0];
+                    return true;
+
+                case "export":
+                case "import":
+                {
+                    var flag = args.Verb == "export" ? "--all" : "--merge";
+                    var names = rest.Where(w => !w.StartsWith("--", StringComparison.Ordinal)).ToList();
+                    var flags = rest.Where(w => w.StartsWith("--", StringComparison.Ordinal)).Select(w => w.ToLowerInvariant()).ToList();
+
+                    if (names.Count != 1 || flags.Any(f => f != flag))
+                    {
+                        error = $"use: hold {args.Verb} <name> [{flag}]";
+                        return false;
+                    }
+
+                    args.Target = names[0];
+                    args.All = flags.Contains("--all");
+                    args.Merge = flags.Contains("--merge");
+                    return true;
+                }
+
+                case "presets":
+                    return true;
+
+                default:
+                    error = $"unknown hold command '{args.Verb}'. {HoldUsage}";
+                    return false;
+            }
+        }
+
+        private static void HandleHold(Session session, string[] rest)
+        {
+            if (!TryParseHoldArgs(rest, out var args, out var error))
+            {
+                Reply(session, error);
+                return;
+            }
+
+            string reply;
+
+            switch (args.Verb)
+            {
+                case "settings":
+                    reply = HoldSettingsAdmin.Settings(args.Target);
+                    break;
+                case "set":
+                    reply = HoldSettingsAdmin.Set(args.Target, args.Value, session);
+                    break;
+                case "reset":
+                    reply = HoldSettingsAdmin.Reset(args.Target, session);
+                    break;
+                case "export":
+                    reply = HoldSettingsAdmin.Export(args.Target, args.All);
+                    Audit(session, $"hold export {args.Target}{(args.All ? " --all" : "")}: {reply}");
+                    break;
+                case "import":
+                    reply = HoldSettingsAdmin.Import(args.Target, args.Merge, session);
+                    break;
+                default:
+                    var presets = HoldSettingsAdmin.Presets();
+                    reply = presets.Count == 0 ? "No Hold presets yet (hold export <name>)." : "Hold presets: " + string.Join(", ", presets);
+                    break;
+            }
+
+            // One chat line per line of the reply, like "properties".
+            foreach (var line in (reply ?? "").Split('\n'))
+                if (line.Trim().Length > 0)
+                    Reply(session, line.TrimEnd('\r'));
+        }
+
         private static void Audit(Session session, string message)
         {
             PlayerManager.BroadcastToAuditChannel(session?.Player, $"[WORLDEVENT] {message}");
@@ -762,7 +905,37 @@ namespace ACE.Server.Command.Handlers
             /// world_events_teaser_lead_seconds tunable (WorldEventRequest.TeaserLeadSeconds).
             /// </summary>
             public int? TeaserLeadSeconds { get; set; }
+
+            /// <summary>
+            /// "--abandon &lt;seconds&gt;": how long the run waits with no kill credit and no (non-staff) player
+            /// present before failing as FailedNoParticipants. 0 turns that rule off for this run, which is
+            /// what a solo admin test needs (staff never count as present). Null when the flag was not passed:
+            /// the run default (<see cref="WorldEvent.DefaultAbandonAfterSeconds"/>) applies.
+            /// </summary>
+            public int? AbandonAfterSeconds { get; set; }
+
+            /// <summary>
+            /// "--level &lt;n&gt;" (admin testing): the participant level every audience sample uses, so a solo
+            /// staff tester (who never counts) can see the waves a level-n group would get. Null when the flag
+            /// was not passed: the real players decide.
+            /// </summary>
+            public int? TestLevel { get; set; }
+
+            /// <summary>"--wave-type &lt;t&gt;" (admin testing, Hold runs): every non-finale wave is this special type. Null rolls normally.</summary>
+            public ACE.Server.WorldEvents.Defs.HoldWaveType? ForcedWaveType { get; set; }
         }
+
+        /// <summary>The largest --abandon value accepted, in seconds (one hour).</summary>
+        public const int MaxAbandonSeconds = 3600;
+
+        /// <summary>
+        /// The run's wipe grace for an --abandon value (D6 - pure): the same number (so --abandon 0 also turns
+        /// the wipe rule off), or the run default when the flag was not passed.
+        /// </summary>
+        public static int WipeGraceFor(int? abandonSeconds) => abandonSeconds ?? WorldEvent.DefaultWipeGraceSeconds;
+
+        /// <summary>The largest --level accepted: the highest level the bands consider (WorldEventRosterSelector.MaxConsideredLevel).</summary>
+        public const int MaxTestLevel = WorldEventRosterSelector.MaxConsideredLevel;
 
         public class WorldEventSimulateArgs
         {
@@ -905,6 +1078,48 @@ namespace ACE.Server.Command.Handlers
                         }
 
                         result.TeaserLeadSeconds = teaserLead;
+                        break;
+
+                    case "--abandon":
+                        if (!TryTakeValue(args, ref i, flag, out var abandonRaw, out error))
+                            return false;
+
+                        if (!int.TryParse(abandonRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var abandon)
+                            || abandon < 0 || abandon > MaxAbandonSeconds)
+                        {
+                            error = $"--abandon needs a whole number of seconds from 0 (never) to {MaxAbandonSeconds}";
+                            return false;
+                        }
+
+                        result.AbandonAfterSeconds = abandon;
+                        break;
+
+                    case "--level":
+                        if (!TryTakeValue(args, ref i, flag, out var levelRaw, out error))
+                            return false;
+
+                        if (!int.TryParse(levelRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var testLevel)
+                            || testLevel < 1 || testLevel > MaxTestLevel)
+                        {
+                            error = $"--level needs a whole number from 1 to {MaxTestLevel}";
+                            return false;
+                        }
+
+                        result.TestLevel = testLevel;
+                        break;
+
+                    case "--wave-type":
+                        if (!TryTakeValue(args, ref i, flag, out var waveTypeRaw, out error))
+                            return false;
+
+                        if (!ACE.Server.WorldEvents.WorldEventHoldRules.TryParseWaveType(waveTypeRaw, out var waveType)
+                            || waveType == ACE.Server.WorldEvents.Defs.HoldWaveType.Finale)
+                        {
+                            error = "--wave-type needs one of breach, runners, ranged, hunters";
+                            return false;
+                        }
+
+                        result.ForcedWaveType = waveType;
                         break;
 
                     default:

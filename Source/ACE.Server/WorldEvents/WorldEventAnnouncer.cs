@@ -198,9 +198,15 @@ namespace ACE.Server.WorldEvents
         /// brace token is left literal - there is no unknown-token diagnostic at announce time.
         /// </summary>
         private static string SubstituteTokens(string template, string goal, string anchor, string boss,
-            string noun, string nounPlural, string reason)
+            string noun, string nounPlural, string reason, string family = null)
         {
             var result = template ?? "";
+
+            // {family}/{Family}: the run's composed monster families (2026-10-17, Hold targets). Families vary
+            // per run, so a template names them only through this token. Same fallback as protect lines.
+            var familyText = string.IsNullOrWhiteSpace(family) ? WorldEventHoldRules.DefaultFamilyText : family.Trim();
+            result = result.Replace("{Family}", WorldEventHoldRules.CapitalizeFirst(familyText));
+            result = result.Replace("{family}", familyText);
 
             result = result.Replace("{goal}", goal ?? "");
             result = result.Replace("{anchor}", anchor ?? "");
@@ -302,7 +308,7 @@ namespace ACE.Server.WorldEvents
         public static string OutcomeLine(WorldEventOutcome outcome, GoalDef goal, string anchorName,
             WorldEventMvp mvp, ParticipantRecord topKiller, int participants, string bossName = null,
             string goalDisplayName = null, string successTemplate = null, string failTemplate = null,
-            string noun = null, string nounPlural = null)
+            string noun = null, string nounPlural = null, string family = null)
         {
             var goalName = GoalName(goal, goalDisplayName);
 
@@ -311,7 +317,7 @@ namespace ACE.Server.WorldEvents
                 case WorldEventOutcome.Success:
                 {
                     var line = !string.IsNullOrWhiteSpace(successTemplate)
-                        ? Global(SubstituteTokens(successTemplate, goalName, anchorName, bossName, noun, nounPlural, null))
+                        ? Global(SubstituteTokens(successTemplate, goalName, anchorName, bossName, noun, nounPlural, null, family))
                         : Global($"{goalName} at {anchorName} succeeded!");
 
                     var mvpSentence = MvpSentence(mvp);
@@ -322,7 +328,7 @@ namespace ACE.Server.WorldEvents
                     var killerName = topKiller?.Name ?? "none";
                     var killerKills = topKiller?.Kills ?? 0;
 
-                    line += $" Most kills: {killerName} ({killerKills}). {participants} defenders took part.";
+                    line += $" Most kills: {killerName} ({killerKills}). {DefendersTookPart(participants)}";
 
                     return line;
                 }
@@ -334,17 +340,20 @@ namespace ACE.Server.WorldEvents
 
                     return Global($"{goalName} at {anchorName} ended: {bossName ?? "the champion"} never " +
                         $"showed and the defenders hold the field. Most kills: {killerName} ({killerKills}). " +
-                        $"{participants} defenders took part.");
+                        $"{DefendersTookPart(participants)}");
                 }
 
                 case WorldEventOutcome.FailedTimeout:
-                    return FailedLine(goalName, anchorName, "time ran out", failTemplate, bossName, noun, nounPlural);
+                    return FailedLine(goalName, anchorName, "time ran out", failTemplate, bossName, noun, nounPlural, family);
 
                 case WorldEventOutcome.FailedWipe:
-                    return FailedLine(goalName, anchorName, "the defenders were wiped out", failTemplate, bossName, noun, nounPlural);
+                    return FailedLine(goalName, anchorName, "the defenders were wiped out", failTemplate, bossName, noun, nounPlural, family);
 
                 case WorldEventOutcome.FailedNoParticipants:
-                    return FailedLine(goalName, anchorName, "nobody answered the call", failTemplate, bossName, noun, nounPlural);
+                    return FailedLine(goalName, anchorName, "nobody answered the call", failTemplate, bossName, noun, nounPlural, family);
+
+                case WorldEventOutcome.FailedObjectiveLost:
+                    return FailedLine(goalName, anchorName, ObjectiveLostReason(nounPlural), failTemplate, bossName, noun, nounPlural, family);
 
                 case WorldEventOutcome.AbortedAdmin:
                 case WorldEventOutcome.AbortedShutdown:
@@ -356,11 +365,60 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>"1 defender took part." or "3 defenders took part." (D6 - pure).</summary>
+        public static string DefendersTookPart(int participants) =>
+            $"{participants} {(participants == 1 ? "defender" : "defenders")} took part.";
+
+        /// <summary>The {reason} for <see cref="WorldEventOutcome.FailedObjectiveLost"/>: "the wards were destroyed".</summary>
+        public static string ObjectiveLostReason(string nounPlural)
+        {
+            var plural = string.IsNullOrWhiteSpace(nounPlural) ? ProtectDef.DefaultNounPlural : nounPlural;
+
+            return $"the {plural} were destroyed";
+        }
+
+        /// <summary>
+        /// A Hold goal's protected target crossed a health milestone (75%, 50%, 25%), fired once per tier per
+        /// target - see <see cref="WorldEvent"/>'s protected-target milestone tick.
+        /// </summary>
+        public static string ProtectedHealthMilestoneLine(string noun, string anchorName, int pct)
+        {
+            var name = string.IsNullOrWhiteSpace(noun) ? ProtectDef.DefaultNoun : noun;
+
+            // "An envoy", "A ward": the article follows the noun's first letter.
+            var trimmed = name.Trim();
+            var article = trimmed.Length > 0 && "aeiou".IndexOf(char.ToLowerInvariant(trimmed[0])) >= 0 ? "An" : "A";
+
+            return Global($"{article} {trimmed} at {anchorName} is at {pct}% health!");
+        }
+
+        /// <summary>
+        /// The global copy of a protected target's spoken line (destroyed and success lines):
+        /// "[World Event] Sir Donovan: "We made it!"". Falls back to the default noun for a nameless speaker.
+        /// </summary>
+        public static string ProtectedSpeechLine(string speakerName, string line)
+        {
+            var name = string.IsNullOrWhiteSpace(speakerName) ? CapitalizeFirst(ProtectDef.DefaultNoun) : speakerName;
+
+            return Global($"{name}: \"{line}\"");
+        }
+
+        /// <summary>
+        /// A Hold phase (a special wave or the finale) as a World Event broadcast (D6 - pure):
+        /// "[World Event] Wave 4 of 7: They are massing on the east flank!" or "[World Event] Final wave: ...".
+        /// </summary>
+        public static string HoldPhaseLine(string label, string announce)
+        {
+            return Global($"{(string.IsNullOrWhiteSpace(label) ? "Next wave" : label)}: {announce ?? ""}");
+        }
+
+        private static string CapitalizeFirst(string text) => WorldEventHoldRules.CapitalizeFirst(text);
+
         private static string FailedLine(string goalName, string anchorName, string reason, string failTemplate = null,
-            string bossName = null, string noun = null, string nounPlural = null)
+            string bossName = null, string noun = null, string nounPlural = null, string family = null)
         {
             var body = !string.IsNullOrWhiteSpace(failTemplate)
-                ? SubstituteTokens(failTemplate, goalName, anchorName, bossName, noun, nounPlural, reason)
+                ? SubstituteTokens(failTemplate, goalName, anchorName, bossName, noun, nounPlural, reason, family)
                 : $"{goalName} at {anchorName} failed - {reason}.";
 
             return Global($"{body} A consolation cache remains for a short while.");
@@ -576,7 +634,7 @@ namespace ACE.Server.WorldEvents
             try
             {
                 var anchor = evt.Composition?.AnchorPosition;
-                var radius = evt.Composition?.Source?.RewardRadius ?? 0f;
+                var radius = evt.EffectiveRewardRadius;
 
                 LocalAt(anchor, radius, msg, $"run={evt.RunId} ");
             }

@@ -1247,6 +1247,19 @@ namespace ACE.Server.WorldObjects
                 // Placed AFTER the cloak damage proc, matching the physical path's order, and inside the
                 // health branch so a Stamina/Mana Lowering drain is never absorbed - the barrier trades
                 // Mana for Health, which would be nonsense against a mana drain.
+                // World Events Hold (world_events_hold_<role>_player_damage_mult and the boss settings): a run monster's
+                // bolt on a player. Before the class barrier, like the physical path's multiplier. 1 for everyone else.
+                if (targetPlayer != null && ProjectileSource is Creature worldEventCaster && worldEventCaster.P_WorldEvent != null)
+                {
+                    var mult = worldEventCaster.WorldEventPlayerDamageMult;
+
+                    if (mult != 1.0)
+                    {
+                        damage = (float)(damage * mult);
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
                 if (targetPlayer != null)
                 {
                     var beforeMitigation = (uint)Math.Round(damage);
@@ -1271,6 +1284,27 @@ namespace ACE.Server.WorldObjects
 
                     if (damage != beforeDefenderReduction)
                         percent = damage / target.Health.MaxValue;
+                }
+
+                // World Events Hold ward (protect.ward) on a ranged wave monster: a spell is magic, cut while the
+                // ward is up (or shattering it, if the goal says magic breaks it). No-op without a ward.
+                if (targetPlayer == null && damage > 0.0f && target.WorldEventWarded)
+                {
+                    var beforeHoldWard = damage;
+
+                    damage = target.ApplyWorldEventWard(ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, damage);
+
+                    if (damage != beforeHoldWard)
+                        percent = damage / target.Health.MaxValue;
+                }
+
+                // World Events Hold: a run monster's bolt on a protected target is sized like its melee hits
+                // (protect.undefendedSeconds, the corrupted multiplier, the minDeathSeconds cap), the twin of the
+                // call at the top of Creature.TakeDamage, which this path never reaches. No-op for anyone else.
+                if (targetPlayer == null && damage > 0.0f && target.WorldEventProtected)
+                {
+                    damage = target.ScaleWorldEventProtectedHit(ProjectileSource, damage);
+                    percent = damage / target.Health.MaxValue;
                 }
 
                 // Monster combat effects: the non-player mirror of the Sanguine Ward call above, in the same

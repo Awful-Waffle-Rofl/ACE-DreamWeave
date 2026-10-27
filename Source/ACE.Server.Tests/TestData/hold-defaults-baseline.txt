@@ -1,0 +1,149 @@
+goal.holdSeconds = 480
+knights.count(1..12) = 3,3,3,3,3,3,3,3,3,3,3,3
+knights.layout(1..12) = 3@16,3@16,3@16,3@16,3@16,3@16,3@16,3@16,3@16,3@16,3@16,3@16
+knights.maxHealth(1..12) = 10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000,10000
+knights.undefended(1..12) = 200,135,100,100,100,100,100,100,100,100,100,100
+knights.minDeathSeconds = 60
+knights.minSurvivors = 1
+knights.healthMilestones = True
+knights.showHealthBar = True
+knights.defendPose = 2.5/2/3/3/20
+knights.timeScaledMaxHealth = 10000
+knights.maxTargets = 3
+knights.placementGrace = 5
+heal.shrine = 2000008/4/20
+heal.shrineHeal = 0.15
+heal.shrineCooldown = 45
+heal.corruptedKillHeal = 0.1
+heal.rescue = 0.01/0.1
+heal.regen = 0.005/10
+heal.playerCap = 0.1
+heal.reduction = 0.5/5
+heal.betweenWaves = 0.1
+heal.budget = 0.35
+mix.shares = 0.2,0.15,0.15,0.3,0.1,0.1
+mix.minimums = 0,2,0,3,0,1
+mix.maximums = -1,-1,-1,-1,-1,2
+runners = 0.6/0.6/1.5/1.5
+ranged.holdDistance = 18
+corrupted = 1.5/1.5/12/1.5/3/2/2/2/0x04001381
+seekShare = 0.8
+waves.count(1..12) = 7,7,7,7,8,8,8,8,9,9,9,9
+waves.size(0..40) = 1,4,6,9,11,14,16,19,21,24,26,29,31,34,36,39,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40
+waves.maxAlive = 40
+waves.interval = 40
+waves.cadence = 0.2/True/75/8/0
+waves.spawnRadius = 26
+waves.portals = 4/30/0.9
+waves.maxHoldWaves = 10
+waves.minSpawnClearance = 10
+waves.finalBonus(0..40) = 1,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8,9,9,9,9,10,10,10,10
+waves.mixCounts(1..45) = 0,0,0,1,0,0;0,0,0,1,0,1;0,1,0,1,0,1;0,1,0,2,0,1;0,2,0,2,0,1;0,2,0,3,0,1;1,2,0,3,0,1;1,2,1,3,0,1;1,2,1,3,1,1;2,2,1,3,1,1;2,2,2,3,1,1;2,2,2,4,1,1;3,2,2,4,1,1;3,2,2,4,2,1;3,2,2,5,2,1;3,2,2,5,2,2;3,3,2,5,2,2;3,3,3,5,2,2;4,3,3,5,2,2;4,3,3,6,2,2;4,3,3,7,2,2;5,3,3,7,2,2;5,4,3,7,2,2;5,4,4,7,2,2;5,4,4,8,2,2;5,4,4,8,3,2;6,4,4,8,3,2;7,4,4,8,3,2;7,4,4,9,3,2;7,5,4,9,3,2;7,5,5,9,3,2;7,5,5,10,3,2;8,5,5,10,3,2;8,5,5,10,4,2;8,5,5,11,4,2;9,5,5,11,4,2;9,6,5,11,4,2;9,6,6,11,4,2;10,6,6,11,4,2;10,6,6,12,4,2;10,6,6,13,4,2;11,6,6,13,4,2;11,7,6,13,4,2;11,7,7,13,4,2;11,7,7,14,4,2
+waves.assaults(1..10) = False,True,False,True,False,True,False,True,False,False
+finale = 0/3/5/Warlord/True
+finale.boss = 50/15/20/0.06/8/10
+finale.scale(cfg 0, x0.67) = 0.6700000166893005
+rules.hitInterval = 2/1/4
+rules.hitDamage = 25,50,100,150,200,400
+rules.betweenWaves = 1000
+rules.budget = 1500,1500,500,0
+rules.playerHeal = 200,400,600,100,100
+rules.cap = 333.3333435058594,166.6666717529297,166.6666717529297,166.6666717529297,166.6666717529297,166.6666717529297,166.6666717529297,166.6666717529297
+rules.healAfterHit = 1,0.5,0.5,1,1
+rules.empower = 3/1.5
+rules.rangedSlack = 1.5
+rules.runnersKeep(1..12) = 1,1,2,2,3,4,4,5,5,6,7,7
+chain = 2/120/250/500/True/800/8000/4/60/160
+chain.next = sky_rift/kill_boss/auto/standard+chain_final
+chain.pacing = 2/5/8/3/3/6
+townReach = 250/60/160/4
+sim.1.Active.0 = WIN  survivors=3/3 waves=7 end=362s healed=453% dmg=565% above90=1/21 assaults=3 assaultDmg=106% boss=3300/1/19/65/0 low=0.605833
+sim.1.Active.1 = WIN  survivors=3/3 waves=7 end=362s healed=450% dmg=578% above90=1/21 assaults=3 assaultDmg=103% boss=3800/2/21/66/0 low=0.474167
+sim.1.Active.2 = WIN  survivors=3/3 waves=7 end=362s healed=422% dmg=547% above90=1/21 assaults=3 assaultDmg=91% boss=4266.667/2/24/63/0 low=0.550833
+sim.1.Active.3 = WIN  survivors=3/3 waves=7 end=366s healed=443% dmg=588% above90=1/21 assaults=3 assaultDmg=107% boss=3733.333/2/21/66/0 low=0.365
+sim.1.Active.4 = WIN  survivors=3/3 waves=7 end=362s healed=438% dmg=561% above90=1/21 assaults=3 assaultDmg=96% boss=4133.333/1/24/63/0 low=0.4625
+sim.1.Active.5 = WIN  survivors=3/3 waves=7 end=361s healed=434% dmg=559% above90=1/21 assaults=3 assaultDmg=98% boss=5233.333/2/30/54/0 low=0.476667
+sim.1.NoFocus.0 = WIN  survivors=3/3 waves=7 end=362s healed=483% dmg=613% above90=1/21 assaults=3 assaultDmg=239% boss=4300/1/25/63/0 low=0.462467
+sim.1.NoFocus.1 = WIN  survivors=3/3 waves=7 end=354s healed=467% dmg=599% above90=1/21 assaults=3 assaultDmg=225% boss=5466.667/2/31/54/0 low=0.416667
+sim.1.NoFocus.2 = WIN  survivors=2/3 waves=7 end=362s healed=436% dmg=647% above90=2/20 assaults=3 assaultDmg=276% boss=3733.333/2/21/66/0 low=0.1775
+sim.1.NoFocus.3 = WIN  survivors=3/3 waves=7 end=361s healed=502% dmg=619% above90=1/21 assaults=3 assaultDmg=226% boss=4800/1/28/53/0 low=0.434167
+sim.1.NoFocus.4 = WIN  survivors=3/3 waves=7 end=355s healed=460% dmg=600% above90=2/21 assaults=3 assaultDmg=239% boss=5366.667/2/31/54/0 low=0.504167
+sim.1.NoFocus.5 = WIN  survivors=3/3 waves=7 end=356s healed=460% dmg=578% above90=1/21 assaults=3 assaultDmg=190% boss=4166.667/2/24/63/0 low=0.524167
+sim.1.Ignore.0 = LOSS survivors=0/3 waves=2 end=114s healed=0% dmg=301% above90=0/5 assaults=1 assaultDmg=48% boss=0/0/0/0/0 low=0
+sim.1.Ignore.1 = LOSS survivors=0/3 waves=2 end=119s healed=0% dmg=301% above90=0/4 assaults=1 assaultDmg=44% boss=0/0/0/0/0 low=0
+sim.1.Ignore.2 = LOSS survivors=0/3 waves=2 end=115s healed=0% dmg=302% above90=0/5 assaults=1 assaultDmg=43% boss=0/0/0/0/0 low=0
+sim.1.Ignore.3 = LOSS survivors=0/3 waves=2 end=116s healed=0% dmg=302% above90=0/4 assaults=1 assaultDmg=47% boss=0/0/0/0/0 low=0
+sim.1.Ignore.4 = LOSS survivors=0/3 waves=2 end=120s healed=0% dmg=302% above90=0/4 assaults=1 assaultDmg=48% boss=0/0/0/0/0 low=0
+sim.1.Ignore.5 = LOSS survivors=0/3 waves=2 end=116s healed=0% dmg=302% above90=0/4 assaults=1 assaultDmg=43% boss=0/0/0/0/0 low=0
+sim.2.Active.0 = WIN  survivors=3/3 waves=7 end=306s healed=527% dmg=592% above90=0/21 assaults=3 assaultDmg=55% boss=2566.667/0/15/47/0 low=0.676574
+sim.2.Active.1 = WIN  survivors=3/3 waves=7 end=307s healed=525% dmg=575% above90=0/21 assaults=3 assaultDmg=55% boss=3566.667/1/21/42/0 low=0.749044
+sim.2.Active.2 = WIN  survivors=3/3 waves=7 end=306s healed=524% dmg=572% above90=0/21 assaults=3 assaultDmg=55% boss=2566.667/0/15/47/0 low=0.793078
+sim.2.Active.3 = WIN  survivors=3/3 waves=7 end=309s healed=536% dmg=577% above90=0/21 assaults=3 assaultDmg=55% boss=4033.333/1/23/42/0 low=0.84317
+sim.2.Active.4 = WIN  survivors=3/3 waves=7 end=307s healed=533% dmg=592% above90=0/21 assaults=3 assaultDmg=55% boss=3666.667/1/21/42/0 low=0.771667
+sim.2.Active.5 = WIN  survivors=3/3 waves=7 end=306s healed=534% dmg=591% above90=0/21 assaults=3 assaultDmg=55% boss=2566.667/0/15/47/0 low=0.789467
+sim.2.NoFocus.0 = WIN  survivors=3/3 waves=7 end=307s healed=512% dmg=538% above90=0/21 assaults=3 assaultDmg=167% boss=3633.333/1/21/42/0 low=0.818541
+sim.2.NoFocus.1 = WIN  survivors=3/3 waves=7 end=307s healed=540% dmg=590% above90=0/21 assaults=3 assaultDmg=169% boss=3600/1/21/42/0 low=0.800159
+sim.2.NoFocus.2 = WIN  survivors=3/3 waves=7 end=307s healed=514% dmg=555% above90=0/21 assaults=3 assaultDmg=148% boss=3666.667/1/21/42/0 low=0.854418
+sim.2.NoFocus.3 = WIN  survivors=3/3 waves=7 end=307s healed=528% dmg=569% above90=0/21 assaults=3 assaultDmg=152% boss=3733.333/1/21/42/0 low=0.783648
+sim.2.NoFocus.4 = WIN  survivors=3/3 waves=7 end=307s healed=508% dmg=537% above90=1/21 assaults=3 assaultDmg=171% boss=3633.333/1/21/42/0 low=0.761418
+sim.2.NoFocus.5 = WIN  survivors=3/3 waves=7 end=307s healed=528% dmg=573% above90=0/21 assaults=3 assaultDmg=148% boss=3733.333/1/21/42/0 low=0.799141
+sim.2.Ignore.0 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.2.Ignore.1 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.2.Ignore.2 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.2.Ignore.3 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.2.Ignore.4 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.2.Ignore.5 = LOSS survivors=0/3 waves=1 end=71s healed=0% dmg=303% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Active.0 = WIN  survivors=3/3 waves=7 end=301s healed=556% dmg=605% above90=0/21 assaults=3 assaultDmg=31% boss=2533.333/0/15/42/0 low=0.805833
+sim.3.Active.1 = WIN  survivors=3/3 waves=7 end=301s healed=568% dmg=609% above90=0/21 assaults=3 assaultDmg=34% boss=2533.333/0/15/42/0 low=0.814167
+sim.3.Active.2 = WIN  survivors=3/3 waves=7 end=301s healed=559% dmg=599% above90=0/21 assaults=3 assaultDmg=37% boss=2533.333/0/15/42/0 low=0.76
+sim.3.Active.3 = WIN  survivors=3/3 waves=7 end=301s healed=561% dmg=610% above90=0/21 assaults=3 assaultDmg=29% boss=2533.333/0/15/42/0 low=0.758333
+sim.3.Active.4 = WIN  survivors=3/3 waves=7 end=301s healed=576% dmg=610% above90=0/21 assaults=3 assaultDmg=35% boss=2533.333/0/15/42/0 low=0.7933
+sim.3.Active.5 = WIN  survivors=3/3 waves=7 end=301s healed=581% dmg=607% above90=0/21 assaults=3 assaultDmg=34% boss=2533.333/0/15/42/0 low=0.821633
+sim.3.NoFocus.0 = WIN  survivors=3/3 waves=7 end=301s healed=543% dmg=581% above90=0/21 assaults=3 assaultDmg=132% boss=2533.333/0/15/42/0 low=0.769167
+sim.3.NoFocus.1 = WIN  survivors=3/3 waves=7 end=301s healed=552% dmg=587% above90=0/21 assaults=3 assaultDmg=137% boss=2533.333/0/15/42/0 low=0.7625
+sim.3.NoFocus.2 = WIN  survivors=3/3 waves=7 end=301s healed=542% dmg=572% above90=0/21 assaults=3 assaultDmg=126% boss=2533.333/0/15/42/0 low=0.724167
+sim.3.NoFocus.3 = WIN  survivors=3/3 waves=7 end=301s healed=551% dmg=583% above90=0/21 assaults=3 assaultDmg=126% boss=2533.333/0/15/42/0 low=0.769167
+sim.3.NoFocus.4 = WIN  survivors=3/3 waves=7 end=303s healed=553% dmg=585% above90=0/21 assaults=3 assaultDmg=132% boss=2866.667/0/17/42/0 low=0.84
+sim.3.NoFocus.5 = WIN  survivors=3/3 waves=7 end=301s healed=559% dmg=575% above90=0/21 assaults=3 assaultDmg=134% boss=2533.333/0/15/42/0 low=0.8416
+sim.3.Ignore.0 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Ignore.1 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Ignore.2 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Ignore.3 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Ignore.4 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.3.Ignore.5 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=301% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Active.0 = WIN  survivors=3/3 waves=8 end=341s healed=613% dmg=637% above90=0/24 assaults=3 assaultDmg=17% boss=2533.333/0/15/42/0 low=0.759933
+sim.5.Active.1 = WIN  survivors=3/3 waves=8 end=341s healed=613% dmg=640% above90=0/24 assaults=3 assaultDmg=20% boss=2533.333/0/15/42/0 low=0.7475
+sim.5.Active.2 = WIN  survivors=3/3 waves=8 end=341s healed=621% dmg=640% above90=0/24 assaults=3 assaultDmg=24% boss=2533.333/0/15/42/0 low=0.804967
+sim.5.Active.3 = WIN  survivors=3/3 waves=8 end=341s healed=624% dmg=647% above90=0/24 assaults=3 assaultDmg=15% boss=2533.333/0/15/42/0 low=0.779933
+sim.5.Active.4 = WIN  survivors=3/3 waves=8 end=341s healed=614% dmg=640% above90=0/24 assaults=3 assaultDmg=23% boss=2533.333/0/15/42/0 low=0.7466
+sim.5.Active.5 = WIN  survivors=3/3 waves=8 end=341s healed=621% dmg=647% above90=0/24 assaults=3 assaultDmg=21% boss=2533.333/0/15/42/0 low=0.7566
+sim.5.NoFocus.0 = WIN  survivors=3/3 waves=8 end=341s healed=616% dmg=641% above90=0/24 assaults=3 assaultDmg=117% boss=2533.333/0/15/42/0 low=0.7533
+sim.5.NoFocus.1 = WIN  survivors=3/3 waves=8 end=341s healed=610% dmg=626% above90=0/24 assaults=3 assaultDmg=97% boss=2533.333/0/15/42/0 low=0.8416
+sim.5.NoFocus.2 = WIN  survivors=3/3 waves=8 end=341s healed=610% dmg=626% above90=0/24 assaults=3 assaultDmg=102% boss=2533.333/0/15/42/0 low=0.839167
+sim.5.NoFocus.3 = WIN  survivors=3/3 waves=8 end=341s healed=616% dmg=640% above90=0/24 assaults=3 assaultDmg=95% boss=2533.333/0/15/42/0 low=0.754967
+sim.5.NoFocus.4 = WIN  survivors=3/3 waves=8 end=341s healed=609% dmg=628% above90=0/24 assaults=3 assaultDmg=109% boss=2533.333/0/15/42/0 low=0.8116
+sim.5.NoFocus.5 = WIN  survivors=3/3 waves=8 end=341s healed=613% dmg=628% above90=0/24 assaults=3 assaultDmg=102% boss=2533.333/0/15/42/0 low=0.8466
+sim.5.Ignore.0 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Ignore.1 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Ignore.2 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Ignore.3 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Ignore.4 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.5.Ignore.5 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Active.0 = WIN  survivors=3/3 waves=9 end=392s healed=795% dmg=838% above90=0/27 assaults=4 assaultDmg=18% boss=3033.333/0/18/50/0 low=0.788333
+sim.10.Active.1 = WIN  survivors=3/3 waves=9 end=392s healed=800% dmg=834% above90=0/27 assaults=4 assaultDmg=18% boss=3033.333/0/18/50/0 low=0.814167
+sim.10.Active.2 = WIN  survivors=3/3 waves=9 end=392s healed=788% dmg=839% above90=0/27 assaults=4 assaultDmg=20% boss=3066.667/1/18/50/0 low=0.790833
+sim.10.Active.3 = WIN  survivors=3/3 waves=9 end=392s healed=798% dmg=838% above90=0/27 assaults=4 assaultDmg=14% boss=3033.333/0/18/50/0 low=0.791667
+sim.10.Active.4 = WIN  survivors=3/3 waves=9 end=392s healed=792% dmg=849% above90=0/27 assaults=4 assaultDmg=22% boss=3033.333/0/18/50/0 low=0.751667
+sim.10.Active.5 = WIN  survivors=3/3 waves=9 end=392s healed=788% dmg=848% above90=0/27 assaults=4 assaultDmg=20% boss=3100/1/18/50/0 low=0.741667
+sim.10.NoFocus.0 = WIN  survivors=3/3 waves=9 end=392s healed=801% dmg=850% above90=0/27 assaults=4 assaultDmg=129% boss=3033.333/0/18/50/0 low=0.795
+sim.10.NoFocus.1 = WIN  survivors=3/3 waves=9 end=392s healed=802% dmg=850% above90=0/27 assaults=4 assaultDmg=128% boss=3033.333/0/18/50/0 low=0.768333
+sim.10.NoFocus.2 = WIN  survivors=3/3 waves=9 end=392s healed=801% dmg=857% above90=0/27 assaults=4 assaultDmg=140% boss=3066.667/1/18/50/0 low=0.792433
+sim.10.NoFocus.3 = WIN  survivors=3/3 waves=9 end=392s healed=822% dmg=875% above90=0/27 assaults=4 assaultDmg=133% boss=3033.333/0/18/50/0 low=0.7625
+sim.10.NoFocus.4 = WIN  survivors=3/3 waves=9 end=392s healed=803% dmg=861% above90=0/27 assaults=4 assaultDmg=142% boss=3033.333/0/18/50/0 low=0.740833
+sim.10.NoFocus.5 = WIN  survivors=3/3 waves=9 end=392s healed=817% dmg=857% above90=0/27 assaults=4 assaultDmg=135% boss=3100/1/18/50/0 low=0.809167
+sim.10.Ignore.0 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Ignore.1 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Ignore.2 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Ignore.3 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Ignore.4 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0
+sim.10.Ignore.5 = LOSS survivors=0/3 waves=1 end=63s healed=0% dmg=300% above90=0/1 assaults=0 assaultDmg=0% boss=0/0/0/0/0 low=0

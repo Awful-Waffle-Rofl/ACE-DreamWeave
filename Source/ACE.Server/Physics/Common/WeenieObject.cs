@@ -4,6 +4,7 @@ using log4net;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Physics.Animation;
 using ACE.Server.Physics.Collision;
@@ -32,6 +33,16 @@ namespace ACE.Server.Physics.Common
 
         public PlayerKillerStatus PlayerKillerStatus { get; set; }
 
+        /// <summary>
+        /// World Events Hold goal: this creature is a protected target (a ward) that the SAME run's monsters
+        /// may target and damage, the way a monster may target a combat pet. Cached from
+        /// <see cref="Creature.WorldEventProtected"/>, which only WorldEventSpawner sets.
+        /// </summary>
+        public bool IsWorldEventProtected { get; set; }
+
+        /// <summary>The PropertyInt.WorldEventId run stamp, 0 for anything a world event did not place.</summary>
+        public int WorldEventRunId { get; set; }
+
         public WeenieObject() { }
 
         public WeenieObject(WorldObject worldObject)
@@ -43,7 +54,15 @@ namespace ACE.Server.Physics.Common
 
             IsCombatPet = worldObject is CombatPet;
 
-            IsMonster = creature.IsMonster && !IsCombatPet;
+            // Stamped by WorldEventSpawner.TryPlace BEFORE EnterWorld, and this object is built during
+            // EnterWorld (Landblock.AddWorldObjectInternal), so both reads below see the final values.
+            IsWorldEventProtected = creature.WorldEventProtected;
+            WorldEventRunId = creature.GetProperty(PropertyInt.WorldEventId) ?? 0;
+
+            // A protected target is Attackable (so its own run's monsters keep it as a candidate) but must not
+            // read as a MONSTER to physics: that would let player combat pets attack it and make it build its
+            // own attack-target list. It takes the npc path in PhysicsObj.handle_visible_cells_non_player.
+            IsMonster = creature.IsMonster && !IsCombatPet && !IsWorldEventProtected;
 
             Faction1Bits = creature.Faction1Bits ?? FactionBits.None;
 
@@ -57,6 +76,23 @@ namespace ACE.Server.Physics.Common
         public bool SameFaction(PhysicsObj obj)
         {
             return (Faction1Bits & obj.WeenieObj.Faction1Bits) != 0;
+        }
+
+        /// <summary>
+        /// True when THIS object is a World Events protected target and <paramref name="attacker"/> is a
+        /// monster placed by the same run (same non-zero run stamp). The only way any monster may target or
+        /// damage a protected target, so a monster outside the event, or from an earlier run, never can.
+        /// </summary>
+        public bool IsProtectedTargetFor(WeenieObject attacker)
+        {
+            return IsProtectedTargetFor(IsWorldEventProtected, WorldEventRunId,
+                attacker != null && attacker.IsMonster, attacker?.WorldEventRunId ?? 0);
+        }
+
+        /// <summary>The pure rule behind <see cref="IsProtectedTargetFor(WeenieObject)"/>.</summary>
+        public static bool IsProtectedTargetFor(bool targetProtected, int targetRunId, bool attackerIsMonster, int attackerRunId)
+        {
+            return targetProtected && targetRunId != 0 && attackerIsMonster && attackerRunId == targetRunId;
         }
 
         public bool PotentialFoe(PhysicsObj obj)

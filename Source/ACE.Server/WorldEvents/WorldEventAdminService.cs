@@ -55,6 +55,9 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>POST stop. World thread, bounded. One audit line on success, written inside the same world action.</summary>
         WorldEventAdminOutcome Stop(WorldEventStopBody body, string accountName);
+
+        /// <summary>GET hold-settings. Read-only: every World Events Hold setting with its value and source (HoldSettingsAdmin.WebBody).</summary>
+        WorldEventAdminOutcome HoldSettings() => WorldEventAdminOutcome.Ok(HoldSettingsAdmin.WebBody());
     }
 
     /// <summary>

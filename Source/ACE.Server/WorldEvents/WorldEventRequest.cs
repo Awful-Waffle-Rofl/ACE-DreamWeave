@@ -104,6 +104,9 @@ namespace ACE.Server.WorldEvents
 
         public int AbandonAfterSeconds { get; set; } = WorldEvent.DefaultAbandonAfterSeconds;
 
+        /// <summary>True when the admin gave --abandon for this run, so world_events_hold_abandon_seconds does not replace it.</summary>
+        public bool AbandonExplicit { get; set; }
+
         public int WipeGraceSeconds { get; set; } = WorldEvent.DefaultWipeGraceSeconds;
 
         /// <summary>
@@ -112,5 +115,48 @@ namespace ACE.Server.WorldEvents
         /// exactly the pre-teaser behaviour.
         /// </summary>
         public int? TeaserLeadSeconds { get; set; }
+
+        /// <summary>
+        /// "--level n" (admin testing): when set, every audience sample treats the participants as level n,
+        /// and an empty field as one such participant - see <see cref="WorldEvent.ApplyTestLevel"/>. Null (the
+        /// default, and every web-panel start) uses the real players.
+        /// </summary>
+        public int? TestLevel { get; set; }
+
+        /// <summary>
+        /// "--wave-type t" (admin testing, Hold runs only): every wave that is not the finale is this special
+        /// type (breach, runners, ranged, hunters), as long as the goal defines it. Null rolls normally.
+        /// </summary>
+        public ACE.Server.WorldEvents.Defs.HoldWaveType? ForcedWaveType { get; set; }
+
+        /// <summary>World Events chain: which stage of a chain this run is (1 = a run nobody chained into).</summary>
+        public int ChainStage { get; set; } = 1;
+
+        /// <summary>World Events chain: the chain's length, carried from its first stage's goal (0 = not part of a chain).</summary>
+        public int ChainMaxLength { get; set; }
+
+        /// <summary>World Events chain: the first stage's run id (0 = this run is the first, or no chain).</summary>
+        public uint ChainRootRunId { get; set; }
+
+        /// <summary>World Events chain: the first stage's goal chain settings, carried to every later stage (null = the run's own goal's).</summary>
+        public ACE.Server.WorldEvents.Defs.ChainDef ChainSettings { get; set; }
+
+        /// <summary>World Events chain: the first stage's goal townReach, carried to every later stage (null = the run's own goal's).</summary>
+        public ACE.Server.WorldEvents.Defs.TownReachDef TownReach { get; set; }
+
+        /// <summary>World Events chain: towns a townReach re-roll must not move this stage to (the town the last stage was at).</summary>
+        public System.Collections.Generic.List<string> ExcludeTowns { get; set; }
+
+        /// <summary>World Events chain story: the envoy who speaks for the chain (null = none survived; a narrator speaks).</summary>
+        public string ChainEnvoyName { get; set; }
+
+        /// <summary>World Events chain story: the first stage's attackers ("the Ruschks and the Mukkirs"), for {family}.</summary>
+        public string ChainFamily { get; set; }
+
+        /// <summary>World Events chain story: the town of the chain's first stage, where the envoys were attacked, for {town}.</summary>
+        public string ChainFirstTown { get; set; }
+
+        /// <summary>World Events chain: Asheron's opening line went out at an earlier stage, so his closing line is owed when the chain ends.</summary>
+        public bool ChainAsheronSpoke { get; set; }
     }
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Linq;
 
 using ACE.Common;
 using ACE.Entity;
@@ -55,7 +56,14 @@ namespace ACE.Server.WorldEvents
         FailedNoParticipants,
         AbortedAdmin,
         AbortedShutdown,
-        AbortedError
+        AbortedError,
+
+        /// <summary>
+        /// A Hold goal's protected targets fell below the goal's minSurvivors. Pays and announces like the
+        /// other Failed* outcomes (consolation cache, the boss's win line). Appended at the end so no existing
+        /// value changes its number.
+        /// </summary>
+        FailedObjectiveLost
     }
 
     /// <summary>
@@ -76,7 +84,7 @@ namespace ACE.Server.WorldEvents
     /// only <see cref="State"/> itself (written solely on the world thread while no landblock work is in
     /// flight), and everything it writes goes through <see cref="Participation"/>, whose own lock covers it.
     /// </summary>
-    public sealed class WorldEvent
+    public sealed partial class WorldEvent
     {
         private static readonly ILog log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -559,6 +567,37 @@ namespace ACE.Server.WorldEvents
         /// True when the given (instance, landblock) key is one this run holds. The spawner's landblock
         /// guard: a candidate position outside the held set is rejected and retried elsewhere.
         /// </summary>
+        /// <summary>
+        /// Whether the run also holds the anchor's neighbouring landblocks (D6 - pure): the source theme's
+        /// holdAdjacentLandblocks, or ALWAYS for a Hold goal. A Hold run places its targets and its spawn ring
+        /// around the anchor, and an anchor near a landblock edge would otherwise lose every target and
+        /// spawn that lands across the edge (a target missing, a third of each wave refused).
+        /// </summary>
+        public static bool HoldsAdjacentLandblocks(SourceThemeDef theme, GoalDef goal)
+        {
+            return (theme?.HoldAdjacentLandblocks ?? false) || goal?.TypeKind == GoalType.Hold;
+        }
+
+        /// <summary>
+        /// "/worldevent start --level n" (admin testing, D6 - pure): every sampled participant counts as level
+        /// <paramref name="testLevel"/>, and an empty field (a solo staff tester, who never counts) counts
+        /// as one such participant, so bands and scaling come out as they would for players of that level.
+        /// Null leaves the sample exactly as it was.
+        /// </summary>
+        public static AudienceEstimate ApplyTestLevel(AudienceEstimate sampled, int? testLevel)
+        {
+            if (testLevel == null || testLevel.Value < 1)
+                return sampled;
+
+            var count = Math.Max(1, sampled.Count);
+            var levels = new List<int>(count);
+
+            for (var i = 0; i < count; i++)
+                levels.Add(testLevel.Value);
+
+            return WorldEventRosterSelector.EstimateFromLevels(levels);
+        }
+
         public bool IsHeldLandblock(ulong key)
         {
             var keys = heldBlockKeys;
@@ -589,7 +628,43 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public bool RunValid(uint runId) => runId == RunId && State != WorldEventState.Done;
 
-        public string ProgressText => Objective?.ProgressText ?? "";
+        public string ProgressText => frozenProgressText ?? Objective?.ProgressText ?? "";
+
+        /// <summary>
+        /// Hold runs: the progress line as it stood the moment the run finished. A Hold objective counts the
+        /// targets standing right now, and cleanup removes them, so without this "/worldevent status" after
+        /// the run would read "0 of 3 targets still stand" for a hold that lost none. Null for every other
+        /// goal, whose progress does not depend on what is still in the world.
+        /// </summary>
+        private string frozenProgressText;
+
+        /// <summary>
+        /// Whether an event creature's death counts as the players' credit (D6 - pure): every death does,
+        /// except a Hold protected target's, which the monsters caused.
+        /// </summary>
+        public static bool DeathCountsAsCredit(bool isProtectedTarget) => !isProtectedTarget;
+
+        /// <summary>The Hold success line used when a goal declares no successTemplate. ASCII only.</summary>
+        public const string DefaultHoldSuccessTemplate = "{goal} at {anchor} succeeded! {alive} of {total} {nounPlural} survived.";
+
+        /// <summary>
+        /// A Hold run's outcome templates with the final counts filled in (D6 - pure): the goal's template, or
+        /// <see cref="DefaultHoldSuccessTemplate"/> for a success with none, through
+        /// WorldEventHoldRules.FillCounts. Null alive/total (not a Hold run) returns the template unchanged.
+        /// </summary>
+        public static string HoldOutcomeTemplate(string template, bool success, int? alive, int? total)
+        {
+            if (alive == null || total == null)
+                return template;
+
+            if (success && string.IsNullOrWhiteSpace(template))
+                template = DefaultHoldSuccessTemplate;
+
+            return WorldEventHoldRules.FillCounts(template, alive.Value, total.Value);
+        }
+
+        /// <summary>The pure rule for when progress is frozen at Finish (D6): Hold goals only.</summary>
+        public static bool FreezesProgressAtFinish(GoalDef goal) => goal?.TypeKind == GoalType.Hold;
 
         /// <summary>Player-facing anchor name, for announcement flavour text.</summary>
         public string AnchorName => Composition?.Anchor?.DisplayName ?? Composition?.Anchor?.Id ?? "somewhere";
@@ -712,6 +787,27 @@ namespace ACE.Server.WorldEvents
             if (minDurationSeconds >= maxDurationSeconds)
             {
                 error = $"--min-duration {minDurationSeconds}s must be below the maximum duration {maxDurationSeconds}s";
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Hold goals (D6 - pure): the hold must be able to finish inside the run. A holdSeconds above the
+        /// maximum duration could only ever end in FailedTimeout, so it is refused at start. Every other goal
+        /// type, and a null goal, passes.
+        /// </summary>
+        public static bool ValidateHoldDuration(GoalDef goal, int maxDurationSeconds, out string error)
+        {
+            error = null;
+
+            if (goal == null || goal.TypeKind != GoalType.Hold)
+                return true;
+
+            if (goal.HoldSeconds > maxDurationSeconds)
+            {
+                error = $"goal {goal.Id} holds for {goal.HoldSeconds}s, longer than the maximum duration {maxDurationSeconds}s";
                 return false;
             }
 
@@ -849,7 +945,12 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void SetAudience(AudienceEstimate sampled)
         {
-            var estimate = WorldEventRosterSelector.WithFloor(sampled);
+            // Admin test override (--level) BEFORE the floor, so it is what every scaling dial reads.
+            var estimate = WorldEventRosterSelector.WithFloor(ApplyTestLevel(sampled, Request?.TestLevel));
+
+            // A chained champion stage (world_events_chain_champion_level_offset): sized as if the players were N levels higher.
+            if (IsChainChampionStage)
+                estimate = HoldSettings.ShiftAudience(estimate, HoldSettings.Integer(HoldKeys.ChampionLevelOffset, 0));
 
             Audience = estimate;
 
@@ -872,7 +973,7 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                Spawner.RatchetBossHealth(this, mult);
+                Spawner.RatchetBossHealth(this, mult * HoldSettings.ChampionHealthMult(IsChainChampionStage));
             }
             catch (Exception ex)
             {
@@ -937,6 +1038,11 @@ namespace ACE.Server.WorldEvents
 
             log.Info($"[WORLDEVENT] run={RunId} teaser lead={lead}s anchor={AnchorName}");
 
+            // A chained stage has no teaser of its own: the chain's announcement (chain.announce) already named the place and the
+            // countdown.
+            if (ChainStageNumber > 1)
+                return;
+
             try
             {
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.TeaserLine(Composition?.Source, AnchorName, lead, null), relayToDiscord: true);
@@ -970,7 +1076,8 @@ namespace ACE.Server.WorldEvents
 
             SetAudience(SampleAudience());
 
-            log.Info($"[WORLDEVENT] run={RunId} estimate count={Audience.Count} median={Audience.MedianLevel} p90={Audience.P90Level}");
+            log.Info($"[WORLDEVENT] run={RunId} estimate count={Audience.Count} median={Audience.MedianLevel} p90={Audience.P90Level}" +
+                     (Request?.TestLevel != null ? $" (--level {Request.TestLevel})" : ""));
 
             if (!Transition(WorldEventState.Announced, "announce"))
                 return;
@@ -989,7 +1096,10 @@ namespace ACE.Server.WorldEvents
             // knows whether it is allowed to speak the matching end line.
             if (DeathProtectionEnabled())
             {
-                WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
+                // Once per chain: a later stage does not repeat it when an earlier one said it.
+                if (!(Request?.ChainAsheronSpoke ?? false))
+                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
+
                 deathProtectionStartAnnounced = true;
             }
         }
@@ -1044,7 +1154,7 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var holdAdjacents = Composition?.Source?.HoldAdjacentLandblocks ?? false;
+                var holdAdjacents = HoldsAdjacentLandblocks(Composition?.Source, Composition?.Goal);
 
                 var prior = landblockBridge.SnapshotPermaload();
 
@@ -1071,7 +1181,11 @@ namespace ACE.Server.WorldEvents
                 }
 
                 heldBlockKeys = new HashSet<ulong>(keys);
-                heldBlockKeysToRelease = WorldEventLandblockHold.ComputeRelease(prior, keys);
+
+                // A block permaloaded only because a finishing run (a chain's first stage) still holds it is ours to
+                // release too: that run leaves it to us (ReleaseLandblockHold).
+                heldBlockKeysToRelease = WorldEventLandblockHold.ComputeRelease(
+                    WorldEventManager.PriorWithoutOtherRuns(this, prior), keys);
 
                 log.Info($"[WORLDEVENT] run={RunId} hold blocks={keys.Count} release-at-finish={heldBlockKeysToRelease.Count} anchor=0x{landblock.Id.Raw:X8} instance={landblock.Instance}");
 
@@ -1090,6 +1204,28 @@ namespace ACE.Server.WorldEvents
         /// wave, for the objective spawns and for the champion, so a run's shape stays stable as the
         /// audience estimate moves.
         /// </summary>
+        /// <summary>
+        /// The radius the run's spawn geometry uses (D6 - pure): a Hold goal's protect.spawnRadius when it is
+        /// positive and finite, otherwise the source theme's geometryRadius - so every non-Hold run, and a
+        /// Hold run that sets none, keeps exactly the source's radius.
+        /// </summary>
+        public static float ResolveSpawnRadius(SourceThemeDef theme, GoalDef goal)
+        {
+            var hold = goal?.TypeKind == GoalType.Hold ? goal.Protect : null;
+            var spawnRadius = hold?.SpawnRadius ?? 0;
+
+            var radius = double.IsFinite(spawnRadius) && spawnRadius > 0 ? spawnRadius : theme?.GeometryRadius ?? 0f;
+
+            // Hold: monsters always arrive from outside the targets' ring, whichever layout the crowd gets.
+            if (hold != null)
+                radius = Math.Max(radius, hold.MaxRingRadius + ProtectDef.EffectiveMinSpawnClearance);
+
+            return (float)radius;
+        }
+
+        /// <summary>This run's spawn geometry radius; see <see cref="ResolveSpawnRadius"/>.</summary>
+        public float SpawnRadius => ResolveSpawnRadius(Composition?.Source, Composition?.Goal);
+
         private void ComputeSpawnAnchors()
         {
             var anchor = Composition?.AnchorPosition;
@@ -1101,15 +1237,17 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
+            var radius = SpawnRadius;
+
             switch (theme.GeometryKind)
             {
                 case SourceGeometry.Ring:
-                    spawnAnchors = WorldEventGeometry.Ring(anchor, theme.GeometryRadius, theme.GeometryPoints,
+                    spawnAnchors = WorldEventGeometry.Ring(anchor, radius, theme.GeometryPoints,
                         WorldEventGeometry.DefaultJitterMetres);
                     break;
 
                 case SourceGeometry.Edges:
-                    spawnAnchors = WorldEventGeometry.Edges(anchor, theme.GeometryRadius, theme.GeometryPoints,
+                    spawnAnchors = WorldEventGeometry.Edges(anchor, radius, theme.GeometryPoints,
                         WorldEventGeometry.DefaultJitterMetres);
                     break;
 
@@ -1118,7 +1256,7 @@ namespace ACE.Server.WorldEvents
                     // the champion, and this 5.2-adjacent log line still reports a real anchor count. The
                     // per-wave RESAMPLE that makes disc different from every other geometry happens in
                     // WaveAnchors, not here - sources and the boss keep using this Stage-time sample.
-                    spawnAnchors = WorldEventGeometry.Disc(anchor, theme.GeometryRadius, theme.GeometryPoints);
+                    spawnAnchors = WorldEventGeometry.Disc(anchor, radius, theme.GeometryPoints);
                     break;
 
                 default:
@@ -1126,7 +1264,8 @@ namespace ACE.Server.WorldEvents
                     break;
             }
 
-            log.Info($"[WORLDEVENT] run={RunId} geometry {theme.GeometryKind} radius={theme.GeometryRadius:F1} anchors={spawnAnchors.Count}");
+            log.Info($"[WORLDEVENT] run={RunId} geometry {theme.GeometryKind} radius={radius:F1} anchors={spawnAnchors.Count}" +
+                     (radius != theme.GeometryRadius ? $" (protect.spawnRadius; source radius {theme.GeometryRadius:F1})" : ""));
         }
 
         /// <summary>
@@ -1136,7 +1275,50 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private IReadOnlyList<Position> WaveAnchors()
         {
-            return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null);
+            // Hold protect.portals: every wave comes out of the portals, a few metres inside each.
+            var portals = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Portals : null;
+
+            if (portals != null && Composition?.AnchorPosition != null)
+                return PortalSpawnAnchors(Composition.AnchorPosition, portals, HoldPortalSpots);
+
+            return ResolveWaveAnchors(Composition?.Source, Composition?.AnchorPosition, spawnAnchors, null, SpawnRadius);
+        }
+
+        /// <summary>
+        /// Where a Hold run's waves spawn with protect.portals: one point per portal, protect.portals.inset metres
+        /// inside it toward the anchor, facing the anchor. The spawner deals a wave's monsters round-robin over
+        /// these, so they pour in from every portal.
+        /// </summary>
+        public static IReadOnlyList<Position> PortalSpawnAnchors(Position anchor, PortalsDef portals)
+        {
+            return PortalSpawnAnchors(anchor, portals, null);
+        }
+
+        /// <summary>
+        /// <see cref="PortalSpawnAnchors(Position, PortalsDef)"/> at the portals the spawn-area check kept
+        /// (<paramref name="spots"/>: bearing and distance each), or at protect.portals' own ring when there are none.
+        /// </summary>
+        public static IReadOnlyList<Position> PortalSpawnAnchors(Position anchor, PortalsDef portals, IReadOnlyList<PortalSpot> spots)
+        {
+            var result = new List<Position>();
+
+            if (anchor == null || portals == null)
+                return result;
+
+            if (spots != null && spots.Count > 0)
+            {
+                foreach (var spot in spots)
+                    result.Add(WorldEventGeometry.AtBearing(anchor, (float)Math.Max(1.0, spot.Radius - Math.Max(0, portals.Inset)), spot.Bearing * Math.PI / 180.0));
+
+                return result;
+            }
+
+            var radius = (float)Math.Max(1.0, portals.Radius - Math.Max(0, portals.Inset));
+
+            foreach (var bearing in WorldEventHoldRules.PortalBearings(portals.Count, portals.RotationDegrees))
+                result.Add(WorldEventGeometry.AtBearing(anchor, radius, bearing));
+
+            return result;
         }
 
         /// <summary>
@@ -1148,8 +1330,15 @@ namespace ACE.Server.WorldEvents
         public static IReadOnlyList<Position> ResolveWaveAnchors(SourceThemeDef theme, Position anchor,
             IReadOnlyList<Position> staged, Random rng)
         {
+            return ResolveWaveAnchors(theme, anchor, staged, rng, theme?.GeometryRadius ?? 0f);
+        }
+
+        /// <summary><see cref="ResolveWaveAnchors(SourceThemeDef, Position, IReadOnlyList{Position}, Random)"/> with the disc radius given (a Hold run's protect.spawnRadius).</summary>
+        public static IReadOnlyList<Position> ResolveWaveAnchors(SourceThemeDef theme, Position anchor,
+            IReadOnlyList<Position> staged, Random rng, float radius)
+        {
             if (theme != null && theme.GeometryKind == SourceGeometry.Disc)
-                return WorldEventGeometry.Disc(anchor, theme.GeometryRadius, theme.GeometryPoints, rng);
+                return WorldEventGeometry.Disc(anchor, radius, theme.GeometryPoints, rng);
 
             return staged;
         }
@@ -1190,6 +1379,8 @@ namespace ACE.Server.WorldEvents
                                 Composition?.GoalDisplayName), relayToDiscord: true);
 
                             relayedToDiscord = true;
+
+                            ScheduleChainTieBack(now);
                         }
                     }
 
@@ -1263,6 +1454,14 @@ namespace ACE.Server.WorldEvents
                     sourcesSpawned = SourcesWereSpawned(objectiveKind);
                 }
 
+                // Hold: the goal's own protected targets, before wave 0 so the first rank already has
+                // something to go for. They come from the GOAL's protect block, not the theme, so any theme
+                // that lists a Hold goal gets the same targets; the theme's own objectives above stay scenery.
+                var goal = Composition?.Goal;
+
+                if (goal != null && goal.TypeKind == GoalType.Hold && goal.Protect != null)
+                    Spawner.SpawnProtected(this, goal.Protect, Composition?.AnchorPosition);
+
                 // WP-14 decor, before wave 0 so the scenery is already going up as the first rank lands.
                 // Placed once at the geometry CENTRE, not per anchor: a stack of discs is one thing in the
                 // sky above the fight, not a ring of them around it.
@@ -1298,7 +1497,13 @@ namespace ACE.Server.WorldEvents
                 if (npcs != null && npcs.Count > 0)
                     Spawner.SpawnNpcs(this, npcs, Composition?.AnchorPosition);
 
-                SpawnWave(now, initial: true);
+                // Hold: the protected targets enter the world in a queued landblock action, so wave 0 waits
+                // for that batch (TickWaves, HoldFirstWaveMayStart). Picked now, it would see no targets: the
+                // wave-start line read "0 of 0" and a breach found nothing to send its seekers at.
+                if (DefersFirstWave(goal))
+                    holdFirstWavePending = true;
+                else
+                    SpawnWave(now, initial: true);
             }
             catch (Exception ex)
             {
@@ -1356,14 +1561,35 @@ namespace ACE.Server.WorldEvents
 
             var alive = Spawner.LiveCount;
 
-            var pick = WorldEventRosterSelector.PickWave(family, Audience, theme, WaveIndex, alive,
-                Pace.QuantityBonus, Spawner.OverflowChampionsAlive, null);
+            // Wave-based Hold: the final counted wave is a little bigger (a quarter more of the theme's base
+            // wave, at least one more monster), on top of whatever the pace controller is asking for.
+            var holdObjective = Objective as HoldObjective;
+            var finalHoldWave = holdObjective != null && holdObjective.IsFinalWave(holdWavesStarted + 1);
+
+            // Hold: the goal's own wave size and alive cap (protect.waveSize / protect.maxAlive), when it sets them.
+            var holdProtect = holdObjective != null ? Composition?.Goal?.Protect : null;
+            var sizingTheme = holdProtect != null ? theme.WithHoldSizing(holdProtect.WaveSize, holdProtect.MaxAlive) : theme;
+
+            var finalWaveExtra = finalHoldWave ? WorldEventHoldRules.FinalWaveBonus(sizingTheme.EffectiveWaveCountBase) : 0;
+
+            // A corrupted assault wave (protect.corrupted.assaultEveryWaves) brings its corrupted on top of the wave.
+            var assaultExtra = HoldAssaultExtra(holdObjective, holdWavesStarted + 1, finalHoldWave);
+
+            var pick = WorldEventRosterSelector.PickWave(family, Audience, sizingTheme, WaveIndex, alive,
+                Pace.QuantityBonus + finalWaveExtra + assaultExtra, Spawner.OverflowChampionsAlive, null);
 
             if (pick == null || pick.IsEmpty)
             {
-                log.Info($"[WORLDEVENT] run={RunId} wave={WaveIndex} skipped: alive={alive} against maxAlive={theme.EffectiveMaxAlive}");
+                log.Info($"[WORLDEVENT] run={RunId} wave={WaveIndex} skipped: alive={alive} against maxAlive={sizingTheme.EffectiveMaxAlive}");
                 return;
             }
+
+            holdLastWaveSize = pick.Trash.Count + pick.Champions.Count;
+
+            // Hold special waves (protect.specialWaves): this wave's type and what it changes.
+            var holdPlan = holdObjective != null && holdObjective.IsWaveBased
+                ? BuildHoldWavePlan(holdObjective, holdWavesStarted + 1, pick)
+                : null;
 
             // Read back when this wave clears: a speed-up goes to quantity while quantity still has room,
             // and to health once it does not.
@@ -1378,6 +1604,7 @@ namespace ACE.Server.WorldEvents
             // pick actually drew from (pick.Band) rather than a single median-anchored band. The 5.2 log
             // line's band=lo-hi can therefore be wide for a mixed-level crowd, e.g. "40-317".
             var band = pick.Band;
+            lastWaveBand = band;
 
             // The 5.2 wave line is emitted by the spawner, from inside the landblock closure, once the whole
             // wave has been placed or skipped - so "spawned" is the count that actually entered the world and
@@ -1399,11 +1626,647 @@ namespace ACE.Server.WorldEvents
 
             lastWaveIndexSpawned = WaveIndex;
 
-            Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult);
+            if (holdPlan != null && holdPlan.FinaleBossOnly && holdPlan.ChampionWcid != 0)
+            {
+                // The finale boss arrives alone; the rest of the final wave (with no copies of the boss's own
+                // monster) follows after protect.finaleBossLeadSeconds, sent by TickWaves. Until then the
+                // finale counts as not yet placed, so it cannot be won early.
+                Spawner.SpawnWave(this, WavePick.Empty, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
+
+                var escortPlan = new HoldWavePlan
+                {
+                    Type = HoldWaveType.Finale,
+                    WaveNumber = holdPlan.WaveNumber,
+                    FinaleEscort = true,
+                    ReplacedTrash = WorldEventHoldRules.WithoutBossLookalikes(pick.Trash, holdPlan.ChampionWcid, holdWaveRng)
+                };
+
+                var lead = Math.Clamp(Composition?.Goal?.Protect?.FinaleBossLeadSeconds ?? ProtectDef.DefaultFinaleBossLeadSeconds, 0, 30);
+
+                holdFinaleEscort = new HoldFinaleEscort(now + lead, pick, escortPlan, WaveIndex, band, healthMult);
+
+                log.Info($"[WORLDEVENT] run={RunId} hold finale: boss {holdPlan.ChampionName} sent alone; the rest of the wave " +
+                         $"({pick.Trash.Count + pick.Champions.Count}) follows in {lead:0.#} s");
+            }
+            else
+                Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult, holdPlan);
+
+            holdWavesStarted++;
+            holdLastWaveStartedAt = now;
+
+            // Hold protect.portals: the portals flare as the wave comes through.
+            PulseHoldPortals();
+
+            if (holdPlan?.KeepCount != null)
+                holdLastWaveSize = Math.Min(holdLastWaveSize, Math.Max(1, holdPlan.KeepCount.Value) + (holdPlan.ChampionWcid != 0 ? 1 : 0));
+            else if (holdPlan != null && holdPlan.ChampionWcid != 0)
+                holdLastWaveSize++;
 
             // Per-wave chatter is local, not server-wide (PLAN 1.10): everyone actually near the fight sees
             // it, without spamming players nowhere near this run.
             WorldEventAnnouncer.Local(this, WorldEventAnnouncer.WaveLine(theme));
+
+            // Wave-based Hold: where the defence stands, at the start of every wave.
+            if (holdObjective != null && holdObjective.IsWaveBased)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} hold wave {holdWavesStarted} of {holdObjective.TargetWaves}" +
+                         (finalHoldWave ? $" (final wave, +{finalWaveExtra})" : ""));
+
+                WorldEventAnnouncer.Local(this, holdObjective.WaveStartText(holdWavesStarted));
+
+                AnnounceHoldWave(holdPlan, holdWavesStarted, holdObjective.TargetWaves);
+            }
+        }
+
+        /// <summary>The rest of a Hold final wave, waiting for its turn after the boss (see SpawnWave).</summary>
+        private sealed class HoldFinaleEscort
+        {
+            public readonly double At;
+            public readonly WavePick Pick;
+            public readonly HoldWavePlan Plan;
+            public readonly int WaveIndex;
+            public readonly LevelBand Band;
+            public readonly double HealthMult;
+
+            public HoldFinaleEscort(double at, WavePick pick, HoldWavePlan plan, int waveIndex, LevelBand band, double healthMult)
+            {
+                At = at;
+                Pick = pick;
+                Plan = plan;
+                WaveIndex = waveIndex;
+                Band = band;
+                HealthMult = healthMult;
+            }
+        }
+
+        /// <summary>The final wave's escort still to come (null when none is pending). World thread only.</summary>
+        private HoldFinaleEscort holdFinaleEscort;
+
+        /// <summary>True while the final wave's escort has not been sent yet.</summary>
+        internal bool HoldFinaleEscortPending => holdFinaleEscort != null;
+
+        /// <summary>
+        /// Sends the final wave's escort once its lead time is up (TickWaves, ahead of the cadence). Returns true
+        /// when it was sent this tick.
+        /// </summary>
+        private bool TickHoldFinaleEscort(double now)
+        {
+            var escort = holdFinaleEscort;
+
+            if (escort == null || now < escort.At)
+                return false;
+
+            holdFinaleEscort = null;
+
+            try
+            {
+                Spawner.SpawnWave(this, escort.Pick, WaveAnchors(), escort.WaveIndex, escort.Band, escort.HealthMult, escort.Plan);
+
+                PulseHoldPortals();
+
+                log.Info($"[WORLDEVENT] run={RunId} hold finale: the rest of the final wave arrives " +
+                         $"({escort.Pick.Trash.Count + escort.Pick.Champions.Count} monsters)");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold finale escort spawn threw", ex);
+            }
+
+            return true;
+        }
+
+        /// <summary>Hold: how many monsters the last wave sent (its cadence's "most of the wave is dead" rule reads it).</summary>
+        private int holdLastWaveSize;
+
+        /// <summary>Hold: when the last wave was started (world clock).</summary>
+        private double holdLastWaveStartedAt;
+
+        /// <summary>Hold: the clock of the current tick, for reads that have no clock of their own.</summary>
+        private double holdTickNow;
+
+        /// <summary>
+        /// A started wave counts as resolved after this long even if the spawner never reported it (a batch
+        /// whose landblock never ran it), so a lost wave cannot hold a won run open until holdSeconds.
+        /// </summary>
+        internal const double HoldWaveResolveGraceSeconds = 15.0;
+
+        /// <summary>Hold: special waves so far this run (not the finale), for protect.minSpecialWaves.</summary>
+        private int holdSpecialWaves;
+
+        /// <summary>
+        /// Every standing protected target's health ("Sir Draithon 80%, Sir Donovan 64%"), for the {targetHealth}
+        /// progress token and the wave-start line. Empty when none stand.
+        /// </summary>
+        internal string ProtectedHealthSummary
+        {
+            get
+            {
+                try
+                {
+                    return WorldEventHoldRules.TargetHealthSummary(Spawner.LiveProtectedCreatures
+                        .Where(c => c != null && !c.IsDead)
+                        .Select(c => (c.Name, c.Health.Current, c.Health.MaxValue)));
+                }
+                catch
+                {
+                    return "";
+                }
+            }
+        }
+
+        /// <summary>The previous Hold wave's type, so two special waves of one type never come back to back.</summary>
+        private HoldWaveType holdLastWaveType = HoldWaveType.Normal;
+
+        /// <summary>Every Hold wave's type in order, for the result log line.</summary>
+        private readonly List<string> holdWaveTypeHistory = new List<string>();
+
+        private readonly Random holdWaveRng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+
+        /// <summary>
+        /// This Hold wave's plan: the type (WorldEventHoldRules.PickWaveType) and what it changes, worked out on
+        /// the world thread before the wave is sent to the spawner. Null for an ordinary wave. A special type
+        /// that cannot apply (a breach with no target standing, a ranged wave from a family with no ranged
+        /// members, a finale with no champion) falls back to an ordinary wave or a finale without a champion,
+        /// and says so in the log.
+        /// </summary>
+        internal HoldWavePlan BuildHoldWavePlan(HoldObjective hold, int waveNumber, WavePick pick)
+        {
+            var protect = Composition?.Goal?.Protect;
+
+            if (protect == null)
+                return null;
+
+            var type = WorldEventHoldRules.PickWaveType(waveNumber, hold.TargetWaves, holdLastWaveType, protect.SpecialWaveChance,
+                protect.SpecialWaveFromWave, protect.SpecialWaves, holdWaveRng, Request?.ForcedWaveType,
+                holdSpecialWaves, protect.MinSpecialWaves);
+
+            // protect.waveMix: every wave but the finale carries every role at once. --wave-type still forces a
+            // one-type wave, for testing one role on its own.
+            if (protect.WaveMix != null && type != HoldWaveType.Finale && Request?.ForcedWaveType == null)
+                type = HoldWaveType.Mixed;
+
+            // A forced type the goal does not define is ignored (the def carries its settings and lines).
+            if (type != HoldWaveType.Normal && type != HoldWaveType.Mixed && protect.SpecialWave(type) == null)
+            {
+                log.Warn($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: type {type} is not in protect.specialWaves; ordinary wave");
+                type = HoldWaveType.Normal;
+            }
+
+            var def = protect.SpecialWave(type);
+            var plan = new HoldWavePlan { Type = type, WaveNumber = waveNumber };
+
+            switch (type)
+            {
+                case HoldWaveType.Mixed:
+                    BuildMixedPlan(plan, protect, pick, waveNumber);
+                    break;
+
+                case HoldWaveType.Breach:
+                {
+                    var targets = Spawner.LiveProtectedCreatures;
+
+                    if (targets.Count == 0)
+                    {
+                        log.Warn($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: breach has no standing target; ordinary wave");
+                        plan.Type = HoldWaveType.Normal;
+                        break;
+                    }
+
+                    var target = targets[holdWaveRng.Next(targets.Count)];
+                    plan.BreachTargetGuid = target.Guid.Full;
+                    plan.BreachSide = SideOfAnchor(target);
+                    break;
+                }
+
+                case HoldWaveType.Runners:
+                    plan.KeepCount = WorldEventHoldRules.RunnersKeep(pick.Trash.Count + pick.Champions.Count, def.CountMult);
+                    plan.HealthMult = Math.Clamp(def.HealthMult, 0.1, 1.0);
+                    plan.RunRateMult = (float)Math.Clamp(def.SpeedMult, 1.0, 3.0);
+                    plan.AttackSpeedMult = (float)Math.Clamp(def.AttackSpeedMult, 1.0, 3.0);
+                    break;
+
+                case HoldWaveType.Ranged:
+                {
+                    var pool = RangedPoolFor(pick.Band, waveNumber);
+
+                    if (pool.Count == 0)
+                    {
+                        log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: family has no ranged or caster members; ordinary wave");
+                        plan.Type = HoldWaveType.Normal;
+                        break;
+                    }
+
+                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceWithRanged(pick.Trash, pool, holdWaveRng);
+                    plan.HoldDistance = (float)Math.Clamp(def.HoldDistance, 5.0, 40.0);
+                    break;
+                }
+
+                case HoldWaveType.Hunters:
+                    plan.Hunters = Math.Max(1, def.Hunters);
+                    break;
+
+                case HoldWaveType.Finale:
+                {
+                    // world_events_hold_finale_level_offset: picked as if the players were N levels higher; and
+                    // world_events_hold_finale_boss_wcid forces the boss.
+                    var finaleAudience = HoldSettings.ShiftAudience(Audience, protect.FinaleLevelOffset);
+                    var champion = protect.FinaleBossWcid is uint forced
+                        ? new ChampionPick(forced, false)
+                        : WorldEventRosterSelector.PickChampion(Composition?.Roster, finaleAudience);
+
+                    if (protect.FinaleBossWcid != null)
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale: boss forced to wcid {champion.Wcid} (finale_boss_wcid)");
+
+                    // The finale always has a boss: with no champion in band, the nearest-level member of the
+                    // family is promoted (named "Champion ...", more health, bigger, the boss effect).
+                    if (champion.Wcid == 0)
+                    {
+                        champion = WorldEventRosterSelector.PickFinaleBossFallback(Composition?.Roster, finaleAudience);
+
+                        if (champion.Wcid == 0)
+                        {
+                            log.Warn($"[WORLDEVENT] run={RunId} hold finale: the family has no members to make a boss from; finale without one");
+                            break;
+                        }
+
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale: no champion in band; promoting wcid {champion.Wcid} as the boss");
+                    }
+
+                    plan.ChampionWcid = champion.Wcid;
+                    plan.ChampionSynthetic = champion.Synthetic;
+                    plan.ChampionUplift = champion.UpliftLevel;
+                    plan.ChampionSlotLevel = champion.SlotLevel;
+
+                    var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == champion.Wcid)?.Name
+                               ?? WorldEventHoldTuningNames.WeenieName(champion.Wcid);
+
+                    // Always a clear title in front ("Warlord ..."), and the boss arrives alone first; the rest of
+                    // the final wave follows after protect.finaleBossLeadSeconds (SpawnWave / TickWaves).
+                    plan.ChampionName = WorldEventHoldRules.FinaleBossName(protect.FinaleBossPrefix, name);
+                    plan.FinaleBossOnly = true;
+                    break;
+                }
+            }
+
+            holdLastWaveType = plan.Type;
+            holdWaveTypeHistory.Add(plan.Type.ToString().ToLowerInvariant());
+
+            if (plan.Type != HoldWaveType.Normal && plan.Type != HoldWaveType.Finale)
+                holdSpecialWaves++;
+
+            log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber} {plan}" +
+                     (Request?.ForcedWaveType != null ? $" (--wave-type {Request.ForcedWaveType.Value.ToString().ToLowerInvariant()})" : ""));
+
+            return plan.Type == HoldWaveType.Normal ? null : plan;
+        }
+
+        /// <summary>
+        /// A mixed wave (protect.waveMix): one role per monster (WorldEventHoldRules.AssignWaveMix), the breach
+        /// squad's target and side, the runner settings and ranged hold distance (from the goal's runners and
+        /// ranged specialWaves entries, else their defaults), and the Ranged slots redrawn from the family's
+        /// ranged and caster members. With no target standing, the breach squad seeks like everyone else; with
+        /// no ranged members, the Ranged slots keep their monster (logged).
+        /// </summary>
+        private void BuildMixedPlan(HoldWavePlan plan, ProtectDef protect, WavePick pick, int waveNumber)
+        {
+            var size = pick.Trash.Count + pick.Champions.Count;
+
+            // An elite or an overflow champion keeps its own monster, so it is never redrawn as Ranged.
+            var keep = new HashSet<int>();
+
+            if (pick.EliteIndex >= 0)
+                keep.Add(pick.EliteIndex);
+
+            for (var i = 0; i < pick.Champions.Count; i++)
+                keep.Add(pick.Trash.Count + i);
+
+            // The corrupted assault: an assault wave has exactly assaultCount corrupted, every other wave none.
+            var corrupted = protect.EffectiveCorrupted;
+            plan.Assault = corrupted.AssaultMode && WorldEventHoldRules.IsAssaultWave(waveNumber, corrupted.AssaultEveryWaves, corrupted.AssaultFromWave, false);
+
+            if (plan.Assault)
+            {
+                // The assault's corrupted come on top of an ordinary mixed wave (the pick drew them as extra monsters).
+                plan.Roles = WorldEventHoldRules.AssignAssaultWave(size, Math.Clamp(corrupted.AssaultCount, 1, 5), protect.WaveMix.Shares,
+                    protect.WaveMix.Minimums, protect.WaveMix.Maximums, keep, holdWaveRng);
+            }
+            else
+            {
+                var mix = WorldEventHoldRules.AssaultMix(protect.WaveMix.Shares, protect.WaveMix.Minimums, protect.WaveMix.Maximums, corrupted.AssaultMode);
+
+                plan.Roles = WorldEventHoldRules.AssignWaveMix(size, mix.Shares, mix.Minimums, mix.Maximums, keep, holdWaveRng);
+            }
+
+            var targets = Spawner.LiveProtectedCreatures;
+
+            if (targets.Count > 0)
+            {
+                var target = targets[holdWaveRng.Next(targets.Count)];
+                plan.BreachTargetGuid = target.Guid.Full;
+                plan.BreachTargetName = target.Name;
+                plan.BreachSide = SideOfAnchor(target);
+            }
+            else
+            {
+                for (var i = 0; i < plan.Roles.Length; i++)
+                    if (plan.Roles[i] == HoldRole.Breach)
+                        plan.Roles[i] = HoldRole.Seeker;
+            }
+
+            var runners = protect.SpecialWave(HoldWaveType.Runners) ?? new SpecialWaveDef { TypeKind = HoldWaveType.Runners };
+            plan.RunRateMult = (float)Math.Clamp(runners.SpeedMult, 1.0, 3.0);
+            plan.AttackSpeedMult = (float)Math.Clamp(runners.AttackSpeedMult, 1.0, 3.0);
+            plan.HealthMult = Math.Clamp(runners.HealthMult, 0.1, 1.0);
+
+            var ranged = protect.SpecialWave(HoldWaveType.Ranged) ?? new SpecialWaveDef { TypeKind = HoldWaveType.Ranged };
+            plan.HoldDistance = (float)Math.Clamp(ranged.HoldDistance, 5.0, 40.0);
+            plan.Warded = protect.Ward != null;
+
+            if (plan.Roles.Any(r => r == HoldRole.Ranged))
+            {
+                var pool = RangedPoolFor(pick.Band, waveNumber);
+
+                if (pool.Count > 0)
+                    plan.ReplacedTrash = WorldEventHoldRules.ReplaceRangedSlots(pick.Trash, plan.Roles, pool, holdWaveRng,
+                        WorldEventRangedMembers.IsCasterWcid, HoldSettings.CasterShareOfRanged());
+                else
+                {
+                    // No member with a real ranged attack, here or in a family of the same theme: those slots seek
+                    // instead, never a melee monster standing in a ranged slot (warded, holding back).
+                    var moved = WorldEventHoldRules.ReassignRole(plan.Roles, HoldRole.Ranged, HoldRole.Seeker);
+
+                    log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: no member with a real ranged attack in the family " +
+                             $"or a family of its theme; {moved} ranged slot(s) seek instead");
+                }
+            }
+
+            // world_events_hold_<role>_level_offset: slots of a role with an offset are redrawn from the moved band.
+            ApplyRoleLevelOffsets(plan, pick, keep, waveNumber);
+
+            if (plan.Assault)
+                AssignAssaultTargets(plan, pick, corrupted);
+        }
+
+        /// <summary>
+        /// How many extra monsters wave <paramref name="waveNumber"/> brings for a corrupted assault: assaultCount on an
+        /// assault wave of a waveMix Hold (never the finale), else 0.
+        /// </summary>
+        private int HoldAssaultExtra(HoldObjective hold, int waveNumber, bool finalWave)
+        {
+            var protect = hold != null && hold.IsWaveBased ? Composition?.Goal?.Protect : null;
+            var corrupted = protect?.WaveMix != null ? protect.EffectiveCorrupted : null;
+
+            if (corrupted == null || !corrupted.AssaultMode || Request?.ForcedWaveType != null)
+                return 0;
+
+            return WorldEventHoldRules.IsAssaultWave(waveNumber, corrupted.AssaultEveryWaves, corrupted.AssaultFromWave, finalWave)
+                ? Math.Clamp(corrupted.AssaultCount, 1, 5) : 0;
+        }
+
+        /// <summary>
+        /// The ranged pool for a wave: the roster's own members with a real ranged attack, else those of a catalog family
+        /// that shares a theme with the roster's (WorldEventRangedMembers.CompatiblePool). Logged when borrowed.
+        /// </summary>
+        private List<uint> RangedPoolFor(LevelBand band, int waveNumber)
+        {
+            var pool = WorldEventRangedMembers.Pool(Composition?.Roster?.Members, band);
+
+            if (pool.Count > 0)
+                return pool;
+
+            var rosterFamilies = Composition?.Families?.Select(f => f?.Id).Where(id => !string.IsNullOrWhiteSpace(id)).ToList() ?? new List<string>();
+
+            pool = WorldEventRangedMembers.CompatiblePool(rosterFamilies, WorldEventManager.Catalog?.Families, band, out var borrowedFrom, null, holdWaveRng);
+
+            if (pool.Count > 0)
+                log.Info($"[WORLDEVENT] run={RunId} hold wave {waveNumber}: {string.Join("+", rosterFamilies)} has no member with a real ranged attack; " +
+                         $"ranged slots drawn from {borrowedFrom} (same theme): {string.Join(",", pool)}");
+
+            return pool;
+        }
+
+        /// <summary>
+        /// A corrupted assault: each corrupted slot is sent at one standing target (a different one each while enough
+        /// stand), and the wave's broadcast names it ("A Corrupted Grievver Shredder marches on Sir Draithon!").
+        /// </summary>
+        private void AssignAssaultTargets(HoldWavePlan plan, WavePick pick, CorruptedDef corrupted)
+        {
+            var targets = Spawner.LiveProtectedCreatures.Where(t => t != null && !t.IsDead).ToList();
+            var slots = Enumerable.Range(0, plan.Roles.Length).Where(i => plan.Roles[i] == HoldRole.Corrupted).ToList();
+
+            plan.CorruptedTargets = new Dictionary<int, uint>();
+            plan.AssaultCalls = new List<(string Monster, string Target)>();
+
+            if (targets.Count == 0 || slots.Count == 0)
+                return;
+
+            var picks = WorldEventHoldRules.AssaultTargets(targets.Count, slots.Count, holdWaveRng);
+            var trash = plan.ReplacedTrash ?? pick.Trash;
+
+            for (var k = 0; k < slots.Count; k++)
+            {
+                var index = slots[k];
+                var target = targets[picks[k]];
+
+                plan.CorruptedTargets[index] = target.Guid.Full;
+
+                var wcid = index < trash.Count ? trash[index] : (index - trash.Count < pick.Champions.Count ? pick.Champions[index - trash.Count] : 0);
+                var name = Composition?.Roster?.Members?.Find(m => m != null && m.Wcid == wcid)?.Name ?? "foe";
+
+                plan.AssaultCalls.Add((WorldEventHoldRules.Titled(corrupted.Prefix, name), target.Name));
+            }
+        }
+
+        /// <summary>Which compass side of the run's anchor <paramref name="target"/> stands on ("east").</summary>
+        private string SideOfAnchor(Creature target)
+        {
+            var anchor = Composition?.AnchorPosition;
+
+            if (anchor == null || target?.Location == null)
+                return null;
+
+            var a = anchor.ToGlobal();
+            var t = target.Location.ToGlobal();
+
+            return WorldEventHoldRules.CompassSide(t.X - a.X, t.Y - a.Y);
+        }
+
+        /// <summary>
+        /// A special wave or the finale is a phase, announced so nobody can miss it: a World Event broadcast
+        /// ("Wave 4 of 7: To arms! The Drudges gather for a single charge!", "Final wave: That is Champion X!
+        /// ..."), and a protected target says one of the type's lines in local chat (for a breach, the threatened
+        /// target names its side). With no lines for the type, the target says the announce line instead.
+        /// Nothing for an ordinary wave.
+        /// </summary>
+        private void AnnounceHoldWave(HoldWavePlan plan, int waveNumber, int targetWaves)
+        {
+            if (plan == null || plan.FinaleEscort)
+                return;
+
+            var protect = Composition?.Goal?.Protect;
+
+            List<string> Fill(IReadOnlyList<string> pool) =>
+                pool?.Select(l => WorldEventHoldRules.FillWaveTokens(l, plan.BreachSide, plan.ChampionName, plan.BreachTargetName)).ToList();
+
+            // A mixed wave: the goal's waveMix announcement names the breach squad's target, and that target
+            // calls out its side (the breach lines).
+            if (plan.Type == HoldWaveType.Mixed)
+            {
+                var mixAnnounce = ComposeProtectedLine(Fill(protect?.WaveMix?.Announce), null);
+
+                if (!string.IsNullOrEmpty(mixAnnounce))
+                    AnnounceInRun(WorldEventAnnouncer.HoldPhaseLine(WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, false), mixAnnounce));
+
+                var breachTarget = Spawner.LiveProtectedCreatures.FirstOrDefault(c => c.Guid.Full == plan.BreachTargetGuid);
+                var breachLine = ComposeProtectedLine(Fill(protect?.SpecialWave(HoldWaveType.Breach)?.Lines), null);
+
+                if (breachTarget != null && !string.IsNullOrEmpty(breachLine))
+                    SpeakLocally(breachTarget, breachLine, viaQueue: true);
+
+                // Each its own World Event line (three sentences at most apiece): the warded ranged, then the
+                // corrupted, when this wave has them.
+                if (plan.Warded && plan.Roles != null && plan.Roles.Contains(HoldRole.Ranged))
+                {
+                    var wardLine = ComposeProtectedLine(Fill(protect?.Ward?.Announce), null);
+
+                    if (!string.IsNullOrEmpty(wardLine))
+                        AnnounceInRun(WorldEventAnnouncer.Global(wardLine));
+                }
+
+                // A corrupted assault: one line per corrupted monster, naming the target it marches on.
+                if (plan.Assault && plan.AssaultCalls != null && plan.AssaultCalls.Count > 0)
+                {
+                    // Not Fill: its {target} is the breach target, and each line names its own.
+                    var pool = protect?.EffectiveCorrupted.AssaultAnnounce?.ToList() ?? new List<string>();
+
+                    foreach (var call in plan.AssaultCalls)
+                    {
+                        string template;
+
+                        lock (protectedLineRngSync)
+                            template = pool.Count > 0 ? pool[protectedLineRng.Next(pool.Count)] : null;
+
+                        var assaultLine = ComposeProtectedLine(new List<string> { WorldEventHoldRules.AssaultLine(template, call.Monster, call.Target) }, null);
+
+                        if (!string.IsNullOrEmpty(assaultLine))
+                            AnnounceInRun(WorldEventAnnouncer.Global(assaultLine));
+                    }
+                }
+                else if (plan.Roles != null && plan.Roles.Contains(HoldRole.Corrupted))
+                {
+                    var corruptedLine = ComposeProtectedLine(Fill(protect?.EffectiveCorrupted.Announce), null);
+
+                    if (!string.IsNullOrEmpty(corruptedLine))
+                        AnnounceInRun(WorldEventAnnouncer.Global(corruptedLine));
+                }
+
+                return;
+            }
+
+            var def = protect?.SpecialWave(plan.Type);
+
+            if (def == null)
+                return;
+
+            var announce = ComposeProtectedLine(Fill(def.Announce), null);
+
+            if (!string.IsNullOrEmpty(announce))
+            {
+                var label = WorldEventHoldRules.PhaseLabel(waveNumber, targetWaves, plan.Type == HoldWaveType.Finale);
+
+                AnnounceInRun(WorldEventAnnouncer.HoldPhaseLine(label, announce));
+            }
+
+            var targets = Spawner.LiveProtectedCreatures;
+
+            if (targets.Count == 0)
+                return;
+
+            Creature speaker = null;
+
+            if (plan.Type == HoldWaveType.Breach)
+                speaker = targets.FirstOrDefault(c => c.Guid.Full == plan.BreachTargetGuid);
+
+            if (speaker == null)
+            {
+                lock (protectedLineRngSync)
+                    speaker = targets[protectedLineRng.Next(targets.Count)];
+            }
+
+            var line = def.Lines != null && def.Lines.Count > 0 ? ComposeProtectedLine(Fill(def.Lines), null) : announce;
+
+            if (!string.IsNullOrEmpty(line))
+                SpeakLocally(speaker, line, viaQueue: true);
+        }
+
+        /// <summary>How long a player counts as "healing the targets" for hunter waves after their last heal on one.</summary>
+        internal const double ProtectedHealerMemorySeconds = 20.0;
+
+        private readonly Dictionary<uint, (Player Player, double At)> protectedHealers = new Dictionary<uint, (Player, double)>();
+
+        private readonly object protectedHealersSync = new object();
+
+        /// <summary>Remembers that <paramref name="healer"/> healed one of this run's targets at <paramref name="now"/>. Any thread.</summary>
+        internal void NoteProtectedHealer(Player healer, double now)
+        {
+            if (healer == null)
+                return;
+
+            lock (protectedHealersSync)
+                protectedHealers[healer.Guid.Full] = (healer, now);
+        }
+
+        /// <summary>Players who healed a target within <see cref="ProtectedHealerMemorySeconds"/> of <paramref name="now"/>. Any thread.</summary>
+        internal List<Player> RecentProtectedHealers(double now)
+        {
+            lock (protectedHealersSync)
+            {
+                var stale = protectedHealers.Where(kv => now - kv.Value.At > HoldSettings.Number(HoldKeys.HealerMemorySeconds, ProtectedHealerMemorySeconds)).Select(kv => kv.Key).ToList();
+
+                foreach (var key in stale)
+                    protectedHealers.Remove(key);
+
+                return protectedHealers.Values.Select(v => v.Player).ToList();
+            }
+        }
+
+        /// <summary>Waves this run has started (picked and sent to the spawner). A Hold run counts its waves by it.</summary>
+        private int holdWavesStarted;
+
+        /// <summary>The number of the wave in progress (0 before the first): healing budgets count per wave by it.</summary>
+        internal int HoldWaveNumber => holdWavesStarted;
+
+        /// <summary>The run's wave counts, for a wave-based Hold objective.</summary>
+        internal HoldWaveCounts HoldWaveCounts =>
+            new HoldWaveCounts(holdWavesStarted, Spawner.LandedWaveCount, Spawner.ClearedWaveCount, Spawner.LiveCount,
+                HoldResolvedWaves(holdWavesStarted, Spawner.ResolvedWaveCount, holdTickNow, holdLastWaveStartedAt, HoldSettings.Number(HoldKeys.WaveResolveGraceSeconds, HoldWaveResolveGraceSeconds),
+                    HoldFinaleEscortPending));
+
+        /// <summary>
+        /// How many started waves count as resolved (D6 - pure): what the spawner reported, or every started
+        /// wave once <paramref name="graceSeconds"/> have passed since the last one started.
+        /// </summary>
+        public static int HoldResolvedWaves(int started, int spawnerResolved, double now, double lastStartedAt, double graceSeconds,
+            bool finaleEscortPending)
+        {
+            var resolved = HoldResolvedWaves(started, spawnerResolved, now, lastStartedAt, graceSeconds);
+
+            // The boss has landed but the rest of the final wave is still to come: the finale is not placed yet.
+            return finaleEscortPending ? Math.Min(resolved, Math.Max(0, started - 1)) : resolved;
+        }
+
+        /// <summary>
+        /// <see cref="HoldResolvedWaves(int, int, double, double, double, bool)"/> with no finale escort pending.
+        /// </summary>
+        public static int HoldResolvedWaves(int started, int spawnerResolved, double now, double lastStartedAt, double graceSeconds)
+        {
+            if (spawnerResolved >= started)
+                return started;
+
+            if (lastStartedAt > 0 && now - lastStartedAt >= graceSeconds)
+                return started;
+
+            return Math.Max(0, spawnerResolved);
         }
 
         /// <summary>
@@ -1562,7 +2425,7 @@ namespace ACE.Server.WorldEvents
                 var line = WorldEventAnnouncer.BossArrivedLine(bossName, AnchorName);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce boss_arrived");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
             }
             catch (Exception ex)
             {
@@ -1700,6 +2563,9 @@ namespace ACE.Server.WorldEvents
                 // the throughput flag and this boss's own floor put it on the measured path instead (C16),
                 // which is decided here, once, and also picks the rebase the spawner will apply.
                 healthMult = ResolveNamedBossSpawnMult(Composition.Boss);
+
+                // A chained stage's champion: world_events_chain_champion_health_mult on top of the sizing (1 = as before).
+                healthMult *= HoldSettings.ChampionHealthMult(IsChainChampionStage);
             }
             else
             {
@@ -2015,7 +2881,8 @@ namespace ACE.Server.WorldEvents
                 if (!enabled)
                     return;
 
-                var dials = BossDamageDialSource();
+                var dials = HoldSettings.ChampionDials(BossDamageDialSource(), IsChainChampionStage,
+                    Spawner.BossCreature?.WorldEventBossSpawnedAt ?? 0, ACE.Common.Time.GetUnixTime());
 
                 if (BossDamage.PendingHits < Math.Max(1, dials.SampleHits))
                     return;
@@ -2026,7 +2893,7 @@ namespace ACE.Server.WorldEvents
                     return;
 
                 var sampled = WorldEventAudienceSampler.SampleTopMaxHealth(Composition?.AnchorPosition,
-                    Composition?.Source?.RewardRadius ?? 0f);
+                    EffectiveRewardRadius);
 
                 if (sampled > 0)
                     BossDamageTopMaxHealth = sampled;
@@ -2122,11 +2989,15 @@ namespace ACE.Server.WorldEvents
         /// tier already announced - can never return that tier a second time. The latch is on the TIER,
         /// never recomputed from the ratio alone.
         /// </summary>
-        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired)
+        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired) =>
+            DueBossHealthMilestones(current, max, fired, BossHealthMilestonePercents);
+
+        /// <summary>The same latch over <paramref name="tiers"/> (the knights' world_events_hold_milestone_percents).</summary>
+        public static List<int> DueBossHealthMilestones(uint current, uint max, HashSet<int> fired, IReadOnlyList<int> tiers)
         {
             var due = new List<int>();
 
-            foreach (var pct in BossHealthMilestonePercents)
+            foreach (var pct in tiers ?? BossHealthMilestonePercents)
             {
                 if (fired.Contains(pct))
                     continue;
@@ -2184,12 +3055,670 @@ namespace ACE.Server.WorldEvents
                     var line = WorldEventAnnouncer.BossHealthMilestoneLine(boss.DisplayName, pct);
 
                     log.Info($"[WORLDEVENT] run={RunId} announce boss_health {pct}");
-                    WorldEventAnnouncer.Broadcast(line);
+                    AnnounceInRun(line);
                 }
             }
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} boss health milestone tick threw", ex);
+            }
+        }
+
+        /// <summary>Per protected target: the milestone tiers already announced. World thread only.</summary>
+        private readonly Dictionary<uint, HashSet<int>> protectedMilestonesFired = new Dictionary<uint, HashSet<int>>();
+
+        /// <summary>
+        /// Hold goals: a global line the first time each living protected target drops to or below 75%, 50%,
+        /// 25% of its max health, reusing <see cref="DueBossHealthMilestones"/>'s once-per-tier latch. Off
+        /// when the goal's protect.healthMilestones is false. Never throws.
+        /// </summary>
+        private void TickProtectedHealthMilestones()
+        {
+            try
+            {
+                var goal = Composition?.Goal;
+                var protect = goal?.Protect;
+
+                if (goal == null || goal.TypeKind != GoalType.Hold || protect == null)
+                    return;
+
+                foreach (var target in Spawner.LiveProtectedCreatures)
+                {
+                    var guid = target.Guid.Full;
+
+                    // The spawn line: once per target, on the first tick it is standing in the world.
+                    if (protectedGreeted.Add(guid))
+                        SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Spawn, null), viaQueue: true);
+
+                    if (!Spawner.TryGetProtectedHealth(guid, out var current, out var max))
+                        continue;
+
+                    if (!protectedMilestonesFired.TryGetValue(guid, out var fired))
+                        protectedMilestonesFired[guid] = fired = new HashSet<int>();
+
+                    foreach (var pct in DueBossHealthMilestones(current, max, fired, HoldSettings.KnightMilestonePercents()))
+                    {
+                        if (protect.HealthMilestones)
+                        {
+                            log.Info($"[WORLDEVENT] run={RunId} announce protected_health guid=0x{guid:X8} {pct}");
+                            AnnounceInRun(
+                                WorldEventAnnouncer.ProtectedHealthMilestoneLine(protect.EffectiveNoun, AnchorName, pct));
+                        }
+
+                        SpeakLocally(target, ComposeProtectedLine(protect.Lines?.Health, pct), viaQueue: true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected target milestone tick threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Hold runs only: every wave monster that is still asleep is asked to wake, through its own
+        /// landblock's action queue (Creature.TryWorldEventHoldWake runs there). Without this the wave stands
+        /// at the spawn ring until a player walks within its awareness range (often 20 m), and the seekers
+        /// never reach the targets. Asked again every tick while it stays asleep, so a monster with nobody in
+        /// reach wakes as soon as someone arrives. Never throws.
+        /// </summary>
+        private void TickHoldWake()
+        {
+            try
+            {
+                if (Composition?.Goal?.TypeKind != GoalType.Hold)
+                    return;
+
+                var targetsStanding = Spawner.LiveProtectedGuids.Count > 0;
+
+                foreach (var creature in Spawner.LiveWaveCreatures)
+                {
+                    // An awake seeker on anything but a target (a player, nothing) is put back on a target,
+                    // with a warning naming what it was on: the seeker lock should make this impossible.
+                    if (creature.MonsterState != Creature.State.Idle)
+                    {
+                        if (WorldEventHoldRules.SeekerStrayed(creature.WorldEventSeeker,
+                                (creature.AttackTarget as Creature)?.WorldEventProtected ?? false, targetsStanding)
+                            && creature.CurrentLandblock is { } strayLandblock)
+                        {
+                            var stray = creature;
+
+                            strayLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                            {
+                                try
+                                {
+                                    stray.TryRestoreWorldEventSeekerLock();
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.Error($"[WORLDEVENT] run={RunId} seeker restore threw", ex);
+                                }
+                            }));
+                        }
+
+                        continue;
+                    }
+
+                    var landblock = creature.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var target = creature;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (target.TryWorldEventHoldWake())
+                                log.Debug($"[WORLDEVENT] run={RunId} hold wake guid=0x{target.Guid.Full:X8} seeker={target.WorldEventSeeker} target={(target.AttackTarget as Creature)?.Name ?? "none"}");
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} hold wake threw", ex);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold wake pass threw", ex);
+            }
+        }
+
+        /// <summary>When the finale boss effect last played. World thread only.</summary>
+        private double holdBossEffectAt;
+
+        /// <summary>
+        /// Hold finale: replays protect.bossEffect (a PlayScript, ShieldUpRed by default) on the living finale
+        /// boss every protect.bossEffectSeconds, through its own landblock queue, so it stands out from the
+        /// wave. Nothing when the goal sets "none". Never throws.
+        /// </summary>
+        private void TickHoldBossEffect(double now)
+        {
+            try
+            {
+                var protect = Composition?.Goal?.Protect;
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold || protect == null)
+                    return;
+
+                WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out var pulse);
+                WorldEventHoldRules.TryParseBossEffect(protect.BossArrivalEffect, out var arrival);
+
+                var pulseDue = pulse != ACE.Entity.Enum.PlayScript.Invalid && now - holdBossEffectAt >= Math.Max(1.0, protect.BossEffectSeconds);
+
+                if (pulseDue)
+                    holdBossEffectAt = now;
+
+                foreach (var boss in Spawner.LiveWaveCreatures)
+                {
+                    if (boss == null || !boss.WorldEventFinaleBoss || boss.IsDead)
+                        continue;
+
+                    var landblock = boss.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    // The arrival effect once per boss, the first tick it is in the world; the pulse after that.
+                    var firstSight = holdBossArrivals.Add(boss.Guid.Full);
+                    var script = firstSight && arrival != ACE.Entity.Enum.PlayScript.Invalid ? arrival : (pulseDue ? pulse : ACE.Entity.Enum.PlayScript.Invalid);
+
+                    if (script == ACE.Entity.Enum.PlayScript.Invalid)
+                        continue;
+
+                    if (firstSight)
+                        log.Info($"[WORLDEVENT] run={RunId} hold finale boss {boss.Name} 0x{boss.Guid.Full:X8} has arrived (effect {script})");
+
+                    var b = boss;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!b.IsDead && !b.IsDestroyed)
+                            b.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(b.Guid, script, 1.0f));
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} boss effect threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Hold protect.portals: plays protect.portals.pulseEffect on every portal part this run placed, through
+        /// each part's own landblock queue, as a wave comes through. Never throws.
+        /// </summary>
+        private void PulseHoldPortals()
+        {
+            try
+            {
+                var portals = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Portals : null;
+
+                if (portals?.Parts == null || !WorldEventHoldRules.TryParseBossEffect(portals.PulseEffect, out var pulse)
+                    || pulse == ACE.Entity.Enum.PlayScript.Invalid)
+                    return;
+
+                var partWcids = new HashSet<uint>(portals.Parts.Where(p => p != null).Select(p => p.Wcid));
+
+                foreach (var part in Spawner.LiveDecorObjects)
+                {
+                    if (!partWcids.Contains(part.WeenieClassId) || part.CurrentLandblock == null)
+                        continue;
+
+                    var p = part;
+
+                    part.CurrentLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!p.IsDestroyed)
+                            p.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(p.Guid, pulse, 1.0f));
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} portal pulse threw", ex);
+            }
+        }
+
+        /// <summary>When the corrupted effect last played. World thread only.</summary>
+        private double holdCorruptedEffectAt;
+
+        /// <summary>Warded monsters whose arrival (ward up) effect has played. World thread only.</summary>
+        private readonly HashSet<uint> holdWardArrivals = new HashSet<uint>();
+
+        /// <summary>
+        /// Hold mixed waves' markers, once a second: the corrupted effect on every living corrupted monster every
+        /// protect.corrupted.effectSeconds; and a warded monster's restore effect when it arrives and each time its
+        /// ward comes back after a shatter. Never throws.
+        /// </summary>
+        private void TickHoldMarkerEffects(double now)
+        {
+            try
+            {
+                var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+                if (protect?.WaveMix == null)
+                    return;
+
+                var corrupted = protect.EffectiveCorrupted;
+                WorldEventHoldRules.TryParseBossEffect(corrupted.Effect, out var corruptedEffect);
+
+                var corruptedDue = corruptedEffect != ACE.Entity.Enum.PlayScript.Invalid && now - holdCorruptedEffectAt >= Math.Max(1.0, corrupted.EffectSeconds);
+
+                if (corruptedDue)
+                    holdCorruptedEffectAt = now;
+
+                var restoreEffect = ACE.Entity.Enum.PlayScript.Invalid;
+
+                if (protect.Ward != null)
+                    WorldEventHoldRules.TryParseBossEffect(protect.Ward.RestoreEffect, out restoreEffect);
+
+                foreach (var monster in Spawner.LiveWaveCreatures)
+                {
+                    if (monster == null || monster.IsDead || monster.CurrentLandblock == null)
+                        continue;
+
+                    var script = ACE.Entity.Enum.PlayScript.Invalid;
+
+                    if (monster.WorldEventCorrupted && corruptedDue)
+                    {
+                        script = corruptedEffect;
+
+                        // protect.corrupted.extraEffect: a second effect on top, for a mark that reads in a crowd.
+                        PlayScriptOn(monster, corrupted.ExtraEffect);
+                    }
+
+                    if (monster.WorldEventWarded && restoreEffect != ACE.Entity.Enum.PlayScript.Invalid)
+                    {
+                        var arrived = holdWardArrivals.Add(monster.Guid.Full);
+                        var restored = monster.WorldEventWardRestorePending && monster.IsWorldEventWardUp(ACE.Common.Time.GetUnixTime());
+
+                        if (restored)
+                            monster.WorldEventWardRestorePending = false;
+
+                        if (arrived || restored)
+                            script = restoreEffect;
+                    }
+
+                    if (script == ACE.Entity.Enum.PlayScript.Invalid)
+                        continue;
+
+                    var m = monster;
+
+                    monster.CurrentLandblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        if (!m.IsDead && !m.IsDestroyed)
+                            m.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageScript(m.Guid, script, 1.0f));
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} marker effects threw", ex);
+            }
+        }
+
+        /// <summary>Finale bosses whose arrival effect has played. World thread only.</summary>
+        private readonly HashSet<uint> holdBossArrivals = new HashSet<uint>();
+
+        /// <summary>How many cleared waves the between-waves heal has already paid out for. World thread only.</summary>
+        private int holdHealedForClears;
+
+        /// <summary>
+        /// Hold runs with protect.healBetweenWaves above 0: every time a wave is fully cleared, each standing
+        /// target regains that share of its max health (through its own landblock queue), and one of them
+        /// says a protect.lines.heal line. Several waves clearing between two ticks heal once per wave. Never
+        /// throws.
+        /// </summary>
+        private void TickHoldBetweenWaveHeals()
+        {
+            try
+            {
+                var protect = Composition?.Goal?.Protect;
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold || protect == null || !(protect.HealBetweenWaves > 0))
+                    return;
+
+                var cleared = Spawner.ClearedWaveCount;
+
+                if (cleared <= holdHealedForClears)
+                    return;
+
+                var newClears = cleared - holdHealedForClears;
+
+                holdHealedForClears = cleared;
+
+                var targets = Spawner.LiveProtectedCreatures;
+
+                if (targets.Count == 0)
+                    return;
+
+                foreach (var target in targets)
+                {
+                    var landblock = target.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var t = target;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (t.IsDead || t.IsDestroyed)
+                                return;
+
+                            // Through the shared heal path: reduced right after a hit, and held to the per-wave budget.
+                            t.ApplyWorldEventProtectedHeal(Math.Min(1.0, protect.HealBetweenWaves * newClears), false, ACE.Common.Time.GetUnixTime(), out _);
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} between-waves heal threw", ex);
+                        }
+                    }));
+                }
+
+                log.Info($"[WORLDEVENT] run={RunId} hold heal {protect.HealBetweenWaves:P0} x{newClears} for {targets.Count} target(s) (waves cleared={cleared})");
+
+                Creature speaker;
+
+                lock (protectedLineRngSync)
+                    speaker = targets[protectedLineRng.Next(targets.Count)];
+
+                SpeakLocally(speaker, ComposeProtectedLine(protect.Lines?.Heal, null), viaQueue: true);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} between-waves heal pass threw", ex);
+            }
+        }
+
+        /// <summary>Protected targets that have already said their spawn line. World thread only.</summary>
+        private readonly HashSet<uint> protectedGreeted = new HashSet<uint>();
+
+        /// <summary>
+        /// Global copies of protected-target lines spoken off the world thread (a destroyed line comes from
+        /// Creature.Die on a landblock thread). Drained at the top of <see cref="TickActive"/>, so a target's
+        /// last words go out before any outcome line its death causes on that same tick.
+        /// </summary>
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> pendingProtectedGlobalLines =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        private readonly Random protectedLineRng = new Random(ThreadSafeRandom.Next(0, int.MaxValue - 1));
+
+        private readonly object protectedLineRngSync = new object();
+
+        /// <summary>
+        /// One line from <paramref name="pool"/>, with this run's tokens filled in: {family}/{Family} from the
+        /// composed monster families, the protect nouns, the anchor, the alive/total counts, and
+        /// <paramref name="pct"/> for health lines. Null when the pool is empty or this is not a Hold run.
+        /// </summary>
+        internal string ComposeProtectedLine(IReadOnlyList<string> pool, int? pct)
+        {
+            var protect = Composition?.Goal?.Protect;
+
+            if (protect == null || pool == null || pool.Count == 0)
+                return null;
+
+            string template;
+
+            lock (protectedLineRngSync)
+                template = WorldEventHoldRules.PickLine(pool, protectedLineRng);
+
+            if (template == null)
+                return null;
+
+            return WorldEventHoldRules.FillLine(template, Composition?.FamilyDisplayName, protect.EffectiveNoun,
+                protect.EffectiveNounPlural, AnchorName, Spawner.LiveProtectedGuids.Count, Spawner.ProtectedGuids.Count, pct);
+        }
+
+        /// <summary>
+        /// <paramref name="speaker"/> says <paramref name="line"/> in local chat, the way an npc's Say emote
+        /// does. <paramref name="viaQueue"/> routes it through the speaker's landblock action queue (for a
+        /// caller on the world thread); false speaks immediately (the caller is already on that landblock's
+        /// thread, e.g. inside Creature.Die). Never throws.
+        /// </summary>
+        private void SpeakLocally(Creature speaker, string line, bool viaQueue)
+        {
+            if (speaker == null || string.IsNullOrEmpty(line))
+                return;
+
+            void Say()
+            {
+                try
+                {
+                    if (speaker.IsDestroyed)
+                        return;
+
+                    speaker.EnqueueBroadcast(new ACE.Server.Network.GameMessages.Messages.GameMessageHearSpeech(
+                        line, speaker.Name, speaker.Guid.Full, ACE.Entity.Enum.ChatMessageType.Emote), WorldObject.LocalBroadcastRange);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} protected target speech threw", ex);
+                }
+            }
+
+            log.Info($"[WORLDEVENT] run={RunId} protected_say guid=0x{speaker.Guid.Full:X8} \"{line}\"");
+
+            if (!viaQueue)
+            {
+                Say();
+                return;
+            }
+
+            var landblock = speaker.CurrentLandblock;
+
+            if (landblock != null)
+                landblock.EnqueueAction(new ActionEventDelegate(Say));
+        }
+
+        /// <summary>
+        /// A protected target was just destroyed: its last words in local chat (we are on its landblock's
+        /// thread, inside Creature.Die), and a global copy queued for the next world tick.
+        /// </summary>
+        private void OnProtectedTargetDestroyed(Creature target)
+        {
+            var line = ComposeProtectedLine(Composition?.Goal?.Protect?.Lines?.Destroyed, null);
+
+            if (line == null)
+                return;
+
+            SpeakLocally(target, line, viaQueue: false);
+
+            pendingProtectedGlobalLines.Enqueue(WorldEventAnnouncer.ProtectedSpeechLine(target.Name, line));
+        }
+
+        private void DrainProtectedGlobalLines()
+        {
+            while (pendingProtectedGlobalLines.TryDequeue(out var line))
+                AnnounceInRun(line);
+        }
+
+        // ---- World Events chain: pacing and story (2026-10-19) ---------------------------------------------------------
+
+        /// <summary>Which stage of its chain this run is (1 = the first, or no chain).</summary>
+        public int ChainStageNumber => Math.Max(1, Request?.ChainStage ?? 1);
+
+        /// <summary>The chain settings this run follows: the ones carried from the first stage, else its own goal's.</summary>
+        public ChainDef ChainSettingsInEffect => Request?.ChainSettings ?? Composition?.Goal?.Chain;
+
+        /// <summary>What the chain does after this run ends with <paramref name="outcome"/> (None when it is not part of a chain).</summary>
+        public WorldEventChain.Decision ChainDecisionFor(WorldEventOutcome outcome)
+        {
+            var maxLength = WorldEventChain.EffectiveMaxLength(Request?.ChainMaxLength ?? 0, Composition?.Goal?.Chain);
+
+            var decision = WorldEventChain.Decide(outcome, ChainStageNumber, maxLength);
+
+            // world_events_chain (on/off) and world_events_chain_chance, rolled once per run so every reader agrees.
+            chainChanceRoll ??= ThreadSafeRandom.Next(0.0f, 1.0f);
+
+            return WorldEventChain.ApplySettings(decision, ChainStageNumber, HoldSettings.Toggle(HoldKeys.Chain, true),
+                HoldSettings.Number(HoldKeys.ChainChance, 1.0), chainChanceRoll.Value);
+        }
+
+        /// <summary>
+        /// The envoy who speaks for the chain: carried from the first stage, else one of this run's surviving protected
+        /// targets, picked at Finish. Null when none survived (a narrator speaks instead).
+        /// </summary>
+        public string ChainEnvoyName { get; private set; }
+
+        /// <summary>Asheron's opening line went out in this chain (this run or an earlier stage), so his closing line is owed.</summary>
+        public bool ChainAsheronSpoke => deathProtectionStartAnnounced || (Request?.ChainAsheronSpoke ?? false);
+
+        private void CaptureChainEnvoy()
+        {
+            try
+            {
+                if (ChainStageNumber > 1)
+                {
+                    ChainEnvoyName = Request?.ChainEnvoyName;
+                    return;
+                }
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold)
+                    return;
+
+                var survivors = Spawner.LiveProtectedCreatures;
+
+                if (survivors.Count == 0)
+                    return;
+
+                lock (protectedLineRngSync)
+                    ChainEnvoyName = survivors[protectedLineRng.Next(survivors.Count)].Name;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain envoy pick threw", ex);
+            }
+        }
+
+        /// <summary>The Town Network town nearest <paramref name="position"/>, or null.</summary>
+        internal static string TownNear(Position position)
+        {
+            try
+            {
+                return position != null ? WorldEventTownIndex.Nearest(position, WorldEventTownIndex.Towns)?.Town.Name : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// This run's story tokens. A later stage: {town} is the first stage's town and {nextTown} this one's. The first
+        /// stage: {town} is its own town and {nextTown} is <paramref name="nextTown"/>.
+        /// </summary>
+        public WorldEventChain.StoryTokens ChainStoryTokens(string nextTown = null, string champion = null)
+        {
+            var here = TownNear(Composition?.AnchorPosition);
+            var later = ChainStageNumber > 1;
+            var boss = Composition?.Boss;
+
+            return new WorldEventChain.StoryTokens
+            {
+                Envoy = ChainEnvoyName ?? (later ? Request?.ChainEnvoyName : null),
+                Family = later ? Request?.ChainFamily ?? Composition?.FamilyDisplayName : Composition?.FamilyDisplayName,
+                Town = later ? Request?.ChainFirstTown ?? here : here,
+                NextTown = later ? here : nextTown,
+                Champion = champion ?? (later && boss?.Kind == BossKind.Named ? boss.DisplayName : null)
+            };
+        }
+
+        /// <summary>
+        /// The chain ends with this run: its closing story line and Asheron's closing line, paced by chain.pacing (an abort:
+        /// only Asheron's, at once). <paramref name="thanksFirst"/>: the stage was won but the next could not start, so the
+        /// thank-you with the cache comes first. Lines due at once go out now; the rest through WorldEventLineSchedule.
+        /// </summary>
+        internal void ScheduleChainEnd(double now, WorldEventOutcome outcome, bool thanksFirst)
+        {
+            try
+            {
+                List<WorldEventChain.PacedLine> plan;
+
+                lock (protectedLineRngSync)
+                    plan = WorldEventChain.ChainEndPlan(ChainSettingsInEffect, outcome, ChainStoryTokens(), ChainAsheronSpoke, thanksFirst, protectedLineRng);
+
+                foreach (var line in plan.Where(l => l.Delay <= 0))
+                    AnnounceInRun(line.Text);
+
+                WorldEventLineSchedule.Shared.AddPlan(now, plan.Where(l => l.Delay > 0));
+
+                log.Info($"[WORLDEVENT] run={RunId} chain stage {ChainStageNumber} ended {outcome}: the chain is over; " +
+                         $"{plan.Count} closing line(s) at [{string.Join(", ", plan.Select(l => $"{l.Delay:0.#} s"))}]");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain closing lines threw", ex);
+            }
+        }
+
+        /// <summary>A later stage has gone live: the line that ties it to the first, chain.pacing.tieBackSeconds later.</summary>
+        private void ScheduleChainTieBack(double now)
+        {
+            try
+            {
+                if (ChainStageNumber <= 1)
+                    return;
+
+                var chain = ChainSettingsInEffect;
+                string line;
+
+                lock (protectedLineRngSync)
+                    line = WorldEventChain.StoryLine(chain?.Story, WorldEventChain.StoryBeat.TieBack, ChainStoryTokens(), protectedLineRng);
+
+                if (line == null)
+                    return;
+
+                WorldEventLineSchedule.Shared.Add(now + Math.Max(0, chain?.Pacing?.TieBackSeconds ?? 0), line, () => State == WorldEventState.Active);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} chain tie-back line threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// The hold succeeded: one surviving target thanks the defenders. Spoken through its landblock queue,
+        /// which is the same queue Finish's cleanup destroys it through, so the line is heard first. Returns
+        /// the global copy for the caller to send after the outcome line, or null when there is nothing to say.
+        /// </summary>
+        private string SpeakProtectedSuccessLine()
+        {
+            try
+            {
+                var lines = Composition?.Goal?.Protect?.Lines?.Success;
+
+                if (Composition?.Goal?.TypeKind != GoalType.Hold || lines == null || lines.Count == 0)
+                    return null;
+
+                var survivors = Spawner.LiveProtectedCreatures;
+
+                if (survivors.Count == 0)
+                    return null;
+
+                Creature speaker;
+
+                lock (protectedLineRngSync)
+                    speaker = survivors[protectedLineRng.Next(survivors.Count)];
+
+                var line = ComposeProtectedLine(lines, null);
+
+                if (line == null)
+                    return null;
+
+                SpeakLocally(speaker, line, viaQueue: true);
+
+                return WorldEventAnnouncer.ProtectedSpeechLine(speaker.Name, line);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected success line threw", ex);
+                return null;
             }
         }
 
@@ -2285,7 +3814,7 @@ namespace ACE.Server.WorldEvents
                     ProgressText, displayWave, secondsRemaining);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce progress");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
             }
             catch (Exception ex)
             {
@@ -2307,7 +3836,8 @@ namespace ACE.Server.WorldEvents
 
             var guid = creature.Guid.Full;
 
-            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid)))
+            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid),
+                    Spawner.IsProtectedGuid(guid)))
                 return;
 
             Throughput.NoteCleared(creature.Health.MaxValue);
@@ -2422,6 +3952,22 @@ namespace ACE.Server.WorldEvents
             return now >= lastWaveAt + interval ? "interval" : "cleared";
         }
 
+        /// <summary>A Hold run's wave 0 is waiting for its protected targets to be placed (see OnBecameActive).</summary>
+        internal bool holdFirstWavePending;
+
+        /// <summary>True for a goal whose first wave waits for its protected targets: a Hold goal with a protect block.</summary>
+        public static bool DefersFirstWave(GoalDef goal) => goal != null && goal.TypeKind == GoalType.Hold && goal.Protect != null;
+
+        /// <summary>
+        /// Whether a Hold run's first wave may go out (D6 - pure): once the protected-target batch has resolved
+        /// on its landblock, or after <paramref name="graceSeconds"/> regardless, so a batch that never reports
+        /// back cannot hold the run without waves.
+        /// </summary>
+        public static bool HoldFirstWaveMayStart(bool placementResolved, double secondsSinceActive, double graceSeconds)
+        {
+            return placementResolved || secondsSinceActive >= graceSeconds;
+        }
+
         /// <summary>
         /// The wave cadence. Runs ahead of the objective and timer evaluation so a wave that completes the
         /// objective is judged on the same tick it lands.
@@ -2430,6 +3976,34 @@ namespace ACE.Server.WorldEvents
         {
             if (AnchorLandblock == null)
                 return;
+
+            // Hold finale: the rest of the final wave, once the boss has stood alone for its lead time.
+            if (TickHoldFinaleEscort(now))
+                return;
+
+            if (holdFirstWavePending)
+            {
+                if (!HoldFirstWaveMayStart(Spawner.ProtectedPlacementResolved, now - ActiveAt, Composition?.Goal?.Protect?.FirstWaveDelaySeconds ?? HoldObjective.PlacementGraceSeconds))
+                    return;
+
+                holdFirstWavePending = false;
+
+                log.Info($"[WORLDEVENT] run={RunId} hold first wave: targets placed={Spawner.ProtectedGuids.Count} " +
+                         $"(resolved={Spawner.ProtectedPlacementResolved}) after {now - ActiveAt:F1}s");
+
+                try
+                {
+                    SpawnWave(now, initial: true);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} initial spawn threw", ex);
+                }
+
+                // The cadence counts from the wave that actually went out.
+                lastWaveAt = now;
+                return;
+            }
 
             var interval = Composition?.Source?.EffectiveWaveIntervalSeconds ?? 0;
 
@@ -2457,6 +4031,40 @@ namespace ACE.Server.WorldEvents
             // spawning at minute one and has four more minutes to serve is an empty field, which is the
             // whole failure this minimum exists to prevent.
             var remaining = minElapsed ? Objective?.RemainingKills : null;
+
+            // Wave-based Hold: once the counted waves have all started and the minimum time is up, no more
+            // waves - the field is left to clear, and the hold succeeds when its last monster dies.
+            if (Objective is HoldObjective hold && !hold.WantsAnotherWave(now))
+                return;
+
+            // Hold with protect.waveIntervalSeconds: constant pressure. The next wave comes after that many
+            // seconds, or as soon as most of the last wave is dead (protect.nextWaveAliveShare), never closer
+            // than protect.minWaveGapSeconds. The total and the finale are still decided above.
+            var holdCadence = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+            if (holdCadence != null && holdCadence.WaveIntervalSeconds > 0)
+            {
+                if (!active || complete || lastWaveIndexSpawned < 0)
+                    return;
+
+                if (!WorldEventHoldRules.HoldNextWaveDue(now, lastWaveAt, holdCadence.WaveIntervalSeconds, holdCadence.MinWaveGapSeconds,
+                        alive, holdLastWaveSize, holdCadence.NextWaveAliveShare, holdCadence.NextWaveRequiresBoth, holdCadence.MaxWaveIntervalSeconds))
+                    return;
+
+                var holdTrigger = now - lastWaveAt >= holdCadence.WaveIntervalSeconds ? "interval" : "most-dead";
+
+                try
+                {
+                    SpawnWave(now, initial: false, trigger: holdTrigger);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} wave spawn threw", ex);
+                }
+
+                lastWaveAt = now;
+                return;
+            }
 
             if (!ShouldSpawnNextWave(active, complete, lastWaveIndexSpawned, alive, now, lastWaveAt,
                     interval, MinWaveGapSeconds, remaining))
@@ -2499,6 +4107,12 @@ namespace ACE.Server.WorldEvents
 
         private void TickActive(double now)
         {
+            holdTickNow = now;
+
+            // Hold: global copies of target lines spoken since the last tick (a destroyed target's last
+            // words), ahead of anything this tick decides.
+            DrainProtectedGlobalLines();
+
             // Champion BEFORE waves (2026-08-16): a champion due on the same tick as a wave claims the
             // ground first, rather than landing into a spot 16 wave mobs just filled - a stage run latched a
             // placement failure at exactly that collision. The objective is still judged after both, below.
@@ -2506,9 +4120,30 @@ namespace ACE.Server.WorldEvents
 
             TickWaves(now);
 
+            TickHoldWake();
+
+            TickHoldBetweenWaveHeals();
+
+            TickHoldBossEffect(now);
+
+            TickHoldFinaleBoss(now);
+
+            TickHoldMarkerEffects(now);
+
+            TickHoldKnightHealth();
+            TickBossTuning(now);
+            TickHoldPresence(now);
+            TickHoldClearRegen();
+
+            TickHoldShrines();
+
+            TickHoldDefendPose(now);
+
             TickBossDamage();
 
             TickBossHealthMilestones();
+
+            TickProtectedHealthMilestones();
 
             try
             {
@@ -2517,6 +4152,26 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} objective tick threw", ex);
+            }
+
+            // The objective's own verdict that the run is lost (Hold: too many targets died). Checked before
+            // IsComplete, so a run can never both lose its last target and "succeed" on the same tick.
+            WorldEventOutcome? objectiveFailure = null;
+
+            try
+            {
+                objectiveFailure = Objective?.FailureOutcome;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective failure check threw", ex);
+            }
+
+            if (objectiveFailure != null)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} objective failed ({objectiveFailure.Value}): {ProgressText}");
+                Finish(objectiveFailure.Value);
+                return;
             }
 
             // TECH-DESIGN 2.15: true once the objective has been MET but the minimum duration is still
@@ -2531,7 +4186,16 @@ namespace ACE.Server.WorldEvents
 
                 if (CompletionAllowed(Composition?.Goal?.TypeKind ?? GoalType.KillCount, minElapsed))
                 {
+                    // Hold: a surviving target's thank-you, spoken locally BEFORE Finish queues the cleanup
+                    // that removes it, and copied globally AFTER the outcome line.
+                    // Not when the chain goes on: the manager paces a thank-you that points to the cache instead.
+                    var successLine = ChainDecisionFor(WorldEventOutcome.Success) == WorldEventChain.Decision.Next ? null : SpeakProtectedSuccessLine();
+
                     Finish(WorldEventOutcome.Success);
+
+                    if (successLine != null)
+                        AnnounceInRun(successLine);
+
                     return;
                 }
 
@@ -2647,7 +4311,7 @@ namespace ACE.Server.WorldEvents
         private void FeedWipeTimer(double now, int presence)
         {
             var anchor = Composition?.AnchorPosition;
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveRewardRadius;
 
             if (anchor == null || radius <= 0)
                 return;
@@ -2699,7 +4363,11 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void OnCreatureDied(Creature creature, DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
         {
-            LastCreditAt = Now();
+            // A Hold target destroyed by the monsters is not the players' doing, so it is not "credit": it must
+            // neither keep an empty run alive (abandon) nor arm the wipe rule. Before this, a target's death
+            // armed FailedWipe against a field where nobody counted as alive, ending the run a second later.
+            if (DeathCountsAsCredit(creature != null && Spawner.IsProtectedGuid(creature.Guid.Full)))
+                LastCreditAt = Now();
 
             // Before Spawner.OnDied, purely so the classification reads the spawner's sets exactly as they
             // were when this creature was alive. Wrapped like every other forward here: a throw measuring
@@ -2716,6 +4384,27 @@ namespace ACE.Server.WorldEvents
             // Before the objective forward: the objective may complete on this death, and the alive count
             // and the source-guid bookkeeping have to reflect it by then.
             Spawner.OnDied(creature);
+
+            // Hold: a corrupted kill heals the targets, and killing a target's attacker is a rescue.
+            try
+            {
+                OnHoldMonsterDied(creature, lastDamager);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hold monster death heal threw", ex);
+            }
+
+            // Hold: a destroyed target's last words, after OnDied so {alive} already counts it as gone.
+            try
+            {
+                if (creature != null && Spawner.IsProtectedGuid(creature.Guid.Full))
+                    OnProtectedTargetDestroyed(creature);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} protected target destroyed line threw", ex);
+            }
 
             // Also before the objective forward, so a WP-06 objective's Mvp() rule can read an
             // already-updated ledger on the same death that completes it.
@@ -2793,6 +4482,38 @@ namespace ACE.Server.WorldEvents
             finishInvoked = true;
             Outcome = outcome;
 
+            // Before cleanup removes the targets: who speaks for the chain from here on.
+            CaptureChainEnvoy();
+
+            // Before anything below can start cleanup: see frozenProgressText.
+            if (FreezesProgressAtFinish(Composition?.Goal))
+            {
+                try
+                {
+                    frozenProgressText = Objective?.ProgressText ?? "";
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} could not freeze the progress text", ex);
+                }
+            }
+
+            // Hold: one summary line for tuning - the result, the targets left and every wave's type.
+            if (Composition?.Goal?.TypeKind == GoalType.Hold)
+            {
+                try
+                {
+                    var counts = HoldWaveCounts;
+
+                    log.Info($"[WORLDEVENT] run={RunId} hold result={outcome} targets={Spawner.LiveProtectedGuids.Count}/{Spawner.ProtectedGuids.Count} " +
+                             $"waves started={counts.Started} cleared={counts.Cleared} types=[{string.Join(",", holdWaveTypeHistory)}]");
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} hold result log threw", ex);
+                }
+            }
+
             if (Transition(WorldEventState.Resolved, $"finish:{outcome}"))
                 ResolvedAt = now;
 
@@ -2814,17 +4535,39 @@ namespace ACE.Server.WorldEvents
                     ? boss.DisplayName
                     : "the champion";
 
+                // Hold: the final count goes into the outcome line ("2 of 3 targets survived"), taken now,
+                // before cleanup removes the targets.
+                var hold = Objective as HoldObjective;
+                int? holdAlive = hold?.Alive;
+                int? holdTotal = hold?.Placed;
+
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.OutcomeLine(
                     outcome, Composition?.Goal, AnchorName, mvp, Participation.TopKiller(), Participation.Count, bossName,
-                    Composition?.GoalDisplayName, Composition?.SuccessTemplate, Composition?.FailTemplate,
-                    Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural),
+                    Composition?.GoalDisplayName,
+                    HoldOutcomeTemplate(Composition?.SuccessTemplate, success: true, holdAlive, holdTotal),
+                    HoldOutcomeTemplate(Composition?.FailTemplate, success: false, holdAlive, holdTotal),
+                    Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural, Composition?.FamilyDisplayName),
                     relayToDiscord: relayedToDiscord);
 
                 // Asheron's Protection (WaffleACE): the matching end line, immediately after the ordinary
                 // outcome announcement, ONLY if the start line actually went out for this run - never on the
                 // property being toggled off mid-run with no corresponding start.
-                if (deathProtectionStartAnnounced)
-                    WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionEndLine);
+                // A chain: Asheron's line waits for the chain's end (the last stage, a loss or an abort), after its
+                // closing story line. While it goes on, the manager paces the stage change.
+                switch (ChainDecisionFor(outcome))
+                {
+                    case WorldEventChain.Decision.None:
+                        if (deathProtectionStartAnnounced)
+                            WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionEndLine);
+                        break;
+
+                    case WorldEventChain.Decision.Next:
+                        break;
+
+                    default:
+                        ScheduleChainEnd(now, outcome, thanksFirst: false);
+                        break;
+                }
 
                 // BOSS-STANDARD.md section 2: a named boss that WON gets the last word, as a second
                 // global line right after the outcome. Nothing is said on a Success (the boss lost) and
@@ -3192,13 +4935,22 @@ namespace ACE.Server.WorldEvents
             AnchorLandblock = null;
 
             if (landblockBridge == null || heldBlockKeysToRelease == null || heldBlockKeysToRelease.Count == 0)
+            {
+                heldBlockKeys = new HashSet<ulong>();
                 return;
+            }
 
-            landblockBridge.ReleasePermaload(heldBlockKeysToRelease);
+            // A chained run (WorldEventManager.Chain) may already stand on some of these blocks while this one
+            // finishes its claim window: those stay permaloaded for it.
+            var release = WorldEventManager.WithoutBlocksHeldByOtherRuns(this, heldBlockKeysToRelease);
 
-            log.Info($"[WORLDEVENT] run={RunId} released the permaload hold on {heldBlockKeysToRelease.Count} landblock(s)");
+            landblockBridge.ReleasePermaload(release);
+
+            log.Info($"[WORLDEVENT] run={RunId} released the permaload hold on {release.Count} landblock(s)" +
+                     (release.Count < heldBlockKeysToRelease.Count ? $" ({heldBlockKeysToRelease.Count - release.Count} kept for another run)" : ""));
 
             heldBlockKeysToRelease = new List<ulong>();
+            heldBlockKeys = new HashSet<ulong>();
         }
 
         /// <summary>
@@ -3229,7 +4981,8 @@ namespace ACE.Server.WorldEvents
         {
             return outcome == WorldEventOutcome.FailedTimeout
                 || outcome == WorldEventOutcome.FailedWipe
-                || outcome == WorldEventOutcome.FailedNoParticipants;
+                || outcome == WorldEventOutcome.FailedNoParticipants
+                || outcome == WorldEventOutcome.FailedObjectiveLost;
         }
 
         private static bool IsAborted(WorldEventOutcome outcome)
@@ -3246,9 +4999,9 @@ namespace ACE.Server.WorldEvents
                 if (audienceSampler != null)
                     return audienceSampler();
 
-                var radius = Composition?.Source?.RewardRadius ?? 0f;
+                var radius = EffectiveRewardRadius;
 
-                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius);
+                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius, ParticipantFilter);
             }
             catch (Exception ex)
             {
@@ -3270,9 +5023,9 @@ namespace ACE.Server.WorldEvents
             if (presenceCounter != null)
                 return presenceCounter();
 
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveRewardRadius;
 
-            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius);
+            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius, ParticipantFilter);
         }
 
         private double Now() => clock();

@@ -66,7 +66,13 @@ namespace ACE.Server.WorldEvents
         Decor,
         Npc,
         InertObjective,
-        Add
+        Add,
+
+        /// <summary>
+        /// A Hold goal's protected target (a ward): adopted WITH the run back-reference so its death reaches
+        /// the objective, but never wave pressure, never a kill, and never counted toward boss sizing.
+        /// </summary>
+        Protected
     }
 
     /// <summary>
@@ -243,6 +249,20 @@ namespace ACE.Server.WorldEvents
         private int addsAdopted;
 
         private int addsStray;
+
+        /// <summary>
+        /// Hold goal protected targets (wards): every one ever placed, and the ones still standing. They take
+        /// the run back-reference (so a death reaches the objective) but are never wave pressure.
+        /// </summary>
+        private readonly HashSet<uint> protectedGuids = new HashSet<uint>();
+
+        private readonly List<Creature> liveProtected = new List<Creature>();
+
+        /// <summary>
+        /// The running fractional carry behind <see cref="WorldEventHoldRules.SeekerCount"/>, so a 30% seeker
+        /// share comes out right across many small waves rather than rounding to 0 on each of them.
+        /// </summary>
+        private double seekerCarry;
 
         /// <summary>
         /// Guids of the OVERFLOW champions (TECH-DESIGN 2.15). They are wave-kind spawns in every other
@@ -465,6 +485,167 @@ namespace ACE.Server.WorldEvents
             get { lock (sync) return npcGuids.ToList(); }
         }
 
+        /// <summary>The live decor this run placed, a copy. Hold's portal pulse reads it.</summary>
+        public IReadOnlyList<WorldObject> LiveDecorObjects
+        {
+            get
+            {
+                lock (sync)
+                    return liveDecor.Where(wo => wo != null && !wo.IsDestroyed).ToList();
+            }
+        }
+
+        /// <summary>The live WAVE creatures (trash, elites, overflow champions), a copy. Hold's wake pass reads it.</summary>
+        public IReadOnlyList<Creature> LiveWaveCreatures
+        {
+            get
+            {
+                lock (sync)
+                {
+                    Prune();
+                    return liveWave.ToList();
+                }
+            }
+        }
+
+        private int resolvedWaveCount;
+
+        /// <summary>
+        /// Wave batches whose placement has finished, landed or not (counted once per batch, where the fixed
+        /// 5.2 wave line is logged). Hold's win check waits for it, so a finale that has been started but not
+        /// yet placed cannot read as cleared.
+        /// </summary>
+        public int ResolvedWaveCount => System.Threading.Volatile.Read(ref resolvedWaveCount);
+
+        /// <summary>Waves that landed (at least one monster adopted). Hold's wave counting reads it.</summary>
+        public int LandedWaveCount
+        {
+            get { lock (sync) return waveRecords.Count; }
+        }
+
+        /// <summary>Waves whose every monster has died. Separate from <see cref="TakeClearedWaves"/>, which the pace controller drains.</summary>
+        public int ClearedWaveCount
+        {
+            get { lock (sync) return waveRecords.Values.Count(r => r.Cleared); }
+        }
+
+        /// <summary>True when <paramref name="guid"/> is a Hold protected target this run placed.</summary>
+        public bool IsProtectedGuid(uint guid)
+        {
+            lock (sync) return protectedGuids.Contains(guid);
+        }
+
+        /// <summary>Every Hold protected target this run placed, dead or alive. HoldObjective reads this.</summary>
+        public IReadOnlyCollection<uint> ProtectedGuids
+        {
+            get { lock (sync) return protectedGuids.ToList(); }
+        }
+
+        /// <summary>The Hold protected targets still standing (not dead, not destroyed).</summary>
+        public IReadOnlyCollection<uint> LiveProtectedGuids
+        {
+            get
+            {
+                lock (sync)
+                {
+                    PruneProtected();
+                    return liveProtected.Select(c => c.Guid.Full).ToList();
+                }
+            }
+        }
+
+        /// <summary>The standing protected targets themselves, for a seeker's target pick. A copy.</summary>
+        public IReadOnlyList<Creature> LiveProtectedCreatures
+        {
+            get
+            {
+                lock (sync)
+                {
+                    PruneProtected();
+                    return liveProtected.ToList();
+                }
+            }
+        }
+
+        /// <summary>
+        /// A live read of one standing protected target's health, for the milestone announcements. False when
+        /// the guid is not a standing protected target. Safe for the same tick-ordering reason
+        /// <see cref="TryGetBossHealth"/> documents.
+        /// </summary>
+        public bool TryGetProtectedHealth(uint guid, out uint current, out uint max)
+        {
+            Creature creature;
+
+            lock (sync)
+                creature = liveProtected.FirstOrDefault(c => c.Guid.Full == guid);
+
+            if (creature == null || creature.IsDestroyed || creature.IsDead)
+            {
+                current = 0;
+                max = 0;
+                return false;
+            }
+
+            max = creature.Health.MaxValue;
+            current = creature.Health.Current;
+            return true;
+        }
+
+        /// <summary>
+        /// Hold goal: the entry indices of one wave batch that become seekers, or null when this run is not a
+        /// Hold run (or its share is 0). The count comes from <see cref="WorldEventHoldRules.SeekerCount"/>
+        /// with this run's running carry; which entries is a random draw, so the seekers are not always the
+        /// first trash picked.
+        /// </summary>
+        private HashSet<int> PickSeekerIndices(WorldEvent evt, int waveSize)
+        {
+            var goal = evt?.Composition?.Goal;
+
+            if (goal == null || goal.TypeKind != GoalType.Hold || goal.Protect == null || waveSize <= 0)
+                return null;
+
+            var share = goal.Protect.EffectiveSeekShare;
+
+            lock (sync)
+            {
+                var count = WorldEventHoldRules.SeekerCount(waveSize, share, ref seekerCarry);
+
+                return count > 0 ? WorldEventHoldRules.PickIndices(waveSize, count, rng) : null;
+            }
+        }
+
+        /// <summary>
+        /// How a Hold protected target reads to the CLIENT: not attackable, with the friendly PlayerKillerStatus
+        /// the retail shopkeepers carry (RubberGlue, 0x10). The client colours a name from the create packet's
+        /// object description flags - the Attackable flag (ObjectDescriptionFlag.Attackable, from
+        /// WorldObject.Attackable) is what makes a creature's name red - so clearing it shows the merchant as
+        /// a friendly NPC and gives players no attack option. Server-side nothing a run monster needs reads
+        /// Attackable: seekers pick the target directly (TrySelectWorldEventSeekTarget), physics admits it
+        /// through WeenieObject.IsProtectedTargetFor, and melee, missile, spell damage and TakeDamage never
+        /// check it. Pure property writes before EnterWorld; nothing else on the creature is touched.
+        /// </summary>
+        public static void ApplyProtectedAppearance(Creature creature)
+        {
+            if (creature == null)
+                return;
+
+            creature.Attackable = false;
+            creature.PlayerKillerStatus = ProtectedPlayerKillerStatus;
+
+            // Monster.SetMonsterState caches IsMonster from Attackable at construction; refresh it so nothing
+            // keyed on IsMonster still sees the merchant as a monster.
+            creature.SetMonsterState();
+        }
+
+        /// <summary>The PlayerKillerStatus every protected target is sent with (the retail shopkeepers' value).</summary>
+        public const ACE.Entity.Enum.PlayerKillerStatus ProtectedPlayerKillerStatus = ACE.Entity.Enum.PlayerKillerStatus.RubberGlue;
+
+        /// <summary>Caller must hold <see cref="sync"/>.</summary>
+        private void PruneProtected()
+        {
+            liveProtected.RemoveAll(c => c == null || c.IsDestroyed || c.IsDead);
+        }
+
         /// <summary>
         /// True once every objective spawn this run made is down. False while there are none, so a theme
         /// with no objective wcid never reads as "already finished".
@@ -472,6 +653,12 @@ namespace ACE.Server.WorldEvents
         public bool AllSourcesDead
         {
             get { lock (sync) return sourceGuids.Count > 0 && liveSourceGuids.Count == 0; }
+        }
+
+        /// <summary>The placed boss (named boss or family champion), or null.</summary>
+        public Creature BossCreature
+        {
+            get { lock (sync) return boss; }
         }
 
         /// <summary>0 until a champion is placed. WP-06's KillBoss objective reads this.</summary>
@@ -746,20 +933,39 @@ namespace ACE.Server.WorldEvents
         public void SpawnWave(WorldEvent evt, WavePick pick, IReadOnlyList<Position> anchors,
             int waveIndex, LevelBand band, double healthMult)
         {
+            SpawnWave(evt, pick, anchors, waveIndex, band, healthMult, null);
+        }
+
+        /// <summary>
+        /// <see cref="SpawnWave(WorldEvent, WavePick, IReadOnlyList{Position}, int, LevelBand, double)"/> with a
+        /// Hold special-wave plan: ranged replacements, the runners' trimmed count and the finale champion are
+        /// applied to the batch here; the per-creature parts (breach target, hunters, runner speed and health,
+        /// the champion's healthiest-target rule) in <see cref="Spawn"/>. A null plan is an ordinary wave.
+        /// </summary>
+        public void SpawnWave(WorldEvent evt, WavePick pick, IReadOnlyList<Position> anchors,
+            int waveIndex, LevelBand band, double healthMult, HoldWavePlan plan)
+        {
             if (pick == null)
                 return;
 
             var entries = new List<SpawnEntry>();
 
-            for (var i = 0; i < pick.Trash.Count; i++)
+            var trash = plan?.ReplacedTrash != null && plan.ReplacedTrash.Count == pick.Trash.Count ? plan.ReplacedTrash : pick.Trash;
+
+            for (var i = 0; i < trash.Count; i++)
             {
                 // WP-24: the every-third-wave elite slot is one specific index into Trash, marked by
                 // WavePick.EliteIndex - every other index is plain trash.
                 var isElite = i == pick.EliteIndex;
 
-                entries.Add(new SpawnEntry(pick.Trash[i], overflowChampion: false,
+                // A slot redrawn by a role level offset (world_events_hold_<role>_level_offset) keeps its moved level: no
+                // uplift back to the band, and its slot level (the combat guard's standard) moved with it.
+                var levelOffset = plan?.LevelOffsetSlots != null && plan.LevelOffsetSlots.TryGetValue(i, out var off) ? off : 0;
+
+                entries.Add(new SpawnEntry(trash[i], overflowChampion: false,
                     isElite ? WorldEventWaveEntryKind.Elite : WorldEventWaveEntryKind.Trash,
-                    isElite && pick.EliteSynthetic, pick.TrashUpliftAt(i), SlotLevelFor(pick, pick.TrashSlotLevelAt(i))));
+                    isElite && pick.EliteSynthetic, levelOffset != 0 ? 0 : pick.TrashUpliftAt(i),
+                    MovedSlotLevel(SlotLevelFor(pick, pick.TrashSlotLevelAt(i)), levelOffset)));
             }
 
             for (var i = 0; i < pick.Champions.Count; i++)
@@ -770,7 +976,21 @@ namespace ACE.Server.WorldEvents
                     WorldEventWaveEntryKind.Champion, synthetic, pick.ChampionUpliftAt(i), SlotLevelFor(pick, pick.ChampionSlotLevelAt(i))));
             }
 
-            Spawn(evt, entries, anchors, WorldEventSpawnKind.Wave, waveIndex, band, healthMult);
+            // Runners: fewer of them (the plan's keep count), from the front of the batch.
+            if (plan?.KeepCount != null && plan.KeepCount.Value < entries.Count)
+                entries = entries.GetRange(0, Math.Max(1, plan.KeepCount.Value));
+
+            // Finale: the family champion joins the wave as one more wave monster, so the wave only clears
+            // once it is dead too.
+            if (plan != null && plan.ChampionWcid != 0)
+            {
+                entries.Add(new SpawnEntry(plan.ChampionWcid, overflowChampion: false, WorldEventWaveEntryKind.Champion,
+                    plan.ChampionSynthetic, plan.ChampionUplift, plan.ChampionSlotLevel));
+
+                plan.ChampionEntryIndex = entries.Count - 1;
+            }
+
+            Spawn(evt, entries, anchors, WorldEventSpawnKind.Wave, waveIndex, band, healthMult, null, plan);
         }
 
         /// <summary>
@@ -841,6 +1061,88 @@ namespace ACE.Server.WorldEvents
             // WorldEvent.ObjectiveSpawnKind) - the placement recipe is identical either way; what changes is
             // the bookkeeping branch in Adopt and the inert property writes in TryPlace.
             Spawn(evt, entries, anchors, kind, NoWaveIndex, default, 1.0, dzByAnchor);
+        }
+
+        /// <summary>
+        /// Hold goal: places the goal's protected targets (wards) around the anchor - protect.count of them,
+        /// sized from the audience now, spread evenly on a ring of protect.radius metres (one target goes at
+        /// the anchor itself). Same placement recipe as <see cref="SpawnObjectives"/>: fixed offsets through
+        /// <see cref="NpcPosition"/>, then the shared creature path, which snaps to terrain and refuses a
+        /// non-Creature wcid. Health is written in <see cref="TryPlace"/> from protect.health.
+        /// </summary>
+        public void SpawnProtected(WorldEvent evt, ProtectDef protect, Position centre)
+        {
+            if (evt == null || protect == null || protect.WcidFor(0) == 0 || centre == null)
+            {
+                // Nothing will be placed: resolved now, so the run's first wave is not held back for it.
+                NoteBossPlacementResolved(WorldEventSpawnKind.Protected, placed: false);
+                return;
+            }
+
+            var participants = Math.Max(0, evt.ResolvedAudienceCount);
+            var (count, radius) = protect.ResolveLayout(participants);
+
+            var entries = new List<SpawnEntry>();
+            var anchors = new List<Position>();
+            var dzByAnchor = new List<float>();
+
+            var ring = WorldEventHoldRules.RingOffsets(count, radius);
+
+            for (var i = 0; i < ring.Count; i++)
+            {
+                var offset = ring[i];
+
+                // One weenie per target in turn (protect.wcids), so the merchants do not all look alike. Each
+                // faces outward (RingOffsets' yaw), toward the attackers coming in from the spawn ring.
+                entries.Add(new SpawnEntry(protect.WcidFor(i), overflowChampion: false));
+                anchors.Add(NpcPosition(centre, offset.Dx, offset.Dy, 0f, offset.YawDegrees));
+                dzByAnchor.Add(0f);
+            }
+
+            // The scene: props around the anchor and one set beside each target, placed stuck. Queued on the
+            // same landblock queue AFTER the targets, so a prop can never take a target's spot first.
+            var scene = new List<DecorDef>();
+
+            if (protect.Decor != null)
+                scene.AddRange(protect.Decor);
+
+            scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(ring, protect.TargetDecor));
+
+            // protect.shrine: a restoration shrine beside each target, in the target's own frame.
+            if (protect.Shrine != null)
+            {
+                // world_events_hold_shrine_count: only the first N knights get one (not set: every knight).
+                var shrineRing = protect.ShrineCount is int shrines ? ring.Take(Math.Max(0, shrines)).ToList() : ring;
+
+                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(shrineRing, new List<DecorDef> { WorldEventHoldRules.ShrineDecor(protect.Shrine) }));
+            }
+
+            // protect.portals: small portals around the outside of the spawn ring; every wave comes out of them.
+            if (protect.Portals != null)
+            {
+                var portals = protect.Portals;
+
+                // The spawn-area check's spots (moved or skipped around obstacles), else the configured ring.
+                var portalRing = evt.HoldPortalSpots != null && evt.HoldPortalSpots.Count > 0
+                    ? WorldEventSpawnArea.SpotOffsets(evt.HoldPortalSpots)
+                    : WorldEventHoldRules.PortalOffsets(portals.Count, portals.Radius, portals.RotationDegrees);
+
+                scene.AddRange(WorldEventHoldRules.PlaceTargetDecor(portalRing, WorldEventHoldRules.ScalePortalParts(portals.Parts, portals.Scale)));
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} hold portals count={portals.Count} radius={portals.Radius:0.#} " +
+                         $"rotation={portals.RotationDegrees:0.#} scale={portals.Scale:0.##} parts={portals.Parts.Count}");
+            }
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} protect wcids={string.Join(",", Enumerable.Range(0, ring.Count).Select(protect.WcidFor))} " +
+                     $"count={count} radius={radius:F1} scene={scene.Count} " +
+                     $"health={protect.EffectiveMaxHealth(participants)}{(protect.IsTimeScaled ? $" (time-based: undefendedSeconds={protect.UndefendedSeconds:F0} minDeathSeconds={protect.MinDeathSeconds:F0})" : "")} minSurvivors={protect.MinSurvivors} " +
+                     $"seekShare={protect.EffectiveSeekShare:F2} (participants={participants})");
+
+            // healthMult 1.0: a ward's health comes from protect.health (TryPlace), never the wave multiplier.
+            Spawn(evt, entries, anchors, WorldEventSpawnKind.Protected, NoWaveIndex, default, 1.0, dzByAnchor);
+
+            if (scene.Count > 0)
+                SpawnDecor(evt, scene, centre, stuck: true);
         }
 
         public void SpawnBoss(WorldEvent evt, uint wcid, Position anchor)
@@ -1003,6 +1305,16 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre)
         {
+            SpawnDecor(evt, decor, centre, stuck: false);
+        }
+
+        /// <summary>
+        /// <see cref="SpawnDecor(WorldEvent, IReadOnlyList{DecorDef}, Position)"/> with the props placed Stuck
+        /// (the Hold target scene), so ground scenery a player can walk up to can never be picked up. The
+        /// sky decor themes keep the original call.
+        /// </summary>
+        public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool stuck)
+        {
             if (evt == null || decor == null || decor.Count == 0)
                 return;
 
@@ -1046,7 +1358,27 @@ namespace ACE.Server.WorldEvents
                     continue;
                 }
 
-                candidates.Add(new DecorCandidate(wo, entry));
+                // No retail use behavior on event props: a decor weenie of an interactive type (a PK altar, a portal,
+                // a lifestone, a switch, a chest...) is refused, and plain decor is never usable. The shrine must be a
+                // plain Generic: its only use is the Hold heal.
+                var verdict = DecorVerdict(wo.WeenieType, entry.HoldShrine);
+
+                if (verdict == DecorUse.Refuse)
+                {
+                    log.Error($"[WORLDEVENT] run={evt.RunId} decor wcid {entry.Wcid} ({wo.Name}) is a {wo.WeenieType}, which keeps its own " +
+                              $"use behavior; refused{(entry.HoldShrine ? " as a shrine (it must be a Generic)" : "")}");
+                    wo.Destroy();
+                    continue;
+                }
+
+                if (verdict == DecorUse.Inert)
+                    wo.ItemUseable = ACE.Entity.Enum.Usable.No;
+
+                // Hold protect.shrine: renamed and usable from a few metres, before the create packet goes out.
+                if (entry.HoldShrine)
+                    ConfigureHoldShrine(wo, evt.Composition?.Goal?.Protect?.Shrine);
+
+                candidates.Add(new DecorCandidate(wo, entry, stuck));
             }
 
             if (candidates.Count == 0)
@@ -1221,6 +1553,8 @@ namespace ACE.Server.WorldEvents
                 Prune();
 
                 liveSourceGuids.Remove(creature.Guid.Full);
+
+                liveProtected.Remove(creature);
 
                 // TECH-DESIGN 2.15: this is the one place a wave creature is retired by DYING, which is
                 // what "cleared" means. Prune() also drops corpses, but it cannot say when, and a wave the
@@ -1429,6 +1763,7 @@ namespace ACE.Server.WorldEvents
             {
                 liveWave.Clear();
                 liveObjective.Clear();
+                liveProtected.Clear();
 
                 // Cleared on both passes: the creature pass already queued every decor destroy (decor is not
                 // a cache), so DecorCount must read 0 from that point rather than only after the final sweep.
@@ -1552,8 +1887,10 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void Spawn(WorldEvent evt, IReadOnlyList<SpawnEntry> entries, IReadOnlyList<Position> anchors,
             WorldEventSpawnKind kind, int waveIndex, LevelBand band, double healthMult,
-            IReadOnlyList<float> dzByAnchor = null)
+            IReadOnlyList<float> dzByAnchor = null, HoldWavePlan plan = null)
         {
+            HashSet<int> hunterIndices = null;
+
             if (evt == null || entries == null || entries.Count == 0)
                 return;
 
@@ -1585,8 +1922,19 @@ namespace ACE.Server.WorldEvents
             // Steps 1 and 2 of the recipe are pure object construction and may run on the world thread.
             var candidates = new List<SpawnCandidate>();
 
+            // Hold goal: which of this wave's entries go straight for the protected targets. Null for every
+            // spawn that is not a Wave batch of a Hold run, which is every spawn outside that one case.
+            var seekerIndices = kind == WorldEventSpawnKind.Wave ? PickSeekerIndices(evt, entries.Count) : null;
+
+            if (plan != null && plan.Type == HoldWaveType.Hunters && kind == WorldEventSpawnKind.Wave)
+                hunterIndices = WorldEventHoldRules.PickHunterIndices(entries.Count, plan.Hunters, seekerIndices, plan.ChampionEntryIndex);
+
+            var entryIndex = -1;
+
             foreach (var entry in entries)
             {
+                entryIndex++;
+
                 var wcid = entry.Wcid;
 
                 if (wcid == 0)
@@ -1644,6 +1992,78 @@ namespace ACE.Server.WorldEvents
                         log.Info($"[WORLDEVENT] run={evt.RunId} wcid {wcid} AiImmobile cleared: no ranged attack");
                 }
 
+                if (seekerIndices != null && seekerIndices.Contains(entryIndex))
+                    creature.WorldEventSeeker = true;
+
+                // Hold special waves (HoldWavePlan). The finale champion is always a seeker that goes for the
+                // healthiest target; a breach sends every seeker at one target; hunters are taken from the
+                // NON-seekers, so a hunter wave still sends its seeker share at the targets.
+                if (plan != null && plan.Roles != null && entryIndex < plan.Roles.Length && entryIndex != plan.ChampionEntryIndex)
+                {
+                    // A mixed wave (protect.waveMix): this monster's own role. A Ranged slot whose monster turns out
+                    // to have no real ranged attack (no offensive spell, no launcher with ammo, no thrown weapon)
+                    // seeks instead, so a melee monster is never warded and held back as an archer.
+                    var role = plan.Roles[entryIndex];
+
+                    if (role == HoldRole.Ranged && !WorldEventRangedMembers.CreatureHasRealRangedAttack(creature))
+                    {
+                        log.Info($"[WORLDEVENT] run={evt.RunId} wcid {wcid} {creature.Name} has no real ranged attack; seeks instead of ranged");
+                        role = HoldRole.Seeker;
+                    }
+
+                    ApplyHoldRole(creature, role, plan, entryIndex);
+
+                    var ward = evt.Composition?.Goal?.Protect?.Ward;
+
+                    if (creature.WorldEventWarded && ward != null)
+                    {
+                        WorldEventEffectTables.EnsureCanPlay(creature, ward.RestoreEffect, WorldEventEffectTables.CreatureTable);
+                        WorldEventEffectTables.EnsureCanPlay(creature, ward.BreakEffect, WorldEventEffectTables.CreatureTable);
+                    }
+                }
+                else if (plan != null)
+                {
+                    if (entryIndex == plan.ChampionEntryIndex)
+                    {
+                        // world_events_hold_finale_target: npcs (the knights, as before), players (not a seeker at all), both
+                        // (a seeker that takes a player when one is nearer than any knight).
+                        var finaleTarget = evt.Composition?.Goal?.Protect?.FinaleTargetMode ?? ProtectDef.FinaleTargetNpcs;
+
+                        creature.WorldEventSeeker = finaleTarget != ProtectDef.FinaleTargetPlayers;
+                        creature.WorldEventSeekHealthiest = finaleTarget != ProtectDef.FinaleTargetPlayers;
+                        creature.WorldEventSeekEither = finaleTarget == ProtectDef.FinaleTargetBoth;
+                        creature.WorldEventFinaleBoss = true;
+                    }
+                    else if (plan.Type == HoldWaveType.Runners)
+                    {
+                        // Runners always go for the targets, never the players.
+                        creature.WorldEventSeeker = true;
+                    }
+                    else if (plan.Type == HoldWaveType.Breach && creature.WorldEventSeeker && plan.BreachTargetGuid != 0)
+                        creature.WorldEventSeekForcedGuid = plan.BreachTargetGuid;
+                    else if (hunterIndices != null && hunterIndices.Contains(entryIndex))
+                    {
+                        creature.WorldEventSeeker = false;
+                        creature.WorldEventHunter = true;
+                    }
+
+                    if (plan.Type == HoldWaveType.Runners && entryIndex != plan.ChampionEntryIndex)
+                    {
+                        creature.WorldEventRunRateMult = plan.RunRateMult;
+                        creature.WorldEventAttackSpeedMult = plan.AttackSpeedMult;
+                    }
+
+                    if (plan.Type == HoldWaveType.Ranged && plan.HoldDistance > 0 && entryIndex != plan.ChampionEntryIndex)
+                        creature.WorldEventHoldDistance = plan.HoldDistance;
+
+                    // The tuning role of a one-type wave's monster (world_events_hold_<role>_*); the finale boss has its own.
+                    if (entryIndex != plan.ChampionEntryIndex)
+                        creature.WorldEventHoldRole = plan.Type == HoldWaveType.Runners ? HoldDamageRole.Runner
+                            : plan.Type == HoldWaveType.Ranged && creature.WorldEventHoldDistance > 0
+                                ? (WorldEventRangedMembers.CreatureIsCaster(creature) ? HoldDamageRole.Caster : HoldDamageRole.Ranged)
+                                : creature.WorldEventCorrupted ? HoldDamageRole.Corrupted : HoldDamageRole.Melee;
+                }
+
                 // Band uplift (world_events_band_uplift): a roster member drawn BELOW its slot's natural band
                 // is normalized up to the band standard, and its health floored to the band median BEFORE the
                 // crowd x pace multiplier below (Threads' order: floor, then multiplier). Placed ahead of the
@@ -1690,11 +2110,43 @@ namespace ACE.Server.WorldEvents
                 // creature enters the world at full health rather than at its unscaled value.
                 ApplyHealthMultiplier(evt, creature, healthMult);
 
+                // A chained stage's champion (world_events_chain_champion_*): its enrage timer starts here, and a flat
+                // health set for it replaces the sizing above.
+                if (kind == WorldEventSpawnKind.Boss)
+                {
+                    creature.WorldEventBossSpawnedAt = ACE.Common.Time.GetUnixTime();
+
+                    if (HoldSettings.ChampionHealth(evt?.IsChainChampionStage ?? false) is int championHealth)
+                    {
+                        ApplyHealth(creature, championHealth);
+                        log.Info($"[WORLDEVENT] run={evt.RunId} chained champion {creature.Name} health set to {championHealth} (chain_champion_health)");
+                    }
+                }
+
+                // Hold runner waves: lighter as well as faster.
+                if (plan != null && plan.HealthMult < 1.0 && entryIndex != plan.ChampionEntryIndex
+                    && (plan.Type == HoldWaveType.Runners || (plan.Roles != null && entryIndex < plan.Roles.Length && plan.Roles[entryIndex] == HoldRole.Runner)))
+                    ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * plan.HealthMult)));
+
+                // Hold per-role settings (world_events_hold_<role>_health_mult, _attack_speed_mult); no-ops while not set.
+                if (plan != null && entryIndex != plan.ChampionEntryIndex)
+                    ApplyHoldRoleTuning(evt, creature);
+
                 // WP-24: a synthetic elite/champion (a role-0 member promoted because the band had no real
                 // one) is renamed and given a further health multiplier ON TOP of healthMult, here - before
                 // EnterWorld, so the create packet the client first sees already carries the new name.
                 if (entry.Synthetic)
                     ApplySyntheticPromotion(evt, creature, entry.Kind);
+
+                // Hold finale boss: bigger and tougher than any wave monster, so the last phase reads as a boss
+                // fight (protect.finaleBossScale / finaleBossHealthMult). Its effect is replayed by WorldEvent.
+                if (plan != null && entryIndex == plan.ChampionEntryIndex)
+                    ApplyFinaleBoss(evt, creature, plan.ChampionName);
+
+                // A mixed wave's corrupted monster: titled, bigger, tougher (protect.corrupted). Its effect is
+                // replayed by WorldEvent.
+                if (creature.WorldEventCorrupted)
+                    ApplyCorrupted(evt, creature);
 
                 candidates.Add(candidate);
             }
@@ -1747,6 +2199,17 @@ namespace ACE.Server.WorldEvents
                     }
 
                     placed = PlaceOnLandblock(evt, candidates, anchorSnapshot, kind, waveIndex, band, dzSnapshot);
+
+                    // Hold: who in this wave goes for the targets, who hunts players, and who is ordinary.
+                    if (kind == WorldEventSpawnKind.Wave && evt.Composition?.Goal?.TypeKind == GoalType.Hold)
+                    {
+                        var roles = candidates.Select(c => c.Creature)
+                            .Where(c => c != null && !c.IsDestroyed && c.PhysicsObj != null)
+                            .Select(c => (c.WorldEventSeeker, c.WorldEventHunter, c.WorldEventSeekForcedGuid))
+                            .ToList();
+
+                        log.Info($"[WORLDEVENT] run={runId} " + WorldEventHoldRules.WaveRoleSummary(plan?.WaveNumber ?? waveIndex + 1, roles));
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1770,8 +2233,38 @@ namespace ACE.Server.WorldEvents
         /// enqueued, so always <c>placed: false</c>) and the queued delegate's try/finally (whatever
         /// actually landed).
         /// </summary>
+        /// <summary>
+        /// True once the Hold run's protected-target batch has finished on its landblock, placed or not. A
+        /// Hold run's first wave waits for it (WorldEvent.HoldFirstWaveMayStart), so the wave-start count and
+        /// a breach target read real targets rather than an empty set.
+        /// </summary>
+        public bool ProtectedPlacementResolved
+        {
+            get { lock (sync) return protectedPlacementResolved; }
+        }
+
+        private bool protectedPlacementResolved;
+
+        /// <summary>Test seam: files <paramref name="creature"/> as a placed, standing protected target, as Adopt would.</summary>
+        internal void AdoptProtectedForTest(Creature creature)
+        {
+            lock (sync)
+            {
+                protectedGuids.Add(creature.Guid.Full);
+                liveProtected.Add(creature);
+            }
+        }
+
         private void NoteBossPlacementResolved(WorldEventSpawnKind kind, bool placed)
         {
+            if (kind == WorldEventSpawnKind.Protected)
+            {
+                lock (sync)
+                    protectedPlacementResolved = true;
+
+                return;
+            }
+
             if (kind != WorldEventSpawnKind.Boss)
                 return;
 
@@ -1829,16 +2322,23 @@ namespace ACE.Server.WorldEvents
 
                     var success = false;
 
+                    // Hold runs: set when the previous attempt's terrain snap put the candidate inside a
+                    // building, so the next attempt re-picks a point elsewhere on the spawn ring instead of
+                    // jittering a metre or two around the same indoor spot.
+                    var lastWasIndoors = false;
+
                     for (var attempt = 0; attempt < attempts && !success; attempt++)
                     {
                         Position candidate;
 
                         if (attempt == 0 && !reused)
                             candidate = new Position(basePosition);
+                        else if (lastWasIndoors)
+                            candidate = NextRingSample(evt.Composition?.AnchorPosition, evt.SpawnRadius) ?? NextJitter(basePosition);
                         else if (resample)
                             // Falls back to a jitter if the theme cannot produce a sample (no anchor
                             // position), so a resampling theme is never worse off than a jittering one.
-                            candidate = NextDiscSample(theme, evt.Composition?.AnchorPosition) ?? NextJitter(basePosition);
+                            candidate = NextDiscSample(theme, evt.Composition?.AnchorPosition, evt.SpawnRadius) ?? NextJitter(basePosition);
                         else if (kind == WorldEventSpawnKind.Boss)
                             // 2026-08-16: the boss's own jitter widens by attempt, so a champion stuck at a
                             // transiently blocked anchor fans further out on each retry within this Spawn
@@ -1847,13 +2347,14 @@ namespace ACE.Server.WorldEvents
                         else
                             candidate = NextJitter(basePosition);
 
-                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, postSnapDz);
+                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, out lastWasIndoors, postSnapDz);
 
                         if (!success)
                         {
                             lastRejected = candidate;
 
-                            log.Debug($"[WORLDEVENT] run={evt.RunId} {kind} attempt {attempt + 1}/{attempts} rejected at {candidate?.ToLOCString()}");
+                            log.Debug($"[WORLDEVENT] run={evt.RunId} {kind} attempt {attempt + 1}/{attempts} rejected at {candidate?.ToLOCString()}" +
+                                      (lastWasIndoors ? " (indoors)" : ""));
                         }
                     }
 
@@ -1908,8 +2409,10 @@ namespace ACE.Server.WorldEvents
         }
 
         private bool TryPlace(WorldEvent evt, Creature creature, Position candidate, float skyDropDz,
-            WorldEventSpawnKind kind, float postSnapDz = 0f)
+            WorldEventSpawnKind kind, out bool refusedIndoors, float postSnapDz = 0f)
         {
+            refusedIndoors = false;
+
             if (creature.IsDestroyed || candidate == null)
                 return false;
 
@@ -1939,6 +2442,16 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} terrain snap failed at {candidate.ToLOCString()}", ex);
+                return false;
+            }
+
+            // Hold runs: a wave spawn the snap put inside a building (an indoor cell, while the anchor is
+            // outdoors) is refused, so the attackers never start hidden in a house the defenders cannot see
+            // into. The caller re-picks elsewhere on the spawn ring.
+            if (WorldEventHoldRules.RefusesIndoorSpawn(evt.Composition?.Goal?.TypeKind == GoalType.Hold,
+                    kind == WorldEventSpawnKind.Wave, candidate.Indoors, evt.Composition?.AnchorPosition?.Indoors ?? false))
+            {
+                refusedIndoors = true;
                 return false;
             }
 
@@ -1986,6 +2499,39 @@ namespace ACE.Server.WorldEvents
                 creature.Attackable = false;
                 creature.UiHidden = true;
                 creature.RadarBehavior = ACE.Entity.Enum.RadarBehavior.ShowNever;
+            }
+
+            // Hold goal protected target. Written BEFORE EnterWorld like everything above: the physics
+            // WeenieObject that ObjectMaint filters on is built during EnterWorld and caches
+            // WorldEventProtected and the WorldEventId stamp, so both must already be in place. The target is
+            // sent to the client as a friendly NPC (ApplyProtectedAppearance); its own run's monsters still
+            // reach and damage it through the protected-target route, which never reads Attackable, while
+            // players and pets are refused (Player.CanDamage, CheckPKStatusVsTarget, the pet filter). ApplyHealth sets an
+            // absolute target, so a placement retry through here does not compound it.
+            if (kind == WorldEventSpawnKind.Protected)
+            {
+                var protect = evt.Composition?.Goal?.Protect;
+
+                if (protect != null)
+                {
+                    var participants = Math.Max(0, evt.ResolvedAudienceCount);
+                    var hp = protect.EffectiveMaxHealthFor(creature.WeenieClassId, participants);
+
+                    if (ApplyHealth(creature, hp))
+                        log.Warn($"[WORLDEVENT] run={evt.RunId} protected wcid={creature.WeenieClassId} health target={hp} " +
+                                 $"could not be reached; resulting MaxValue={creature.Health.MaxValue}");
+                }
+
+                ApplyProtectedAppearance(creature);
+                creature.WorldEventProtected = true;
+
+                // protect.showHealthBar (default true): sent to the client as attackable so it draws a health bar.
+                // Server-side Attackable stays false; nothing a player or pet does can damage it.
+                creature.WorldEventShowHealthBar = protect?.ShowHealthBar ?? true;
+
+                // The shrine's heal effect has to be able to show on the target (the knights have no effect table).
+                if (protect?.Shrine != null)
+                    WorldEventEffectTables.EnsureCanPlay(creature, protect.Shrine.UsedEffect, WorldEventEffectTables.HumanTable);
             }
 
             ApplyBossTether(evt, creature, kind);
@@ -2109,6 +2655,275 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// One monster's role in a mixed Hold wave (D6 - runtime flags only, before EnterWorld):
+        ///   * Breach: a seeker locked on the breach target;
+        ///   * Runner: a seeker with the plan's run and attack speed;
+        ///   * Ranged: a seeker that holds the plan's distance;
+        ///   * Seeker: a seeker that prefers the targets the breach squad is not on;
+        ///   * Hunter: no seeker; goes for players, recent healers first.
+        ///   * Corrupted: a seeker; on an assault wave, locked on the target named for its index.
+        /// Runners, ranged and seekers all avoid the breach target while another target stands.
+        /// </summary>
+        public static void ApplyHoldRole(Creature creature, HoldRole role, HoldWavePlan plan, int entryIndex = -1)
+        {
+            if (creature == null || plan == null)
+                return;
+
+            creature.WorldEventSeeker = role != HoldRole.Hunter;
+            creature.WorldEventHunter = role == HoldRole.Hunter;
+
+            // The role whose world_events_hold_<role>_* settings tune this monster.
+            creature.WorldEventHoldRole = DamageRoleFor(role, creature);
+
+            switch (role)
+            {
+                case HoldRole.Breach:
+                    creature.WorldEventSeekForcedGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Runner:
+                    creature.WorldEventRunRateMult = plan.RunRateMult;
+                    creature.WorldEventAttackSpeedMult = plan.AttackSpeedMult;
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Ranged:
+                    creature.WorldEventHoldDistance = plan.HoldDistance;
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    creature.WorldEventWarded = plan.Warded;
+                    break;
+
+                case HoldRole.Corrupted:
+                    creature.WorldEventCorrupted = true;
+
+                    // An assault monster goes for its one named target, and nothing else while it stands.
+                    if (plan.CorruptedTargets != null && plan.CorruptedTargets.TryGetValue(entryIndex, out var assaultTarget) && assaultTarget != 0)
+                        creature.WorldEventSeekForcedGuid = assaultTarget;
+                    else
+                        creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+
+                case HoldRole.Seeker:
+                    creature.WorldEventSeekAvoidGuid = plan.BreachTargetGuid;
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// The tuning role of a wave monster from its wave role (world_events_hold_&lt;role&gt;_*): the breach squad, seekers and
+        /// hunters are melee; a ranged slot is a caster when its ranged attack is spells only.
+        /// </summary>
+        public static HoldDamageRole DamageRoleFor(HoldRole role, Creature creature)
+        {
+            switch (role)
+            {
+                case HoldRole.Runner: return HoldDamageRole.Runner;
+                case HoldRole.Corrupted: return HoldDamageRole.Corrupted;
+                case HoldRole.Ranged: return WorldEventRangedMembers.CreatureIsCaster(creature) ? HoldDamageRole.Caster : HoldDamageRole.Ranged;
+                default: return HoldDamageRole.Melee;
+            }
+        }
+
+        /// <summary>
+        /// A Hold wave monster's new per-role settings, before EnterWorld: its health (melee, ranged, caster) and attack speed
+        /// (every role but runners, whose own setting goes through the wave plan). Nothing changes while a setting is not set.
+        /// </summary>
+        public static void ApplyHoldRoleTuning(WorldEvent evt, Creature creature)
+        {
+            if (creature == null || creature.WorldEventHoldRole == HoldDamageRole.None)
+                return;
+
+            try
+            {
+                var health = HoldSettings.RoleHealthMult(creature.WorldEventHoldRole);
+
+                if (health is double h && Math.Abs(h - 1.0) > 1e-9)
+                    ApplyHealth(creature, Math.Max(1, (int)Math.Round(creature.Health.MaxValue * h)));
+
+                var speed = HoldSettings.RoleAttackSpeedMult(creature.WorldEventHoldRole);
+
+                if (speed is double s)
+                    creature.WorldEventAttackSpeedMult = (float)Math.Clamp(s, HoldSettings.RoleAttackSpeedMin, HoldSettings.RoleAttackSpeedMax);
+
+                if (health != null || speed != null)
+                    log.Debug($"[WORLDEVENT] run={evt?.RunId} {creature.Name} role={creature.WorldEventHoldRole} health={creature.Health.MaxValue} attackSpeed=x{creature.WorldEventAttackSpeedMult:0.##}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt?.RunId} role tuning for {creature.Name} threw", ex);
+            }
+        }
+
+        /// <summary>What the spawner does with one event decor object (see <see cref="DecorVerdict"/>).</summary>
+        public enum DecorUse
+        {
+            /// <summary>Placed, never usable.</summary>
+            Inert,
+
+            /// <summary>Placed and usable: the Hold shrine, whose use the run handles.</summary>
+            HoldShrine,
+
+            /// <summary>Not placed: its weenie type carries its own use behavior.</summary>
+            Refuse
+        }
+
+        /// <summary>
+        /// The decor rule (D6 - pure): a shrine must be a plain Generic (its only use is the Hold heal); any other decor
+        /// must be a Generic or a light source (a campfire) and is made unusable. Every other weenie type (a PK altar,
+        /// a portal, a lifestone, a switch, a door, a chest, a creature...) keeps its own use behavior and is refused.
+        /// </summary>
+        public static DecorUse DecorVerdict(ACE.Entity.Enum.WeenieType type, bool isShrine)
+        {
+            if (isShrine)
+                return type == ACE.Entity.Enum.WeenieType.Generic ? DecorUse.HoldShrine : DecorUse.Refuse;
+
+            return type == ACE.Entity.Enum.WeenieType.Generic || type == ACE.Entity.Enum.WeenieType.LightSource
+                ? DecorUse.Inert : DecorUse.Refuse;
+        }
+
+        /// <summary>
+        /// A Hold restoration shrine, before it enters the world: named, and usable from protect.shrine.useRadius
+        /// metres (Usable.Remote), so the client lets a player use it. What the use does is WorldEvent.TryUseHoldShrine;
+        /// the model's own use behaviour never runs.
+        /// </summary>
+        public static void ConfigureHoldShrine(WorldObject wo, ShrineDef shrine)
+        {
+            if (wo == null || shrine == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(shrine.Name))
+                wo.Name = shrine.Name;
+
+            wo.ItemUseable = ACE.Entity.Enum.Usable.Remote;
+            wo.UseRadius = (float)Math.Clamp(shrine.UseRadius, 1, 10);
+            // Its own words (a PK altar's use text would otherwise show on appraisal).
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ShortDesc);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ActivationTalk);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.ActivationFailure);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.UseMessage);
+            wo.RemoveProperty(ACE.Entity.Enum.Properties.PropertyString.UsePkServerError);
+            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.LongDesc, "Asheron's blessing rests in this shrine. Use it to restore the defender who stands beside it.");
+            wo.SetProperty(ACE.Entity.Enum.Properties.PropertyString.Use, "Double-click to restore the defender beside this shrine.");
+
+            // The ready cue must be able to show (the altar has no effect table of its own).
+            WorldEventEffectTables.EnsureCanPlay(wo, shrine.ReadyEffect, WorldEventEffectTables.CreatureTable);
+        }
+
+        /// <summary>
+        /// A corrupted monster, before EnterWorld: titled (protect.corrupted.prefix), its size and health
+        /// multiplied. Logged. Never throws.
+        /// </summary>
+        private void ApplyCorrupted(WorldEvent evt, Creature creature)
+        {
+            var c = evt?.Composition?.Goal?.Protect?.EffectiveCorrupted;
+
+            if (c == null || creature == null)
+                return;
+
+            try
+            {
+                creature.Name = WorldEventHoldRules.Titled(c.Prefix, creature.Name);
+
+                var scale = (float)Math.Clamp(c.Scale, 1.0, 2.0);
+
+                if (scale != 1.0f)
+                    creature.ApplyRuntimeScaleMultiplier(scale);
+
+                var mult = Math.Clamp(c.HealthMult, 1.0, 5.0);
+
+                if (mult > 1.0)
+                    ApplyHealthMultiplier(evt, creature, mult);
+
+                // Its aura must be able to show on this body (some monsters have a short or empty effect table).
+                WorldEventEffectTables.EnsureCanPlay(creature, c.Effect, WorldEventEffectTables.CreatureTable);
+                WorldEventEffectTables.EnsureCanPlay(creature, c.ExtraEffect, WorldEventEffectTables.CreatureTable);
+
+                // The tint over its whole palette (WorldEventTint), in the create message the client first sees.
+                var tint = "none";
+
+                if (c.TintPaletteId != 0)
+                {
+                    creature.WorldEventTintPalette = c.TintPaletteId;
+                    tint = WorldEventTint.CanShowOn(creature.SetupTableId)
+                        ? $"0x{c.TintPaletteId:X8}"
+                        : $"0x{c.TintPaletteId:X8} (cannot show: no palette textures on setup 0x{creature.SetupTableId:X8}; the aura marks it)";
+                }
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} corrupted wcid={creature.WeenieClassId} {creature.Name} scale=x{scale:F2} health=x{mult:F2} tint={tint}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} could not corrupt wcid {creature.WeenieClassId}", ex);
+            }
+        }
+
+        /// <summary>
+        /// A Hold finale boss, before EnterWorld: its size times protect.finaleBossScale (its held items too)
+        /// and its health times protect.finaleBossHealthMult. Logged. Never throws.
+        /// </summary>
+        private void ApplyFinaleBoss(WorldEvent evt, Creature creature, string bossName)
+        {
+            var protect = evt?.Composition?.Goal?.Protect;
+
+            if (protect == null || creature == null)
+                return;
+
+            try
+            {
+                var bossMultiplier = ResolveBossScaleMultiplier(PropertyManager.GetDouble("world_events_boss_scale_multiplier").Item);
+                var scale = WorldEventHoldRules.FinaleBossScale(protect.FinaleBossScale, bossMultiplier);
+                var sizing = $"x{scale:F2}";
+
+                // finaleBossScale 0: as tall as the named World Events bosses (their median height in game), whatever this
+                // model's own height. Falls back to their median size multiplier when no height can be read.
+                if (protect.FinaleBossScale <= 0)
+                {
+                    var target = WorldEventFinaleBoss.NamedBossHeight(bossMultiplier, out var measured);
+                    var own = WorldEventFinaleBoss.SetupHeight(creature.SetupTableId);
+                    var objScale = creature.ObjScale ?? 1.0f;
+                    var match = target != null && own != null ? WorldEventFinaleBoss.HeightScale(target.Value, own.Value, objScale) : null;
+
+                    scale = match ?? (float)HoldSettings.Number(HoldKeys.FinaleFallbackScale, WorldEventFinaleBoss.FallbackNamedScale);
+                    sizing = match != null
+                        ? $"x{scale:F2} (to {target:0.0} m, the median of {measured} named bosses; its model {own:0.00} m at ObjScale {objScale:0.##})"
+                        : $"x{scale:F2} (fallback: no height could be read)";
+                }
+
+                if (!string.IsNullOrWhiteSpace(bossName))
+                    creature.Name = bossName;
+
+                if (scale != 1.0f)
+                    creature.ApplyRuntimeScaleMultiplier(scale);
+
+                var mult = Math.Clamp(protect.FinaleBossHealthMult, 1.0, 10.0);
+
+                // world_events_hold_finale_health: a flat max health in place of the multiplier.
+                var flat = protect.FinaleHealth;
+
+                if (flat != null)
+                    mult = 1.0;
+
+                if (flat is int flatHealth)
+                    ApplyHealth(creature, flatHealth);
+                else if (mult > 1.0)
+                    ApplyHealthMultiplier(evt, creature, mult);
+
+                // The enrage timer (world_events_hold_finale_enrage_seconds) runs from here.
+                creature.WorldEventBossSpawnedAt = ACE.Common.Time.GetUnixTime();
+
+                WorldEventEffectTables.EnsureCanPlay(creature, protect.BossEffect, WorldEventEffectTables.CreatureTable);
+                WorldEventEffectTables.EnsureCanPlay(creature, protect.BossArrivalEffect, WorldEventEffectTables.CreatureTable);
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} hold finale boss wcid={creature.WeenieClassId} {creature.Name} " +
+                         $"scale={sizing} health=x{mult:F2} -> {creature.Health.MaxValue}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} could not make wcid {creature.WeenieClassId} the finale boss", ex);
+            }
+        }
+
+        /// <summary>
         /// Whether a spawn of this kind gets the boss scale and nearest-player targeting: Boss kind only, which
         /// is the named boss and the family champion (SpawnBoss). An overflow champion inside a wave is Wave
         /// kind and is deliberately left alone. Pure.
@@ -2202,15 +3017,19 @@ namespace ACE.Server.WorldEvents
         /// <summary>One constructed decor object and the entry it came from, carried into the landblock closure.</summary>
         private sealed class DecorCandidate
         {
-            public DecorCandidate(WorldObject wo, DecorDef def)
+            public DecorCandidate(WorldObject wo, DecorDef def, bool stuck = false)
             {
                 Object = wo;
                 Def = def;
+                Stuck = stuck;
             }
 
             public WorldObject Object { get; }
 
             public DecorDef Def { get; }
+
+            /// <summary>Hold scene props: placed Stuck so players can never pick a cart or a crate up.</summary>
+            public bool Stuck { get; }
         }
 
         /// <summary>
@@ -2279,6 +3098,9 @@ namespace ACE.Server.WorldEvents
                 // Mandatory - see the class remarks. Decor has no Generator back-reference either, so the
                 // landblock heartbeat would otherwise decay it out from under the run.
                 wo.TimeToRot = -1;
+
+                if (candidate.Stuck)
+                    wo.Stuck = true;
 
                 var entered = false;
 
@@ -2796,6 +3618,9 @@ namespace ACE.Server.WorldEvents
         /// <summary>The slot level to stamp on an entry: the recorded one, or <see cref="NoSlotLevel"/> for a pick that recorded none.</summary>
         internal static int SlotLevelFor(WavePick pick, int recorded) => pick.HasSlotLevels ? recorded : NoSlotLevel;
 
+        /// <summary>A slot level moved by a role level offset (D6 - pure); "no slot level" stays as it is.</summary>
+        internal static int MovedSlotLevel(int slotLevel, int offset) => offset == 0 || slotLevel == NoSlotLevel ? slotLevel : Math.Clamp(slotLevel + offset, 1, 275);
+
         /// <summary>
         /// The health a band-uplifted creature must be raised to, or 0 for "leave it" (pure, upward-only):
         /// the band median when it exceeds the creature's current maximum. A median of 0 means "no data".
@@ -2994,6 +3819,10 @@ namespace ACE.Server.WorldEvents
 
             var deadOrDestroyed = creature.IsDestroyed || creature.IsDead;
             var landblock = creature.CurrentLandblock;
+
+            // A flat chained-champion health (world_events_chain_champion_health) is not ratcheted.
+            if (HoldSettings.ChampionHealth(evt?.IsChainChampionStage ?? false) != null)
+                return;
 
             if (!BossRatchetReady(authoredBaseMax, newMult, deadOrDestroyed, landblock != null))
             {
@@ -3413,6 +4242,11 @@ namespace ACE.Server.WorldEvents
                     sourceGuids.Add(creature.Guid.Full);
                     liveSourceGuids.Add(creature.Guid.Full);
                 }
+                else if (kind == WorldEventSpawnKind.Protected)
+                {
+                    protectedGuids.Add(creature.Guid.Full);
+                    liveProtected.Add(creature);
+                }
                 else if (kind == WorldEventSpawnKind.Boss)
                 {
                     bossGuid = creature.Guid.Full;
@@ -3524,14 +4358,31 @@ namespace ACE.Server.WorldEvents
         /// own seeded rng under <see cref="sync"/> exactly as <see cref="NextJitter"/> is. Null when the
         /// theme cannot produce one, which the caller treats as "fall back to a jitter".
         /// </summary>
-        private Position NextDiscSample(SourceThemeDef theme, Position centre)
+        /// <summary>
+        /// A point at a random bearing on the run's spawn ring (Hold's indoor re-pick), drawn from this
+        /// spawner's own seeded rng under <see cref="sync"/>. Null without a centre or a radius.
+        /// </summary>
+        private Position NextRingSample(Position centre, float radius)
+        {
+            if (centre == null || !(radius > 0f))
+                return null;
+
+            double bearing;
+
+            lock (sync)
+                bearing = rng.NextDouble() * Math.PI * 2.0;
+
+            return WorldEventGeometry.AtBearing(centre, radius, bearing);
+        }
+
+        private Position NextDiscSample(SourceThemeDef theme, Position centre, float radius)
         {
             if (theme == null || centre == null)
                 return null;
 
             lock (sync)
             {
-                var sample = WorldEventGeometry.Disc(centre, theme.GeometryRadius, 1, rng);
+                var sample = WorldEventGeometry.Disc(centre, radius, 1, rng);
 
                 return sample.Count > 0 ? sample[0] : null;
             }
@@ -3619,10 +4470,23 @@ namespace ACE.Server.WorldEvents
         ///
         /// A no-op for objective and champion spawns, which are not waves and have no band.
         /// </summary>
+        /// <summary>The wave index boss adds are spawned under (WorldEvent.TickBossTuning): not a wave.</summary>
+        public const int BossAddsWaveIndex = -1;
+
         private void LogWaveIfWave(WorldEvent evt, WorldEventSpawnKind kind, int waveIndex, LevelBand band, int placed)
         {
             if (kind != WorldEventSpawnKind.Wave)
                 return;
+
+            // Boss adds (world_events_hold_finale_add_count / chain_champion_add_count) come as wave index -1: not a wave, so
+            // they never count toward the waves resolved.
+            if (waveIndex == BossAddsWaveIndex)
+            {
+                log.Info($"[WORLDEVENT] run={evt.RunId} boss adds band={band.Low}-{band.High} spawned={placed} alive={LiveCount}");
+                return;
+            }
+
+            System.Threading.Interlocked.Increment(ref resolvedWaveCount);
 
             log.Info($"[WORLDEVENT] run={evt.RunId} wave={waveIndex} band={band.Low}-{band.High} spawned={placed} alive={LiveCount}");
         }

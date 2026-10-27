@@ -316,6 +316,11 @@ namespace ACE.Server.Tests
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Npc));
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Decor));
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Add));
+
+            // A Hold goal's protected target (a ward) is FRIENDLY - the players defend it - so it must never
+            // be made hostile to players. Its own run's monsters reach it through the protected-target flag
+            // instead (WeenieObject.IsProtectedTargetFor), not through Tolerance/faction/FoeType.
+            Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Protected));
         }
 
         [TestMethod]
@@ -328,6 +333,7 @@ namespace ACE.Server.Tests
                 WorldEventSpawnKind.Wave, WorldEventSpawnKind.Boss,
                 WorldEventSpawnKind.Source, WorldEventSpawnKind.InertObjective,
                 WorldEventSpawnKind.Npc, WorldEventSpawnKind.Decor, WorldEventSpawnKind.Add,
+                WorldEventSpawnKind.Protected,
             };
 
             foreach (WorldEventSpawnKind kind in System.Enum.GetValues(typeof(WorldEventSpawnKind)))

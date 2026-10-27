@@ -111,10 +111,10 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
-            var rewardRadius = composition.Source?.RewardRadius ?? 0f;
+            var rewardRadius = evt.EffectiveRewardRadius;
             var audience = WorldEventAudienceSampler.Sample(anchor, rewardRadius);
 
-            var count = ComputeCacheCount(audience.Count, reward.ParticipantsPerCache, reward.CacheCount, out var unclamped);
+            var count = ComputeCacheCount(audience.Count, HoldSettings.ParticipantsPerCacheFor(evt, reward.ParticipantsPerCache), reward.CacheCount, out var unclamped);
 
             if (unclamped > count)
                 log.Warn($"[WORLDEVENT] run={evt.RunId} caches clamped from {unclamped} to {count}");

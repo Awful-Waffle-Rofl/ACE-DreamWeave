@@ -49,9 +49,9 @@ namespace ACE.Server.Tests
                 "an admin route was registered through a bare Map*/MapMethods call instead of MapAdmin - it would skip AdminAuthorizer entirely");
 
             // PLAN-P4.md section 7: me, settings, settings/{key}, chat, announce, commands, and P4b's
-            // commands/run; WORLD-EVENTS-START.md: world-events catalog, status, preview, start, stop.
+            // commands/run; WORLD-EVENTS-START.md: world-events catalog, status, preview, start, stop, and hold-settings (2026-10-24).
             // A pinned count also catches a route that silently disappears.
-            Assert.AreEqual(12, mapAdminCount, "the admin route count changed - update this pin together with the route and market-api-v1.yaml");
+            Assert.AreEqual(13, mapAdminCount, "the admin route count changed - update this pin together with the route and market-api-v1.yaml");
         }
 
         /// <summary>Negative control: proves the bare-map regex actually catches the shape it exists to catch, so a passing test above is not merely a regex that never matches anything.</summary>

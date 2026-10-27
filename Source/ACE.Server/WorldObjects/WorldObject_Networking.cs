@@ -872,6 +872,12 @@ namespace ACE.Server.WorldObjects
             return weenieHeaderFlag2;
         }
 
+        /// <summary>
+        /// The Attackable bit sent to the client in the object description. Attackable itself for everything but a
+        /// World Events protected target that shows a health bar (Creature override).
+        /// </summary>
+        public virtual bool ClientAttackable => Attackable;
+
         private void UpdateObjectDescriptionFlags()
         {
             if (WeenieType == WeenieType.Container || WeenieType == WeenieType.Corpse || WeenieType == WeenieType.Chest
@@ -891,7 +897,9 @@ namespace ACE.Server.WorldObjects
             if (WeenieType == WeenieType.Admin || WeenieType == WeenieType.Sentinel)
                 UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Player, CloakStatus < CloakStatus.Creature);
 
-            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, Attackable);
+            // ClientAttackable, not Attackable: a World Events protected target may be shown as attackable (for its health
+            // bar) while the server keeps refusing every player and pet attack on it.
+            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, ClientAttackable);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.PlayerKiller, PlayerKillerStatus == PlayerKillerStatus.PK);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.HiddenAdmin, HiddenAdmin);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.UiHidden, UiHidden);

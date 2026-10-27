@@ -122,7 +122,8 @@ namespace ACE.Server.WorldObjects
                             if (GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
                                 FightDirty(targetPlayer, damageEvent.Weapon);
                         }
-                        else if (combatPet != null || targetPet != null || Faction1Bits != null || target.Faction1Bits != null || PotentialFoe(target))
+                        else if (combatPet != null || targetPet != null || Faction1Bits != null || target.Faction1Bits != null || PotentialFoe(target)
+                            || IsWorldEventProtectedTargetFor(target))
                         {
                             // combat pet inflicting or receiving damage
                             //Console.WriteLine($"{target.Name} taking {Math.Round(damage)} {damageType} damage from {Name}");
@@ -158,7 +159,7 @@ namespace ACE.Server.WorldObjects
             PrevAttackTime = Timers.RunningTime;
             NextMoveTime = PrevAttackTime + animLength + 0.5f;
 
-            var meleeDelay = ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f));
+            var meleeDelay = ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f)) / Math.Max(1.0f, WorldEventAttackSpeedMult);
 
             NextAttackTime = PrevAttackTime + animLength + meleeDelay;
 
@@ -356,7 +357,8 @@ namespace ACE.Server.WorldObjects
 
             var baseSpeed = GetAnimSpeed();
             var animSpeedMod = IsDualWieldAttack ? 1.2f : 1.0f;     // dual wield swing animation 20% faster
-            var animSpeed = baseSpeed * animSpeedMod;
+            // World Events Hold runners swing faster (1 for every other creature).
+            var animSpeed = baseSpeed * animSpeedMod * Math.Max(1.0f, WorldEventAttackSpeedMult);
 
             animLength = MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, motionCommand, animSpeed);
 

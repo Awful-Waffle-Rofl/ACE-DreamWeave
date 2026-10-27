@@ -53,6 +53,10 @@ namespace ACE.Server.WorldEvents
             if (amount == 0)
                 return;
 
+            // Hold finale boss: player damage counts toward pulling it off a target (one field read for everyone else).
+            if (victim != null && victim.WorldEventFinaleBoss)
+                victim.NoteWorldEventBossDamage(attacker, amount, ACE.Common.Time.GetUnixTime());
+
             OnCombatContact(victim, attacker);
         }
 

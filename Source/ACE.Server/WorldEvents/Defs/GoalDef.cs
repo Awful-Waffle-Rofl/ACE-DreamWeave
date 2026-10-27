@@ -3,8 +3,9 @@ using System.Text.Json.Serialization;
 namespace ACE.Server.WorldEvents.Defs
 {
     /// <summary>
-    /// Objective kind. Parsed case-insensitively from GoalDef.Type. No Hold entry ships in v1 (C6 defers
-    /// Hold to P2), but the enum value exists so WP-12 can add it without a rename.
+    /// Objective kind. Parsed case-insensitively from GoalDef.Type. Hold is the "protect the targets" goal:
+    /// it spawns the friendly targets in its <see cref="GoalDef.Protect"/> block and succeeds when enough of
+    /// them are still alive after <see cref="GoalDef.HoldSeconds"/>.
     /// </summary>
     public enum GoalType
     {
@@ -41,8 +42,17 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("count")]
         public ScaledCount Count { get; set; }
 
+        /// <summary>Hold only: seconds from the run going Active until the hold succeeds.</summary>
         [JsonPropertyName("holdSeconds")]
-        public int HoldSeconds { get; set; }
+        public int HoldSecondsJson { get; set; }
+
+        /// <summary>In force: for a Hold goal, world_events_hold_hold_seconds when set, else goals.json (live).</summary>
+        [JsonIgnore]
+        public int HoldSeconds { get => TypeKind == GoalType.Hold ? HoldSettings.Integer(HoldKeys.HoldSeconds, HoldSecondsJson) : HoldSecondsJson; set => HoldSecondsJson = value; }
+
+        /// <summary>Hold only: the targets to protect. Required for a Hold goal, ignored by every other type.</summary>
+        [JsonPropertyName("protect")]
+        public ProtectDef Protect { get; set; }
 
         [JsonPropertyName("mvpRule")]
         public string MvpRule { get; set; }
@@ -71,6 +81,20 @@ namespace ACE.Server.WorldEvents.Defs
         public string FailTemplate { get; set; }
 
         /// <summary>
+        /// Optional: when a run of this goal succeeds, a second World Event starts nearby (WorldEventChain). Absent: no
+        /// chain. Any goal may carry it; the envoys do.
+        /// </summary>
+        [JsonPropertyName("chain")]
+        public ChainDef Chain { get; set; }
+
+        /// <summary>
+        /// Optional: every location of this goal (and of the stages it chains into) must be a short walk from a Town
+        /// Network portal drop (WorldEventTownReach). Absent: no check.
+        /// </summary>
+        [JsonPropertyName("townReach")]
+        public TownReachDef TownReach { get; set; }
+
+        /// <summary>
         /// Computed at load time from <see cref="Type"/> (case-insensitive). Never read from JSON.
         /// </summary>
         [JsonIgnore]
@@ -81,5 +105,12 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonIgnore]
         public MvpRule RuleKind { get; set; }
+
+        /// <summary>
+        /// This goal's own object from goals.json, kept at load so HoldSettings can tell a value set in the file from the
+        /// code default (the "source" column of /worldevent hold settings). Null for a goal built in code.
+        /// </summary>
+        [JsonIgnore]
+        public System.Text.Json.JsonElement? RawJson { get; set; }
     }
 }

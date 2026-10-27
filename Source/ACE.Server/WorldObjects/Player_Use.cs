@@ -274,6 +274,13 @@ namespace ACE.Server.WorldObjects
             //Console.WriteLine($"{Name}.TryUseItem({item.Name}, {success})");
             LastUseTime = 0.0f;
 
+            // World Events Hold: a restoration shrine is handled by its run, never by the model's own use.
+            if (success && ACE.Server.WorldEvents.WorldEventManager.Current is ACE.Server.WorldEvents.WorldEvent holdRun && holdRun.TryUseHoldShrine(this, item))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
             if (success)
                 item.OnActivate(this);
 

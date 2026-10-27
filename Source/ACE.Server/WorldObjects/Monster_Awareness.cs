@@ -201,6 +201,17 @@ namespace ACE.Server.WorldObjects
                     TauntTarget = null;
                 }
 
+                // WaffleACE fork, World Events Hold: a seeker (the protect.seekShare part of each wave) goes for
+                // its run's protected targets instead of the players. After the Taunt hold on purpose, so a
+                // player's taunt can still pull a seeker off a ward. Falls through to normal targeting when no
+                // protected target is left or in reach. A no-op for every creature that is not a seeker.
+                if (WorldEventSeeker && TrySelectWorldEventSeekTarget())
+                    return true;
+
+                // WaffleACE fork, World Events Hold hunter waves: a hunter turns onto whoever is healing the targets.
+                if (WorldEventHunter && TrySelectWorldEventHunterTarget())
+                    return true;
+
                 if (visibleTargets.Count == 0)
                 {
                     if (MonsterState != State.Return)
@@ -326,6 +337,11 @@ namespace ACE.Server.WorldObjects
             {
                 // ensure attackable
                 if (!creature.Attackable && creature.TargetingTactic == TargetingTactic.None || creature.Teleporting) continue;
+
+                // WaffleACE fork, World Events Hold: protected targets are only ever chosen by a seeker, through
+                // TrySelectWorldEventSeekTarget - never by an ordinary tactic, so the rest of the wave keeps
+                // going for the players.
+                if (creature.WorldEventProtected) continue;
 
                 // ensure within 'detection radius' ?
                 var chaseDistSq = creature == AttackTarget ? MaxChaseRangeSq : VisualAwarenessRangeSq;
@@ -565,6 +581,12 @@ namespace ACE.Server.WorldObjects
 
             var targetCreature = AttackTarget as Creature;
 
+            // WaffleACE fork, World Events Hold: a seeker going for a protected target does not recruit the
+            // monsters around it - otherwise one seeker would turn its whole pack onto the ward and the
+            // protect.seekShare split would mean nothing.
+            if (targetCreature != null && targetCreature.WorldEventProtected)
+                return;
+
             var alerted = false;
 
             foreach (var obj in visibleObjs)
@@ -604,6 +626,10 @@ namespace ACE.Server.WorldObjects
                     }
 
                     alerted = true;
+
+                    // WaffleACE fork, World Events Hold: an alerted seeker goes for its target, not the alert's target.
+                    if (nearbyCreature.TryKeepWorldEventSeekerLock(this))
+                        continue;
 
                     nearbyCreature.AttackTarget = AttackTarget;
                     nearbyCreature.WakeUp(false);

@@ -744,6 +744,16 @@ namespace ACE.Server.Command.Handlers
             // TODO: output
         }
 
+        /// <summary>
+        /// Which creatures "@smite all" kills (D6 - pure): every attackable one, EXCEPT a World Events Hold
+        /// protected target (a target the players are defending), so an admin clearing a wave does not also
+        /// fail the run. "@smite" on a selected target still kills a protected target.
+        /// </summary>
+        public static bool SmiteAllTakes(bool attackable, bool worldEventProtected)
+        {
+            return attackable && !worldEventProtected;
+        }
+
         [CommandHandler("smite", AccessLevel.Envoy, CommandHandlerFlag.RequiresWorld, 0, "Kills the selected target or all monsters in radar range if \"all\" is specified.", "[all, Player's Name]")]
         public static void HandleSmite(Session session, params string[] parameters)
         {
@@ -762,7 +772,7 @@ namespace ACE.Server.Command.Handlers
 
                         var useTakeDamage = PropertyManager.GetBool("smite_uses_takedamage").Item;
 
-                        if (wo is Creature creature && creature.Attackable)
+                        if (wo is Creature creature && SmiteAllTakes(creature.Attackable, creature.WorldEventProtected))
                             creature.Smite(session.Player, useTakeDamage);
                     }
 

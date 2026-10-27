@@ -115,11 +115,17 @@ namespace ACE.Server.WorldEvents
         /// What one of this run's objective spawns is called - "pillar"/"pillars" on an element portal,
         /// "rift"/"rifts" everywhere else. Never null: the axis store repairs a blank to the default.
         /// </summary>
+        /// A Hold goal names its OWN targets instead (protect.noun / nounPlural, "ward"/"wards" by default):
+        /// the things the players defend come from the goal, not the source theme.
         public string ObjectiveNoun =>
-            !string.IsNullOrWhiteSpace(Source?.ObjectiveNoun) ? Source.ObjectiveNoun : SourceThemeDef.DefaultObjectiveNoun;
+            IsHoldWithProtect ? Goal.Protect.EffectiveNoun
+            : !string.IsNullOrWhiteSpace(Source?.ObjectiveNoun) ? Source.ObjectiveNoun : SourceThemeDef.DefaultObjectiveNoun;
 
         public string ObjectiveNounPlural =>
-            !string.IsNullOrWhiteSpace(Source?.ObjectiveNounPlural) ? Source.ObjectiveNounPlural : SourceThemeDef.DefaultObjectiveNounPlural;
+            IsHoldWithProtect ? Goal.Protect.EffectiveNounPlural
+            : !string.IsNullOrWhiteSpace(Source?.ObjectiveNounPlural) ? Source.ObjectiveNounPlural : SourceThemeDef.DefaultObjectiveNounPlural;
+
+        private bool IsHoldWithProtect => Goal?.TypeKind == GoalType.Hold && Goal.Protect != null;
 
         /// <summary>
         /// How constrained the family pair this run drew was, and the floor it was drawn against. Set only

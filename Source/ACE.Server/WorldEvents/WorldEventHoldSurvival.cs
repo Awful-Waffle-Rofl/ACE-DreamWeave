@@ -1,0 +1,455 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+using ACE.Entity.Enum;
+using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
+using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WorldEvents.Defs;
+using ACE.Server.WorldObjects;
+
+namespace ACE.Server.WorldEvents
+{
+    /// <summary>
+    /// Hold: the ways players keep the targets alive, each a goals.json setting and all off by default.
+    ///   * corruptedKillHeal: a corrupted monster's death heals every standing target, with a target's line;
+    ///   * shrine: a restoration shrine beside each target heals it when a player uses it, then rests;
+    ///   * rescueHeal: killing a monster that was attacking a target heals that target a little (capped per wave);
+    ///   * clearRegenPerSecond: a target with no hostile within clearRadius regenerates.
+    /// Every one of them goes through Creature.ApplyWorldEventProtectedHeal, so the after-hit reduction and the
+    /// per-wave healing budget (healBudgetPerWave) hold for all of them together.
+    /// </summary>
+    public sealed partial class WorldEvent
+    {
+        /// <summary>
+        /// Queues a heal of <paramref name="share"/> of max health on <paramref name="target"/>'s own landblock and
+        /// calls <paramref name="after"/> there with what it came to. Any thread.
+        /// </summary>
+        private void QueueProtectedHeal(Creature target, double share, bool isRescue, string why,
+            Action<int, WorldEventHoldRules.ProtectedHealOutcome> after = null)
+        {
+            var landblock = target?.CurrentLandblock;
+
+            if (landblock == null || !(share > 0))
+                return;
+
+            var t = target;
+
+            landblock.EnqueueAction(new ActionEventDelegate(() =>
+            {
+                try
+                {
+                    if (t.IsDead || t.IsDestroyed)
+                        return;
+
+                    var healed = t.ApplyWorldEventProtectedHeal(share, isRescue, ACE.Common.Time.GetUnixTime(), out var outcome);
+
+                    if (healed > 0)
+                        log.Debug($"[WORLDEVENT] run={RunId} protected heal {why} {t.Name} +{healed} ({t.Health.Current}/{t.Health.MaxValue}, " +
+                                  $"spent this wave {t.WorldEventHealSpentThisWave})");
+
+                    after?.Invoke(healed, outcome);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} protected heal ({why}) threw", ex);
+                }
+            }));
+        }
+
+        /// <summary>
+        /// Live knight health (world_events_hold_knight_max_health and _by_wcid): once a second, a standing knight whose max
+        /// health no longer matches its setting is rescaled on its own landblock, keeping its health percentage. Only for
+        /// time-based damage or a knight named in the by-wcid list, so with nothing set this never changes a knight.
+        /// </summary>
+        private void TickHoldKnightHealth()
+        {
+            try
+            {
+                var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+                if (protect == null)
+                    return;
+
+                var byWcid = HoldSettings.KnightHealthByWcid();
+                var participants = Math.Max(0, ResolvedAudienceCount);
+
+                foreach (var target in Spawner.LiveProtectedCreatures)
+                {
+                    if (target == null || target.IsDead || target.IsDestroyed)
+                        continue;
+
+                    if (!protect.IsTimeScaled && (byWcid == null || !byWcid.ContainsKey(target.WeenieClassId)))
+                        continue;
+
+                    var desired = protect.EffectiveMaxHealthFor(target.WeenieClassId, participants);
+
+                    if (desired <= 0 || desired == target.Health.MaxValue)
+                        continue;
+
+                    var landblock = target.CurrentLandblock;
+
+                    if (landblock == null)
+                        continue;
+
+                    var t = target;
+
+                    landblock.EnqueueAction(new ActionEventDelegate(() =>
+                    {
+                        try
+                        {
+                            if (t.IsDead || t.IsDestroyed || t.Health.MaxValue == desired)
+                                return;
+
+                            var before = t.Health.MaxValue;
+                            var current = WorldEventHoldRules.RescaledHealth(t.Health.Current, before, (uint)desired);
+
+                            WorldEventSpawner.ApplyHealth(t, desired);
+                            t.Health.Current = Math.Min(t.Health.MaxValue, current);
+
+                            log.Info($"[WORLDEVENT] run={RunId} knight {t.Name} max health {before} -> {t.Health.MaxValue} (setting), now {t.Health.Current}");
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[WORLDEVENT] run={RunId} knight health rescale threw", ex);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} knight health tick threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// A wave monster of a Hold run died (from OnCreatureDied, on its landblock thread): a corrupted one heals
+        /// every standing target (protect.corruptedKillHeal) and one of them says so; and a monster that was
+        /// attacking a target, killed by a player or a pet, restores a little of that target (protect.rescueHeal).
+        /// </summary>
+        private void OnHoldMonsterDied(Creature creature, DamageHistoryInfo lastDamager)
+        {
+            var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+            if (protect == null || creature == null || creature.WorldEventProtected)
+                return;
+
+            if (creature.WorldEventCorrupted && protect.CorruptedKillHeal > 0)
+            {
+                var targets = Spawner.LiveProtectedCreatures.Where(t => t != null && !t.IsDead).ToList();
+
+                foreach (var target in targets)
+                    QueueProtectedHeal(target, protect.CorruptedKillHeal, false, "corrupted kill");
+
+                log.Info($"[WORLDEVENT] run={RunId} corrupted {creature.Name} slain; {targets.Count} target(s) heal {protect.CorruptedKillHeal:P0}");
+
+                if (targets.Count > 0)
+                {
+                    Creature speaker;
+
+                    lock (protectedLineRngSync)
+                        speaker = targets[protectedLineRng.Next(targets.Count)];
+
+                    SpeakLocally(speaker, ComposeProtectedLine(protect.Lines?.CorruptedKill, null), viaQueue: true);
+                }
+            }
+
+            if (protect.RescueHeal > 0 && creature.AttackTarget is Creature victim && victim.WorldEventProtected
+                && ReferenceEquals(victim.P_WorldEvent, this) && !victim.IsDead && WorldEventHoldRules.IsRescueKill(lastDamager?.IsPlayer ?? false,
+                    lastDamager?.TryGetPetOwner() != null))
+            {
+                QueueProtectedHeal(victim, protect.RescueHeal, true, "rescue");
+            }
+        }
+
+        // ---- clear regeneration --------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Once a second: every standing target with no living wave monster within protect.clearRadius regenerates
+        /// protect.clearRegenPerSecond. It stops the moment one comes within range. Never throws.
+        /// </summary>
+        private void TickHoldClearRegen()
+        {
+            try
+            {
+                var protect = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect : null;
+
+                if (protect == null || !(protect.ClearRegenPerSecond > 0))
+                    return;
+
+                // world_events_hold_regen_interval_seconds (default 1 = every tick): the same regen per second, applied in
+                // steps of the interval.
+                var interval = Math.Max(1, protect.RegenIntervalSeconds);
+                var now = ACE.Common.Time.GetUnixTime();
+
+                if (interval > 1 && now - lastClearRegenAt < interval - 0.01)
+                    return;
+
+                lastClearRegenAt = now;
+
+                var monsters = Spawner.LiveWaveCreatures.Where(m => m != null && !m.IsDead && m.Location != null)
+                    .Select(m => m.Location).ToList();
+
+                foreach (var target in Spawner.LiveProtectedCreatures)
+                {
+                    if (target == null || target.IsDead || target.Location == null)
+                        continue;
+
+                    if (target.Health.Current >= target.Health.MaxValue)
+                        continue;
+
+                    var nearest = monsters.Count == 0 ? (double?)null : monsters.Min(m => (double)target.Location.DistanceTo(m));
+
+                    if (!WorldEventHoldRules.IsClear(nearest, protect.ClearRadius))
+                        continue;
+
+                    QueueProtectedHeal(target, Math.Min(0.1, protect.ClearRegenPerSecond) * interval, false, "clear regen");
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} clear regeneration threw", ex);
+            }
+        }
+
+        /// <summary>When clear regeneration was last applied (world_events_hold_regen_interval_seconds).</summary>
+        private double lastClearRegenAt;
+
+        // ---- restoration shrines -------------------------------------------------------------------------------
+
+        private readonly object shrineSync = new object();
+
+        /// <summary>Per shrine guid: when it is ready again (unix time). Absent = ready.</summary>
+        private readonly Dictionary<uint, double> shrineReadyAt = new Dictionary<uint, double>();
+
+        /// <summary>Per shrine guid: when its ready effect last played.</summary>
+        private readonly Dictionary<uint, double> shrineReadyPulseAt = new Dictionary<uint, double>();
+
+        /// <summary>Per player guid: when that player may use a shrine again (world_events_hold_shrine_player_cooldown_seconds).</summary>
+        private readonly Dictionary<uint, double> shrinePlayerReadyAt = new Dictionary<uint, double>();
+
+        /// <summary>A shrine farther than this from every target restores nobody (the default of world_events_hold_shrine_bind_range).</summary>
+        internal const double ShrineBindMetres = ProtectDef.DefaultShrineBindRange;
+
+        /// <summary>True when <paramref name="item"/> is one of this run's restoration shrines.</summary>
+        internal bool IsHoldShrine(WorldObject item)
+        {
+            var shrine = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Shrine : null;
+
+            return shrine != null && item != null && item.WeenieClassId == shrine.Wcid && Spawner.IsDecorGuid(item.Guid.Full);
+        }
+
+        /// <summary>
+        /// A player used <paramref name="item"/> (Player.TryUseItem, on the player's landblock). When it is one of this
+        /// run's shrines: on cooldown, the player is told how long is left; ready, the nearest standing target is
+        /// restored by protect.shrineHeal (through the healing budget), the shrine rests for
+        /// protect.shrineCooldownSeconds, the target shows the used effect and says a line. A heal that comes to
+        /// nothing (full health, or the budget spent) gives the use back and says why. Returns true when it was a
+        /// shrine (handled here, whatever happened), false for anything else.
+        /// </summary>
+        public bool TryUseHoldShrine(Player player, WorldObject item)
+        {
+            if (player == null || !IsHoldShrine(item))
+                return false;
+
+            var protect = Composition.Goal.Protect;
+            var now = ACE.Common.Time.GetUnixTime();
+
+            if (State != WorldEventState.Active)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: run not active ({State})");
+                Tell(player, "The shrine is quiet.");
+                return true;
+            }
+
+            double readyAt;
+
+            lock (shrineSync)
+                shrineReadyAt.TryGetValue(item.Guid.Full, out readyAt);
+
+            if (WorldEventHoldRules.ShrineUseCheck(now, readyAt, 0, 0) == WorldEventHoldRules.ShrineUseState.ShrineResting)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: resting, ready in {readyAt - now:0} s");
+                Tell(player, WorldEventHoldRules.ShrineCooldownLine(readyAt - now));
+                return true;
+            }
+
+            // world_events_hold_shrine_player_cooldown_seconds (0 = off): one player waits between any two shrine uses.
+            var playerCooldown = protect.ShrinePlayerCooldownSeconds;
+            double playerReadyAt;
+
+            lock (shrineSync)
+                shrinePlayerReadyAt.TryGetValue(player.Guid.Full, out playerReadyAt);
+
+            if (WorldEventHoldRules.ShrineUseCheck(now, 0, playerReadyAt, playerCooldown) == WorldEventHoldRules.ShrineUseState.PlayerResting)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: player cooldown, {playerReadyAt - now:0} s left");
+                Tell(player, WorldEventHoldRules.ShrinePlayerCooldownLine(playerReadyAt - now));
+                return true;
+            }
+
+            var bindRange = protect.ShrineBindRange;
+            var target = NearestProtected(item, bindRange);
+
+            if (target == null)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: no standing target within {bindRange:0} m");
+                Tell(player, "There is no one here for the shrine to restore.");
+                return true;
+            }
+
+            var cooldown = protect.EffectiveShrineCooldownSeconds;
+
+            lock (shrineSync)
+            {
+                shrineReadyAt[item.Guid.Full] = now + cooldown;
+
+                if (playerCooldown > 0)
+                    shrinePlayerReadyAt[player.Guid.Full] = now + playerCooldown;
+            }
+
+            var shrineGuid = item.Guid.Full;
+            var playerGuid = player.Guid.Full;
+
+            // world_events_hold_shrine_heals_all: every standing knight, else only the one beside the shrine.
+            var healed = protect.ShrineHealsAll
+                ? Spawner.LiveProtectedCreatures.Where(t => t != null && !t.IsDead).ToList()
+                : new List<Creature> { target };
+
+            var pending = healed.Count;
+            var anyHealed = false;
+
+            foreach (var knight in healed)
+            {
+                var k = knight;
+
+                QueueProtectedHeal(k, protect.ShrineHeal, false, "shrine", (amount, outcome) =>
+                {
+                    bool last;
+
+                    lock (shrineSync)
+                    {
+                        anyHealed |= amount > 0;
+                        last = --pending == 0;
+                    }
+
+                    if (amount > 0)
+                    {
+                        PlayScriptOn(k, protect.Shrine?.UsedEffect);
+
+                        if (ReferenceEquals(k, target))
+                            SpeakLocally(k, ComposeProtectedLine(protect.Lines?.Shrine, null), viaQueue: false);
+
+                        log.Info($"[WORLDEVENT] run={RunId} shrine used by {player.Name}: {k.Name} +{amount} health (now {k.Health.Current}/{k.Health.MaxValue}); ready again in {cooldown:0} s");
+                    }
+
+                    if (!last || anyHealed)
+                        return;
+
+                    // Nothing restored anywhere: give the use back (the player's own cooldown too).
+                    lock (shrineSync)
+                    {
+                        shrineReadyAt.Remove(shrineGuid);
+                        shrinePlayerReadyAt.Remove(playerGuid);
+                    }
+
+                    log.Info($"[WORLDEVENT] run={RunId} shrine use by {player.Name}: {target.Name} restored nothing ({outcome}); the use is given back");
+
+                    Tell(player, WorldEventHoldRules.ShrineWastedLine(target.Name, outcome));
+                });
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Once a second: a shrine plays its ready effect the moment it is ready (placed, or its rest over), and again
+        /// every protect.shrine.readyPulseSeconds while ready when that is set (0: no repeat). Never throws.
+        /// </summary>
+        private void TickHoldShrines()
+        {
+            try
+            {
+                var shrine = Composition?.Goal?.TypeKind == GoalType.Hold ? Composition?.Goal?.Protect?.Shrine : null;
+
+                if (shrine == null || !WorldEventHoldRules.TryParseBossEffect(shrine.ReadyEffect, out var ready) || ready == PlayScript.Invalid)
+                    return;
+
+                var now = ACE.Common.Time.GetUnixTime();
+
+                foreach (var item in Spawner.LiveDecorObjects)
+                {
+                    if (item == null || item.WeenieClassId != shrine.Wcid)
+                        continue;
+
+                    bool due;
+
+                    lock (shrineSync)
+                    {
+                        shrineReadyAt.TryGetValue(item.Guid.Full, out var readyAt);
+                        shrineReadyPulseAt.TryGetValue(item.Guid.Full, out var pulsedAt);
+
+                        due = WorldEventHoldRules.ShrineReadyPulseDue(now, readyAt, pulsedAt, shrine.ReadyPulseSeconds);
+
+                        if (due)
+                            shrineReadyPulseAt[item.Guid.Full] = now;
+                    }
+
+                    if (due)
+                        PlayScriptOn(item, shrine.ReadyEffect);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} shrine tick threw", ex);
+            }
+        }
+
+        /// <summary>The nearest standing target of this run within <paramref name="metres"/> of <paramref name="wo"/>, or null.</summary>
+        private Creature NearestProtected(WorldObject wo, double metres)
+        {
+            if (wo?.Location == null)
+                return null;
+
+            Creature best = null;
+            var bestDist = double.MaxValue;
+
+            foreach (var target in Spawner.LiveProtectedCreatures)
+            {
+                if (target == null || target.IsDead || target.Location == null)
+                    continue;
+
+                var d = wo.Location.DistanceTo(target.Location);
+
+                if (d <= metres && d < bestDist)
+                {
+                    best = target;
+                    bestDist = d;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>Plays a PlayScript (by name; "none" or unknown does nothing) on <paramref name="wo"/> through its landblock. Any thread.</summary>
+        private void PlayScriptOn(WorldObject wo, string effect)
+        {
+            if (wo?.CurrentLandblock == null || !WorldEventHoldRules.TryParseBossEffect(effect, out var script) || script == PlayScript.Invalid)
+                return;
+
+            var target = wo;
+
+            wo.CurrentLandblock.EnqueueAction(new ActionEventDelegate(() =>
+            {
+                if (!target.IsDestroyed)
+                    target.EnqueueBroadcast(new GameMessageScript(target.Guid, script, 1.0f));
+            }));
+        }
+
+        private static void Tell(Player player, string text)
+        {
+            player?.Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+        }
+    }
+}

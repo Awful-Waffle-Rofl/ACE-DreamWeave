@@ -1189,7 +1189,8 @@ namespace ACE.Server.WorldObjects
 
         public override bool CanDamage(Creature target)
         {
-            return target.Attackable && !target.Teleporting && !(target is CombatPet);
+            // WaffleACE fork: a World Events protected target is never damageable by a player (see CheckPKStatusVsTarget).
+            return target.Attackable && !target.Teleporting && !(target is CombatPet) && !target.WorldEventProtected;
         }
 
         // http://acpedia.org/wiki/Announcements_-_2002/04_-_Betrayal
@@ -1479,6 +1480,12 @@ namespace ACE.Server.WorldObjects
             // (no tag) falls through unchanged.
             if (TryBattlegroundObjectiveGate(targetCreature, spell, out var objectiveResult))
                 return objectiveResult;
+
+            // WaffleACE fork, World Events Hold: a protected target (a ward the players are defending) can only
+            // be harmed by its own run's monsters. Refused here as well as in CanDamage because the cleave,
+            // multi-shot and AoE candidate filters ask this method rather than CanDamage.
+            if (targetCreature.WorldEventProtected && IsHarmfulAction(spell))
+                return BattlegroundObjectiveRefusalErrors();
 
             // PvP arena damage gate (Docs/Pvp/DESIGN.md H6), first among the PK rules: when either player is in a
             // match, PvpArenaGate decides and the retail rules below do not run. Harmful actions only (melee,
