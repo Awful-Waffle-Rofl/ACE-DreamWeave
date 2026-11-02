@@ -177,6 +177,73 @@ namespace ACE.Server.Tests
             }
         }
 
+        [TestMethod]
+        public void Reflect_BouncedProjectile_TriggersThorns_OutsideTheLatch()
+        {
+            // A bounced projectile never reaches Player.TakeDamage or the magic Thorns sites, so the bounce
+            // must answer with Thorns itself (owner ruling 2026-10-22) - and, since the 2026-10-23 rework,
+            // OUTSIDE the reflect latch, so the firer's wards and immunities apply to it. A held latch is what
+            // makes Creature.AbsorbMonsterEffectDamage skip every incoming-damage effect (behaviourally pinned in
+            // ReflectBounceTests.Thorns_WardAbsorbs_UnlessAReflectLatchIsHeld), so the method must not claim it.
+            var file = Path.Combine(ClassAbilityAffinityDeclarationTests.RepoRoot(), "Source", "ACE.Server", "WorldObjects", "Player_ClassAbilityReflectAndPin.cs");
+
+            Assert.IsTrue(File.Exists(file), $"could not locate {file}");
+
+            var body = MethodBody(Squash(StripFullLineComments(File.ReadAllText(file))), "public bool TryReflectProjectile(");
+
+            Assert.IsFalse(body.Contains("TryEnterReflect(", StringComparison.Ordinal),
+                "TryReflectProjectile must not claim the reflect latch - the bounce and its Thorns answer must run the firer's wards and immunities");
+            Assert.IsFalse(body.Contains("ExitReflect(", StringComparison.Ordinal),
+                "TryReflectProjectile must not release a latch it does not claim");
+
+            // the refusal is a READ of the latch, ahead of the roll
+            var refusal = body.IndexOf("if (Creature.IsReflectResolving) return false;", StringComparison.Ordinal);
+            var roll = body.IndexOf("ThreadSafeRandom.Next(", StringComparison.Ordinal);
+
+            Assert.IsTrue(refusal >= 0, "TryReflectProjectile must refuse a bounce while a reflect is resolving on this thread");
+            Assert.IsTrue(roll > refusal, "the IsReflectResolving refusal must come before the roll");
+
+            // the DirectHit gate and the magic damage-type mapping are part of the rule, so they are pinned too,
+            // after the roll (a bounce that did not happen answers with nothing)
+            var thorns = body.IndexOf("if (origin == IncomingDamageOrigin.DirectHit) ApplyThornsReflect(firer, combatType == CombatType.Magic ? GetThornsMagicReflectDamageType(damageType) : damageType, 1.0);", StringComparison.Ordinal);
+
+            Assert.IsTrue(thorns > roll, "TryReflectProjectile must call a DirectHit-gated ApplyThornsReflect on the firer once the roll has succeeded");
+
+            // the spell site must hand over the projectile's real origin, or a Secondary bolt would bounce into Thorns
+            var spellSite = Squash(File.ReadAllText(Path.Combine(ClassAbilityAffinityDeclarationTests.RepoRoot(), "Source", "ACE.Server", "WorldObjects", "SpellProjectile.cs")));
+
+            Assert.IsTrue(spellSite.Contains("TryReflectProjectile(sourceCreature, CombatType.Magic, Spell.DamageType, spellDamage, IncomingDamageOrigin)"),
+                "SpellProjectile must pass its own IncomingDamageOrigin to TryReflectProjectile");
+        }
+
+        // drops every line whose first non-blank characters are //, so prose in a doc comment cannot satisfy or
+        // trip a code search
+        private static string StripFullLineComments(string text) =>
+            string.Join("\n", text.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+        /// <summary>The text of one method, from its signature prefix to its matching closing brace.</summary>
+        private static string MethodBody(string source, string signature)
+        {
+            var start = source.IndexOf(signature, StringComparison.Ordinal);
+            Assert.IsTrue(start >= 0, $"signature not found - has it changed? {signature}");
+
+            var open = source.IndexOf('{', start + signature.Length);
+            var depth = 0;
+
+            for (var i = open; i < source.Length; i++)
+            {
+                if (source[i] == '{') depth++;
+                else if (source[i] == '}' && --depth == 0)
+                    return source.Substring(start, i - start + 1);
+            }
+
+            Assert.Fail($"unbalanced braces after {signature}");
+            return null;
+        }
+
+        // collapses every whitespace run to one space, so a reflow of the source does not break the match
+        private static string Squash(string text) => System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+
         // ---- Reflect: the latch ------------------------------------------------------------------------
 
         [TestMethod]
@@ -323,7 +390,7 @@ namespace ACE.Server.Tests
         public void PinningShot_DurationAndImmunity_MatchTheSignedOffSpec()
         {
             Assert.AreEqual(5.0, PropertyManager.GetDouble("class_ability_pinningshot_duration_seconds").Item, 1e-9);
-            Assert.AreEqual(15.0, PropertyManager.GetDouble("class_ability_pinningshot_immunity_seconds").Item, 1e-9);
+            Assert.AreEqual(8.0, PropertyManager.GetDouble("class_ability_pinningshot_immunity_seconds").Item, 1e-9);
 
             // the immunity must outlast the pin, or the effect chain-locks
             Assert.IsTrue(PropertyManager.GetDouble("class_ability_pinningshot_immunity_seconds").Item
@@ -465,18 +532,32 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void PinningShotSlow_WindowEndsNoLaterThanThePinImmunity()
+        public void PinningShotSlow_WhenItOutlastsTheImmunity_AReProcExtendsTheWindowNeverShortensIt()
         {
             var duration = PropertyManager.GetDouble("class_ability_pinningshot_duration_seconds").Item;
             var immunity = PropertyManager.GetDouble("class_ability_pinningshot_immunity_seconds").Item;
 
-            // both windows are measured from the same instant - the pin's end - so comparing the two
-            // durations compares the two end times. Mirrors the immunity > duration assertion above.
-            Assert.IsTrue(SlowSeconds <= immunity,
-                $"the slow ({SlowSeconds}s from the pin end) must not outlast the immunity ({immunity}s from the " +
-                "same instant), or a re-proc can land while the previous slow is still running and the two windows overlap");
-
             Assert.IsTrue(duration > 0.0, "a slow armed from a zero-length pin would start in the past");
+
+            // Archer pass: the immunity dropped 15 -> 8 s while the slow stayed 10 s, so the slow can now
+            // outlast the immunity by up to 2 s and a re-pin can land while the previous slow still runs.
+            // That overlap is benign ONLY because the re-pin re-arms the window from its own, later pin end:
+            // the newest window wins and a re-proc can never shorten a slow already in force.
+            var target = PinnableTarget();
+
+            Assert.IsTrue(target.TryApplyClassAbilityPin(duration, immunity));
+            Assert.IsTrue(target.TryApplyClassAbilityMoveSlow(SlowSeconds, (float)SlowFactor));
+            var firstEnd = target.ClassAbilityMoveSlowUntil;
+
+            // a later pin: move the immunity edge into the past so the second pin is legal
+            target.ClassAbilityPinImmuneUntil = 0.0;
+            target.ClassAbilityPinnedUntil = 0.0;
+
+            Assert.IsTrue(target.TryApplyClassAbilityPin(duration, immunity));
+            Assert.IsTrue(target.TryApplyClassAbilityMoveSlow(SlowSeconds, (float)SlowFactor));
+
+            Assert.IsTrue(target.ClassAbilityMoveSlowUntil >= firstEnd - 1e-6,
+                "a re-proc must never pull an in-force slow window earlier");
         }
 
         [TestMethod]
@@ -598,16 +679,24 @@ namespace ACE.Server.Tests
 
             // ---- THE CHASE: server half and wire half must carry the same expression, or the client's dead
             // reckoning and the server's physics disagree about where a slowed creature is.
-            Assert.IsTrue(monsterNav.Contains("mvp.Speed = CurrentMovementSlowFactor;"),
+            //
+            // Every emit site reads MovementSpeedFactor, which is CurrentMovementSlowFactor for every creature
+            // except a CombatPet (which multiplies in the pet speed floor). The base must stay exactly that, or
+            // the slow stops reaching these sites.
+            var pinSource = File.ReadAllText(Path.Combine(worldObjects, "Creature_ClassAbilityPin.cs"));
+            Assert.IsTrue(pinSource.Contains("public virtual float MovementSpeedFactor => CurrentMovementSlowFactor;"),
+                "Creature.MovementSpeedFactor must default to the slow factor");
+
+            Assert.IsTrue(monsterNav.Contains("mvp.Speed = MovementSpeedFactor;"),
                 "Monster_Navigation.GetMovementParameters must set the SERVER-side speed from the slow factor");
-            Assert.IsTrue(creatureNav.Contains("motion.MoveToParameters.Speed = CurrentMovementSlowFactor;"),
+            Assert.IsTrue(creatureNav.Contains("motion.MoveToParameters.Speed = MovementSpeedFactor;"),
                 "Creature_Navigation.GetMoveToMotion must set the WIRE-side speed from the same factor");
 
             // ---- THE RANGED / CASTING / IMMOBILE TURN. StartTurn's turnTo branch pairs
             // Creature_Navigation.TurnTo(WorldObject, bool) on the wire with PhysicsObj.TurnToObject on the
             // server, and mvp.Speed scales turning OMEGA as well as translation. Missing this was a real
             // divergence: the client tracked at full rate while the server turned at a fifth.
-            Assert.IsTrue(creatureNav.Contains("turnToMotion.MoveToParameters.Speed = CurrentMovementSlowFactor;"),
+            Assert.IsTrue(creatureNav.Contains("turnToMotion.MoveToParameters.Speed = MovementSpeedFactor;"),
                 "Creature_Navigation.TurnTo(WorldObject, bool) must carry the slow factor - it is the WIRE half " +
                 "of StartTurn's turnTo branch, whose server half is PhysicsObj.TurnToObject(..., GetMovementParameters())");
             Assert.IsTrue(monsterNav.Contains("PhysicsObj.TurnToObject(AttackTarget.PhysicsObj, mvp);"),
@@ -615,9 +704,9 @@ namespace ACE.Server.Tests
                 "no longer a pair");
 
             // ---- THE RETURN-HOME LEG, both halves. The literal 1.0f in each call is walkRunThreshold, NOT speed.
-            Assert.IsTrue(monsterNav.Contains("MoveTo(home, RunRate, false, 1.0f, CurrentMovementSlowFactor);"),
+            Assert.IsTrue(monsterNav.Contains("MoveTo(home, RunRate, false, 1.0f, MovementSpeedFactor);"),
                 "MoveToHome must pass the slow factor as MoveTo's speed argument (the fifth), not leave it null");
-            Assert.IsTrue(creatureNav.Contains("GetMoveToPosition(home, RunRate, 1.0f, CurrentMovementSlowFactor);"),
+            Assert.IsTrue(creatureNav.Contains("GetMoveToPosition(home, RunRate, 1.0f, MovementSpeedFactor);"),
                 "BroadcastMoveTo's return-home branch must carry the slow factor too, or a player entering range " +
                 "mid-slow is told the wrong rate");
 
@@ -655,18 +744,23 @@ namespace ACE.Server.Tests
         // ---- Registry wiring ---------------------------------------------------------------------------
 
         [TestMethod]
-        public void Reflect_IsImplemented_AndCarriesNoDamageHook()
+        public void Reflect_IsImplemented_AndRidesOnlyThePreWriteHook()
         {
             var handler = ClassAbilityRegistry.GetHandler(ClassAbilityId.ReflectMagic);
 
             Assert.IsTrue(handler.Definition.Implemented, "Reflect's mechanic has landed and it should be learnable");
-            Assert.IsInstanceOfType(handler, typeof(IPassiveStatAbility),
-                "Reflect is dispatched by hand from two projectile sites, so it carries the bespoke marker (as Parry / Shield Block / Pocket Sand do)");
 
-            // it must reach no damage hook at all - every one of these is melee-reachable, and the whole
-            // point of the entry is that it only ever sees projectiles
+            // the creature-spell immunity window (2026-10-17) rides the pre-write hook, the one dispatch all
+            // four spell routes reach; the bounce is still dispatched by hand from the two projectile sites
+            Assert.IsInstanceOfType(handler, typeof(IPreWriteDamageAbility),
+                "the immunity window must ride the pre-write hook to see spell projectiles, Harm, Drain Health and DoT ticks");
+            Assert.IsTrue(ClassAbilityRegistry.PreWriteDamageAbilities.Contains((IPreWriteDamageAbility)handler),
+                "Reflect must be in the pre-write bucket");
+            Assert.IsFalse(handler is IPassiveStatAbility,
+                "a hooked handler must not also claim the no-hook marker");
+
+            // no OTHER damage hook: the post-write one is physical-only and would fire on melee hits
             Assert.IsFalse(handler is IIncomingDamageAbility, "an incoming-damage hook would fire on melee hits");
-            Assert.IsFalse(handler is IPreWriteDamageAbility, "a pre-write hook would fire on melee hits and DoT ticks");
             Assert.IsFalse(handler is IOutgoingDamageAbility);
             Assert.IsFalse(handler is ISpellHitAbility);
         }
@@ -689,7 +783,8 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void BothEntries_DeclareTheAffinityTheirCodeApplies()
         {
-            Assert.AreEqual(Skill.MissileDefense, ClassAbilityRegistry.Get(ClassAbilityId.ReflectMagic).AffinitySkill);
+            // Magic Defense since 2026-10-17, for the WHOLE ability - the bounce chance and the immunity window
+            Assert.AreEqual(Skill.MagicDefense, ClassAbilityRegistry.Get(ClassAbilityId.ReflectMagic).AffinitySkill);
             Assert.AreEqual(Skill.AssessCreature, ClassAbilityRegistry.Get(ClassAbilityId.PinningShot).AffinitySkill);
         }
 

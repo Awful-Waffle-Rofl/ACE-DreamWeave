@@ -116,6 +116,7 @@
 -- account_vault_class WIPE
 -- account_bank WIPE
 -- account_mule_form WIPE
+-- account_vault_setting WIPE
 -- account_capacity_upgrade WIPE
 -- account_capacity_upgrade_purchase WIPE
 -- market_listing WIPE
@@ -409,6 +410,13 @@ INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_
 DEALLOCATE PREPARE lw_stmt;
 
 SET @lw_t = 'account_mule_form';
+SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
+SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
+INSERT INTO ace_wipe_scratch.action_count (step, n) VALUES (CONCAT('wipe ', @lw_t), IF(@lw_x = 1, ROW_COUNT(), -1));
+DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'account_vault_setting';
 SET @lw_x = (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t);
 SET @lw_sql = IF(@lw_x = 1, CONCAT('DELETE FROM `', @lw_t, '`'), 'DO 0');
 PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt;
@@ -720,6 +728,11 @@ SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCH
 PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
 
 SET @lw_t = 'account_mule_form';
+SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
+    CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
+PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;
+
+SET @lw_t = 'account_vault_setting';
 SET @lw_sql = IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @lw_t) = 1,
     CONCAT('INSERT INTO ace_wipe_scratch.check_result (check_name, n) SELECT ''verify_wipe_nonempty ', @lw_t, ''', COUNT(*) FROM `', @lw_t, '`'), 'DO 0');
 PREPARE lw_stmt FROM @lw_sql; EXECUTE lw_stmt; DEALLOCATE PREPARE lw_stmt;

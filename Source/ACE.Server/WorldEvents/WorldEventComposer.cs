@@ -12,8 +12,9 @@ namespace ACE.Server.WorldEvents
     /// Resolves a <see cref="WorldEventRequest"/> against an axis store and a family catalog into a
     /// <see cref="WorldEventComposition"/> (TECH-DESIGN 2.3).
     ///
-    /// Entirely pure - no logging, no manager state, no side effects - so the whole refusal matrix is unit
-    /// testable (D6) and so "/worldevent simulate" and "--dry" can run it without touching a live event.
+    /// Pure apart from one read - no logging, no manager state, no side effects - so the whole refusal matrix is unit
+    /// testable (D6) and so "/worldevent simulate" and "--dry" can run it without touching a live event. The one read is
+    /// world_events_hold_enabled for a pinned Hold goal (World Events Hold H6), behind the <see cref="HoldEnabledReader"/> seam.
     /// WorldEventManager.TryCompose is a thin wrapper that adds the one warning this cannot emit.
     /// </summary>
     public static class WorldEventComposer
@@ -50,6 +51,63 @@ namespace ACE.Server.WorldEvents
         /// (source, goal) list before giving up. See <see cref="TryComposeRandom"/> for why this is small.
         /// </summary>
         public const int MaxPairsTried = 8;
+
+        // ---- World Events Hold: the composer gate (H6) ------------------------------------------------------------------
+
+        /// <summary>
+        /// THE ONE-LINE FLIP (owner decision pending, H6 builds pinned-only): whether a RANDOM roll may land on a Hold goal at
+        /// all. False: a Hold goal starts only when pinned with --goal, and a random roll never picks one whatever
+        /// world_events_hold_enabled says. True: a random roll may pick a Hold goal while world_events_hold_enabled is on.
+        /// Every decision reads it through <see cref="RandomRollMayPick"/>.
+        /// </summary>
+        public const bool RandomRollIncludesHoldGoals = false;
+
+        /// <summary>
+        /// Whether a random roll may cross a source with <paramref name="goal"/> (pure): every goal that is not Hold; a Hold
+        /// goal only when <see cref="RandomRollIncludesHoldGoals"/> and the switch is on.
+        /// </summary>
+        public static bool RandomRollMayPick(GoalDef goal, bool holdEnabled)
+        {
+            if (goal == null || goal.TypeKind != GoalType.Hold)
+                return true;
+
+            return RandomRollIncludesHoldGoals && holdEnabled;
+        }
+
+        /// <summary>The refusal a pinned Hold goal gets while world_events_hold_enabled is off. ASCII.</summary>
+        public static string HoldOffError(string goalId) =>
+            $"Hold goals are off ({Objectives.WorldEventObjectiveFactory.HoldEnabledProperty} is false); '{goalId}' cannot start";
+
+        /// <summary>
+        /// world_events_hold_enabled for the composer's gate. The composer's one read that is not of its inputs; a seam so tests
+        /// stay pure (process-wide: a test that sets it restores it in a finally). The live reader treats an unreadable
+        /// property as OFF.
+        /// </summary>
+        internal static Func<GoalDef, bool> HoldEnabledReader = ReadHoldEnabled;
+
+        private static bool ReadHoldEnabled(GoalDef goal)
+        {
+            try
+            {
+                return WorldEventHoldSettingsResolver.Flag(goal, HoldKeys.Enabled);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool HoldEnabled(GoalDef goal)
+        {
+            try
+            {
+                return (HoldEnabledReader ?? ReadHoldEnabled)(goal);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
 
         public static bool TryCompose(WorldEventAxisStore store, WorldEventCatalog catalog,
             WorldEventRequest request, out WorldEventComposition composition, out string error, Random rng = null)
@@ -105,6 +163,13 @@ namespace ACE.Server.WorldEvents
             if (!store.Goals.TryGetValue(goalId, out var goal))
             {
                 error = Unknown("goal", goalId, store.Goals.Keys);
+                return false;
+            }
+
+            // World Events Hold: a Hold goal starts only while world_events_hold_enabled is on, and the refusal names it.
+            if (goal.TypeKind == GoalType.Hold && !HoldEnabled(goal))
+            {
+                error = HoldOffError(goalId);
                 return false;
             }
 
@@ -293,6 +358,12 @@ namespace ACE.Server.WorldEvents
                 foreach (var goalId in compatibleGoals)
                 {
                     if (requestedGoal != null && goalId != requestedGoal)
+                        continue;
+
+                    // World Events Hold (H6): the roll itself never lands on a Hold goal (RandomRollMayPick); a goal pinned
+                    // with --goal is the caller's choice and is crossed here, then gated by TryCompose's switch check.
+                    if (requestedGoal == null && store.Goals.TryGetValue(goalId, out var rolledGoal)
+                        && rolledGoal.TypeKind == GoalType.Hold && !RandomRollMayPick(rolledGoal, RandomRollIncludesHoldGoals && HoldEnabled(rolledGoal)))
                         continue;
 
                     pairs.Add((source.Id, goalId));

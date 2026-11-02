@@ -26,9 +26,11 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///
     /// WHY THE FLOOR IS READ INSIDE Cloak.TryProcSpell RATHER THAN PASSED IN BY EACH CALLER. RollProc never
     /// receives the defender and so cannot read a class ability itself, but TryProcSpell already takes the
-    /// cloak's wearer as its <c>defender</c> parameter at every one of its four call sites (the melee /
-    /// missile / hotspot path in Player.TakeDamage, the spell-projectile path in SpellProjectile, and the
-    /// Harm and Drain Health paths in WorldObject_Magic). Reading the floor there means a FIFTH cloak
+    /// cloak's wearer as its <c>defender</c> parameter at every one of its six call sites (the melee /
+    /// missile / hotspot path in Player.TakeDamage, the spell-projectile path in SpellProjectile, the
+    /// Harm and Drain Health paths in WorldObject_Magic, the Reflect bounce in Player.TryReflectProjectile,
+    /// and the Shield Block in Player.OnClassAbilityAttackAvoided, which has no damage figure and so rolls on
+    /// the floor alone). Reading the floor there means a SEVENTH cloak
     /// spell-proc site cannot skip it: there is no floor argument for a new call site to omit, because the
     /// only way to reach HandleProcSpell is through TryProcSpell, which computes the floor itself.
     /// CloakProcWiringSourceScanTests pins that last clause as a source scan.

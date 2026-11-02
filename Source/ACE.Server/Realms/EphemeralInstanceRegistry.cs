@@ -35,8 +35,25 @@ namespace ACE.Server.Realms
     /// <typeparam name="T">The value stored per live instance - <c>Landblock</c> in the server.</typeparam>
     internal sealed class EphemeralInstanceRegistry<T> where T : class
     {
+        /// <summary>
+        /// One live instance: the value registered for it (its primary landblock in the server) and its footprint.
+        /// Stored together so a reader always sees a value and the footprint it was registered with, never one
+        /// without the other.
+        /// </summary>
+        private sealed class Entry
+        {
+            public readonly T Value;
+            public readonly EphemeralFootprint Footprint;
+
+            public Entry(T value, EphemeralFootprint footprint)
+            {
+                Value = value;
+                Footprint = footprint;
+            }
+        }
+
         /// <summary>Live ephemeral instances, keyed by their full 32-bit instance id.</summary>
-        private readonly ConcurrentDictionary<uint, T> live = new ConcurrentDictionary<uint, T>();
+        private readonly ConcurrentDictionary<uint, Entry> live = new ConcurrentDictionary<uint, Entry>();
 
         /// <summary>
         /// Ids handed out by <see cref="RequestNewInstanceId"/> whose landblock has not been registered yet.
@@ -67,23 +84,75 @@ namespace ACE.Server.Realms
         /// </summary>
         public T Get(uint instance)
         {
-            live.TryGetValue(instance, out var value);
-            return value;
+            live.TryGetValue(instance, out var entry);
+            return entry?.Value;
         }
 
         /// <summary>
-        /// Registers a live instance. False if the id was already registered, which is a bug in the caller
-        /// (instance ids are allocated unique and unregistered on unload) and should be logged.
+        /// The footprint a live instance was registered with, or null when the instance is not live (or was
+        /// registered through the footprint-less overload, which only tests use). Lock free, like <see cref="Get"/>.
+        /// </summary>
+        public EphemeralFootprint GetFootprint(uint instance)
+        {
+            live.TryGetValue(instance, out var entry);
+            return entry?.Footprint;
+        }
+
+        /// <summary>
+        /// One coherent read of a live instance's value AND footprint. False (and both null) when it is not live.
+        /// Prefer this to a <see cref="Get"/> followed by a <see cref="GetFootprint"/>, which can straddle an unregister.
+        /// </summary>
+        public bool TryGet(uint instance, out T value, out EphemeralFootprint footprint)
+        {
+            if (live.TryGetValue(instance, out var entry))
+            {
+                value = entry.Value;
+                footprint = entry.Footprint;
+                return true;
+            }
+
+            value = null;
+            footprint = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Registers a live instance with no footprint. False if the id was already registered, which is a bug in
+        /// the caller (instance ids are allocated unique and unregistered on unload) and should be logged.
         /// </summary>
         public bool TryRegister(uint instance, T value)
         {
-            return live.TryAdd(instance, value);
+            return TryRegister(instance, value, null);
+        }
+
+        /// <summary>
+        /// Registers a live instance together with its footprint (LandblockManager always passes one). False if
+        /// the id was already registered.
+        /// </summary>
+        public bool TryRegister(uint instance, T value, EphemeralFootprint footprint)
+        {
+            return live.TryAdd(instance, new Entry(value, footprint));
         }
 
         /// <summary>Removes a live instance. False if it was not registered.</summary>
         public bool TryUnregister(uint instance)
         {
             return live.TryRemove(instance, out _);
+        }
+
+        /// <summary>
+        /// Removes a live instance ONLY while it is still registered to <paramref name="expected"/> (by reference).
+        /// False, and nothing removed, when it is not registered or is registered to a different value - so a stale
+        /// landblock's unload can never remove an instance id that now belongs to someone else.
+        /// </summary>
+        public bool TryUnregister(uint instance, T expected)
+        {
+            if (!live.TryGetValue(instance, out var entry) || !ReferenceEquals(entry.Value, expected))
+                return false;
+
+            // Removes only this exact entry: if it was replaced between the read and here, nothing is removed.
+            return ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<uint, Entry>>)live)
+                .Remove(new System.Collections.Generic.KeyValuePair<uint, Entry>(instance, entry));
         }
 
         /// <summary>
@@ -103,6 +172,19 @@ namespace ACE.Server.Realms
         /// </summary>
         public uint RequestNewInstanceId(ushort homeRealmId)
         {
+            return RequestNewInstanceId(homeRealmId, null);
+        }
+
+        /// <summary>
+        /// As <see cref="RequestNewInstanceId(ushort)"/>, and additionally never returns an id for which
+        /// <paramref name="isStillLoaded"/> is true. LandblockManager passes "some landblock is still loaded under
+        /// this id": a registration can be gone while a landblock is still loaded under its id (a bare orphan copy, or
+        /// a group member still waiting in the unload throttle), and handing that id to a new instance would make the
+        /// new creator's GetLandblock find the stale copy instead of building and registering its own. Called under
+        /// the allocation lock, so the predicate must be lock free and must not call back into this registry.
+        /// </summary>
+        public uint RequestNewInstanceId(ushort homeRealmId, Func<uint, bool> isStillLoaded)
+        {
             uint iid;
 
             lock (allocationLock)
@@ -112,7 +194,7 @@ namespace ACE.Server.Realms
                     var shortInstanceId = (ushort)random.Next(1, 0xFFFE);
                     iid = ACE.Entity.Position.InstanceIDFromVars(homeRealmId, shortInstanceId, isTemporaryRuleset: true);
                 }
-                while (live.ContainsKey(iid) || !pending.TryAdd(iid, 0));
+                while (live.ContainsKey(iid) || (isStillLoaded != null && isStillLoaded(iid)) || !pending.TryAdd(iid, 0));
             }
 
             return iid;

@@ -376,6 +376,10 @@ namespace ACE.Server.MlDigsite
                 else if (liveWave.Remove(guid))
                 {
                     waveNowEmpty = liveWave.Count == 0;
+                    killsThisWave++;
+
+                    if (waveNowEmpty)
+                        realClears++;
 
                     // The field emptied: the wave just placed is CLEARED, which is what the Waves tier pays on.
                     if (waveNowEmpty && wavesSpawned > highestWaveCleared)
@@ -418,6 +422,166 @@ namespace ACE.Server.MlDigsite
                 }
 
                 return kind;
+            }
+        }
+
+        /// <summary>
+        /// Drops every tracked wave creature that has been DESTROYED without ever dying, and reports them.
+        /// Destroy without Die is a real path (prod 2026-10-24: digsite 557 ended on wave-time-limit with a
+        /// Mattekar that was destroyed=True inWorld=False in a landblock two blocks from the dig): the death
+        /// hook is the only thing that removes a creature from the live wave, so a vanished creature held the
+        /// wave open forever - the status line showed waveLeft above zero while nothing was on the field, and
+        /// the run died on a wave clock at partial credit.
+        ///
+        /// A creature that is dead is skipped: its death hook removes it itself, and removing it here first
+        /// would swallow the kill's credit. When the removal empties the field, <paramref name="waveNowEmpty"/>
+        /// is true. If at least half of the wave's spawned creatures were killed
+        /// (MlDigsiteRules.VanishCountsAsClear) it is a real clear, recorded here exactly as the last kill
+        /// would record it (<paramref name="realClear"/>); otherwise it is a vanish skip: nothing credited,
+        /// VanishSkips bumped, and the caller skips it (MlDigsiteManager.OnWaveSkipped).
+        /// </summary>
+        public List<Creature> PruneVanishedWaveCreatures(DateTime nowUtc, out bool waveNowEmpty, out bool realClear)
+        {
+            var vanished = new List<Creature>();
+
+            waveNowEmpty = false;
+            realClear = false;
+
+            lock (sync)
+            {
+                if (state == MlDigsiteState.Ended || liveWave.Count == 0)
+                    return vanished;
+
+                foreach (var pair in liveWave)
+                {
+                    if (pair.Value.IsDestroyed && !pair.Value.IsDead)
+                        vanished.Add(pair.Value);
+                }
+
+                if (vanished.Count == 0)
+                    return vanished;
+
+                foreach (var creature in vanished)
+                    liveWave.Remove(creature.Guid.Full);
+
+                waveNowEmpty = liveWave.Count == 0;
+
+                if (!waveNowEmpty)
+                    return vanished;
+
+                // Emptied. Half or more already killed: a real clear, recorded exactly as the last kill would.
+                // Otherwise a vanish skip: nothing is credited, and the run can no longer be a FullClear.
+                if (MlDigsiteRules.VanishCountsAsClear(killsThisWave, spawnedThisWave))
+                {
+                    realClear = true;
+                    realClears++;
+
+                    if (wavesSpawned > highestWaveCleared)
+                        highestWaveCleared = wavesSpawned;
+
+                    lastKillUtc = nowUtc;
+                }
+                else
+                {
+                    vanishSkips++;
+                }
+            }
+
+            return vanished;
+        }
+
+        private int killsThisWave;
+        private int spawnedThisWave;
+        private int realClears;
+        private int vanishSkips;
+
+        /// <summary>Waves emptied by kills (including a vanish-emptied wave with at least half killed).</summary>
+        public int RealClears
+        {
+            get { lock (sync) return realClears; }
+        }
+
+        /// <summary>Waves skipped because the prune emptied them with under half killed. Placed-0 skips are NOT counted.</summary>
+        public int VanishSkips
+        {
+            get { lock (sync) return vanishSkips; }
+        }
+        /// <summary>
+        /// The checkpoint mini-boss twin of <see cref="PruneVanishedWaveCreatures"/>: a checkpoint that was
+        /// destroyed without dying is cleared from the encounter's bookkeeping (no kill credit) so a later
+        /// checkpoint is no longer skipped as "the previous one is still alive". Returns it, or null.
+        /// </summary>
+        public Creature PruneVanishedCheckpoint()
+        {
+            lock (sync)
+            {
+                if (state == MlDigsiteState.Ended || !checkpointAlive || checkpointCreature == null)
+                    return null;
+
+                if (!checkpointCreature.IsDestroyed || checkpointCreature.IsDead)
+                    return null;
+
+                var vanished = checkpointCreature;
+
+                checkpointAlive = false;
+
+                return vanished;
+            }
+        }
+
+        private bool lastWaveRespawnUsed;
+        private bool lastWaveRespawnPending;
+
+        /// <summary>True once the one allowed re-spawn of an empty last wave has been claimed this run.</summary>
+        public bool LastWaveRespawnUsed
+        {
+            get { lock (sync) return lastWaveRespawnUsed; }
+        }
+
+        /// <summary>
+        /// Claims the run's single re-spawn of an empty last wave and marks it pending for the next
+        /// SpawnWave tick. False when it was already claimed, which is what keeps the retry bounded.
+        /// </summary>
+        public bool TryClaimLastWaveRespawn()
+        {
+            lock (sync)
+            {
+                if (lastWaveRespawnUsed)
+                    return false;
+
+                lastWaveRespawnUsed = true;
+                lastWaveRespawnPending = true;
+
+                return true;
+            }
+        }
+
+        /// <summary>Reads and clears the pending re-spawn flag: true when the wave about to spawn is the re-spawn.</summary>
+        public bool TakeLastWaveRespawnPending()
+        {
+            lock (sync)
+            {
+                var pending = lastWaveRespawnPending;
+
+                lastWaveRespawnPending = false;
+
+                return pending;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="NoteWaveSpawned"/> for a re-spawn of the same wave: restarts both clocks and clears the
+        /// pending schedule WITHOUT advancing the wave count.
+        /// </summary>
+        public void NoteWaveRespawned(DateTime nowUtc, int spawnedCount = 0)
+        {
+            lock (sync)
+            {
+                killsThisWave = 0;
+                spawnedThisWave = spawnedCount;
+                waveStartedUtc = nowUtc;
+                lastKillUtc = nowUtc;
+                nextWaveDueUtc = null;
             }
         }
 
@@ -503,11 +667,13 @@ namespace ACE.Server.MlDigsite
         /// Records that a wave has just been placed: bumps the count, restarts both wave clocks and clears
         /// any pending schedule. One call, so the two clocks can never be restarted independently.
         /// </summary>
-        public void NoteWaveSpawned(DateTime nowUtc)
+        public void NoteWaveSpawned(DateTime nowUtc, int spawnedCount = 0)
         {
             lock (sync)
             {
                 wavesSpawned++;
+                killsThisWave = 0;
+                spawnedThisWave = spawnedCount;
                 waveStartedUtc = nowUtc;
                 lastKillUtc = nowUtc;
                 nextWaveDueUtc = null;
@@ -1139,7 +1305,8 @@ namespace ACE.Server.MlDigsite
         {
             lock (sync)
                 return new MlDigsitePayoutSnapshot(result, wavesSpawned, checkpointKills, bossMinHealthFraction,
-                    Type == MlDigsiteType.BossRush && objectiveKilled, highestWaveCleared,
+                    Type == MlDigsiteType.BossRush && objectiveKilled,
+                    vanishSkips > 0 ? Math.Min(highestWaveCleared, realClears) : highestWaveCleared,
                     assumeBailed || (endRequested && requestedReason == MlDigsiteRules.EndReasons.Bailed),
                     corruptedKills);
         }

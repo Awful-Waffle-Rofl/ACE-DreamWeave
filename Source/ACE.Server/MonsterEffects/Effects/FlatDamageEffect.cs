@@ -117,7 +117,8 @@ namespace ACE.Server.MonsterEffects.Effects
         private static void DealRiderDamage(Creature attacker, Creature defender, DamageType type, uint amount)
         {
             if (defender is Player defenderPlayer)
-                defenderPlayer.TakeDamage(attacker, type, (float)amount, BodyPart.Chest);
+                // the custom chat line below replaces the generic defender notification
+                defenderPlayer.TakeDamage(attacker, type, (float)amount, BodyPart.Chest, sendDefenderNotification: false);
             else
                 defender.TakeDamage(attacker, type, (float)amount);
 

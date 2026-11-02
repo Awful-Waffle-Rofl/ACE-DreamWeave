@@ -219,10 +219,25 @@ namespace ACE.Server.Tests.ThreadDungeons
             var run = PooledRun();
             var t0 = DateTime.UtcNow;
 
-            Assert.IsTrue(run.SpawnCacheCooldownElapsed(t0));
-            run.StampSpawnCacheCooldown(t0);
-            Assert.IsFalse(run.SpawnCacheCooldownElapsed(t0.AddSeconds(4.9)));
-            Assert.IsTrue(run.SpawnCacheCooldownElapsed(t0 + ThreadDungeonRun.SpawnCacheCooldown));
+            Assert.IsTrue(run.SpawnCacheCooldownElapsed(1u, t0));
+            run.StampSpawnCacheCooldown(1u, t0);
+            Assert.IsFalse(run.SpawnCacheCooldownElapsed(1u, t0.AddSeconds(4.9)));
+            Assert.IsTrue(run.SpawnCacheCooldownElapsed(1u, t0 + ThreadDungeonRun.SpawnCacheCooldown));
+        }
+
+        [TestMethod]
+        public void Spawncache_cooldown_is_per_player()
+        {
+            var run = PooledRun();
+            var t0 = DateTime.UtcNow;
+
+            run.StampSpawnCacheCooldown(1u, t0);
+            Assert.IsFalse(run.SpawnCacheCooldownElapsed(1u, t0.AddSeconds(1)));
+            Assert.IsTrue(run.SpawnCacheCooldownElapsed(2u, t0.AddSeconds(1)), "one member's use must not block another member");
+
+            run.StampSpawnCacheCooldown(2u, t0.AddSeconds(1));
+            Assert.IsFalse(run.SpawnCacheCooldownElapsed(2u, t0.AddSeconds(2)));
+            Assert.IsTrue(run.SpawnCacheCooldownElapsed(1u, t0 + ThreadDungeonRun.SpawnCacheCooldown), "stamping member 2 must not extend member 1");
         }
 
         [TestMethod]

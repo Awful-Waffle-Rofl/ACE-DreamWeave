@@ -18,7 +18,8 @@ namespace ACE.Server.ThreadDungeons
     {
         /// <summary>
         /// Invariant 1: <paramref name="player"/> is on the run's roster AND stands in the run's copy - the same
-        /// instance and the dungeon's landblock. The location clause is ThreadCachePlacer.IsOwnerInside's body.
+        /// instance and a landblock the copy owns (ThreadRunGeometry.IsOnRunLandblock: the dungeon's landblock, or
+        /// any footprint landblock of an outdoor run). The location clause is ThreadCachePlacer.IsOwnerInside's body.
         /// A member the puzzle fail policy removed (ThreadDungeonRun.MarkPuzzleRemoved) is never inside, wherever they
         /// stand, so every reward and message this file feeds skips them from the moment of removal.
         /// </summary>
@@ -27,7 +28,7 @@ namespace ACE.Server.ThreadDungeons
                && run.IsRosterMember(player.Guid.Full)
                && !run.IsPuzzleRemoved(player.Guid.Full)
                && player.Location.Instance == run.Instance
-               && player.Location.LandblockId.Landblock == run.Dungeon.Landblock;
+               && ThreadRunGeometry.IsOnRunLandblock(run, player.Location);
 
         /// <summary>Online roster members who are inside, in roster order (invariant 4).</summary>
         public static List<Player> OnlineMembersInside(ThreadDungeonRun run, Func<uint, Player> onlinePlayer = null)
@@ -95,11 +96,9 @@ namespace ACE.Server.ThreadDungeons
         /// placed cache still holds items, or any DEAL SEAT (ThreadDungeonRun.DealSeats: the owner and every keyed
         /// member, ruling R32) holds an undelivered pile or is flagged as waiting for delivery, online or not, inside
         /// or not. A keyless member cannot enter to collect, so their pile and flag hold nothing (final review F2).
-        /// Always false for a solo run: a solo run is never held for loot (owner ruling, 2026-09-27 - its gem is
-        /// destroyed at the clear, so nobody can re-enter it, and undelivered loot is forfeit at run end). How LONG
-        /// a true answer holds a GROUP run is bounded by the empty-copy mechanism, not here: a held run's copy
-        /// unloads once it has stood empty for the lock-time loot hold (ThreadDungeonRun.GroupLootHoldActive and
-        /// ResolveUnloadInterval).
+        /// Always false for a solo run; the solo answer is <see cref="LootOwed"/>'s. How LONG a true answer holds a
+        /// run is bounded by the empty-copy mechanism, not here: a held run's copy unloads once it has stood empty for
+        /// the lock-time loot hold (ThreadDungeonRun.LootHoldActive and ResolveUnloadInterval).
         ///
         /// The held-pile clause is independent of the flag on purpose. Ruling R20 does not flag a member who was
         /// inside when delivery hit NoRoom, so a member who then dies or walks out holds a pile with no flag; R29
@@ -112,6 +111,34 @@ namespace ACE.Server.ThreadDungeons
 
             return LootOwedCore(run);
         }
+
+        /// <summary>
+        /// The loot hold's "still owed" question for any run (owner ruling 2026-10-10). A GROUP run: exactly
+        /// <see cref="GroupLootOwed"/>. A SOLO run: its owner gem is not retired (a willing exit from the cleared copy
+        /// retires it, ThreadDungeonRun.RetireOwnerGem, and then nobody can come back for anything) AND the run still
+        /// holds unclaimed loot, a placed cache still holds items, or a placement is waiting for the owner. The
+        /// first two clauses are exactly what the exit guard's solo prompt asks about (ThreadExitGuard.TryHoldExit:
+        /// run.HasUnclaimedLoot, ThreadLootPool.AnyCacheHoldsItems), so the copy is held for precisely the loot a
+        /// willing exit would have been warned about; IsPlacementWanted adds the delivery that found the owner outside
+        /// (died before it formed) and is waiting for them to step back in. Reads placed caches: call it from the world
+        /// thread. DungeonGemRules.IsClearedReturnFor makes the same kind of read (ThreadLootPool.AnyCacheHoldsItemsFor)
+        /// from other threads too - a gem use, a death, a delivery step - but only reads and tolerates a stale answer;
+        /// see its summary.
+        /// </summary>
+        public static bool LootOwed(ThreadDungeonRun run)
+        {
+            if (run == null)
+                return false;
+
+            if (run.IsGroup)
+                return LootOwedCore(run);
+
+            return SoloLootOwed(run.IsOwnerGemRetired, run.HasUnclaimedLoot, ThreadLootPool.AnyCacheHoldsItems(run), run.IsPlacementWanted);
+        }
+
+        /// <summary>The solo half of <see cref="LootOwed"/>, pure, so the truth table is testable without a world.</summary>
+        internal static bool SoloLootOwed(bool ownerGemRetired, bool hasUnclaimedLoot, bool anyCacheHoldsItems, bool placementWanted)
+            => !ownerGemRetired && (hasUnclaimedLoot || anyCacheHoldsItems || placementWanted);
 
         private static bool LootOwedCore(ThreadDungeonRun run)
         {

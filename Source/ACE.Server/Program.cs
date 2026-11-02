@@ -450,6 +450,17 @@ namespace ACE.Server
             log.Info("Initializing HouseManager...");
             HouseManager.Initialize();
 
+            // Warm the IP-limit housing landblock set now so the first sweep does not run the world query on the tick thread.
+            // A failure is logged and never stops startup (the set is retried lazily on first real use).
+            try
+            {
+                IpLimitManager.IsHousingLandblock(0);
+            }
+            catch (Exception ex)
+            {
+                log.Error("Could not warm the IP-limit housing landblock set", ex);
+            }
+
             log.Info("Initializing InboundMessageManager...");
             InboundMessageManager.Initialize();
 
@@ -490,10 +501,18 @@ namespace ACE.Server
             EventManager.Initialize();
 
             log.Info("Initializing WorldEventManager...");
-            WorldEventManager.Initialize();
+            WorldEventHooks.Initialize();
 
             log.Info("Initializing ThreadDungeonManager...");
             ACE.Server.ThreadDungeons.ThreadDungeonManager.Initialize();
+
+            // After ThreadDungeonManager: the course file is cross-checked against the Threads store and the species
+            // tables, which do not exist yet where SpeedSeasonManager initializes.
+            log.Info("Initializing SpeedCourseManager...");
+            ACE.Server.SpeedCourses.SpeedCourseManager.Initialize();
+
+            log.Info("Initializing PinnacleFightManager...");
+            ACE.Server.Pinnacles.PinnacleFightManager.Initialize();
 
             // Background, and never awaited: warms the world-DB weenie cache for every wcid Threads loot delivery can
             // create, so the first clear after a restart does not take those reads inside the world tick. A no-op
@@ -624,6 +643,7 @@ namespace ACE.Server
                 GetAccountById = id => DatabaseManager.Authentication.GetAccountById(id),
                 AdminWebEnabled = () => PropertyManager.GetBool("admin_web_enabled").Item,
                 SuitBuilderEnabled = () => PropertyManager.GetBool("suit_builder_enabled").Item,
+                SuitCharacterMovesEnabled = () => PropertyManager.GetBool("suit_character_moves_enabled").Item,
                 EnumerateSettings = () => PropertyManager.EnumerateWithPrefix(""),
                 EnqueueWorldAction = WorldManager.EnqueueAction,
 
@@ -636,7 +656,7 @@ namespace ACE.Server
 
             // The World Event start page (Docs/AdminPanel/WORLD-EVENTS-START.md): world-thread writes bounded
             // by the same RequestTimeoutMs as the settings edit, audited under the web account name like the settings and announce routes.
-            apiOptions.WorldEvents = ACE.Server.WorldEvents.WorldEventAdminService.CreateLive(
+            apiOptions.WorldEvents = ACE.Server.WorldEvents.WorldEventHooks.CreateAdminService(
                 WorldManager.EnqueueAction,
                 (actorLabel, message) => PlayerManager.BroadcastToAuditChannel(actorLabel, message),
                 apiOptions.RequestTimeoutMs);
@@ -644,6 +664,9 @@ namespace ACE.Server
             // The suit builder's vault-to-character transfer (POST /v1/accounts/me/suit/transfers). One service for
             // the process: its idempotency map and its one-transfer-per-account rule are in memory.
             apiOptions.SuitTransfers = new ACE.Server.Entity.AccountVault.SuitTransferService(ACE.Server.Entity.AccountVault.LiveSuitTransferWorld.Instance);
+
+            // The same instance, for the world heartbeat's transfer watchdog sweep (WorldManager.UpdateGameWorld).
+            ACE.Server.Entity.AccountVault.SuitTransferService.Live = apiOptions.SuitTransfers;
 
             // GET and run share one loaded table and one online-character rule (LiveWebCommandWorld).
             if (commandClassification != null)

@@ -307,6 +307,15 @@ namespace ACE.Server.Network.Handlers
                     return;
             }
 
+            // WaffleACE suit builder: the last gate. A login is refused while an item move out of this character's pack is
+            // in flight (SuitHolderMoveGuard's remarks), and otherwise marked as entering until DoPlayerEnterWorld has put
+            // the character online. Every path after this point ends the mark (WorldManager.PlayerEnterWorld).
+            if (!ACE.Server.Entity.AccountVault.SuitHolderMoveGuard.TryBeginEnterWorld(guid))
+            {
+                session.SendCharacterError(CharacterError.EnterGameCharacterInWorld);
+                return;
+            }
+
             session.InitSessionForWorldLogin();
 
             session.State = SessionState.WorldConnected;
@@ -337,7 +346,17 @@ namespace ACE.Server.Network.Handlers
             // PropertiesPosition.Instance), so a realm-scoped mule_landblocks entry such as 01F5@1 does not
             // confine a character that logged out in the realm-0 copy of that same landblock.
             if (persistedLocation != null)
-                confined = IpLimitManager.IsInMuleLandblock(IpLimitManager.GetMuleLandblocks(), (ushort)(persistedLocation.ObjCellId >> 16), persistedLocation.Instance ?? 0);
+            {
+                var persistedLandblock = (ushort)(persistedLocation.ObjCellId >> 16);
+                var persistedInstance = persistedLocation.Instance ?? 0;
+
+                confined = IpLimitManager.IsInMuleLandblock(IpLimitManager.GetMuleLandblocks(), persistedLandblock, persistedInstance);
+
+                // A character at a house is confined too, mule or not (same rule as the live check). The housing set
+                // comes from the world DB, so the landblock need not be loaded; the set is checked before the dial.
+                if (!confined)
+                    confined = IpLimitManager.IsInHousing(persistedLandblock, persistedInstance);
+            }
 
             // LoginTimestamp is HARDCODED to double.MaxValue here and must NEVER be read from the character's
             // stored PropertyFloat.LoginTimestamp. That property is only written when a character actually
@@ -352,7 +371,8 @@ namespace ACE.Server.Network.Handlers
             // The excludeAccountId argument is load-bearing: a player reconnecting briefly leaves their own
             // previous session still counted as online, and without this exclusion they would evict their own
             // character. Always pass the real account id, never 0.
-            var residents = IpLimitManager.GetResidents(session.EndPointC2S?.Address, session.AccountId);
+            var householdKey = IpLimitManager.HouseholdKey(session);
+            var residents = IpLimitManager.GetResidents(householdKey, session.AccountId);
 
             // Clamped, not bare-cast: see IpLimitManager.ClampCap for why an unchecked long -> int narrowing
             // of these two is a server-wide lockout waiting on one admin typo.
@@ -369,7 +389,7 @@ namespace ACE.Server.Network.Handlers
                 // the closest existing CharacterError to what actually happened.
                 session.SendCharacterError(CharacterError.EnterGameCharacterInWorld);
 
-                log.Info($"[IP limit] refused world entry for {character.Name} (account {session.Account}, address {session.EndPointC2S?.Address}) - the address is already at its in-world character limit ({maxFree} outside the mule landblocks, {maxFree + maxConfined} total).");
+                log.Info($"[IP limit] refused world entry for {character.Name} (account {session.Account}, household {householdKey}, address {session.EndPointC2S?.Address}) - the address is already at its in-world character limit ({maxFree} outside the mule landblocks, {maxFree + maxConfined} total).");
 
                 return false;
             }
@@ -385,10 +405,12 @@ namespace ACE.Server.Network.Handlers
 
                     evictee.Session.Network.EnqueueSend(new GameMessageSystemChat("You have been logged out because a higher level character from your network address has entered the world.", ChatMessageType.Broadcast));
 
-                    log.Info($"[IP limit] logging off {evictee.Name} (level {evictee.Level ?? 0}, account {evictee.Session.Account}, address {session.EndPointC2S?.Address}) because {character.Name} (level {offlinePlayer.Level ?? 0}, account {session.Account}) entered the world from the same address.");
+                    log.Info($"[IP limit] logging off {evictee.Name} (level {evictee.Level ?? 0}, account {evictee.Session.Account}, household {householdKey}, address {session.EndPointC2S?.Address}) because {character.Name} (level {offlinePlayer.Level ?? 0}, account {session.Account}) entered the world from the same address.");
 
                     // forceImmediate so a PK logout timer cannot stall the eviction. Session.LogOffPlayer, not
                     // Player.ForceLogoff - the latter is documented as system use only.
+                    // Deserter lockout: a server eviction, not the player's desertion.
+                    evictee.PvpServerLogoffPending = true;
                     evictee.Session.LogOffPlayer(true);
                 }
             }

@@ -63,8 +63,8 @@ namespace ACE.Server.Pvp
         /// TRUE BY DEFAULT for every mode, arena and battleground alike (owner ruling 2026-10-03): a new mode is
         /// templated unless its definition explicitly passes templated: false. A templated mode needs a template at
         /// join, re-checks it at accept and dispatch, freezes it onto the bindings, applies it before the teleport,
-        /// forces the arena masks on and does not require the PK facet; an opted-out mode is placed with the
-        /// player's own build, the pvp_arena_suppress_* dials and the PK facet requirement.
+        /// forces the arena masks on; an opted-out mode is placed with the player's own build and the
+        /// pvp_arena_suppress_* dials. No mode requires the PK facet (owner ruling 2026-10-15).
         /// </summary>
         public bool Templated { get; }
 

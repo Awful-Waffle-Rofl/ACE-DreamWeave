@@ -8,11 +8,15 @@ namespace ACE.Server.WorldObjects
     partial class CombatPet
     {
         /// <summary>
-        /// Wakes up any monsters within the applicable range
+        /// Wakes up any monsters within the applicable range. A never-initiates pet (CombatPet.NeverInitiates,
+        /// Custom Summons) wakes nothing: it only ever joins fights already in progress.
         /// </summary>
         public void PetCheckMonsters()
         {
             //if (!Attackable) return;
+
+            if (NeverInitiates)
+                return;
 
             var creatures = PhysicsObj.ObjMaint.GetVisibleTargetsValuesOfTypeCreature();
 

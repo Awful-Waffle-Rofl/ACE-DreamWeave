@@ -13,7 +13,14 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// Archer T2, taking the slot Heavy Draw vacated in the 2026-09-12 class ability overhaul: a missile hit
     /// has a 10/20/30% chance by rank to pin the target in place for 5 seconds. A PIN IS NOT A STUN - the
     /// pinned creature still attacks and still casts, it simply cannot close or flee - and each target
-    /// carries a 15 second immunity afterwards, so the effect cannot be chain-applied into a permanent lock.
+    /// carries an 8 second immunity afterwards (it starts when the pin ends), so the effect cannot be
+    /// chain-applied into a permanent lock.
+    ///
+    /// ONE ROLL PER VOLLEY (owner ruling, Archer pass): a missile volley rolls the chance ONCE at launch
+    /// (Player.RollClassAbilityVolleyPin) and stamps the result on every projectile of the volley - the
+    /// primary arrow, the multishot extras, the overflow arrows and the Double Volley re-fire. On a win,
+    /// every arrow that LANDS pins its target; an arrow that misses never reaches this hook, so it is
+    /// exempt. On a loss, none pin. Spell hits keep their own per-hit roll.
     /// Both of those limits are the reason the entry is a control tool rather than a damage rider, which is
     /// what Archer T2 was a wall of before the overhaul.
     ///
@@ -58,7 +65,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// 23 handlers hanging off it - Bloodlust, Poison Weapon, Sundermark, Hunter's Mark, Savage Blows and
     /// the rest - none of which may have it. Declaring the interface here means the C# type list is the
     /// permission list, so the reach cannot leak to a handler that did not ask for it. Dispelling Edge is
-    /// wired the same way and for the same reason; VengeanceAbility is the prior art for one handler
+    /// wired the same way and for the same reason; BerserkRageAbility is the prior art for one handler
     /// carrying two hooks.
     ///
     /// THE TWO PATHS CANNOT DOUBLE-PROC A SINGLE HIT. They are reached from disjoint call sites: the weapon
@@ -80,10 +87,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "pinning_shot",
             DisplayName = "Pinning Shot",
-            Description = "Your missile hits and your damaging spell projectiles have a 10/20/30% chance " +
-                          "(by rank) to pin the target in place for 5 seconds. A pinned creature still " +
-                          "attacks and casts. Each target is immune to being pinned again for 15 seconds. " +
-                          "Higher Assess Creature multiplies the chance.",
+            Description = "Each missile volley and each damaging spell projectile has a 10/20/30% chance " +
+                          "(by rank) to pin its target in place for 5 seconds. A volley rolls once: if it wins, " +
+                          "every arrow that lands pins its target; if it fails, none do. A pinned creature " +
+                          "still attacks and casts. Each target is immune to being pinned again for 8 seconds " +
+                          "after a pin ends. Higher Assess Creature multiplies the chance.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // reprice reversal 2026-09-29: back to 1/rank (was 2/rank premium reprice 2026-09-13)
             Implemented = true,
@@ -157,7 +165,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (!AppliesTo(damageEvent.CombatType))
                 return;
 
-            TryPin(attacker, rank, target);
+            // the volley's single roll rides the projectile; null (no roll made) falls back to a per-hit roll
+            TryPin(attacker, rank, target, damageEvent.DamageSource?.ClassAbilityVolleyPinRoll);
         }
 
         /// <summary>
@@ -169,15 +178,44 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
         {
-            TryPin(caster, rank, primaryTarget);
+            // spell hits keep their existing per-hit roll
+            TryPin(caster, rank, primaryTarget, null);
         }
+
+        /// <summary>
+        /// The proc chance for this player at this rank, with the Assess Creature multiplier and the affinity
+        /// cap read live - the one place the chance is assembled from tunables, shared by the per-hit roll and
+        /// the once-per-volley roll so the two cannot drift.
+        /// </summary>
+        public static double ChanceFor(Player attacker, int rank)
+        {
+            // Assess Creature is MULTIPLICATIVE on Pinning Shot's own rank bonus (2026-09-12 overhaul), not
+            // an additive rider beside it. At zero effective Assess Creature the factor is exactly 1.0 and
+            // the proc chance is bit-identical to rank alone. class_ability_affinity_chance_cap, passed
+            // below, bounds the AMOUNT the multiply adds rather than a raw skill quotient.
+            var assessCreature = attacker.GetClassAbilityAffinityMultiplier(Skill.AssessCreature);
+
+            return Chance(rank,
+                PropertyManager.GetDouble("class_ability_pinningshot_chance_base").Item,
+                PropertyManager.GetDouble("class_ability_pinningshot_chance_step").Item,
+                assessCreature,
+                PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
+        }
+
+        /// <summary>
+        /// Whether a landed hit wins its pin roll. A volley's pre-rolled result (TRUE/FALSE) is final - a
+        /// loss means NO arrow of the volley pins, a win means EVERY landing arrow does - and the per-hit
+        /// roll is not even drawn. Only when no volley roll exists (null) does <paramref name="perHitRoll"/>
+        /// run. Pure, so the all-or-none rule is unit testable.
+        /// </summary>
+        public static bool ResolveRoll(bool? volleyPinRoll, Func<bool> perHitRoll) => volleyPinRoll ?? perHitRoll();
 
         /// <summary>
         /// The proc body both dispatch paths share, so the roll, the tunable reads, the legality check and
         /// the notification cannot drift between them. Factored out when the spell path was added on
         /// 2026-09-13; every line of it came from the weapon path unchanged.
         /// </summary>
-        private static void TryPin(Player attacker, int rank, Creature target)
+        private static void TryPin(Player attacker, int rank, Creature target, bool? volleyPinRoll)
         {
             if (rank <= 0 || attacker == null || target == null)
                 return;
@@ -187,19 +225,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (!target.CanBeClassAbilityPinned())
                 return;
 
-            // Assess Creature is MULTIPLICATIVE on Pinning Shot's own rank bonus (2026-09-12 overhaul), not
-            // an additive rider beside it. At zero effective Assess Creature the factor is exactly 1.0 and
-            // the proc chance is bit-identical to rank alone. class_ability_affinity_chance_cap, passed
-            // below, bounds the AMOUNT the multiply adds rather than a raw skill quotient.
-            var assessCreature = attacker.GetClassAbilityAffinityMultiplier(Skill.AssessCreature);
-
-            var chance = Chance(rank,
-                PropertyManager.GetDouble("class_ability_pinningshot_chance_base").Item,
-                PropertyManager.GetDouble("class_ability_pinningshot_chance_step").Item,
-                assessCreature,
-                PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
-
-            if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
+            // A volley's arrows share ONE roll made at launch; only a hit with no volley roll (a spell, or a
+            // projectile outside a launched volley) rolls here.
+            if (!ResolveRoll(volleyPinRoll, () => ThreadSafeRandom.Next(0.0f, 1.0f) <= ChanceFor(attacker, rank)))
                 return;
 
             var duration = PropertyManager.GetDouble("class_ability_pinningshot_duration_seconds").Item;

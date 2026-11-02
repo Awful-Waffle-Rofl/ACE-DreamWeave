@@ -145,6 +145,12 @@ namespace ACE.Server.Entity
                 .Sum(t => t.Weight);
         }
 
+        /// <summary>True when <paramref name="tokenKey"/> is a live (non-expired) token as of <paramref name="now"/>. Read-only.</summary>
+        public bool HasToken(string tokenKey, DateTime now)
+        {
+            return tokenKey != null && _tokens.TryGetValue(tokenKey, out var token) && !IsExpired(token, now);
+        }
+
         private void PurgeExpired(DateTime now)
         {
             if (_tokens.Count == 0)

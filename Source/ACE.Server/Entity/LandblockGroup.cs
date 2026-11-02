@@ -39,6 +39,14 @@ namespace ACE.Server.Entity
 
         public bool IsDungeon { get; private set; }
 
+        /// <summary>
+        /// Instance groups: the <see cref="Realms.EphemeralInstanceGroup.TickGroupKey"/> every landblock in this group
+        /// shares, taken from the first one added. An ephemeral instance's landblocks only ever group with each other,
+        /// so an outdoor ephemeral copy never merges into the tick group of the real world around it; every persistent
+        /// landblock has key 0 and clusters exactly as before.
+        /// </summary>
+        public uint InstanceKey { get; private set; }
+
         public static readonly TimeSpan TrySplitInterval = Landblock.UnloadInterval;
 
         public DateTime NextTrySplitTime { get; private set; } = DateTime.UtcNow.Add(TrySplitInterval);
@@ -97,6 +105,12 @@ namespace ACE.Server.Entity
                     log.Error($"[LANDBLOCK GROUP] You cannot add a dungeon landblock ({landblock.Id}) to an existing LandblockGroup");
                     return false;
                 }
+
+                if (Realms.EphemeralInstanceGroup.TickGroupKey(landblock.Instance) != InstanceKey)
+                {
+                    log.Error($"[LANDBLOCK GROUP] You cannot add landblock ({landblock.Id}) instance 0x{landblock.Instance:X8} to a LandblockGroup of instance key 0x{InstanceKey:X8}");
+                    return false;
+                }
             }
 
             if (landblocks.Add(landblock))
@@ -104,7 +118,10 @@ namespace ACE.Server.Entity
                 landblock.CurrentLandblockGroup = this;
 
                 if (landblocks.Count == 1)
+                {
                     IsDungeon = landblock.IsDungeon;
+                    InstanceKey = Realms.EphemeralInstanceGroup.TickGroupKey(landblock.Instance);
+                }
 
                 if (landblock.Id.LandblockX < XMin) XMin = landblock.Id.LandblockX;
                 if (landblock.Id.LandblockX > XMax) XMax = landblock.Id.LandblockX;
@@ -269,22 +286,11 @@ namespace ACE.Server.Entity
 
         public bool ShouldBeAddedToThisLandblockGroup(Landblock landblock)
         {
+            // Distance, dormancy and the instance-group tick key, in one pairwise rule shared with the split helper.
             foreach (var value in landblocks)
             {
-                var distance = Math.Max(
-                Math.Abs(value.Id.LandblockX - landblock.Id.LandblockX),
-                Math.Abs(value.Id.LandblockY - landblock.Id.LandblockY));
-
-                if (value.IsDormant || landblock.IsDormant)
-                {
-                    if (distance < LandblockGroup.LandblockGroupMinSpacingWhenDormant)
-                        return true;
-                }
-                else
-                {
-                    if (distance < LandblockGroup.LandblockGroupMinSpacing)
-                        return true;
-                }
+                if (LandblockGroupClustering.MayCluster(value, landblock))
+                    return true;
             }
 
             return false;

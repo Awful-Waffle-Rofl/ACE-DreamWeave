@@ -258,7 +258,9 @@ namespace ACE.Server.PuzzleGates
             var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
             var dungeons = store.Dungeons.Values
-                .Where(d => d.Enabled && store.GetPuzzleSites(d.Id).Count > 0)
+                // Outdoor sites carry no puzzle gates (Open World Threads R24); the store already drops their rows, and
+                // this skip keeps the sweep from ever opening a dungeon-style copy of an outdoor footprint.
+                .Where(d => d.Enabled && !d.IsOutdoor && store.GetPuzzleSites(d.Id).Count > 0)
                 .Where(d => args.DungeonId == null || string.Equals(d.Id, args.DungeonId, StringComparison.OrdinalIgnoreCase))
                 .OrderBy(d => d.Id, StringComparer.Ordinal)
                 .ToList();

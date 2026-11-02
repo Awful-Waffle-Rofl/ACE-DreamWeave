@@ -18,7 +18,7 @@ namespace ACE.Server.Command.Handlers
 {
     /// <summary>
     /// PvP Template Facets admin command (Docs/Pvp/TEMPLATES.md "Commands"): /pvptemplate list | inspect | snapshot |
-    /// name | enable | disable | modes | restore. AccessLevel.Admin, like /arenaadmin: it changes what every arena match is
+    /// name | enable | disable | modes | restore | kit. AccessLevel.Admin, like /arenaadmin: it changes what every arena match is
     /// fought on. CommandHandlerFlag.None so it also works from the server console (every reply goes through
     /// CommandHandlerHelper, which handles a null session).
     ///
@@ -32,7 +32,7 @@ namespace ACE.Server.Command.Handlers
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         internal const string Usage =
-            "[PvpTemplate] Usage: /pvptemplate <list|inspect <key>|snapshot <key> <character> [| <display name>]|name <key> <display name>|enable <key>|disable <key>|modes <key> <1v1,2v2,tugak,koth|none>|restore <character>>";
+            "[PvpTemplate] Usage: /pvptemplate <list|inspect <key>|snapshot <key> <character> [| <display name>]|name <key> <display name>|enable <key>|disable <key>|modes <key> <1v1,2v2,tugak,koth|none>|restore <character>|kit [preview] <character> | <ops>>";
 
         /// <summary>The longest display name the pvp_template.display_Name column holds.</summary>
         internal const int MaxDisplayNameLength = 64;
@@ -45,7 +45,9 @@ namespace ACE.Server.Command.Handlers
             "name <key> <display name>     - set the name shown beside players on results, the announcement and /top (64 characters at most)\n" +
             "enable <key> | disable <key>  - offer or withdraw a template\n" +
             "modes <key> <1v1,2v2,tugak,koth|none> - which modes offer it (koth = King of the Hill; every arena and battleground mode is templated)\n" +
-            "restore <character>           - take a template off an ONLINE character now (offline: restored at their next login)")]
+
+            "restore <character>           - take a template off an ONLINE character now (offline: restored at their next login)\n" +
+            "kit [preview] <character> | <ops> - rework the items of an OFFLINE character on pvp_template_account. Ops: <old>=<new>[xN] replace in place, ~<wcid> recreate from the current weenie in place, +<wcid>[xN] add to the main pack, -<wcid> delete. preview writes nothing; any problem writes nothing")]
         public static void HandlePvpTemplate(Session session, params string[] parameters)
         {
             if (parameters == null || parameters.Length == 0)
@@ -112,9 +114,14 @@ namespace ACE.Server.Command.Handlers
                     HandleModes(session, rest[0], string.Join(",", rest.Skip(1)), adminName);
                     break;
 
+
                 case "restore":
                     if (rest.Length < 1) { Reply(session, Usage); break; }
                     HandleRestore(session, string.Join(" ", rest), adminName);
+                    break;
+
+                case "kit":
+                    HandleKit(session, string.Join(" ", rest), adminName);
                     break;
 
                 default:
@@ -141,7 +148,7 @@ namespace ACE.Server.Command.Handlers
             }));
         }
 
-        /// <summary>The /pvptemplate list block. Pure.</summary>
+        /// <summary>The /pvptemplate list block: every row, flat. Pure.</summary>
         internal static string ListText(IReadOnlyList<PvpTemplateRecord> rows, PvpTemplateStoreStatus status)
         {
             if (status == PvpTemplateStoreStatus.TablesMissing)
@@ -154,14 +161,17 @@ namespace ACE.Server.Command.Handlers
             sb.AppendLine($"[PvpTemplate] {rows.Count} template(s):");
 
             foreach (var r in rows.OrderBy(r => r.TemplateKey, StringComparer.Ordinal))
-            {
-                var parsed = PvpTemplateSnapshotService.TryParse(r, out _, out var error);
-                var modes = PvpTemplateCatalog.ParseModes(r.Modes);
-
-                sb.AppendLine($"  {r.TemplateKey} \"{r.DisplayName}\" v{r.Version} {(r.Enabled ? "ENABLED" : "disabled")}, modes {PvpTemplateCatalog.ModesDisplay(modes)}, from {r.SourceCharacterName} (0x{r.SourceCharacterId:X8}), snapshot {r.SnapshotAt:yyyy-MM-dd HH:mm} UTC by {r.SnapshotBy}{(parsed ? "" : $", DOES NOT PARSE ({error}) and is never offered")}");
-            }
+                sb.AppendLine("  " + RowText(r));
 
             return sb.ToString().TrimEnd();
+        }
+        /// <summary>One row as the list shows it: key, name, version, switch, modes, source and snapshot. Pure.</summary>
+        private static string RowText(PvpTemplateRecord r)
+        {
+            var parsed = PvpTemplateSnapshotService.TryParse(r, out _, out var error);
+            var modes = PvpTemplateCatalog.ParseModes(r.Modes);
+
+            return $"{r.TemplateKey} \"{r.DisplayName}\" v{r.Version} {(r.Enabled ? "ENABLED" : "disabled")}, modes {PvpTemplateCatalog.ModesDisplay(modes)}, from {r.SourceCharacterName} (0x{r.SourceCharacterId:X8}), snapshot {r.SnapshotAt:yyyy-MM-dd HH:mm} UTC by {r.SnapshotBy}{(parsed ? "" : $", DOES NOT PARSE ({error}) and is never offered")}";
         }
 
         private static void HandleInspect(Session session, string rawKey)
@@ -483,6 +493,37 @@ namespace ACE.Server.Command.Handlers
             }));
 
             Reply(session, $"[PvpTemplate] Restoring {online.Name}...");
+        }
+
+        // ---- kit ----
+
+        internal const string KitUsage = "[PvpTemplate] Usage: /pvptemplate kit [preview] <character> | <ops>. Ops (space separated): <old>=<new>[xN] replace in place, ~<wcid> recreate from the current weenie in place, +<wcid>[xN] add to the main pack, -<wcid> delete.";
+
+        /// <summary>
+        /// /pvptemplate kit [preview] &lt;character&gt; | &lt;ops&gt; (Docs/Pvp/TEMPLATES.md "Commands"): parses here (pure, PvpTemplateKitEdit)
+        /// and hands the read, plan and writes to PvpTemplateKitEditService. Every reply is marshalled to the world thread.
+        /// </summary>
+        private static void HandleKit(Session session, string text, string adminName)
+        {
+            if (!PvpTemplateKitEdit.TrySplitArgs(text, out var preview, out var character, out var opsText))
+            {
+                Reply(session, KitUsage);
+                return;
+            }
+
+            if (!PvpTemplateKitEdit.TryParseOps(opsText, out var ops, out var problems))
+            {
+                foreach (var problem in problems)
+                    Reply(session, "[PvpTemplate]   " + problem);
+
+                Reply(session, $"[PvpTemplate] Refused: {problems.Count} op problem(s) above. Nothing was written to {character}.");
+                return;
+            }
+
+            Reply(session, $"[PvpTemplate] Kit {(preview ? "preview" : "edit")} of {character}: {ops.Count} op(s)...");
+
+            new PvpTemplateKitEditService(new PvpTemplateKitLiveHost())
+                .Run(preview, character, ops, adminName, line => OnWorld(() => Reply(session, "[PvpTemplate] " + line)));
         }
 
         // ---- shared ----

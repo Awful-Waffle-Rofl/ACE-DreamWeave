@@ -110,8 +110,37 @@ namespace ACE.Server.WorldObjects
 
             MonsterEffects = set;
             monsterEffectState = new MonsterEffectState[set.Count];
+            attachedMonsterEffectSpec = spec;
 
             return true;
+        }
+
+        /// <summary>
+        /// The spec string most recently attached successfully (authored, or authored plus every overlay so
+        /// far), or null when nothing is attached. What a further overlay composes onto - see
+        /// <see cref="ApplyMonsterEffectOverlay"/>.
+        /// </summary>
+        private string attachedMonsterEffectSpec;
+
+        /// <summary>
+        /// The effect kinds this creature currently carries (lowercase-insensitive set) and the number of
+        /// records attached, including inert ones. An empty set and 0 for a creature with no effects. A caller
+        /// about to overlay uses it to skip a kind the creature already authors and to stay under
+        /// monster_effect_max_per_monster.
+        /// </summary>
+        public (HashSet<string> Kinds, int Count) GetAttachedMonsterEffectKinds()
+        {
+            var kinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var effects = MonsterEffects;
+
+            if (effects == null)
+                return (kinds, 0);
+
+            for (var i = 0; i < effects.Count; i++)
+                kinds.Add(effects[i].Spec.Kind);
+
+            return (kinds, effects.Count);
         }
 
         /// <summary>
@@ -119,8 +148,13 @@ namespace ACE.Server.WorldObjects
         /// of this creature's AUTHORED effects, for this creature only. The ML digsite Boss Rush boss uses it
         /// to carry a mechanic its weenie does not author.
         ///
+        /// OVERLAYS ACCUMULATE. The overlay composes onto the spec CURRENTLY ATTACHED (the authored string,
+        /// plus every earlier overlay), so a second call adds to the first rather than replacing it. It used
+        /// to compose onto the weenie's authored string every time, which silently discarded the previous
+        /// overlay. max_per_monster still drops the tail of the composed list at resolve time.
+        ///
         /// HOW IT FITS THE CACHE. The spec is read once, at construction, and resolved sets are cached by
-        /// (wcid, spec string). The overlay composes "authored; extra" (<see cref="ComposeMonsterEffectSpec"/>)
+        /// (wcid, spec string). The overlay composes "attached; extra" (<see cref="ComposeMonsterEffectSpec"/>)
         /// and resolves THAT string through the same cache and the same ResolveMonsterEffects path, so it is
         /// parsed once per distinct combination, shared immutably by every creature carrying the same
         /// combination, and never pollutes the plain authored entry other creatures of the wcid resolve to.
@@ -136,7 +170,7 @@ namespace ACE.Server.WorldObjects
             if (string.IsNullOrWhiteSpace(extra))
                 return false;
 
-            return AttachMonsterEffects(ComposeMonsterEffectSpec(GetProperty(PropertyString.MonsterCombatEffects), extra));
+            return AttachMonsterEffects(ComposeMonsterEffectSpec(attachedMonsterEffectSpec ?? GetProperty(PropertyString.MonsterCombatEffects), extra));
         }
 
         /// <summary>
@@ -231,6 +265,14 @@ namespace ACE.Server.WorldObjects
             if (reflectDepth > 0)
                 reflectDepth--;
         }
+
+        /// <summary>
+        /// TRUE while reflect damage is being resolved further up this thread's call stack. A READ, never a
+        /// claim: Player.TryReflectProjectile refuses a bounce while it is set, but no longer holds the latch
+        /// itself, so the bounce and its Thorns answer both run the firer's incoming-damage effects (a ward
+        /// absorbs them, an immune boss ignores them).
+        /// </summary>
+        public static bool IsReflectResolving => reflectDepth > 0;
 
         // ---- Recast re-entry guard -----------------------------------------------------------------
         //
@@ -419,12 +461,14 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// IMonsterIncomingDamage dispatch - returns the amount that actually lands after every filter this
-        /// monster carries (a ward subtracting, a reflect answering). Called from all THREE paths by which
+        /// monster carries (a ward subtracting, a reflect answering). Called from all FOUR paths by which
         /// damage reaches a monster, because they share no common sink:
         ///   Creature.TakeDamage        - melee, missile, hotspots, damage over time
         ///   SpellProjectile.DamageTarget - war/void spell projectiles, which write the vital directly
-        ///   WorldObject.HandleCastSpell_Boost - life magic (Harm, Drain Health), likewise
-        /// A defensive effect wired at only one or two of the three is silently partial - the identical trap
+        ///   WorldObject.HandleCastSpell_Boost - life magic (Harm), likewise
+        ///   WorldObject.HandleCastSpell_Transfer - Drain Health, likewise (added 2026-10-19, Pinnacle review C5:
+        ///     a drain used to bypass an immune or warded monster entirely)
+        /// A defensive effect wired at only some of the four is silently partial - the identical trap
         /// Mana Barrier and Sanguine Ward each hit on the player side.
         ///
         /// THE REFLECT LATCH IS HELD ACROSS THE WHOLE DISPATCH, not just around a reflect. That is a
@@ -621,6 +665,39 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// IMonsterTauntHold dispatch - called from Creature.ApplyTaunt to scale the hold duration. The
+        /// product of (1 - pct) over every scatter record this monster carries, clamped to
+        /// [monster_effect_taunt_hold_floor, 1]: scatter shortens a Taunt and can never cancel it. 1.0 when
+        /// the monster carries nothing, the master switch is off, or no scatter record is attached.
+        /// </summary>
+        public double GetMonsterEffectTauntHoldMultiplier()
+        {
+            var effects = MonsterEffects;
+
+            if (effects == null || !MonsterEffectCaps.Enabled)
+                return 1.0;
+
+            var indexes = effects.TauntHoldIndexes;
+
+            if (indexes.Count == 0)
+                return 1.0;
+
+            var state = monsterEffectState;
+
+            var mult = 1.0;
+
+            for (var i = 0; i < indexes.Count; i++)
+            {
+                var index = indexes[i];
+                var entry = effects[index];
+
+                mult *= ((IMonsterTauntHold)entry.Handler).GetTauntHoldMultiplier(this, entry.Spec, ref state[index]);
+            }
+
+            return Math.Clamp(mult, MonsterEffectCaps.TauntHoldFloor, 1.0);
+        }
+
+        /// <summary>
         /// The ramp axis a speed axis reads. MonsterSpeedAxis has exactly two members, so the ternary is
         /// total; if a third is ever added, add its ramp axis here at the same time rather than letting it
         /// fall through to the attack ramp.
@@ -649,6 +726,59 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The multiplier this monster currently holds on one ramp axis (1.0 for a monster carrying no ramp,
+        /// or with the master switch off). A pure read, no accrual. For MagicDamage it is the same product
+        /// RampEffect.OnSpellHit applies to a landed spell, since that handler reads its own held stacks
+        /// before accruing - which is what lets a REFLECTED spell keep the ramp as part of the firer's attack
+        /// without dispatching the spell-hit hook against the player.
+        /// </summary>
+        public double GetMonsterEffectRampMultiplier(MonsterRampAxis axis)
+        {
+            var effects = MonsterEffects;
+
+            if (effects == null || !MonsterEffectCaps.Enabled)
+                return 1.0;
+
+            return effects.GetRampMultiplier(axis, monsterEffectState);
+        }
+
+        /// <summary>
+        /// Reflect (Vanguard T3): the riders of THIS monster's shot that a player bounced back at it. Called
+        /// when the bounce lands (Player.ApplyReflectBounce), in place of the outgoing-hit / spell-hit
+        /// dispatch that never ran against the player. Walks the same prefiltered bucket the original hit
+        /// would have used - <paramref name="firedAs"/> Hit for a missile (OutgoingHitIndexes), SpellHit for
+        /// a spell projectile (SpellHitIndexes) - and answers only the handlers that implement
+        /// IMonsterReflectedRider (dot, debuff, leech). Every other rider on the bucket is suppressed: it was
+        /// not applied to the player and is not applied to this monster either.
+        ///
+        /// <paramref name="damage"/> is the damage the shot would have dealt the PLAYER, which is what a
+        /// leech sizes itself from. Same early-outs, same order, as every other dispatch here.
+        /// </summary>
+        public void ApplyReflectedMonsterEffectRiders(Creature reflector, MonsterEffectTrigger firedAs, DamageType damageType, float damage)
+        {
+            var effects = MonsterEffects;
+
+            if (effects == null || !MonsterEffectCaps.Enabled || reflector == null)
+                return;
+
+            var indexes = firedAs == MonsterEffectTrigger.SpellHit ? effects.SpellHitIndexes : effects.OutgoingHitIndexes;
+
+            if (indexes.Count == 0)
+                return;
+
+            var state = monsterEffectState;
+
+            for (var i = 0; i < indexes.Count; i++)
+            {
+                var index = indexes[i];
+                var entry = effects[index];
+
+                if (entry.Handler is IMonsterReflectedRider rider)
+                    rider.OnReflected(this, reflector, firedAs, damageType, damage, entry.Spec, ref state[index]);
+            }
+        }
+
+        /// <summary>
         /// IMonsterSpeedMod on the attack axis - called from Creature.GetAnimSpeed, in the branch the
         /// player's ApplyClassAbilityAttackSpeed does not take. Multiplies the animation speed, so a larger
         /// value is a faster attack.
@@ -670,13 +800,19 @@ namespace ACE.Server.WorldObjects
         /// PreCastSpeed, so a future speed handler that wants the animation to keep pace with the cadence
         /// has to scale there as well; this phase ships no such handler, and with none registered the
         /// multiplier is 1.0 and the two cannot disagree.
+        ///
+        /// THE WEAKENED BLOOD SLOW IS APPLIED HERE TOO, after the monster-effect multiplier and its cap and
+        /// EVEN WHEN THE MONSTER CARRIES NO EFFECTS (Creature.ScaleWeakenedBloodSlowDuration): nearly every
+        /// monster has MonsterEffects == null, and the slow must reach them all. An exact no-op when no slow
+        /// is live.
         /// </summary>
         public float ScaleMonsterEffectCastTime(float castTime)
         {
-            if (MonsterEffects == null)
-                return castTime;
+            var scaled = MonsterEffects == null
+                ? castTime
+                : (float)(castTime / GetMonsterEffectSpeedMultiplier(MonsterSpeedAxis.Cast));
 
-            return (float)(castTime / GetMonsterEffectSpeedMultiplier(MonsterSpeedAxis.Cast));
+            return ScaleWeakenedBloodSlowDuration(scaled);
         }
 
         /// <summary>

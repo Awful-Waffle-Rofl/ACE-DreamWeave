@@ -79,6 +79,11 @@ namespace ACE.Server.Command.Handlers
             output.AppendLine("A season missing from the database is KEPT in the registry, not dropped - a live run may still reference it.");
             output.AppendLine("Content errors (malformed or overlapping rows) are written to the server log.");
 
+            // The speed courses (speed-courses.json) reload with the seasons. Runs already in progress keep the course
+            // they started with.
+            var courses = ACE.Server.SpeedCourses.SpeedCourseManager.Reload();
+            output.AppendLine($"Speed courses: {courses.Courses.Count} loaded, {courses.Diagnostics.Count} diagnostic(s) (see the server log).");
+
             CommandHandlerHelper.WriteOutputInfo(session, output.ToString(), ChatMessageType.Broadcast);
         }
 

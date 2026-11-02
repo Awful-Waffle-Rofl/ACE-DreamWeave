@@ -75,6 +75,64 @@ namespace ACE.Server.Tests
             return true;
         }
 
+        public int RekeyCalls;
+        public bool FailRekeys;
+
+        /// <summary>
+        /// The DAO's re-key over the in-memory table: non-null rows of the account only, a row already on its
+        /// target untouched, and the UNIQUE (key, ip) adjudicating against OTHER accounts' rows. All or nothing.
+        /// </summary>
+        public bool TryRekeyAccount(uint accountId, Func<RewardClaim, bool, string> decide, out RewardClaimRekeyResult result)
+        {
+            RekeyCalls++;
+            result = null;
+
+            if (FailRekeys)
+                return false;
+
+            var counts = new RewardClaimRekeyResult();
+            var writes = new List<(RewardClaim Row, string Key)>();
+
+            foreach (var row in Rows.Where(r => r.AccountId == accountId && r.IpKey != null))
+            {
+                counts.Examined++;
+                var target = decide(Copy(row), false);
+
+                if (target == row.IpKey)
+                {
+                    counts.Unchanged++;
+                    continue;
+                }
+
+                if (target == null)
+                {
+                    writes.Add((row, null));
+                    counts.NulledNoKey++;
+                    continue;
+                }
+
+                if (Rows.Any(r => r != row && r.ClaimKey == row.ClaimKey && r.IpKey == target))
+                {
+                    var fallback = decide(Copy(row), true);
+                    if (fallback != null && Rows.Any(r => r != row && r.ClaimKey == row.ClaimKey && r.IpKey == fallback))
+                        return false;
+
+                    writes.Add((row, fallback));
+                    counts.NulledByCollision++;
+                    continue;
+                }
+
+                writes.Add((row, target));
+                counts.Rekeyed++;
+            }
+
+            foreach (var (row, key) in writes)
+                row.IpKey = key;
+
+            result = counts;
+            return true;
+        }
+
         private IEnumerable<RewardClaim> Match(string claimKey, uint? accountId, string ipKey)
             => Rows.Where(r => r.ClaimKey == claimKey
                 && ((!accountId.HasValue && ipKey == null)
@@ -114,7 +172,7 @@ namespace ACE.Server.Tests
             RewardClaimService.ResetForTesting(null);
         }
 
-        private static RewardClaimRequest Request(string key, uint account, string ip, bool exempt = false, uint? npc = null, bool room = true)
+        private static RewardClaimRequest Request(string key, uint account, string ip, bool exempt = false, uint? npc = null, bool room = true, string householdKey = null)
         {
             RewardClaimAllowlist.TryGet(key, out var entry);
 
@@ -126,6 +184,7 @@ namespace ACE.Server.Tests
                 CharacterId = 0x50000000 + account,
                 CharacterName = $"Char{account}",
                 Address = ip == null ? null : IPAddress.Parse(ip),
+                HouseholdKey = householdKey ?? ACE.Server.Managers.IpLimitManager.HouseholdKeyCore(account, null, ip == null ? null : IPAddress.Parse(ip), null),
                 IsExempt = () => exempt,
                 HasRoomForReward = _ => room,
             };

@@ -241,6 +241,142 @@ namespace ACE.Server.Tests
             Assert.IsTrue(ItemTextSearch.IsMatch(regex, text), $"expected a match against '{text}'");
         }
 
+        // ---- 5-arg SearchText(name, spellNames, setLabel, setToken, ratingLines) ----
+
+        private static Weenie RatedWeenie(string name, params (ACE.Entity.Enum.Properties.PropertyInt Key, int Value)[] ratings)
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = 3,
+                PropertiesString = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyString, string>
+                {
+                    { ACE.Entity.Enum.Properties.PropertyString.Name, name },
+                },
+                PropertiesInt = new System.Collections.Generic.Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>(),
+            };
+
+            foreach (var (key, value) in ratings)
+                weenie.PropertiesInt[key] = value;
+
+            return weenie;
+        }
+
+        /// <summary>No ratings must produce EXACTLY the pre-ratings string, byte for byte.</summary>
+        [TestMethod]
+        public void SearchText_NoRatings_IsByteIdenticalToTheFourArgOverload()
+        {
+            var spells = new[] { "Spell A", "Spell B" };
+
+            Assert.AreEqual(
+                ItemTextSearch.SearchText("Ring of Testing", spells, "Defender's", "Defenders"),
+                ItemTextSearch.SearchText("Ring of Testing", spells, "Defender's", "Defenders", null));
+            Assert.AreEqual(
+                "Ring of Testing; Spell A; Spell B; Defender's; Defenders",
+                ItemTextSearch.SearchText("Ring of Testing", spells, "Defender's", "Defenders", System.Array.Empty<string>()));
+            Assert.AreEqual(
+                "Ring of Testing; Spell A; Spell B",
+                ItemTextSearch.SearchText("Ring of Testing", spells, null, null, new string[] { null, "" }));
+        }
+
+        /// <summary>Rating segments come after the set parts, in the order given, joined with "; ".</summary>
+        [TestMethod]
+        public void SearchText_RatingLines_AreAppendedAfterTheSetParts_InOrder()
+        {
+            var text = ItemTextSearch.SearchText(
+                "Ring of Testing", new[] { "Spell A" }, "Defender's", "Defenders",
+                new[] { "Damage Rating: +1", "Critical Damage Rating: +2" });
+
+            Assert.AreEqual("Ring of Testing; Spell A; Defender's; Defenders; Damage Rating: +1; Critical Damage Rating: +2", text);
+        }
+
+        /// <summary>The reported bug: "legendary.*\+1" must find a Legendary-spell item with a +1 rating.</summary>
+        [TestMethod]
+        public void LegendaryThenPlusOne_MatchesALegendaryItemWithAPlusOneRating_ButNotOneWithout()
+        {
+            Assert.IsTrue(ItemTextSearch.TryCompile(@"legendary.*\+1", out var regex, out var error));
+            Assert.IsNull(error);
+
+            var rated = ItemTextSearch.SearchText("Ring of Testing", new[] { "Legendary Strength" }, null, null, new[] { "Critical Damage Rating: +1" });
+            var unrated = ItemTextSearch.SearchText("Ring of Testing", new[] { "Legendary Strength" }, null, null, null);
+
+            Assert.IsTrue(ItemTextSearch.IsMatch(regex, rated), $"expected a match against '{rated}'");
+            Assert.IsFalse(ItemTextSearch.IsMatch(regex, unrated));
+        }
+
+        /// <summary>
+        /// Ratings are read from the item's gear-rating properties in the fixed AddRatings order, zero
+        /// is omitted, a negative keeps its sign, and a weenie with none yields exactly the plain string.
+        /// </summary>
+        [TestMethod]
+        public void SearchText_Weenie_AppendsNonZeroRatingsInFixedOrder_OmittingZeroes()
+        {
+            // Inserted out of order on purpose: output order is the table's, not insertion order.
+            var weenie = RatedWeenie("Rated Ring",
+                (ACE.Entity.Enum.Properties.PropertyInt.GearHealingBoost, 3),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearCritDamage, 2),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearDamageResist, 0),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearDamage, -1));
+
+            Assert.AreEqual(
+                "Rated Ring; Damage Rating: -1; Critical Damage Rating: +2; Healing Boost Rating: +3",
+                ItemTextSearch.SearchText(weenie));
+        }
+
+        /// <summary>
+        /// Pins the whole 14-label table and its order as one literal. The web market repo pins the SAME
+        /// 14 literals (TextPatternSearchTests.ItemRatings_Labels_AreTheFourteenInOrder), so a label
+        /// edited on one side only fails a test on that side. Mixed signs, inserted out of order.
+        /// </summary>
+        [TestMethod]
+        public void SearchText_Weenie_AllFourteenRatings_PinsTheFullTableAndOrder()
+        {
+            var weenie = RatedWeenie("Full Ring",
+                (ACE.Entity.Enum.Properties.PropertyInt.GearOverpowerResist, -14),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearOverpower, 13),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearPKDamageResistRating, -12),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearPKDamageRating, 11),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearMaxHealth, -10),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearLifeResist, 9),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearNetherResist, -8),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearHealingBoost, 7),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearCritDamageResist, -6),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearCritDamage, 5),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearCritResist, -4),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearCrit, 3),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearDamageResist, -2),
+                (ACE.Entity.Enum.Properties.PropertyInt.GearDamage, 1));
+
+            Assert.AreEqual(
+                "Full Ring; Damage Rating: +1; Damage Reduction Rating: -2; Critical Rating: +3; "
+                + "Critical Resistance Rating: -4; Critical Damage Rating: +5; Critical Damage Reduction Rating: -6; "
+                + "Healing Boost Rating: +7; Nether Resistance Rating: -8; Life Resistance Rating: +9; "
+                + "Maximum Health Bonus: -10; PK Damage Rating: +11; PK Damage Reduction Rating: -12; "
+                + "Overpower Rating: +13; Overpower Resistance Rating: -14",
+                ItemTextSearch.SearchText(weenie));
+        }
+
+        /// <summary>The live-item overload reads the same ratings (FakeVaultWorld builds a WorldObject without dats).</summary>
+        [TestMethod]
+        public void SearchText_WorldObject_AppendsItsRatings()
+        {
+            var item = FakeVaultWorld.MakeStack(92002, 1, 1);   // named "Test Item 92002"
+
+            Assert.AreEqual("Test Item 92002", ItemTextSearch.SearchText(item));
+
+            item.SetProperty(ACE.Entity.Enum.Properties.PropertyInt.GearCritDamage, 2);
+            item.SetProperty(ACE.Entity.Enum.Properties.PropertyInt.GearDamage, -1);
+
+            Assert.AreEqual("Test Item 92002; Damage Rating: -1; Critical Damage Rating: +2", ItemTextSearch.SearchText(item));
+        }
+
+        [TestMethod]
+        public void SearchText_Weenie_WithOnlyZeroRatings_IsJustTheName()
+        {
+            var weenie = RatedWeenie("Plain Ring", (ACE.Entity.Enum.Properties.PropertyInt.GearCrit, 0));
+
+            Assert.AreEqual("Plain Ring", ItemTextSearch.SearchText(weenie));
+        }
+
         [TestMethod]
         public void SearchText_WeenieWithASpellbook_IncludesOneEntryPerSpell_AndNeverThrows()
         {

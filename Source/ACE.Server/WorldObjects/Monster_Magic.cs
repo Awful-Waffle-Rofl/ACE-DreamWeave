@@ -197,6 +197,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private float GetSpellMaxRange()
         {
+            // Custom Summons caster pets: the range the caster brain resolved for the spell it is closing with
+            // (CombatPet.TickCaster), so StartTurn and GetMovementParameters measure against the same number
+            if (CasterSpellRangeOverride is float casterRange)
+                return casterRange;
+
             var skill = GetMagicSkillForRangeCheck();
 
             var maxRange = Math.Min(CurrentSpell.BaseRangeConstant + skill * CurrentSpell.BaseRangeMod, Player.MaxRadarRange_Outdoors);
@@ -206,6 +211,12 @@ namespace ACE.Server.WorldObjects
 
             return maxRange;
         }
+
+        /// <summary>
+        /// Custom Summons: a caster pet's brain-resolved range for the spell it is closing with. Null (the formula)
+        /// for every other creature, and for a caster pet that is not mid-approach.
+        /// </summary>
+        internal virtual float? CasterSpellRangeOverride => null;
 
         private bool IsSelfCast()
         {
@@ -253,6 +264,16 @@ namespace ACE.Server.WorldObjects
                 if (IsDead || AttackTarget == null || target.IsDead)
                     return;
 
+                // Elemental Proficiency Bludgeon stun: a cast winding up when the stun landed is lost (the mana
+                // was already spent at the windup). Return to the ready stance instead of casting, so the
+                // creature is not left frozen in the windup pose; the monster-effect cast hook does not fire,
+                // because no cast completed.
+                if (IsClassAbilityStunned)
+                {
+                    PostCastMotion();
+                    return;
+                }
+
                 CastSpell(spell);
 
                 // monster combat effects: the cast completed - the hook a recast rides. Bounded by
@@ -272,7 +293,9 @@ namespace ACE.Server.WorldObjects
             PrevAttackTime = Timers.RunningTime + preCastTime;
             var powerupTime = (float)(PowerupTime ?? 1.0f);
 
-            var postDelay = ThreadSafeRandom.Next(0.0f, powerupTime);
+            // Weakened Blood slow: both cast halves above are slowed inside ScaleMonsterEffectCastTime; the
+            // random recovery delay is a duration too, so it stretches by the same factor
+            var postDelay = ScaleWeakenedBloodSlowDuration(ThreadSafeRandom.Next(0.0f, powerupTime));
 
             NextMoveTime = NextAttackTime = PrevAttackTime + postCastTime + postDelay;
         }
@@ -288,6 +311,106 @@ namespace ACE.Server.WorldObjects
                 return false;
 
             Mana.Current -= manaUsed;
+            return true;
+        }
+
+        /// <summary>Whether this creature spends mana to cast (PropertyBool.AiUsesMana, default true).</summary>
+        internal bool UsesManaToCast => AiUsesMana;
+
+        /// <summary>
+        /// Whether TryStartExplicitCast could pay for <paramref name="spell"/> at <paramref name="target"/> now - the
+        /// exact cost it charges. Lets a caster pet check before it stops what it is doing.
+        /// </summary>
+        internal bool CanPayCastMana(Spell spell, WorldObject target)
+        {
+            if (!AiUsesMana)
+                return true;
+
+            if (spell == null || spell.NotFound)
+                return false;
+
+            return CalculateManaUsage(this, spell, ExplicitCastManaTarget(spell, target)) <= Mana.Current;
+        }
+
+        /// <summary>The mana target MagicAttack's UseMana picks: the caster for an unbounded spell, else the target.</summary>
+        private WorldObject ExplicitCastManaTarget(Spell spell, WorldObject target)
+        {
+            var formulaRange = Math.Min(spell.BaseRangeConstant + GetMagicSkillForRangeCheck(spell) * spell.BaseRangeMod, Player.MaxRadarRange_Outdoors);
+
+            return formulaRange == 0.0f ? this : target;
+        }
+
+        /// <summary>
+        /// Custom Summons caster pets: MagicAttack's cast, at an EXPLICIT target rather than AttackTarget - the
+        /// owner or a sibling pet for a friendly spell, or whichever engaged enemy the caster brain chose for a
+        /// harmful one. Same steps and cadence as MagicAttack: mana, spell words, the wind-up motion, the cast
+        /// when the wind-up ends, the post-cast motion, and PrevAttackTime/NextAttackTime/NextMoveTime exactly as
+        /// MagicAttack sets them (so NextMagicAttackTime gates the next cast). The pet is snapped to face the
+        /// target first (FaceTargetDirectly), since the target need not be the one StartTurn turns toward.
+        ///
+        /// Two deliberate differences from MagicAttack: OnMonsterEffectCastComplete is not called (its recast
+        /// re-casts at AttackTarget, which for a heal would be the enemy), and at release a harmful spell is
+        /// dropped if the target has left combat with the owner's side during the wind-up (the never-initiates
+        /// rule, like CombatPet.MayLooseAt). Returns FALSE, starting nothing, when the target is gone or the pet
+        /// cannot pay the mana.
+        /// </summary>
+        internal bool TryStartExplicitCast(Spell spell, WorldObject target, bool friendly)
+        {
+            if (spell == null || spell.NotFound || target == null || target.IsDestroyed)
+                return false;
+
+            if (target is Creature targetCreature && !targetCreature.IsAlive)
+                return false;
+
+            if (AiUsesMana)
+            {
+                var manaUsed = CalculateManaUsage(this, spell, ExplicitCastManaTarget(spell, target));
+
+                if (manaUsed > Mana.Current)
+                    return false;
+
+                Mana.Current -= manaUsed;
+            }
+
+            // PreCastMotion_Human reads CurrentSpell
+            CurrentSpell = spell;
+
+            if (AiUseHumanMagicAnimations)
+            {
+                var spellWords = spell._spellBase.GetSpellWords(DatManager.PortalDat.SpellComponentsTable);
+                if (!string.IsNullOrWhiteSpace(spellWords))
+                    EnqueueBroadcast(new GameMessageHearSpeech(spellWords, Name, Guid.Full, ChatMessageType.Spellcasting), LocalBroadcastRange);
+            }
+
+            FaceTargetDirectly(target);
+
+            var preCastTime = ScaleMonsterEffectCastTime(PreCastMotion(target));
+
+            var actionChain = new ActionChain();
+            actionChain.AddDelaySeconds(preCastTime);
+            actionChain.AddAction(this, () =>
+            {
+                if (IsDead || target.IsDestroyed || (target is Creature c && c.IsDead))
+                    return;
+
+                if (!friendly && this is CombatPet pet && !(target is Creature engaged && PetEngagement.IsEngagedWithOwner(engaged, pet.P_PetOwner)))
+                    return;
+
+                CastSpellAt(spell, target, friendly);
+
+                PostCastMotion();
+            });
+            actionChain.EnqueueChain();
+
+            var postCastTime = ScaleMonsterEffectCastTime(GetPostCastTime(spell));
+
+            PrevAttackTime = Timers.RunningTime + preCastTime;
+            var powerupTime = (float)(PowerupTime ?? 1.0f);
+
+            var postDelay = ScaleWeakenedBloodSlowDuration(ThreadSafeRandom.Next(0.0f, powerupTime));
+
+            NextMoveTime = NextAttackTime = PrevAttackTime + postCastTime + postDelay;
+
             return true;
         }
 
@@ -362,14 +485,34 @@ namespace ACE.Server.WorldObjects
         {
             if (AttackTarget == null) return;
 
+            CastSpellAt(spell, AttackTarget);
+        }
+
+        /// <summary>
+        /// The body of CastSpell, at an explicit target: CastSpell passes AttackTarget, and a Custom Summons caster
+        /// pet passes the owner, a sibling pet or its chosen enemy (TryStartExplicitCast). With
+        /// <paramref name="friendly"/>:
+        ///   - the explicit target is HONOURED even for a self-targeted or untargeted spell, which CastSpell (and
+        ///     HandleCastSpell) would otherwise redirect onto the caster - a caster pet's Heal Self or Strength Self
+        ///     is aimed at its owner (ruling 2026-11-02);
+        ///   - a life spell skips TryHandleFactionMob - a heal on a sibling pet must never start a faction fight.
+        /// Everything else, the cross-landblock-group guard included, is unchanged.
+        /// </summary>
+        internal void CastSpellAt(Spell spell, WorldObject explicitTarget, bool friendly = false)
+        {
+            if (explicitTarget == null) return;
+
             var targetSelf = spell.Flags.HasFlag(SpellFlags.SelfTargeted);
             var untargeted = spell.NonComponentTargetType == ItemType.None;
 
-            var target = AttackTarget;
-            if (untargeted)
-                target = null;
-            else if (targetSelf)
-                target = this;
+            var target = explicitTarget;
+            if (!friendly)
+            {
+                if (untargeted)
+                    target = null;
+                else if (targetSelf)
+                    target = this;
+            }
 
             var caster = GetEquippedWand();
 
@@ -396,7 +539,7 @@ namespace ACE.Server.WorldObjects
             {
                 case MagicSchool.CreatureEnchantment:
 
-                    HandleCastSpell(spell, target);
+                    HandleCastSpell(spell, target, keepExplicitTarget: friendly);
 
                     if (spell.IsHarmful)
                     {
@@ -413,11 +556,12 @@ namespace ACE.Server.WorldObjects
 
                 case MagicSchool.LifeMagic:
 
-                    HandleCastSpell(spell, target, null, caster);
+                    HandleCastSpell(spell, target, null, caster, keepExplicitTarget: friendly);
 
                     if (spell.MetaSpellType != SpellType.LifeProjectile)
                     {
-                        TryHandleFactionMob(target);
+                        if (!friendly)
+                            TryHandleFactionMob(target);
 
                         if (spell.IsHarmful)
                         {
@@ -481,9 +625,11 @@ namespace ACE.Server.WorldObjects
         /// (initial points + points due to directly raising the skill)
         /// </summary>
         /// <returns></returns>
-        private uint GetMagicSkillForRangeCheck()
+        private uint GetMagicSkillForRangeCheck() => GetMagicSkillForRangeCheck(CurrentSpell);
+
+        private uint GetMagicSkillForRangeCheck(Spell spell)
         {
-            var skill = GetCreatureSkill(CurrentSpell.School);
+            var skill = GetCreatureSkill(spell.School);
 
             // verify this - should it be using base?
             // seems like it could be off, player formula uses current + cap?

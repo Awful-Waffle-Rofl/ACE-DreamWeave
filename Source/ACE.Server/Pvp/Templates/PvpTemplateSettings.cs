@@ -69,6 +69,14 @@ namespace ACE.Server.Pvp.Templates
         internal static Action<ACE.Server.WorldObjects.Player, ACE.Server.WorldObjects.WorldObject> MoveWornItemToPack =
             (player, item) => player.HandleActionPutItemInContainer(item.Guid.Full, player.Guid.Full);
 
+        /// <summary>
+        /// Test seam: the re-equip of one own item from the pack at restore (Player.TryDetachAndEquipForFacet), called
+        /// by RestorePvpTemplateOwnEquip inside the facet spell-activation waiver. The real detach and equip need a live
+        /// session; ACE.Server.Tests swaps this to observe the waiver at the moment of the equip.
+        /// </summary>
+        internal static Func<ACE.Server.WorldObjects.Player, ACE.Server.WorldObjects.Container, ACE.Server.WorldObjects.WorldObject, ACE.Entity.Enum.EquipMask, System.Collections.Generic.List<string>, bool> EquipOwnItem =
+            (player, rootOwner, item, slot, report) => player.EquipOwnItemForPvpTemplate(rootOwner, item, slot, report);
+
         /// <summary>How long the heartbeat backstop waits before retrying a restore that failed (the record was kept).</summary>
         public static readonly TimeSpan HeartbeatRetryBackoff = TimeSpan.FromSeconds(60);
 

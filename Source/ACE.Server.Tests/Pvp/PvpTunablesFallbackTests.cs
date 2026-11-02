@@ -37,7 +37,6 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(300, d.TimeLimitSecondsFfa);
             Assert.AreEqual(10, d.PostMatchSeconds);
             Assert.AreEqual(10, d.MaxConcurrentMatches);
-            Assert.AreEqual(50, d.MinLevel);
             Assert.IsTrue(d.BlockSameIp);
             Assert.IsFalse(d.FriendlyFire);
             Assert.IsTrue(d.DeathKeepsEnchantments);
@@ -79,9 +78,10 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(0.0, d.OvertimeDamageRampPerMinute);
             Assert.IsTrue(d.BloodEnabled, "owner ruling 2026-10-08: the arena currency is ON by default");
             Assert.AreEqual(1.0, d.FfaRingDmg);
-            Assert.AreEqual(2, d.BloodWin);
+            Assert.AreEqual(2, d.BloodWin, "owner ruling 2026-10-18: arena pays 2 Marks to a winner");
             Assert.AreEqual(1, d.BloodLoss);
             Assert.AreEqual(1, d.BloodDraw);
+            Assert.IsTrue(d.CrierResultsEnabled, "the Crier result line defaults ON");
             Assert.AreEqual(10, d.BloodDailyCap);
             Assert.AreEqual("America/New_York", d.BloodResetTimezone);
             Assert.AreEqual(0, d.BloodResetHour);

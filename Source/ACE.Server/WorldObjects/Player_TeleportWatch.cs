@@ -11,10 +11,15 @@ namespace ACE.Server.WorldObjects
     /// Pending-teleport diagnostics for the "stuck in portal space" report: a teleport or login sets Teleporting and
     /// only the client's GameActionLoginComplete (OnTeleportComplete) clears it, so a client that never sends it is
     /// invisible until the 5 minute MaximumTeleportTime logoff - and players kill the client long before that.
+    /// (Since the server-side arrival fallback, Player_TeleportArrival can also complete it, on movement from the
+    /// destination or after teleport_forced_complete_seconds; it writes [TELEPORT_FORCED_COMPLETE] with this file's
+    /// field set, and the completion hook below runs the same way for every source.)
     ///
     /// Writes [TELEPORT_PENDING] (Warn, once at 10s and once at 30s per teleport, from Heartbeat), [TELEPORT_ABANDONED]
-    /// (Info, once per teleport, from LogOut_Inner) and [TELEPORT_LATE_COMPLETE] (Info, only after a pending line
-    /// fired), and feeds the ace.teleport.* counters. The fields are chosen to separate three hypotheses: H1 lost
+    /// (Info, once per teleport, from LogOut_Inner), [TELEPORT_LATE_COMPLETE] (Info, only after a pending line
+    /// fired) and [TELEPORT_ARRIVAL_COST] (Info, on completion when at least TeleportWatchRules.ArrivalCostMinCreates
+    /// CreateObjects went out in the window; the same field set as an abandon line), and feeds the ace.teleport.*
+    /// counters. The fields are chosen to separate three hypotheses: H1 lost
     /// packets (client alive, not acking past the teleport, asking for resends), H2 client stall (client sending and
     /// acking but no LoginComplete), H3 server ordering (self-position sends after Teleport() returned, or another
     /// teleport replacing a pending one).
@@ -58,6 +63,9 @@ namespace ACE.Server.WorldObjects
 
                 teleportWatch.DestCell = destCell;
                 teleportWatch.DestInstance = destInstance;
+
+                // peakInflight / pacerPeakHeld on this window's lines are peaks since here
+                Session?.ResetArrivalPeaks();
 
                 var snapshot = default(TeleportNetSnapshot);
                 Session?.FillTeleportDiagnostics(ref snapshot, false);
@@ -196,6 +204,15 @@ namespace ACE.Server.WorldObjects
                 // apart from one that never came
                 if (teleportWatch.AnyThresholdFired(stamp))
                     log.Info($"[TELEPORT_LATE_COMPLETE] {Name} (0x{Guid.Full:X8}) kind={TeleportWatchRules.KindTag(teleportWatch.Kind)} after={Time.GetUnixTime() - (stamp ?? 0):0}s");
+
+                // the completed-arrival twin of [TELEPORT_ABANDONED]: same field set, so a heavy arrival that made it
+                // can be compared with one that did not (creates, bytesOut, peakInflight, pacer depth when paced)
+                // (a cheap read first: the depths take locks and are only worth it when the line is written)
+                var snapshot = default(TeleportNetSnapshot);
+                Session?.FillTeleportDiagnostics(ref snapshot, false);
+
+                if (TeleportWatchRules.ShouldLogArrivalCost(teleportWatch, snapshot))
+                    log.Info($"[TELEPORT_ARRIVAL_COST] {BuildTeleportWatchFields(Time.GetUnixTime() - (stamp ?? 0))}");
             }
             catch (Exception ex)
             {

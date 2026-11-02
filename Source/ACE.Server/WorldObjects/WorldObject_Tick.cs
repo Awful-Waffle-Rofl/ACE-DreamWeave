@@ -292,7 +292,7 @@ namespace ACE.Server.WorldObjects
                 // Inactive ON walkable ground can only mean the fall is already over, so that is a landing.
                 // Inactive in the AIR is re-armed with the engine's own set_active
                 // (Physics/PhysicsObj.cs:3455) and the drop carries on.
-                if (this is Creature inactiveDrop && inactiveDrop.WorldEventSkyDrop)
+                if (this is Creature inactiveDrop && ACE.Server.WorldEvents.WorldEventHooks.IsSkyDropping(inactiveDrop))
                     return inactiveDrop.HandleSkyDropPhysicsInactive();
 
                 return false;
@@ -317,12 +317,12 @@ namespace ACE.Server.WorldObjects
                 // except during the first frame of spawning, idle emotes, and dying
                 isDying = creature.IsDead;
 
-                if (creature.WorldEventSkyDrop)
+                if (ACE.Server.WorldEvents.WorldEventHooks.IsSkyDropping(creature))
                     skyDropCreature = creature;
 
                 // determine if updates should be run for object
                 var runUpdate = ShouldRunCreaturePhysics(PhysicsObj.IsAnimating, creature.IsMonster, creature.IsAwake,
-                    isDying, PhysicsObj.InitialUpdates, creature.WorldEventSkyDrop);
+                    isDying, PhysicsObj.InitialUpdates, ACE.Server.WorldEvents.WorldEventHooks.IsSkyDropping(creature));
 
                 if (!runUpdate)
                     return false;
@@ -330,7 +330,7 @@ namespace ACE.Server.WorldObjects
                 // WP-17: NOT while dropping. This exists to stop an idle monster's cached velocity from
                 // drifting, but zeroing it mid-fall would make PhysicsObj.IsGrounded (OnWalkable AND
                 // CachedVelocity == 0) read true in the air.
-                if (creature.IsMonster && !creature.IsAwake && !creature.WorldEventSkyDrop)
+                if (creature.IsMonster && !creature.IsAwake && !ACE.Server.WorldEvents.WorldEventHooks.IsSkyDropping(creature))
                     cachedVelocityFix = true;
             }
             else
@@ -419,7 +419,7 @@ namespace ACE.Server.WorldObjects
 
                     skyDropCreature.LogSkyDropProgress();
 
-                    if (SkyDropSettled(onWalkable, PhysicsTimer.CurrentTime, skyDropCreature.WorldEventSkyDropDeadline))
+                    if (ACE.Server.WorldEvents.WorldEventHooks.SkyDropSettled(onWalkable, PhysicsTimer.CurrentTime, skyDropCreature))
                         skyDropCreature.OnSkyDropLanded(!onWalkable, onWalkable ? "walkable" : "deadline");
                 }
 

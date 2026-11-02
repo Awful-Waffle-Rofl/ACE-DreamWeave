@@ -484,13 +484,19 @@ namespace ACE.Server.Tests
 
         private static void AssertMirrored(Weenie weenie, Func<Weenie, WorldObject> toItem)
         {
-            var fromWeenie = MarketSnapshot.FromWeenie(weenie);
-            var fromItem = MarketSnapshot.FromItem(toItem(weenie));
+            var fromWeenie = MarketSnapshot.FromWeenie(weenie, includeSuit: true);
+            var fromItem = MarketSnapshot.FromItem(toItem(weenie), includeSuit: true);
 
             foreach (var property in typeof(ListingSnapshot).GetProperties(BindingFlags.Public | BindingFlags.Instance))
             {
                 var a = property.GetValue(fromWeenie);
                 var b = property.GetValue(fromItem);
+
+                if (property.Name == nameof(ListingSnapshot.Suit))
+                {
+                    AssertSuitMirrored(weenie, (ACE.Server.Managers.Market.Suit.SuitItem)a, (ACE.Server.Managers.Market.Suit.SuitItem)b);
+                    continue;
+                }
 
                 if (a is IEnumerable listA && !(a is string))
                 {
@@ -500,6 +506,50 @@ namespace ACE.Server.Tests
                 }
 
                 Assert.AreEqual(a, b, $"{weenie.GetName()}.{property.Name} differs between FromWeenie and FromItem");
+            }
+        }
+
+        /// <summary>
+        /// The nested suit projection, compared field by field. Only the two fields that legitimately
+        /// differ are excluded: ItemGuid (a weenie has no guid; asserted separately) and Reductions (a
+        /// template weenie has no live item to judge; SuitItem documents it as null there).
+        /// </summary>
+        private static void AssertSuitMirrored(Weenie source, ACE.Server.Managers.Market.Suit.SuitItem fromWeenie, ACE.Server.Managers.Market.Suit.SuitItem fromItem)
+        {
+            var label = source.GetName();
+
+            Assert.AreEqual(fromWeenie == null, fromItem == null, $"{label}.Suit is null on exactly one of FromWeenie / FromItem");
+
+            if (fromWeenie == null)
+                return;
+
+            Assert.IsNull(fromWeenie.ItemGuid, $"{label}.Suit.ItemGuid must be null on the weenie projection");
+            Assert.IsNotNull(fromItem.ItemGuid, $"{label}.Suit.ItemGuid must be the item's guid on the item projection");
+            Assert.IsNull(fromWeenie.Reductions, $"{label}.Suit.Reductions must be null on the weenie projection");
+
+            // Tailoring.ReductionResult refuses an item with no ItemWorkmanship, so every fixture here
+            // without one must read null on the item side too. The non-null case (a workmanship-bearing
+            // multi-slot piece) is pinned in MarketSnapshotSuitTests, because only there can it differ.
+            if (!source.GetProperty(PropertyInt.ItemWorkmanship).HasValue)
+                Assert.IsNull(fromItem.Reductions, $"{label}.Suit.Reductions must be null for an item with no workmanship");
+
+            foreach (var property in typeof(ACE.Server.Managers.Market.Suit.SuitItem).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (property.Name == nameof(ACE.Server.Managers.Market.Suit.SuitItem.ItemGuid)
+                    || property.Name == nameof(ACE.Server.Managers.Market.Suit.SuitItem.Reductions))
+                    continue;
+
+                var a = property.GetValue(fromWeenie);
+                var b = property.GetValue(fromItem);
+
+                if (a is IEnumerable listA && !(a is string))
+                {
+                    CollectionAssert.AreEqual(listA.Cast<object>().ToList(), ((IEnumerable)b).Cast<object>().ToList(),
+                        $"{label}.Suit.{property.Name} differs between FromWeenie and FromItem");
+                    continue;
+                }
+
+                Assert.AreEqual(a, b, $"{label}.Suit.{property.Name} differs between FromWeenie and FromItem");
             }
         }
 

@@ -114,24 +114,29 @@ namespace ACE.Server.WorldObjects
         {
             var player = this as Player;
 
-            // class ability: Whirlwind (paid for this swing) cleaves in a full 360° arc for one extra target -
-            // even on a weapon with no innate cleave, in which case Whirlwind is the whole reason we cleave.
+            // class ability: Whirlwind (paid for this swing) cleaves in a full 360-degree arc for 1/2/3 extra
+            // targets by rank (Player.WhirlwindExtraTargets) - even on a weapon with no innate cleave, or with
+            // NO weapon at all (unarmed qualifies since 2026-10-24), in which case Whirlwind is the whole reason
+            // we cleave. weapon may therefore be null here, and every read of it below is null-safe.
             var whirlwind = player != null && player.WhirlwindSwingActive;
+            var whirlwindExtra = whirlwind ? player.WhirlwindExtraTargets : 0;
 
             // class ability: Kinetic Charge's melee spend (this same strike) cleaves EXTRA targets on top of
-            // the weapon's own CleaveTargets and Whirlwind's +1, even on a weapon with no innate cleave. It
-            // does not widen the arc - the normal front arc below still applies unless Whirlwind is also
-            // active. See Player.KineticChargeCleaveTargets for why this is safe to read here.
-            var kineticExtra = player != null ? player.KineticChargeCleaveTargets : 0;
+            // the weapon's own CleaveTargets and Whirlwind's extra, on a weapon (Player_Melee only arms the cleave
+            // path for it when a weapon is wielded, so an unarmed Whirlwind swing ignores it). It does not widen
+            // the arc - the normal front arc below still applies unless Whirlwind is also active.
+            var kineticExtra = player != null && weapon != null ? player.KineticChargeCleaveTargets : 0;
 
-            if (!weapon.IsCleaving && !whirlwind && kineticExtra <= 0) return null;
+            var weaponCleaves = weapon?.CleaveTargets ?? 0;
+
+            if (!(weapon?.IsCleaving ?? false) && !whirlwind && kineticExtra <= 0) return null;
 
             // sort visible objects by ascending distance
             var visible = PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
             visible.Sort(DistanceComparator);
 
             var cleaveTargets = new List<Creature>();
-            var totalCleaves = TotalCleaveTargets(weapon.CleaveTargets, whirlwind, kineticExtra);
+            var totalCleaves = TotalCleaveTargets(weaponCleaves, whirlwindExtra, kineticExtra);
 
             foreach (var obj in visible)
             {
@@ -167,7 +172,7 @@ namespace ACE.Server.WorldObjects
                 if (cylDist > CleaveCylRange)
                     return cleaveTargets;
 
-                // only cleave in front of attacker (Whirlwind widens this to a full 360° arc)
+                // only cleave in front of attacker (Whirlwind widens this to a full 360-degree arc)
                 if (!whirlwind)
                 {
                     var angle = GetAngle(creature);
@@ -185,11 +190,12 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// The total number of extra creatures one cleaving strike may hit: the weapon's own CleaveTargets,
-        /// plus Whirlwind's flat +1, plus Kinetic Charge's per-strike extra (floored at 0, in case a
-        /// negative value ever reaches here by some path other than KineticChargeAbility.FlooredCleaveTargets).
-        /// Pure, so the stacking rules are unit-testable without a live Player or Creature.
+        /// plus Whirlwind's per-rank extra (1/2/3, 0 when no Whirlwind swing is active - it was a flat +1 until
+        /// 2026-10-24), plus Kinetic Charge's per-strike extra. Both class-ability terms are floored at 0, in case
+        /// a negative value ever reaches here. Pure, so the stacking rules are unit-testable without a live
+        /// Player or Creature.
         /// </summary>
-        public static int TotalCleaveTargets(int weaponCleaves, bool whirlwind, int kineticExtra) =>
-            weaponCleaves + (whirlwind ? 1 : 0) + Math.Max(0, kineticExtra);
+        public static int TotalCleaveTargets(int weaponCleaves, int whirlwindExtra, int kineticExtra) =>
+            weaponCleaves + Math.Max(0, whirlwindExtra) + Math.Max(0, kineticExtra);
     }
 }

@@ -45,8 +45,10 @@ namespace ACE.Server.Command.Handlers
             "Usage:\n"
             + "  rewardclaim show <key> account <name>   - list the reward_claim rows for that account\n"
             + "  rewardclaim show <key> ip <addr>        - list the reward_claim rows for that IP\n"
+            + "  rewardclaim show <key> cluster <name>   - list the reward_claim rows for that household cluster\n"
             + "  rewardclaim clear <key> account <name>  - delete that account's row(s)\n"
             + "  rewardclaim clear <key> ip <addr>       - delete that IP's row(s)\n"
+            + "  rewardclaim clear <key> cluster <name>  - delete that cluster's row(s)\n"
             + "clear deletes WHOLE rows, so it frees both the account AND the IP each row held for that key.\n"
             + PeriodNote + "\n"
             + "Keys: " + string.Join(", ", RewardClaimAllowlist.Entries.Keys.OrderBy(k => k, StringComparer.Ordinal));
@@ -140,6 +142,16 @@ namespace ACE.Server.Command.Handlers
                 return new RewardClaimCommandRequest { Kind = kind, Key = key, IpKey = RewardClaimRules.NormalizeIpKey(address, false) };
             }
 
+            if (string.Equals(parameters[2], "cluster", StringComparison.OrdinalIgnoreCase))
+            {
+                var clusterName = value?.Trim().ToLowerInvariant();
+
+                if (!ACE.Server.Managers.AccountClusters.IsValidName(clusterName))
+                    return new RewardClaimCommandRequest { Kind = kind, Key = key, Error = $"'{value}' is not a valid cluster name." };
+
+                return new RewardClaimCommandRequest { Kind = kind, Key = key, IpKey = ACE.Server.Managers.IpLimitManager.ClusterKey(clusterName) };
+            }
+
             return usage;
         }
 
@@ -160,7 +172,7 @@ namespace ACE.Server.Command.Handlers
 
         [CommandHandler("rewardclaim", AccessLevel.Admin, CommandHandlerFlag.None, 0,
             "Shows or clears once-per-account/IP reward claims (Assay Row hammers, Proving Grounds herald tiers). clear deletes whole rows, freeing both the account and the IP for that key.",
-            "show|clear <key> account <name> | ip <addr>")]
+            "show|clear <key> account <name> | ip <addr> | cluster <name>")]
         public static void HandleRewardClaim(Session session, params string[] parameters)
         {
             var request = RewardClaimCommandText.Parse(parameters);

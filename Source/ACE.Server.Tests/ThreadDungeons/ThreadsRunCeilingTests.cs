@@ -17,7 +17,8 @@ namespace ACE.Server.Tests.ThreadDungeons
     /// The 2026-10-08 run ceiling raise (owner rulings, final): the gem ceiling stays 375, the run level can
     /// reach 500 (a 375 fragment plus a Mana Scarab presses to 410), reach-up applies from the pivot upward,
     /// every monster stat follows its natural curve past the authored data, and effective defense above monster
-    /// level 375 grows at half its fitted rate.
+    /// level 300 (lowered from 375 by the 2026-10-22 ruling) grows at half its fitted rate. Monster magic defense
+    /// follows the retail fit from level 301 up.
     ///
     /// The plan-level tests run against the SHIPPED roster (ShippedRosterFixture), because the pivot is derived
     /// from the roster it is handed - a toy fixture would put its pivot wherever its own top happened to be.
@@ -36,9 +37,12 @@ namespace ACE.Server.Tests.ThreadDungeons
         private static DungeonPopulationLimits MasterLimits(bool reachUp = DungeonPopulationLimits.DefaultReachUp,
             int healthCurveTopLevel = DungeonPopulationLimits.DefaultHealthCurveTopLevel,
             bool statCurve = DungeonPopulationLimits.DefaultStatCurve,
-            double defenseRate = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375)
+            double defenseRate = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375,
+            double magicRate = DungeonPopulationLimits.DefaultMagicDefenseCurveRateAbove300,
+            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot)
             => new DungeonPopulationLimits(60, 3.0, 3.0, 8, 0.5,
-                healthCurveTopLevel: healthCurveTopLevel, reachUp: reachUp, statCurve: statCurve, defenseCurveRateAbove375: defenseRate);
+                healthCurveTopLevel: healthCurveTopLevel, reachUp: reachUp, statCurve: statCurve, defenseCurveRateAbove375: defenseRate,
+                magicDefenseCurveRateAbove300: magicRate, damageCurveRateAbovePivot: damageRate);
 
         private static DungeonSpawnPlan Build(int level, int seed, DungeonPopulationLimits limits, Func<uint, DungeonStatProfile> profileOf = null,
             ThreadPlanMemo memo = null)
@@ -346,7 +350,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         private static DungeonBandStandard CurveAt(int level, double rate = DungeonStatCurve.DefaultDefenseRateAbove375)
-            => DungeonStatCurve.Extrapolate(AnalysisAnchor(), 326, level, rate, AnalysisFormulaOf);
+            => DungeonStatCurve.Extrapolate(AnalysisAnchor(), 326, level, rate, rate, 1.0, AnalysisFormulaOf); // magic at the same rate: the pinned pre-split numbers
 
         private static uint Landed(DungeonBandStandard s, Skill skill)
             => AttributeFormula.Compute(AnalysisFormulaOf(skill), a => s.AttributeMedianFor(a)) + s.MedianFor(skill);
@@ -359,9 +363,13 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(1386u, s.MaxBodyDamage, "dmg");
             Assert.AreEqual(592u, s.MaxBaseArmor, "armour");
             Assert.AreEqual(831u, s.EffectiveSkillMedianFor(Skill.HeavyWeapons), "attack");
-            Assert.AreEqual(859u, s.EffectiveSkillMedianFor(Skill.MeleeDefense), "melee D");
-            Assert.AreEqual(782u, s.EffectiveSkillMedianFor(Skill.MissileDefense), "missile D");
-            Assert.AreEqual(680u, s.EffectiveSkillMedianFor(Skill.MagicDefense), "magic D");
+            // Defense softens from 300 now, so every level above the 326 pivot runs at half rate: melee D
+            // 820 * e^(0.5 * 0.00094 * 49) and missile D 745 * e^(0.5 * 0.00099 * 49) (were 859 and 782 when the
+            // softening started at 375). Magic D is the absolute retail fit, 19.365 * 300^0.5769 *
+            // (375 / 300)^(0.5769 * 0.5) (was 680, the anchor times the old magic slope).
+            Assert.AreEqual(839u, s.EffectiveSkillMedianFor(Skill.MeleeDefense), "melee D");
+            Assert.AreEqual(763u, s.EffectiveSkillMedianFor(Skill.MissileDefense), "missile D");
+            Assert.AreEqual(555u, s.EffectiveSkillMedianFor(Skill.MagicDefense), "magic D");
             Assert.AreEqual(726u, s.EffectiveSkillMedianFor(Skill.WarMagic), "war");
             Assert.AreEqual(456u, s.AttributeMedianFor(PropertyAttribute.Strength), "Str");
             Assert.AreEqual(459u, s.AttributeMedianFor(PropertyAttribute.Endurance), "End");
@@ -380,11 +388,12 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             // The InitLevel medians are re-derived against the RAISED attributes, so attribute term + InitLevel
             // is exactly the extrapolated effective value - the attribute slope cannot sneak the full defense
-            // rate back in. Independently computed (python, same rounding) at 410 and 500, rate 0.5.
+            // rate back in. Independently computed (PowerShell, same rounding) at 410 and 500, rate 0.5; melee and
+            // missile soften from 300 and magic D is the retail fit, so those three columns moved with the 2026-10-22 ruling.
             var expected = new Dictionary<int, (uint Atk, uint MelD, uint MisD, uint MagD, uint War)>
             {
-                [410] = (847, 873, 796, 698, 760),
-                [500] = (888, 911, 832, 749, 857),
+                [410] = (847, 853, 777, 569, 760),
+                [500] = (888, 890, 812, 603, 857),
             };
 
             foreach (var kvp in expected)
@@ -400,32 +409,277 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        public void Effective_defense_above_375_grows_at_half_the_slope_and_is_continuous_at_375()
+        public void Effective_defense_above_300_grows_at_half_the_slope_and_is_continuous_at_300()
         {
-            foreach (var axis in new[] { DungeonStatAxis.MeleeDefense, DungeonStatAxis.MissileDefense, DungeonStatAxis.MagicDefense })
+            foreach (var axis in new[] { DungeonStatAxis.MeleeDefense, DungeonStatAxis.MissileDefense })
             {
                 var b = DungeonStatCurve.Slope(axis);
 
-                Assert.AreEqual(Math.Exp(b), DungeonStatCurve.Ratio(axis, 374, 375, 0.5), 1e-12, $"{axis}: full slope just below 375");
-                Assert.AreEqual(Math.Exp(0.5 * b), DungeonStatCurve.Ratio(axis, 375, 376, 0.5), 1e-12, $"{axis}: half slope just above");
-                Assert.AreEqual(Math.Exp(b * 49 + 0.5 * b * 35), DungeonStatCurve.Ratio(axis, 326, 410, 0.5), 1e-12, $"{axis}: split at 375");
-                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 326, 375, 0.5) * DungeonStatCurve.Ratio(axis, 375, 500, 0.5),
-                    DungeonStatCurve.Ratio(axis, 326, 500, 0.5), 1e-12, $"{axis}: continuous (composes) through 375");
+                Assert.AreEqual(Math.Exp(b), DungeonStatCurve.Ratio(axis, 299, 300, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: full slope just below 300");
+                Assert.AreEqual(Math.Exp(0.5 * b), DungeonStatCurve.Ratio(axis, 300, 301, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: half slope just above");
+                Assert.AreEqual(Math.Exp(b * 4 + 0.5 * b * 26), DungeonStatCurve.Ratio(axis, 296, 326, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: split at 300");
+                Assert.AreEqual(Math.Exp(0.5 * b * 84), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: the whole pivot-up path is softened");
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 326, 375, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 375, 500, 0.5, 0.5, 1.0, 326),
+                    DungeonStatCurve.Ratio(axis, 326, 500, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: composes through 375");
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 300, 500, 0.5, 0.5, 1.0, 326),
+                    DungeonStatCurve.Ratio(axis, 250, 500, 0.5, 0.5, 1.0, 326), 1e-12, $"{axis}: continuous (composes) through 300");
 
-                // Discriminating: the unsoftened rate differs above 375 and is identical below it.
-                Assert.AreNotEqual(DungeonStatCurve.Ratio(axis, 326, 410, 1.0), DungeonStatCurve.Ratio(axis, 326, 410, 0.5));
-                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 326, 375, 1.0), DungeonStatCurve.Ratio(axis, 326, 375, 0.5), 1e-15);
+                // Discriminating: the unsoftened rate differs above 300 and is identical below it.
+                Assert.AreNotEqual(DungeonStatCurve.Ratio(axis, 326, 410, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326));
+                Assert.AreEqual(DungeonStatCurve.Ratio(axis, 250, 300, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(axis, 250, 300, 0.5, 0.5, 1.0, 326), 1e-15);
             }
 
-            // Non-defense axes ignore the rate entirely.
-            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 1.0), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.0), 1e-15);
+            Assert.AreEqual(Math.Exp(0.5 * 0.00094 * 49), DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 326, 375, 0.5, 0.5, 1.0, 326), 1e-12);
 
-            // And the standards: melee D at 410 is 873 softened against 887 unsoftened (python cross-check).
-            Assert.AreEqual(873u, CurveAt(410, 0.5).EffectiveSkillMedianFor(Skill.MeleeDefense));
+            // Non-defense axes ignore the rate entirely.
+            Assert.AreEqual(DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 1.0, 1.0, 1.0, 326), DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 326, 500, 0.0, 0.0, 1.0, 326), 1e-15);
+
+            // And the standards: melee D at 410 is 853 softened against 887 unsoftened (PowerShell cross-check).
+            Assert.AreEqual(853u, CurveAt(410, 0.5).EffectiveSkillMedianFor(Skill.MeleeDefense));
             Assert.AreEqual(887u, CurveAt(410, 1.0).EffectiveSkillMedianFor(Skill.MeleeDefense));
-            Assert.AreEqual(CurveAt(375, 0.5).EffectiveSkillMedianFor(Skill.MeleeDefense), CurveAt(375, 1.0).EffectiveSkillMedianFor(Skill.MeleeDefense));
+            Assert.AreEqual(CurveAt(326, 0.5).EffectiveSkillMedianFor(Skill.MeleeDefense), CurveAt(326, 1.0).EffectiveSkillMedianFor(Skill.MeleeDefense),
+                "at the pivot the anchor is returned whatever the rate");
         }
 
+        [TestMethod]
+        public void RetailMagicDefense_is_the_fitted_power_law_softened_above_300()
+        {
+            // Rate 0.5 (rounded): 150 -> 349, 300 -> 520, 326 -> 533, 375 -> 555, 500 -> 603 (PowerShell cross-check
+            // of 19.365 * L^0.5769 below 300 and 19.365 * 300^0.5769 * (L / 300)^(0.5769 * rate) above it).
+            var expected = new Dictionary<int, double> { [150] = 349, [300] = 520, [326] = 533, [375] = 555, [500] = 603 };
+
+            foreach (var kvp in expected)
+                Assert.AreEqual(kvp.Value, DungeonStatCurve.RetailMagicDefense(kvp.Key, 0.5), 0.5, $"level {kvp.Key}");
+
+            // Rate 1.0 is the unsoftened power law everywhere; rate 0 freezes at the level-300 value.
+            foreach (var level in new[] { 150, 300, 326, 375, 500 })
+                Assert.AreEqual(19.365 * Math.Pow(level, 0.5769), DungeonStatCurve.RetailMagicDefense(level, 1.0), 1e-9, $"unsoftened at {level}");
+
+            foreach (var level in new[] { 300, 326, 375, 500 })
+                Assert.AreEqual(DungeonStatCurve.RetailMagicDefense(300, 0.0), DungeonStatCurve.RetailMagicDefense(level, 0.0), 1e-9, $"frozen at {level}");
+
+            Assert.AreEqual(19.365 * Math.Pow(300, 0.5769), DungeonStatCurve.RetailMagicDefense(300, 0.5), 1e-9);
+            Assert.AreEqual(0.0, DungeonStatCurve.RetailMagicDefense(0, 0.5));
+        }
+
+        [TestMethod]
+        public void Magic_defense_ratio_is_the_retail_curve_ratio_and_composes()
+        {
+            const DungeonStatAxis axis = DungeonStatAxis.MagicDefense;
+
+            Assert.AreEqual(DungeonStatCurve.RetailMagicDefense(410, 0.5) / DungeonStatCurve.RetailMagicDefense(326, 0.5),
+                DungeonStatCurve.Ratio(axis, 326, 410, 0.5, 0.5, 1.0, 326), 1e-12);
+            Assert.AreEqual(DungeonStatCurve.Ratio(axis, 200, 326, 0.5, 0.5, 1.0, 326) * DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326),
+                DungeonStatCurve.Ratio(axis, 200, 450, 0.5, 0.5, 1.0, 326), 1e-12);
+            Assert.AreEqual(1.0 / DungeonStatCurve.Ratio(axis, 326, 450, 0.5, 0.5, 1.0, 326), DungeonStatCurve.Ratio(axis, 450, 326, 0.5, 0.5, 1.0, 326), 1e-12);
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 410, 410, 0.5, 0.5, 1.0, 326));
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 326, 0, 0.5, 0.5, 1.0, 326), "non-positive target level: neutral, never zero");
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(axis, 0, 326, 0.5, 0.5, 1.0, 326), "non-positive source level: neutral");
+        }
+
+        private static DungeonBandStandard RichAnchor()
+        {
+            var attrs = new Dictionary<PropertyAttribute, uint>
+            {
+                [PropertyAttribute.Strength] = 410, [PropertyAttribute.Endurance] = 410, [PropertyAttribute.Quickness] = 360,
+                [PropertyAttribute.Coordination] = 410, [PropertyAttribute.Focus] = 580, [PropertyAttribute.Self] = 580,
+            };
+            var inits = new Dictionary<Skill, uint>
+            {
+                [Skill.MagicDefense] = 500, [Skill.MeleeDefense] = 600, [Skill.HeavyWeapons] = 700, [Skill.Run] = 90,
+            };
+            var effective = new Dictionary<Skill, uint>
+            {
+                [Skill.MagicDefense] = 630, [Skill.MeleeDefense] = 820, [Skill.HeavyWeapons] = 810,
+            };
+
+            return DungeonBandStandard.ForTest(inits, 844, 540, spellTier: 7, healthRate: 0.25, sampleCount: 20,
+                attributeMedians: attrs, effectiveSkillMedians: effective);
+        }
+
+        [TestMethod]
+        public void WithRetailMagicDefense_replaces_only_magic_defense_above_300()
+        {
+            var anchor = RichAnchor();
+
+            Assert.AreSame(anchor, DungeonStatCurve.WithRetailMagicDefense(anchor, 300, 0.5, AnalysisFormulaOf), "level 300: unchanged");
+            Assert.AreSame(anchor, DungeonStatCurve.WithRetailMagicDefense(anchor, 250, 0.5, AnalysisFormulaOf), "below 300: unchanged");
+
+            var s = DungeonStatCurve.WithRetailMagicDefense(anchor, 310, 0.5, AnalysisFormulaOf);
+            var target = (uint)Math.Round(DungeonStatCurve.RetailMagicDefense(310, 0.5), MidpointRounding.AwayFromZero);
+
+            Assert.AreEqual(525u, target, "retail magic D at 310, rate 0.5 (525.02)");
+            Assert.AreEqual(target, s.EffectiveSkillMedianFor(Skill.MagicDefense));
+            Assert.AreEqual(target, s.EffectiveDefenseMedianFor(Skill.MagicDefense));
+
+            // InitLevel = target - the attribute term over THIS standard's attributes: (Self 580 + Focus 580) / 7 = 166 (AttributeFormula rounds).
+            Assert.AreEqual(166u, AttributeFormula.Compute(AnalysisFormulaOf(Skill.MagicDefense), a => anchor.AttributeMedianFor(a)));
+            Assert.AreEqual(target - 166u, s.MedianFor(Skill.MagicDefense));
+
+            // Everything else is identical.
+            Assert.AreEqual(anchor.MedianFor(Skill.MeleeDefense), s.MedianFor(Skill.MeleeDefense));
+            Assert.AreEqual(anchor.MedianFor(Skill.HeavyWeapons), s.MedianFor(Skill.HeavyWeapons));
+            Assert.AreEqual(anchor.MedianFor(Skill.Run), s.MedianFor(Skill.Run));
+            Assert.AreEqual(anchor.EffectiveSkillMedianFor(Skill.MeleeDefense), s.EffectiveSkillMedianFor(Skill.MeleeDefense));
+            Assert.AreEqual(anchor.EffectiveSkillMedianFor(Skill.HeavyWeapons), s.EffectiveSkillMedianFor(Skill.HeavyWeapons));
+            Assert.AreEqual(anchor.SkillMedians.Count, s.SkillMedians.Count);
+            Assert.AreEqual(anchor.EffectiveSkillMedians.Count, s.EffectiveSkillMedians.Count);
+            CollectionAssert.AreEquivalent(anchor.AttributeMedians.ToList(), s.AttributeMedians.ToList());
+            Assert.AreEqual(anchor.MaxBodyDamage, s.MaxBodyDamage);
+            Assert.AreEqual(anchor.MaxBaseArmor, s.MaxBaseArmor);
+            Assert.AreEqual(anchor.SpellTier, s.SpellTier);
+            Assert.AreEqual(anchor.HealthRate, s.HealthRate);
+            Assert.AreEqual(anchor.SampleCount, s.SampleCount);
+            Assert.AreEqual(anchor.SampleLowRatio, s.SampleLowRatio);
+        }
+
+        [TestMethod]
+        public void WithRetailMagicDefense_floors_the_init_level_at_zero_and_leaves_absent_data_absent()
+        {
+            // A huge attribute term exceeds the retail target: InitLevel floors at 0, never wraps.
+            var big = new Dictionary<PropertyAttribute, uint> { [PropertyAttribute.Self] = 5000, [PropertyAttribute.Focus] = 5000 };
+            var floored = DungeonBandStandard.ForTest(new Dictionary<Skill, uint> { [Skill.MagicDefense] = 100 }, 100, 100,
+                attributeMedians: big, effectiveSkillMedians: new Dictionary<Skill, uint> { [Skill.MagicDefense] = 1500 });
+            Assert.AreEqual(0u, DungeonStatCurve.WithRetailMagicDefense(floored, 400, 0.5, AnalysisFormulaOf).MedianFor(Skill.MagicDefense));
+
+            // No magic defense data at all: returned unchanged (same instance), and nothing is invented.
+            var none = DungeonBandStandard.ForTest(new Dictionary<Skill, uint> { [Skill.MeleeDefense] = 600 }, 100, 100,
+                effectiveSkillMedians: new Dictionary<Skill, uint> { [Skill.MeleeDefense] = 800 });
+            Assert.AreSame(none, DungeonStatCurve.WithRetailMagicDefense(none, 400, 0.5, AnalysisFormulaOf));
+            Assert.AreEqual(0u, none.EffectiveSkillMedianFor(Skill.MagicDefense));
+
+            // Empty and null standards are no-ops.
+            Assert.AreSame(DungeonBandStandard.Empty, DungeonStatCurve.WithRetailMagicDefense(DungeonBandStandard.Empty, 400, 0.5));
+            Assert.AreSame(DungeonBandStandard.Empty, DungeonStatCurve.WithRetailMagicDefense(null, 400, 0.5));
+
+            // Extrapolate keeps "0 = no data" too: an anchor with no magic defense median gets none.
+            var extrapolated = DungeonStatCurve.Extrapolate(none, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+            Assert.AreEqual(0u, extrapolated.MedianFor(Skill.MagicDefense));
+            Assert.AreEqual(0u, extrapolated.EffectiveSkillMedianFor(Skill.MagicDefense));
+        }
+
+        [TestMethod]
+        public void Extrapolate_sets_magic_defense_absolutely_and_never_from_the_anchor()
+        {
+            var anchor = RichAnchor();
+            var s = DungeonStatCurve.Extrapolate(anchor, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+
+            Assert.AreEqual(569u, s.EffectiveSkillMedianFor(Skill.MagicDefense), "retail 410 at rate 0.5, whatever the anchor held");
+            Assert.AreEqual(569u, Landed(s, Skill.MagicDefense), "InitLevel + term over the raised attributes lands on it");
+
+            // Absolute: a different anchor magic D gives the same result.
+            var other = DungeonBandStandard.ForTest(new Dictionary<Skill, uint> { [Skill.MagicDefense] = 50 }, 844, 540,
+                sampleCount: 20, attributeMedians: anchor.AttributeMedians, effectiveSkillMedians: new Dictionary<Skill, uint> { [Skill.MagicDefense] = 900 });
+            Assert.AreEqual(569u, DungeonStatCurve.Extrapolate(other, 326, 410, 0.5, 0.5, 1.0, AnalysisFormulaOf).EffectiveSkillMedianFor(Skill.MagicDefense));
+        }
+
+        [TestMethod]
+        public void Anchored_StandardAt_gives_retail_magic_defense_at_and_below_the_pivot_above_300()
+        {
+            var curve = new DungeonStatCurve.Anchored(RichAnchor(), 326, 0.5, 0.5, 1.0, AnalysisFormulaOf);
+
+            Assert.AreEqual(525u, curve.StandardAt(310).EffectiveSkillMedianFor(Skill.MagicDefense), "310 is below the pivot but above 300");
+            Assert.AreEqual(630u, curve.StandardAt(290).EffectiveSkillMedianFor(Skill.MagicDefense), "290: the raw anchor");
+            Assert.AreSame(curve.Anchor, curve.StandardAt(290));
+            Assert.AreSame(curve.Anchor, curve.StandardAt(300));
+            Assert.AreEqual(533u, curve.StandardAt(326).EffectiveSkillMedianFor(Skill.MagicDefense), "the pivot itself is above 300");
+            Assert.AreEqual(569u, curve.StandardAt(410).EffectiveSkillMedianFor(Skill.MagicDefense));
+            Assert.AreEqual(curve.Anchor.EffectiveSkillMedianFor(Skill.MeleeDefense), curve.StandardAt(310).EffectiveSkillMedianFor(Skill.MeleeDefense),
+                "melee is untouched below the pivot");
+        }
+
+        private static DungeonStatProfile MagicLevelProfile(uint wcid)
+        {
+            var p = LevelProfile(wcid);
+
+            if (p.Level <= 0)
+                return p;
+
+            var skills = new Dictionary<Skill, uint>(p.Skills) { [Skill.MagicDefense] = 2 * (uint)p.Level };
+            return new DungeonStatProfile(p.Level, 0, skills, p.MaxBodyDamage, p.MaxBaseArmor, 0, 0.0, p.Attributes);
+        }
+
+        [TestMethod]
+        public void A_gem_310_plan_carries_the_retail_magic_defense_only_with_the_stat_curve_on()
+        {
+            var on = Build(310, 1, MasterLimits(), MagicLevelProfile);
+            var off = Build(310, 1, MasterLimits(statCurve: false), MagicLevelProfile);
+
+            Assert.IsFalse(on.BandStandard.IsEmpty, "positive control: the plan computed a standard");
+            Assert.IsNull(on.StatCurve, "310 is below the pivot: no curve object");
+            // The synthetic GameTables carry no Magic Defense formula row, so the attribute term is 0 and the InitLevel median IS the
+            // retail effective value.
+            // Shipped magic rate 0 (owner ruling 2026-10-28): frozen at the level-300 retail value.
+            Assert.AreEqual(520u, on.BandStandard.MedianFor(Skill.MagicDefense), "retail magic D at 310, frozen at its 300 value");
+
+            // The pre-split rate 0.5 reproduces the old value exactly.
+            var half = Build(310, 1, MasterLimits(magicRate: 0.5), MagicLevelProfile);
+            Assert.AreEqual(525u, half.BandStandard.MedianFor(Skill.MagicDefense), "retail magic D at 310, magic rate 0.5");
+
+            Assert.IsFalse(off.BandStandard.IsEmpty);
+            Assert.AreNotEqual(520u, off.BandStandard.MedianFor(Skill.MagicDefense), "switch off: the measured standard");
+            Assert.AreNotEqual(0u, off.BandStandard.MedianFor(Skill.MagicDefense), "positive control: magic D was measured");
+            Assert.AreEqual(off.BandStandard.EffectiveSkillMedianFor(Skill.MeleeDefense), on.BandStandard.EffectiveSkillMedianFor(Skill.MeleeDefense),
+                "melee is the measured standard either way below the pivot");
+
+            // At 300 and below nothing changes.
+            var at300 = Build(300, 1, MasterLimits(), MagicLevelProfile);
+            // The measured standard (MagicLevelProfile authors 2 x level), not the retail curve's 520, which starts above 300.
+            Assert.AreEqual(600u, at300.BandStandard.MedianFor(Skill.MagicDefense));
+        }
+
+        [TestMethod]
+        public void A_plan_above_the_pivot_softens_damage_by_the_damage_dial_only()
+        {
+            // Owner ruling 2026-10-29: dynamic_dungeons_damage_curve_rate_above_pivot defaults to 0.75; 1.0 is the old curve.
+            foreach (var level in new[] { 350, 410, 500 })
+            {
+                var soft = Build(level, 1, MasterLimits(defenseRate: 0.25, magicRate: 0.5, damageRate: 0.75), LevelProfile);
+                var full = Build(level, 1, MasterLimits(defenseRate: 0.25, magicRate: 0.5, damageRate: 1.0), LevelProfile);
+
+                Assert.IsNotNull(soft.StatCurve, $"{level}: positive control, the curve applies");
+                Assert.AreEqual(0.25, soft.StatCurve.DefenseRate, $"{level}: each rate reaches its own field");
+                Assert.AreEqual(0.5, soft.StatCurve.MagicDefenseRate);
+                Assert.AreEqual(0.75, soft.StatCurve.DamageRate);
+
+                var pivot = soft.StatCurve.Pivot;
+                var anchor = soft.StatCurve.Anchor.MaxBodyDamage;
+                Assert.AreEqual(DungeonStatCurve.Scale(anchor, Math.Exp(0.75 * DungeonStatCurve.DamageSlope * (level - pivot))), soft.BandStandard.MaxBodyDamage, $"{level}: softened damage");
+                Assert.AreEqual(DungeonStatCurve.Scale(anchor, Math.Exp(DungeonStatCurve.DamageSlope * (level - pivot))), full.BandStandard.MaxBodyDamage, $"{level}: 1.0 is the old curve");
+                Assert.AreEqual(full.BandStandard.MaxBaseArmor, soft.BandStandard.MaxBaseArmor, $"{level}: armour untouched");
+                Assert.AreEqual(full.BandStandard.EffectiveSkillMedianFor(Skill.MeleeDefense), soft.BandStandard.EffectiveSkillMedianFor(Skill.MeleeDefense), $"{level}: defense untouched");
+                CollectionAssert.AreEqual(full.BandStandard.AttributeMedians.OrderBy(k => k.Key).ToList(), soft.BandStandard.AttributeMedians.OrderBy(k => k.Key).ToList(), $"{level}: attributes untouched");
+            }
+
+            // At and below the pivot nothing changes.
+            var atPivot = Build(326, 1, MasterLimits(damageRate: 0.75), LevelProfile);
+            var atPivotFull = Build(326, 1, MasterLimits(damageRate: 1.0), LevelProfile);
+            Assert.AreEqual(atPivotFull.BandStandard.MaxBodyDamage, atPivot.BandStandard.MaxBodyDamage);
+        }
+
+        [TestMethod]
+        public void A_plan_above_the_pivot_freezes_magic_defense_and_leaves_melee_and_missile_on_their_own_dial()
+        {
+            // Owner ruling 2026-10-28: dynamic_dungeons_magic_defense_curve_rate_above_300 defaults to 0.
+            foreach (var level in new[] { 350, 410, 500 })
+            {
+                var frozen = Build(level, 1, MasterLimits(), MagicLevelProfile);
+                var half = Build(level, 1, MasterLimits(magicRate: 0.5), MagicLevelProfile);
+
+                Assert.IsNotNull(frozen.StatCurve, $"{level}: positive control, the curve applies");
+                Assert.AreEqual(0.0, frozen.StatCurve.MagicDefenseRate);
+                Assert.AreEqual(520u, frozen.BandStandard.MedianFor(Skill.MagicDefense), $"{level}: frozen at the 300 value");
+                Assert.AreEqual((uint)Math.Round(DungeonStatCurve.RetailMagicDefense(level, 0.5), MidpointRounding.AwayFromZero),
+                    half.BandStandard.MedianFor(Skill.MagicDefense), $"{level}: 0.5 reproduces the pre-split value");
+                Assert.AreEqual(1.0, frozen.StatCurve.Ratio(DungeonStatAxis.MagicDefense, 326, level), 1e-12, $"{level}: a stamp's magic ratio is flat");
+
+                foreach (var skill in new[] { Skill.MeleeDefense, Skill.MissileDefense })
+                {
+                    Assert.AreEqual(half.BandStandard.MedianFor(skill), frozen.BandStandard.MedianFor(skill), $"{level} {skill}: InitLevel median unchanged");
+                    Assert.AreEqual(half.BandStandard.EffectiveSkillMedianFor(skill), frozen.BandStandard.EffectiveSkillMedianFor(skill), $"{level} {skill}: effective median unchanged");
+                }
+            }
+        }
         [TestMethod]
         public void The_defense_rate_is_sanitized_into_zero_to_one()
         {
@@ -434,7 +688,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(0.0, DungeonStatCurve.SanitizeDefenseRate(-1));
             Assert.AreEqual(1.0, DungeonStatCurve.SanitizeDefenseRate(7));
             Assert.AreEqual(0.25, DungeonStatCurve.SanitizeDefenseRate(0.25));
-            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 375, 500, 0.0), "0 freezes defense at its 375 value");
+            Assert.AreEqual(1.0, DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 300, 500, 0.0, 0.0, 1.0, 326), "0 freezes defense at its 300 value");
         }
 
         [TestMethod]
@@ -479,7 +733,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Stamp_scaling_preserves_authored_order()
         {
             // Three creatures at the same authored level, stamped to the same level: one ratio for all of them.
-            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 375, 431, 0.5);
+            var ratio = DungeonStatCurve.Ratio(DungeonStatAxis.Damage, 375, 431, 0.5, 0.5, 1.0, 326);
             var scaled = new[] { 300, 450, 600 }.Select(v => ReachUpStamp.ScaleInt(v, ratio)).ToArray();
             CollectionAssert.AreEqual(scaled.OrderBy(v => v).ToArray(), scaled, "same raw, same stamp: order kept");
 
@@ -488,7 +742,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             // each sitting exactly on the curve at their authored levels both land on the curve at their stamps,
             // and the higher stamp is the tougher one. (Equal RAW values at different levels are NOT ordered after
             // stamping on a defense axis: the lower one was relatively tougher for its level and stays so, and the
-            // softening above 375 shortens the higher one's climb - measured 1060 vs 1048 for melee D at 340 vs
+            // softening above 300 shortens the higher one's climb - measured 1060 vs 1048 for melee D at 340 vs
             // 370 in a 410 run. That is the authored spread being kept, not lost.)
             var k = DungeonPopulationBuilder.ReachUpScale(410, 326);
             var lowRaw = 340;
@@ -499,10 +753,10 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             foreach (var axis in Enum.GetValues(typeof(DungeonStatAxis)).Cast<DungeonStatAxis>())
             {
-                int OnCurve(int level) => (int)Math.Round(10000 * DungeonStatCurve.Ratio(axis, 326, level, 0.5));
+                int OnCurve(int level) => (int)Math.Round(10000 * DungeonStatCurve.Ratio(axis, 326, level, 0.5, 0.5, 1.0, 326));
 
-                var lowScaled = ReachUpStamp.ScaleInt(OnCurve(lowRaw), DungeonStatCurve.Ratio(axis, lowRaw, lowStamp, 0.5));
-                var highScaled = ReachUpStamp.ScaleInt(OnCurve(highRaw), DungeonStatCurve.Ratio(axis, highRaw, highStamp, 0.5));
+                var lowScaled = ReachUpStamp.ScaleInt(OnCurve(lowRaw), DungeonStatCurve.Ratio(axis, lowRaw, lowStamp, 0.5, 0.5, 1.0, 326));
+                var highScaled = ReachUpStamp.ScaleInt(OnCurve(highRaw), DungeonStatCurve.Ratio(axis, highRaw, highStamp, 0.5, 0.5, 1.0, 326));
 
                 Assert.AreEqual(OnCurve(lowStamp), lowScaled, 1, $"{axis}: on the curve at {lowRaw} -> on the curve at {lowStamp}");
                 Assert.AreEqual(OnCurve(highStamp), highScaled, 1, $"{axis}: on the curve at {highRaw} -> on the curve at {highStamp}");
@@ -510,7 +764,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             }
 
             // Skills: the re-derived InitLevel lands effective on value x ratio for each creature.
-            var meleeRatio = DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 375, 431, 0.5);
+            var meleeRatio = DungeonStatCurve.Ratio(DungeonStatAxis.MeleeDefense, 375, 431, 0.5, 0.5, 1.0, 326);
             Assert.AreEqual(DungeonStatCurve.Scale(800, meleeRatio) - 300u, ReachUpStamp.SkillInitTarget(800, 300, meleeRatio));
             Assert.AreEqual(0u, ReachUpStamp.SkillInitTarget(100, 5000, meleeRatio), "floored at 0, never wraps");
 

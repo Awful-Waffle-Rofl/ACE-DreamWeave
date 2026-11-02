@@ -1,3 +1,5 @@
+using System;
+
 using ACE.Server.Managers;
 
 namespace ACE.Server.MonsterEffects
@@ -87,5 +89,25 @@ namespace ACE.Server.MonsterEffects
 
         /// <summary>Maximum ward grant, as a multiple of the carrying monster's own maximum health.</summary>
         public static double WardCap => PropertyManager.GetDouble("monster_effect_ward_cap").Item;
+
+        /// <summary>
+        /// The smallest fraction of its normal duration a Taunt may hold a monster after every scatter record
+        /// has composed (0.25 = at least a quarter of the full hold). A FLOOR, not a ceiling: scatter shortens
+        /// a taunt and never cancels one. Sanitised into (0, 1] - a non-positive or NaN value falls back to
+        /// the 0.25 default, anything above 1 is 1 (scatter off) - so a mis-set tunable can neither make the
+        /// hold zero nor lengthen it.
+        /// </summary>
+        public static double TauntHoldFloor
+        {
+            get
+            {
+                var floor = PropertyManager.GetDouble("monster_effect_taunt_hold_floor").Item;
+
+                if (double.IsNaN(floor) || floor <= 0.0)
+                    return 0.25;
+
+                return Math.Min(floor, 1.0);
+            }
+        }
     }
 }

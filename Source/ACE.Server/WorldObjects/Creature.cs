@@ -49,6 +49,14 @@ namespace ACE.Server.WorldObjects
         public ACE.Server.ThreadDungeons.ThreadDungeonRun P_DungeonRun;
 
         /// <summary>
+        /// Threads (WaffleACE): the DoT tick being applied to this run creature right now, staged by
+        /// EnchantmentManager.ApplyDamageTick through ThreadContributionHook.BeginDotTick and consumed by
+        /// Creature.TakeDamage at its vital write. Lives only for the span of one tick, on the landblock thread that
+        /// runs it. Null for every creature outside a group Thread, and for every creature between ticks.
+        /// </summary>
+        internal ACE.Server.ThreadDungeons.ThreadDotTick P_PendingThreadDotTick;
+
+        /// <summary>
         /// ML digsite encounters (WaffleACE): the encounter that spawned this creature. Set by
         /// MlDigsiteSpawner before EnterWorld, read by Creature.Die() to report the kill. Purely in-memory
         /// and NEVER persisted; the persisted twin is PropertyInt.MlDigsiteEncounterId, and both the death
@@ -77,6 +85,15 @@ namespace ACE.Server.WorldObjects
         /// (DamageEvent.cs), so an Invincible boss would still be killed by war magic.
         /// </summary>
         public bool P_DigsiteImmune;
+
+        /// <summary>
+        /// Speed courses (WaffleACE, 2026-10-24): a health floor for a phased boss. While above 0, no write through
+        /// <see cref="UpdateVital(CreatureVital, int)"/> can take this NON-player creature's health below
+        /// min(current, floor), so an overkill past a phase threshold stops at the threshold instead of killing.
+        /// Heals are unaffected. 0 (the default) is a no-op. Purely in-memory, never persisted and never networked,
+        /// like <see cref="P_DigsiteImmune"/>; owned by the speed-course boss guard (SpeedBossPhaseRules).
+        /// </summary>
+        public uint P_HealthFloor;
 
         /// <summary>Threads: the role this creature was placed as, for the kill ledger and XP rate.</summary>
         public ACE.Server.ThreadDungeons.DungeonRole? DungeonRole;
@@ -199,7 +216,7 @@ namespace ACE.Server.WorldObjects
             CombatMode = CombatMode.NonCombat;
             DamageHistory = new DamageHistory(this);
 
-            WorldEventObjective = GetProperty(PropertyBool.WorldEventObjective) == true;
+            WorldEventObjective = ACE.Server.WorldEvents.WorldEventHooks.IsObjectiveCreature(this);
 
             BuildMonsterEffects();
 
@@ -463,6 +480,12 @@ namespace ACE.Server.WorldObjects
             // The Thread-Guide (flagged by PropertyBool.ThreadGuideNpc) issues guide fragments here, for the same
             // reason as the Archivist above: no Use emote set, because emotes run before this method.
             if (worldObject is Player guided && ThreadDungeons.ThreadGuideStation.TryHandleUse(this, guided))
+                return;
+
+            // A Pinnacle fight head: talking to it begins the user's own fight. No Use emote set on the head, for the
+            // same reason as the stations above. For any other creature this is one registry lookup by the user's guid
+            // (a miss for everyone without a live fight) and a reference compare against that fight's head.
+            if (worldObject is Player challenger && ACE.Server.Pinnacles.PinnacleFightManager.TryHandleHeadUse(this, challenger))
                 return;
 
             // handled in base.OnActivate -> EmoteManager.OnUse()

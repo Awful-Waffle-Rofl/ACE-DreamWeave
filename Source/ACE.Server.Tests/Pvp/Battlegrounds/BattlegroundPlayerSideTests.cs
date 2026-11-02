@@ -354,6 +354,50 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsTrue(body.Contains(Squash("ClearBattlegroundRespawnShields();"), StringComparison.Ordinal), "shield clear wired");
         }
 
+        /// <summary>
+        /// The death-arrival vital rule (stage KOTH report 2026-10-15: players reached the pen about 70% down): a pen death
+        /// arrives at the full maximum, every other death at the standard 75%, rounded as before.
+        /// </summary>
+        [TestMethod]
+        public void DeathArrivalVital_PenDeathIsFull_OtherDeathsKeepSeventyFivePercent()
+        {
+            Assert.AreEqual(400u, PvpPlayerRules.DeathArrivalVital(400, penStillLive: true), "pen death: full");
+            Assert.AreEqual(1u, PvpPlayerRules.DeathArrivalVital(1, penStillLive: true), "pen death: full at the smallest max");
+            Assert.AreEqual(300u, PvpPlayerRules.DeathArrivalVital(400, penStillLive: false), "control: an ordinary death keeps 75%");
+            Assert.AreEqual((uint)Math.Round(333 * 0.75f), PvpPlayerRules.DeathArrivalVital(333, penStillLive: false), "control: the old rounding is unchanged");
+            Assert.AreEqual(0u, PvpPlayerRules.DeathArrivalVital(0, penStillLive: true), "a zero max stays zero");
+        }
+
+        /// <summary>
+        /// The death arrival sets all three vitals through the rule, handed penStillLive: wentToPen re-checked INSIDE the delayed
+        /// arrival action against the backstop predicate, so a pen death whose match stopped being Live during the delay (the
+        /// backstop sends it home) gets the standard 75%. The template death arrival and the backstop keep wentToPen. The vitals
+        /// are read after the template death arrival and written through UpdateVital. Source pin: a Player cannot run the death
+        /// chain in this suite.
+        /// </summary>
+        [TestMethod]
+        public void ThreadSafeTeleportOnDeath_SetsArrivalVitalsThroughThePenRule()
+        {
+            var body = Squash(MethodBody("Player_Death.cs", "public void ThreadSafeTeleportOnDeath()"));
+
+            var addAction = body.IndexOf(Squash("teleportChain.AddAction(this, () =>"), StringComparison.Ordinal);
+            var restore = body.IndexOf(Squash("PvpTemplateDeathArrival(wentToPen);"), StringComparison.Ordinal);
+            var still = body.IndexOf(Squash("var penStillLive = wentToPen && !PvpPenBackstopNeeded(penMatch);"), StringComparison.Ordinal);
+            var health = body.IndexOf(Squash("var newHealth = PvpPlayerRules.DeathArrivalVital(Health.MaxValue, penStillLive);"), StringComparison.Ordinal);
+            var stamina = body.IndexOf(Squash("var newStamina = PvpPlayerRules.DeathArrivalVital(Stamina.MaxValue, penStillLive);"), StringComparison.Ordinal);
+            var mana = body.IndexOf(Squash("var newMana = PvpPlayerRules.DeathArrivalVital(Mana.MaxValue, penStillLive);"), StringComparison.Ordinal);
+            var write = body.IndexOf(Squash("UpdateVital(Health, newHealth); UpdateVital(Stamina, newStamina); UpdateVital(Mana, newMana);"), StringComparison.Ordinal);
+            var backstop = body.IndexOf(Squash("if (wentToPen && !IsLoggingOut && PvpPenBackstopNeeded(penMatch))"), StringComparison.Ordinal);
+
+            Assert.IsTrue(addAction >= 0 && restore > addAction, "template death arrival inside the delayed arrival action");
+            Assert.IsTrue(still > addAction, "penStillLive is decided inside the delayed arrival action, not when the teleport starts");
+            Assert.IsTrue(health > still && stamina > still && mana > still && health > restore, "all three vitals go through the rule with penStillLive, after the template death arrival");
+            Assert.IsTrue(write > mana, "the computed values are what UpdateVital writes");
+            Assert.IsTrue(backstop > write, "the backstop still keys on wentToPen");
+            Assert.IsFalse(body.Contains(Squash("DeathArrivalVital(Health.MaxValue, wentToPen)"), StringComparison.Ordinal), "the vitals never take the raw wentToPen");
+            Assert.IsFalse(body.Contains(Squash("MaxValue * 0.75f"), StringComparison.Ordinal), "no hard-coded 75% survives beside the rule");
+        }
+
         // ================= healing kit =================
 
         [TestMethod]

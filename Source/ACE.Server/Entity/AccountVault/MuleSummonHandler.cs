@@ -800,6 +800,35 @@ namespace ACE.Server.Entity.AccountVault
         /// and an allowlist entry must never be able to re-open it.
         /// </summary>
         internal static bool IsSummonPermitted(Position location, out string failReason)
+            => IsSummonPermitted(location, out failReason, IsHousingSettlement);
+
+        private const string HousingConfigKey = "account_vault_housing_allowed";
+
+        /// <summary>
+        /// True when <paramref name="location"/> is in a LOADED landblock (same instance) that contains at least
+        /// one house, and account_vault_housing_allowed is on. Never loads a landblock: an adjacent landblock
+        /// that is not loaded reads as "no", and a placement rung that would cross into it is skipped. The
+        /// setting is read only once a house has actually been found, so a location with no house costs no
+        /// PropertyManager read.
+        /// </summary>
+        internal static bool IsHousingSettlement(Position location)
+        {
+            if (location == null)
+                return false;
+
+            var landblock = LandblockManager.GetLoadedLandblock(location.LandblockId, location.Instance);
+
+            if (landblock == null || landblock.Houses.Count == 0)
+                return false;
+
+            return PropertyManager.GetBool(HousingConfigKey).Item;
+        }
+
+        /// <summary>
+        /// The location gate with the housing test injected, so the rule is testable without a loaded landblock.
+        /// Order: denylist (outranks everything), then the allowlist, then the housing settlement exemption.
+        /// </summary>
+        internal static bool IsSummonPermitted(Position location, out string failReason, Func<Position, bool> isHousingSettlement)
         {
             failReason = null;
 
@@ -817,7 +846,7 @@ namespace ACE.Server.Entity.AccountVault
             // Count == 0 is "no allowlist configured", NOT "nothing is allowed" - see
             // AllowlistConfigKey's remarks. Inverting this would make a blanked config row silently
             // disable the entire feature everywhere.
-            if (allowlist.Count > 0 && !allowlist.Contains(location))
+            if (allowlist.Count > 0 && !allowlist.Contains(location) && !isHousingSettlement(location))
             {
                 failReason = $"You can only summon your vault vendor in {GetAllowlistName()}.";
                 return false;

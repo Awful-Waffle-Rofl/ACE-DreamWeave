@@ -210,7 +210,7 @@ namespace ACE.Server.Tests.Pvp
 
         // ================= the generated key list =================
 
-        /// <summary>The nineteen pvp_arena_* / pvp_bg_* doubles that are NOT context tuning keys.</summary>
+        /// <summary>The twenty-four pvp_arena_* / pvp_bg_* doubles that are NOT context tuning keys (the last two are the performance modifier's gain and near-hill kill weight; pvp_bg_bonus_multiplier is the Double Marks multiplier).</summary>
         private static readonly string[] PreExistingNonContextDoubles =
         {
             "pvp_arena_dmg_mod_1v1",
@@ -224,6 +224,7 @@ namespace ACE.Server.Tests.Pvp
             "pvp_bg_koth_marker_spacing",
             "pvp_bg_koth_marker_z_offset",
             "pvp_bg_dmg_mod",
+            "pvp_bg_ring_dmg",
             "pvp_bg_ad_kill_chip_pct",
             "pvp_bg_ad_kill_heal_pct",
             "pvp_bg_ad_kill_range",
@@ -232,6 +233,10 @@ namespace ACE.Server.Tests.Pvp
             "pvp_bg_ad_defender_dr_radius",
             "pvp_bg_ad_defender_dr_window_s",
             "pvp_bg_marks_scale",
+            "pvp_bg_perf_koth_near_margin",
+            "pvp_bg_perf_gain",
+            "pvp_bg_perf_koth_near_kill_weight",
+            "pvp_bg_bonus_multiplier",
         };
 
         [TestMethod]
@@ -248,7 +253,7 @@ namespace ACE.Server.Tests.Pvp
                 .ToArray();
 
             CollectionAssert.AreEqual(PvpContextTuning.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray(), registered,
-                "the generated list and the registered pvp_(arena|bg)_* doubles (less the nineteen non-context ones) must be the same set");
+                "the generated list and the registered pvp_(arena|bg)_* doubles (less the twenty-four non-context ones) must be the same set");
 
             foreach (var key in PvpContextTuning.Keys)
             {
@@ -305,6 +310,97 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(PvpCombatCategory.Heavy, PvpContextTuning.WeaponCategory(false, Skill.None, WeaponType.Undef, false, Skill.HeavyWeapons));
             Assert.AreEqual(PvpCombatCategory.Finesse, PvpContextTuning.WeaponCategory(false, Skill.None, WeaponType.Undef, false, Skill.FinesseWeapons));
             Assert.AreEqual(PvpCombatCategory.None, PvpContextTuning.WeaponCategory(false, Skill.None, WeaponType.Undef, true, Skill.HeavyWeapons));
+        }
+
+        /// <summary>
+        /// A missile weapon shaped like the retail rows that carry NO PropertyInt.WeaponType (353): retail 24199
+        /// Weeping Bow, 24201 Weeping Crossbow and 24197 Weeping Atlatl are MissileLaunchers with WeaponSkill
+        /// MissileWeapons (or a retired Bow / Crossbow / ThrownWeapon skill on older rows), an AmmoType, and no 353;
+        /// many retail thrown weapons (187 of 317 WeenieType.Missile rows) carry none either, and the 15 Generic
+        /// tavern throwables (chalice 142) carry only DefaultCombatStyle ThrownWeapon (128).
+        /// </summary>
+        private static WorldObject RetailMissileFixture(WeenieType weenieType, Skill skill, AmmoType? ammo, PvpWeaponVariant variants, bool thrownCombatStyle = false)
+        {
+            var weapon = Seeded<MeleeWeapon>();
+            weapon.Biota.WeenieType = weenieType;
+            weapon.WeaponSkill = skill;
+
+            if (ammo.HasValue)
+                weapon.SetProperty(PropertyInt.AmmoType, (int)ammo.Value);
+
+            if (thrownCombatStyle)
+                weapon.SetProperty(PropertyInt.DefaultCombatStyle, (int)CombatStyle.ThrownWeapon);
+
+            Assert.AreEqual(WeaponType.Undef, weapon.W_WeaponType, "fixture: the retail rows carry no WeaponType");
+            Assert.AreEqual(thrownCombatStyle, weapon.IsThrownWeapon, "fixture: combat style");
+
+            return Flag(weapon, variants);
+        }
+
+        [TestMethod]
+        public void MissileWeaponWithNoWeaponType_IsCategorizedFromItsAmmoTypeOrWeenieType_SoItsKeysApply()
+        {
+            var pairs = new Pairs();
+
+            var cases = new (string Name, WorldObject Weapon, PvpCombatCategory Category)[]
+            {
+                ("weeping bow (24199 shape)", RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.Arrow, PvpWeaponVariant.Weeping), PvpCombatCategory.Bow),
+                ("weeping crossbow (24201 shape)", RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.Bolt, PvpWeaponVariant.Weeping), PvpCombatCategory.Crossbow),
+                ("weeping atlatl (24197 shape)", RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.Atlatl, PvpWeaponVariant.Weeping), PvpCombatCategory.Thrown),
+                ("retired Bow skill launcher", RetailMissileFixture(WeenieType.MissileLauncher, Skill.Bow, AmmoType.Arrow, PvpWeaponVariant.Weeping), PvpCombatCategory.Bow),
+                ("crystal-arrow launcher", RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.ArrowCrystal, PvpWeaponVariant.Weeping), PvpCombatCategory.Bow),
+                ("thrown weapon", RetailMissileFixture(WeenieType.Missile, Skill.ThrownWeapon, null, PvpWeaponVariant.Weeping), PvpCombatCategory.Thrown),
+                ("Generic throwable (chalice 142 shape)", RetailMissileFixture(WeenieType.Generic, Skill.MissileWeapons, null, PvpWeaponVariant.Weeping, thrownCombatStyle: true), PvpCombatCategory.Thrown),
+            };
+
+            foreach (var c in cases)
+            {
+                var dmgKey = PvpContextTuning.DamageKey(PvpContext.Battleground, c.Category, PvpWarShape.None);
+                var weepingKey = PvpContextTuning.VariantDamageKey(PvpContext.Battleground, c.Category, PvpWeaponVariant.Weeping);
+                var profile = PvpHitProfile.ForWeapon(c.Weapon, CombatType.Missile);
+                var kind = AllKinds.Single(k => k.Category == c.Category);
+
+                UseContext(PvpContextDials.Neutral.With(weepingKey, 2.0));
+                Assert.AreEqual(Hit * 2.0f, DamageWith(pairs, PvpScope.Battleground, kind, false, profile), 1e-3f, $"{c.Name}: {weepingKey}=2 must double the battleground hit");
+                Assert.AreEqual(Hit, DamageWith(pairs, PvpScope.Arena, kind, false, profile), 1e-3f, $"{c.Name}: {weepingKey} must not reach the arena");
+
+                UseContext(PvpContextDials.Neutral.With(dmgKey, 3.0));
+                Assert.AreEqual(Hit * 3.0f, DamageWith(pairs, PvpScope.Battleground, kind, false, profile), 1e-3f, $"{c.Name}: {dmgKey}=3 must triple the battleground hit");
+            }
+
+            // the crit-chance path resolves the same category: the weeping-bow shape takes pvp_bg_bow_crit_chance
+            var weepingBow = PvpHitProfile.ForWeapon(RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.Arrow, PvpWeaponVariant.Weeping), CombatType.Missile);
+            UseContext(PvpContextDials.Neutral.With("pvp_bg_bow_crit_chance", 2.0));
+            Assert.AreEqual(0.2f, PvpContextTuning.ApplyCritChance(PvpChokePoint.CC1, pairs.Battleground.A, pairs.Battleground.D, weepingBow, 0.1f), 1e-6f, "weeping-bow shape: pvp_bg_bow_crit_chance=2 must double the crit chance");
+
+            // a launcher with no WeaponType AND no AmmoType has nothing to read: still no category, hit unchanged
+            var unknownLauncher = PvpHitProfile.ForWeapon(RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, null, PvpWeaponVariant.Weeping), CombatType.Missile);
+            var bowKind = AllKinds.Single(k => k.Category == PvpCombatCategory.Bow);
+            UseContext(PvpContextDials.Neutral
+                .With("pvp_bg_bow_dmg", 2.0).With("pvp_bg_crossbow_dmg", 2.0).With("pvp_bg_thrown_dmg", 2.0)
+                .With("pvp_bg_bow_weeping_dmg", 2.0).With("pvp_bg_crossbow_weeping_dmg", 2.0).With("pvp_bg_thrown_weeping_dmg", 2.0));
+            Assert.AreEqual(Hit, DamageWith(pairs, PvpScope.Battleground, bowKind, false, unknownLauncher), 1e-3f, "a launcher with no WeaponType and no AmmoType stays uncategorized");
+
+            // WeaponCategory, not the inference, keeps a launcher-shaped object swung on a MELEE hit out of every missile category
+            var meleeSwing = PvpHitProfile.ForWeapon(RetailMissileFixture(WeenieType.MissileLauncher, Skill.MissileWeapons, AmmoType.Arrow, PvpWeaponVariant.None), CombatType.Melee);
+            UseContext(PvpContextDials.Neutral.With("pvp_bg_bow_dmg", 2.0));
+            Assert.AreEqual(Hit, DamageWith(pairs, PvpScope.Battleground, bowKind, false, meleeSwing), 1e-3f, "WeaponCategory: a melee hit never lands in a missile category");
+        }
+
+        [TestMethod]
+        public void InferMissileWeaponType_KeepsAStoredType_AndOtherwiseReadsAmmoOrWeenieType()
+        {
+            Assert.AreEqual(128, (int)CombatStyle.ThrownWeapon, "the retail DefaultCombatStyle value the Generic throwables carry");
+            Assert.AreEqual(WeaponType.Crossbow, PvpContextTuning.InferMissileWeaponType(WeaponType.Crossbow, WeenieType.MissileLauncher, AmmoType.Arrow, false), "a stored WeaponType wins");
+            Assert.AreEqual(WeaponType.Bow, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.MissileLauncher, AmmoType.ArrowChorizite, false));
+            Assert.AreEqual(WeaponType.Crossbow, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.MissileLauncher, AmmoType.BoltCrystal, false));
+            Assert.AreEqual(WeaponType.Thrown, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.MissileLauncher, AmmoType.AtlatlChorizite, false), "atlatls are thrown");
+            Assert.AreEqual(WeaponType.Undef, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.MissileLauncher, null, false), "a launcher with no ammo type stays unknown");
+            Assert.AreEqual(WeaponType.Thrown, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.Missile, null, false));
+            Assert.AreEqual(WeaponType.Thrown, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.Generic, null, true), "a Generic throwable (DefaultCombatStyle ThrownWeapon) is thrown");
+            Assert.AreEqual(WeaponType.Undef, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.Generic, null, false), "a plain Generic is not");
+            Assert.AreEqual(WeaponType.Undef, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.Ammunition, AmmoType.Arrow, false), "ammunition is not a launcher");
+            Assert.AreEqual(WeaponType.Undef, PvpContextTuning.InferMissileWeaponType(WeaponType.Undef, WeenieType.MeleeWeapon, null, false));
         }
 
         [TestMethod]

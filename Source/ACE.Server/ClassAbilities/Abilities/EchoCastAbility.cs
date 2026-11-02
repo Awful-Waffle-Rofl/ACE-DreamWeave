@@ -44,9 +44,9 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "wind-up. The echo is a full second cast with all your bonuses, and Spell AOE can " +
                           "spread it; an echo never echoes. Higher Magic Item Tinkering increases the chance.",
             MaxRank = 3,
-            // premium reprice 2026-09-13: off the 1/2/3 escalator onto flat 2/rank. The buyout total is
-            // unchanged at 6 - rank 3 got CHEAPER (3 -> 2) while ranks 1 and 2 got dearer.
-            CostPerRank = new[] { 2, 2, 2 },
+            // Archmage pass 2026-10-24 (reprice wave 6): 2/rank -> 1/rank. It was 1/2/3 until the 2026-09-13
+            // premium reprice moved it to flat 2/rank.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
             AffinitySkill = Skill.MagicItemTinkering,
         };
@@ -135,6 +135,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         ///    .HandleCastSpell_Projectile); an echo never re-runs that path, so without this copy its basis was
         ///    0 and the echo landed for 0 (SpellProjectile.CalculateDamage: LifeProjectileDamage x
         ///    DamageRatio). The echo pays nothing for it - the drain happened once.
+        ///  - InheritsProcCasterSkill: set when the parent is a Spellsword proc (or an echo of one), so the echo
+        ///    reads Item Enchantment like its parent. IsClassAbilityProc itself is NOT copied (Cascade's gate).
+        ///  - VolatileWallCounter: NOT inherited (CopyPerCastStamps never copies it). The echo keeps the fresh
+        ///    counter its own launch created, so a wall echo ramps Volatile Wall from its own first landed
+        ///    projectile.
         ///  - LifeProjectileStamp: the PARENT's Blood Price multiplier, Blood Charge ramp or Exsanguinate burst,
         ///    and outcome, snapshotted when the parent launched. The live player fields belong to the caster's
         ///    most recent cast, so an echo reading them could take a burst multiplier and resistance-ignore
@@ -148,6 +153,13 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return;
 
             echo.IsEchoCopy = true;
+
+            // An echo of a Spellsword proc reads the proc's caster skill (Item Enchantment) for resist, skill
+            // bonus and imbue scaling, without becoming a proc itself (which would let it cascade).
+            echo.InheritsProcCasterSkill = parent.IsClassAbilityProc || parent.InheritsProcCasterSkill;
+
+            // Volatile Wall: an echo is a SEPARATE cast (owner ruling 2026-10-24). CopyPerCastStamps leaves
+            // VolatileWallCounter alone, so the echo keeps the fresh counter its own launch gave it.
             SpellProjectile.CopyPerCastStamps(echo, parent);
         }
 

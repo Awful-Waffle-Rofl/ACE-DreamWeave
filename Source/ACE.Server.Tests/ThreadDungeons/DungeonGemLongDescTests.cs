@@ -1018,7 +1018,8 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         /// <summary>
         /// Control against phase 1's text: neither closing line a finished gem can carry changed in D4c, and
-        /// neither gained a prefix in P2-R20. Byte-identical, not a substring match.
+        /// neither gained a prefix in P2-R20. Byte-identical, not a substring match. The bound line's tail itself
+        /// was reworded by owner ruling 2026-10-10 (a solo gem now survives the clear).
         /// </summary>
         [TestMethod]
         public void Gem_closing_lines_are_unchanged()
@@ -1028,7 +1029,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             StringAssert.EndsWith(unbound, "\nUnbound. Use it to open a dungeon.");
 
             var bound = ThreadDungeonGemHandler.ComposeLongDesc(Gem().WithBinding(0x80001234u, 0x50000001u), "Filo's Doom", 2, 3, Lookup, ComponentName);
-            StringAssert.EndsWith(bound, "\nBound to Filo's Doom. It crumbles when the dungeon is cleared or its last entry is spent; a death after the clear leaves no way back in.");
+            StringAssert.EndsWith(bound, "\nBound to Filo's Doom. It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes.");
         }
 
         // ---- the LongDesc gap (owner requirement, 2026-09-07) -----------------------------------------

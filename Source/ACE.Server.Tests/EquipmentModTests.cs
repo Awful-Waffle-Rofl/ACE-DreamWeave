@@ -445,6 +445,18 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void ElementalProficiency_IsAFivePercentEffectAmplifierCappedAtFifteen()
+        {
+            var mod = EquipmentModRegistry.Get(EquipmentModId.ElementalRend);
+
+            Assert.AreEqual("Elemental Proficiency", mod.DisplayName);
+            Assert.AreEqual(0.05, mod.MaxMagnitude, 1e-12, "one perfect roll = +5% effect");
+            Assert.AreEqual(3.0, mod.StackCap, 1e-12);
+            Assert.AreEqual("+5% elemental effect", mod.Format(0.05));
+            Assert.AreEqual(0.15, ApplyStackCap(mod, 6.0) * EquipmentModValue.MagnitudePerPotency(mod), 1e-9, "stack cap = +15% effect");
+        }
+
+        [TestMethod]
         public void Format_RendersDisplayUnitsNotHookUnits()
         {
             var deadeye = EquipmentModRegistry.Get(EquipmentModId.Deadeye);
@@ -621,21 +633,24 @@ namespace ACE.Server.Tests
         /// MaxMagnitude was raised from 0.0015 to 0.003 (2026-08-04 normalization), doubling its display
         /// range in proportion, which is what let the format drop from four decimals to the catalog's usual
         /// two: the floor now prints 0.03% and a perfect roll prints 0.3%, both legible at two decimals.
+        /// HALVED back to 0.0015 on 2026-10-24 (Berserker pass: Frenzy's stack caps doubled, so the per-stack
+        /// magnitude halves and the peak is unchanged), with the format back at three decimals: the floor
+        /// prints 0.015% and a perfect roll 0.15%.
         /// </summary>
         [TestMethod]
         public void FrenziedPace_MinimumRollRendersMeaningfulDigits()
         {
             var frenziedPace = EquipmentModRegistry.Get(EquipmentModId.FrenziedPace);
 
-            Assert.AreEqual(0.003, frenziedPace.MaxMagnitude, 1e-12);
+            Assert.AreEqual(0.0015, frenziedPace.MaxMagnitude, 1e-12);
             Assert.AreEqual(100.0, frenziedPace.DisplayScale, 1e-12);
             Assert.AreEqual(EquipmentModRoller.DefaultMinPotency, EquipmentModRoller.MinPotency(frenziedPace), 1e-12);
 
-            Assert.AreEqual("Frenzied Pace [10%]: +0.03% attack speed per Frenzy stack",
+            Assert.AreEqual("Frenzied Pace [10%]: +0.015% attack speed per Frenzy stack",
                 EquipmentModDisplay.Describe(frenziedPace, EquipmentModRoller.MinPotency(frenziedPace)),
                 "the weakest legal Frenzied Pace - this line is what read '+0%' before the original fix");
 
-            Assert.AreEqual("Frenzied Pace [100%]: +0.3% attack speed per Frenzy stack",
+            Assert.AreEqual("Frenzied Pace [100%]: +0.15% attack speed per Frenzy stack",
                 EquipmentModDisplay.Describe(frenziedPace, 1.0), "a perfect roll must not gain spurious trailing zeros");
 
             // control: the OLD three-decimal format is what turned a low roll into a literal 0. Reproduced
@@ -645,8 +660,8 @@ namespace ACE.Server.Tests
                 "control: a resolved value of 0.0004% still rounds to a bare zero at three decimals");
 
             // a legacy sub-floor row (stamped before the floor existed, potency below the current 0.10
-            // minimum) must still render a number under the shipped two-decimal format
-            Assert.AreEqual("Frenzied Pace [3%]: +0.01% attack speed per Frenzy stack", EquipmentModDisplay.Describe(frenziedPace, 0.034),
+            // minimum) must still render a number under the shipped three-decimal format
+            Assert.AreEqual("Frenzied Pace [3%]: +0.005% attack speed per Frenzy stack", EquipmentModDisplay.Describe(frenziedPace, 0.034),
                 "a legacy sub-floor row must still render a number");
         }
 

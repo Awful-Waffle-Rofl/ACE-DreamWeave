@@ -41,6 +41,8 @@ namespace ACE.Database.Models.Shard
 
             ConfigureAccountMuleForm(modelBuilder);
 
+            ConfigureAccountVaultSetting(modelBuilder);
+
             ConfigureAccountCapacityUpgrade(modelBuilder);
 
             ConfigureCharacterFacet(modelBuilder);

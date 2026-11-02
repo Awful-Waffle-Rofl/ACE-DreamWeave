@@ -409,9 +409,66 @@ namespace ACE.Server.Tests
         /// Marketplace (realm 1's copy of Aerfalle Keep), the same entry mule_landblocks defaults to.
         /// </summary>
         [TestMethod]
-        public void Allowlist_ShipsDefaultingToTheMarketplace()
+        public void Allowlist_ShipsDefaultingToTheMarketplaceAndBothNetworkHalls()
         {
-            Assert.AreEqual("01F5@1", DefaultPropertyManager.DefaultStringProperties["account_vault_allowlist"].Item);
+            var shipped = DefaultPropertyManager.DefaultStringProperties["account_vault_allowlist"].Item;
+
+            Assert.AreEqual("01F5@1,0007@0,0007@1", shipped);
+
+            // The shipped string, parsed: Marketplace (realm 1), Town Network (realm 0), Drift Network (realm 1).
+            var list = LandblockRealmList.Parse(shipped, "account_vault_allowlist");
+            Assert.IsTrue(list.Contains(0x01F5, 1, false), "Marketplace");
+            Assert.IsTrue(list.Contains(0x0007, 0, false), "Town Network");
+            Assert.IsTrue(list.Contains(0x0007, 1, false), "Drift Network");
+            Assert.IsFalse(list.Contains(0x01F5, 0, false), "retail Aerfalle Keep stays out");
+        }
+
+        [TestMethod]
+        public void Allowlist_NameShipsNamingEveryPermittedArea()
+        {
+            var name = DefaultPropertyManager.DefaultStringProperties["account_vault_allowlist_name"].Item;
+
+            StringAssert.Contains(name, "Marketplace");
+            StringAssert.Contains(name, "Town Network");
+            StringAssert.Contains(name, "Drift Network");
+            StringAssert.Contains(name, "housing settlement");
+        }
+
+        [TestMethod]
+        public void HousingSetting_ShipsOn()
+        {
+            Assert.IsTrue(DefaultPropertyManager.DefaultBooleanProperties["account_vault_housing_allowed"].Item);
+        }
+
+        [TestMethod]
+        public void HousingSettlement_IsPermittedOutsideTheAllowlist()
+        {
+            PropertyManager.ModifyString("account_vault_allowlist", "01F5@1");
+
+            var location = MakeLocation(0x0090);
+
+            Assert.IsFalse(MuleSummonHandler.IsSummonPermitted(location, out _, _ => false), "no house: refused");
+            Assert.IsTrue(MuleSummonHandler.IsSummonPermitted(location, out var failReason, _ => true), failReason);
+        }
+
+        [TestMethod]
+        public void HousingSettlement_DoesNotReopenADenylistedLandblock()
+        {
+            PropertyManager.ModifyString("account_vault_allowlist", "01F5@1");
+            PropertyManager.ModifyString("account_vault_denylist", "0090");
+
+            var ok = MuleSummonHandler.IsSummonPermitted(MakeLocation(0x0090), out var failReason, _ => true);
+
+            Assert.IsFalse(ok);
+            StringAssert.Contains(failReason, "cannot summon your vault vendor here");
+        }
+
+        [TestMethod]
+        public void NoLoadedLandblock_IsNotAHousingSettlement()
+        {
+            // nothing is loaded in a unit test; the probe must answer no (and must not throw or load one)
+            Assert.IsFalse(MuleSummonHandler.IsHousingSettlement(MakeLocation(0x0090)));
+            Assert.IsFalse(MuleSummonHandler.IsHousingSettlement(null));
         }
 
         /// <summary>
@@ -2096,6 +2153,24 @@ namespace ACE.Server.Tests
 
             Assert.IsTrue(resolved.PropertiesBool[PropertyBool.PersonalVendor],
                 "bool 9049 must survive the clone or the factory returns a plain Vendor");
+        }
+
+        [TestMethod]
+        public void ResolveVendorWeenie_ForTheDarkSarcophagus_WearsTheCoffinStandIn_EvenFromAnOldSavedForm()
+        {
+            // The saved form is per-account by wcid and read at every summon, so a stand-in repairs a
+            // form captured before it existed. The donor's own Setup is unmeasurable here (the fixture
+            // height answers 0 for it): the stand-in path must not need it.
+            var donor = MakeFormDonorWeenie(FormUnmeasurableSetup);
+            donor.WeenieClassId = MuleFormStandIn.DarkSarcophagusWcid;
+
+            var resolved = MuleSummonHandler.ResolveVendorWeenie(
+                MakeFormMuleWeenie(), new MuleFormLook(MuleFormStandIn.DarkSarcophagusWcid, "Dark Sarcophagus"),
+                wcid => wcid == MuleFormStandIn.DarkSarcophagusWcid ? donor : null, FormSetupHeight, FormAccount);
+
+            Assert.AreEqual(0x020000CEu, resolved.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(MuleFormStandIn.CoffinDefaultScale, resolved.PropertiesFloat[PropertyFloat.DefaultScale], 0.0001);
+            Assert.IsTrue(resolved.PropertiesBool[PropertyBool.PersonalVendor]);
         }
 
         [TestMethod]

@@ -944,7 +944,7 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.AdminTell));
         }
 
-        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp | thread | 1v1 | 2v2 | tugak | bg")]
+        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp | thread | title | knot | 1v1 | 2v2 | tugak | bg")]
         public static void HandleTop(Session session, params string[] parameters)
         {
             var player = session.Player;
@@ -977,6 +977,15 @@ namespace ACE.Server.Command.Handlers
                     return;
                 }
 
+                // Best Knot clear per character: highest Knot level, then fastest time (KnotClearRecords).
+                case "knot":
+                case "knots":
+                {
+                    var board = LeaderboardBoardsByKey["knot"];
+                    SendLeaderboard(session, board.Title, board.Score, board.Format, board.TieBreaker, detail: board.Detail);
+                    return;
+                }
+
                 // Speed does NOT go through SendLeaderboard: that method hardcodes OrderByDescending and a
                 // score > 0 filter over PlayerManager, so it can neither serve a lower-is-better board nor
                 // read the speed board cache at all (DESIGN section 6). Its own renderers below reuse every
@@ -993,6 +1002,13 @@ namespace ACE.Server.Command.Handlers
                 case "level":
                 {
                     var board = LeaderboardBoardsByKey["level"];
+                    SendLeaderboard(session, board.Title, board.Score, board.Format, board.TieBreaker);
+                    return;
+                }
+
+                case "deaths":
+                {
+                    var board = LeaderboardBoardsByKey["deaths"];
                     SendLeaderboard(session, board.Title, board.Score, board.Format, board.TieBreaker);
                     return;
                 }
@@ -1076,6 +1092,15 @@ namespace ACE.Server.Command.Handlers
                     return;
                 }
 
+                // titles earned, ties broken by lifetime xp
+                case "title":
+                case "titles":
+                {
+                    var board = LeaderboardBoardsByKey["title"];
+                    SendLeaderboard(session, board.Title, board.Score, board.Format, board.TieBreaker);
+                    return;
+                }
+
                 // PvP arena ladders, ranked by rating: the same board /arena top prints, reachable here
                 // because /top is where players look for leaderboards. "/top 1v1 [count]" passes through.
                 case var ladder when PvpArenaCommands.IsLadderWord(ladder):
@@ -1095,6 +1120,9 @@ namespace ACE.Server.Command.Handlers
                 + "/top cap - Most class ability points earned, lifetime\n"
                 + "/top stamp - Most quest stamps earned by a single character\n"
                 + "/top thread - Highest Thread-Guide rung won, ties broken by lifetime Thread clears\n"
+                + "/top knot - Best Knot clear: highest Knot level, then fastest time\n"
+                + "/top title - Most character titles earned\n"
+                + "/top deaths - Most deaths\n"
                 + "/top 1v1 | 2v2 | tugak | bg - PvP arena ladder, ranked by rating\n";
             session.Network.EnqueueSend(new GameMessageSystemChat(usage, ChatMessageType.System));
         }
@@ -1327,7 +1355,7 @@ namespace ACE.Server.Command.Handlers
 
         [CommandHandler("bank", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Deposit, withdraw, transfer, and check banked currency",
             "deposit|withdraw|transfer|balance ...\n" +
-            "Currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas\n" +
+            "Currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas, m=Marks of the Hopeslayer\n" +
             "/b d                 - deposit everything\n" +
             "/b d p [amount]      - deposit pyreals (all, or an amount like 10k)\n" +
             "/b d pea             - deposit peas (lead through pyreal) as pyreals, at face value\n" +
@@ -1335,7 +1363,8 @@ namespace ACE.Server.Command.Handlers
             "/b w n [value] <cnt> - withdraw trade notes (value defaults to 250000)\n" +
             "/b w k <uses>       - withdraw legendary keys; the amount is in USES, paid as 10-use Durable keys + 1-use Aged keys\n" +
             "/b w pn <amount>     - withdraw promissory notes\n" +
-            "/b t p|k|pn <amount> <char> - transfer to another character\n" +
+            "/b w m <amount>      - withdraw Marks of the Hopeslayer\n" +
+            "/b t p|k|pn <amount> <char> - transfer to another character (Marks are bonded and cannot be transferred)\n" +
             "/b ad [on|off]       - vendor sale proceeds to the bank (on) or as coins in your pack (off)\n" +
             "/b                   - show balances\n" +
             "Luminance can be deposited but not withdrawn or transferred.")]
@@ -1420,10 +1449,11 @@ namespace ACE.Server.Command.Handlers
         {
             var player = session.Player;
             session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Your balances:", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Pyreals (shared by every character on this account): {player.BankedPyreals:N0}", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Pyreals (shared by every character on this account): {player.BankedPyreals:N0} ({Player.FormatMmdEquivalent(player.BankedPyreals)} MMD)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Luminance: {player.BankedLuminance:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Legendary Keys: {player.BankedLegendaryKeys:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Promissory Notes: {player.BankedPromissoryNotes:N0}", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Marks of the Hopeslayer: {player.BankedHopeslayerMarks:N0}", ChatMessageType.System));
 
             if (PropertyManager.GetBool("offline_bonus_enabled").Item)
                 session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Offline Bonus Time: {player.OfflineExperienceBonusDisplay}", ChatMessageType.System));
@@ -1437,16 +1467,17 @@ namespace ACE.Server.Command.Handlers
 
         private static void ShowBankHelp(Session session)
         {
-            session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Bank commands (currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas):", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Bank commands (currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas, m=Marks of the Hopeslayer):", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b                   - show balances", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d                 - deposit everything", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat("/b d p|l|k|pn|n|pea [amt] - deposit one currency (amount optional)", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b d p|l|k|pn|n|pea|m [amt] - deposit one currency (amount optional)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d pea             - bank peas (lead through pyreal) as pyreals at face value", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w p <amount>      - withdraw pyreals (as 250k notes + coins)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w n [value] <cnt> - withdraw trade notes (value defaults to 250000)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w k <uses>       - withdraw legendary keys; the amount is in USES, paid as 10-use Durable keys + 1-use Aged keys", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w pn <amount>     - withdraw promissory notes", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat("/b t p|k|pn <amount> <char> - transfer to another character", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b w m <amount>      - withdraw Marks of the Hopeslayer", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b t p|k|pn <amount> <char> - transfer to another character (Marks of the Hopeslayer are bonded and cannot be transferred)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b ad [on|off]       - vendor sale proceeds to the bank (on) or as coins in your pack (off)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("Luminance can be deposited but not withdrawn or transferred. Amounts accept k/m/b suffixes (e.g. 10k).", ChatMessageType.System));
         }
@@ -1468,10 +1499,11 @@ namespace ACE.Server.Command.Handlers
                 case "l": case "luminance": player.DepositLuminance(amount); break;
                 case "k": case "keys": player.DepositLegendaryKeys(); break;
                 case "pn": case "promissory": case "promissorynotes": player.DepositPromissoryNotes(); break;
+                case "m": case "mark": case "marks": player.DepositHopeslayerMarks(amount); break;
                 case "n": case "notes": player.DepositTradeNotes(); break;
                 case "pea": case "peas": player.DepositPeas(); break;
                 default:
-                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, l, k, pn, n, or pea.", ChatMessageType.System));
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, l, k, pn, n, pea, or m.", ChatMessageType.System));
                     break;
             }
         }
@@ -1561,13 +1593,20 @@ namespace ACE.Server.Command.Handlers
                     player.WithdrawPromissoryNotes(pnAmt);
                     break;
 
+                case "m":
+                case "mark":
+                case "marks":
+                    if (parameters.Length < 3 || !Player.TryParseAmount(parameters[2], out var mAmt)) { player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Usage: /b w m <amount>", ChatMessageType.System)); return; }
+                    player.WithdrawHopeslayerMarks(mAmt);
+                    break;
+
                 case "l":
                 case "luminance":
                     player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Luminance cannot be withdrawn.", ChatMessageType.System));
                     break;
 
                 default:
-                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, n, k, or pn.", ChatMessageType.System));
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, n, k, pn, or m.", ChatMessageType.System));
                     break;
             }
         }
@@ -1579,6 +1618,14 @@ namespace ACE.Server.Command.Handlers
 
         private static void HandleBankTransfer(Player player, string cur, string[] parameters)
         {
+            // Marks of the Hopeslayer are bonded: refuse before the usage, amount and target checks so the player
+            // always hears why, whatever else they typed.
+            if (Player.TryGetBankTransferRefusal(cur, out var refusal))
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] {refusal}", ChatMessageType.System));
+                return;
+            }
+
             // /b t <currency> <amount> <char...>
             if (parameters.Length < 4)
             {

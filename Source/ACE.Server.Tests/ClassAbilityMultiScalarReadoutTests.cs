@@ -18,7 +18,14 @@ namespace ACE.Server.Tests
     /// WeakenedBlood/BloodPrice there - a REAL check of GetReadout's actual .Secondary contents, not a
     /// restatement.
     ///
-    /// EmpoweredSummons, Hemomancy, Taunt and Soul Jump all call a live-Player affinity method WITHOUT a
+    /// (Hemomancy was one of the seven until the Blood Mage buff pass reworked it into a heal-armed damage
+    /// buff with a single, null-Player-safe readout; it is now exercised through GetReadout(null, rank).)
+    ///
+    /// (Taunt was one of these until 2026-10-17, when it lost its Assess Person affinity: its GetReadout no
+    /// longer calls any Player method but the null-conditional gear reads, so it is exercised through
+    /// GetReadout(null, rank) below like Hemomancy.)
+    ///
+    /// EmpoweredSummons and Soul Jump call a live-Player affinity method WITHOUT a
     /// null-conditional on their PRIMARY term (pre-existing, unchanged by this pass), so their GetReadout
     /// cannot run here AT ALL, not even with the FormatterServices.GetUninitializedObject "inert Player"
     /// trick this assembly uses elsewhere (SalvageCombineTests.cs, MuleSummonTests.cs) for Player methods
@@ -31,10 +38,10 @@ namespace ACE.Server.Tests
     /// A LIVE PLAYER CANNOT BE BUILT AT ALL IN THIS TEST PROJECT (Player's constructor makes an
     /// unconditional live ace_auth round-trip - see MuleCommerceTests.cs's class remarks, independently
     /// re-confirmed there twice already), so "exercise the real GetReadout" is not achievable for these
-    /// four abilities by any means available in this suite.
+    /// two abilities by any means available in this suite.
     ///
     /// The closest honest substitute: EmpoweredSummonsAbility.DurationSecondary and
-    /// TauntAbility.RadiusSecondary are the ACTUAL pure factory methods GetReadout calls for those two
+    /// TauntAbility.RadiusSecondary are the ACTUAL pure factory methods GetReadout calls for those
     /// segments (not restatements of their arithmetic - see each ability file's own doc comment), so
     /// calling them directly here exercises the exact same code GetReadout would run, missing only the
     /// live-Player plumbing that resolves their inputs (the duration/gear multiplier). Hemomancy and Soul
@@ -182,28 +189,50 @@ namespace ACE.Server.Tests
             Assert.AreEqual("pet duration", readout.Label);
         }
 
-        // ---- Hemomancy: drain secondary ---------------------------------------------------------------
+        // ---- Hemomancy: single scalar after the rework (the drain secondary is gone) -----------------
 
         [TestMethod]
-        public void Hemomancy_DrainMultiplier_MatchesTickMultiplierShapeAtEachRank()
+        public void Hemomancy_Readout_IsNullPlayerSafe_ReportsDamageLadder_WithNoSecondary()
         {
-            const double perRank = 0.02; // class_ability_hemomancy_drain_percent_per_rank default
+            var ability = new HemomancyAbility();
 
-            for (var rank = 1; rank <= 5; rank++)
+            for (var rank = 0; rank <= 5; rank++)
             {
-                var expected = 1.0 + rank * perRank;
-                Assert.AreEqual(expected, HemomancyAbility.DrainMultiplier(rank, perRank, affinityRider: 0.0), 1e-6,
-                    $"rank {rank}");
+                var readout = ability.GetReadout(null, rank);
+
+                Assert.AreEqual(rank * 2.0, readout.Effective, 1e-9, $"rank {rank}");
+                Assert.AreEqual(0.0, readout.Affinity, 1e-9, $"rank {rank}");
+                Assert.IsNull(readout.Secondary, "Hemomancy no longer reports a Drain secondary");
             }
         }
 
-        [TestMethod]
-        public void Hemomancy_DrainMultiplier_RankZero_IsNeutral()
-        {
-            Assert.AreEqual(1.0f, HemomancyAbility.DrainMultiplier(0, 0.02, affinityRider: 0.5));
-        }
-
         // ---- Taunt: radius secondary -------------------------------------------------------------------
+
+        // GetReadout is null-Player safe since 2026-10-17 (no affinity call), so this is the REAL readout.
+        [TestMethod]
+        public void Taunt_Readout_NullPlayer_ReportsFlatDurationAndTheRankRadius()
+        {
+            var ability = new TauntAbility();
+            var expectedRadii = new[] { 15.0, 30.0, 65.0 };
+            var baseDuration = PropertyManager.GetDouble("class_ability_taunt_duration").Item;
+
+            for (var rank = 1; rank <= 3; rank++)
+            {
+                var readout = ability.GetReadout(null, rank);
+
+                Assert.IsTrue(readout.HasValue, $"rank {rank}");
+                Assert.AreEqual("s", readout.Unit, $"rank {rank}");
+                Assert.AreEqual(baseDuration, readout.Effective, 1e-9, $"rank {rank}: the duration is flat across ranks");
+                Assert.AreEqual(0.0, readout.Affinity, 1e-9, $"rank {rank}: no affinity");
+                Assert.IsNull(readout.CapNote, $"rank {rank}: no cap");
+
+                Assert.AreEqual(1, readout.Secondary.Count, $"rank {rank}");
+                Assert.AreEqual("radius", readout.Secondary[0].Label);
+                Assert.AreEqual("m", readout.Secondary[0].Unit);
+                Assert.AreEqual(expectedRadii[rank - 1], readout.Secondary[0].Effective, 1e-9, $"rank {rank}: radius");
+                Assert.AreEqual(0.0, readout.Secondary[0].Gear, 1e-9, $"rank {rank}: null player carries no gear");
+            }
+        }
 
         [TestMethod]
         public void Taunt_EffectiveRadius_SumsBaseAndBellowGearWithNoClamp()
@@ -224,7 +253,7 @@ namespace ACE.Server.Tests
         }
 
         // RadiusSecondary is the ACTUAL pure factory GetReadout calls (TauntAbility.cs's own GetReadout
-        // does `RadiusSecondary(baseRadius, radiusGear)` - not restated here).
+        // does `RadiusSecondary(RadiusForRank(rank), radiusGear)` - not restated here).
 
         [TestMethod]
         public void Taunt_RadiusSecondary_ReportsBaseAndGearInMetresWithNoAffinity()

@@ -699,6 +699,33 @@ namespace ACE.Server.Tests.Pvp
         }
 
         /// <summary>
+        /// pvp_bg_ring_dmg sits right beside the Tugak ring call: after the war/void-vs-life branch split (so a Life ring is covered), fed the
+        /// projectile's own ring shape, before the debug readout, with no early return before the final return.
+        /// </summary>
+        [TestMethod]
+        public void CallSite_BgRingDmg_SitsBesideTheFfaRingCall_AfterTheBranchSplit()
+        {
+            var projectile = RepoSource("WorldObjects", "SpellProjectile.cs").Replace("\r\n", "\n");
+
+            const string ffaCall = "PvpArenaOneVOneRules.ApplyFfaRingDmg(source, target, SpellType == ProjectileSpellType.Ring, finalDamage);";
+            const string bgCall = "PvpArenaOneVOneRules.ApplyBgRingDmg(source, target, SpellType == ProjectileSpellType.Ring, finalDamage);";
+            StringAssert.Contains(projectile, bgCall);
+
+            var ffaAt = projectile.IndexOf(ffaCall, StringComparison.Ordinal);
+            var callAt = projectile.IndexOf(bgCall, StringComparison.Ordinal);
+            var bgModAt = projectile.IndexOf("PvpArenaOneVOneRules.ApplyDmgModBg(source, target, finalDamage);", StringComparison.Ordinal);
+            var debugAt = projectile.IndexOf("// show debug info", callAt, StringComparison.Ordinal);
+
+            Assert.IsTrue(ffaAt >= 0 && bgModAt >= 0 && debugAt > callAt, "anchors must exist");
+            Assert.IsTrue(callAt > ffaAt && callAt > bgModAt, "the battleground ring call must come after the war/void branch and the Tugak ring call");
+            StringAssert.Contains(projectile.Substring(bgModAt, callAt - bgModAt), "\n            }\n", "the war/void else-branch must close before the ring call");
+
+            var returnAt = projectile.IndexOf("return finalDamage;", callAt, StringComparison.Ordinal);
+            Assert.IsTrue(returnAt > callAt, "CalculateDamage must still return finalDamage after the ring call");
+            Assert.IsFalse(projectile.Substring(callAt, returnAt - callAt).Contains("return "), "no early return may sit between the ring call and the final return");
+        }
+
+        /// <summary>
         /// F2: a hit between two Countdown players (a pre-cast vuln) still stamps both PK timestamps and so applies the
         /// dispel-vuln lock, but does not reach the rare-buff strip (RB1 is never even consulted). Live is unchanged: RB1 is consulted.
         /// </summary>

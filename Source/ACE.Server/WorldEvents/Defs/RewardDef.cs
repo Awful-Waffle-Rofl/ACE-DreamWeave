@@ -95,5 +95,29 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("coalWcid")]
         public uint CoalWcid { get; set; }
+
+        /// <summary>
+        /// The presence-payout pool: weighted entries a player's reward multiplier rolls against
+        /// (WorldEventRewardRoller). Empty, the default, means the axis has no presence payout. Entries that
+        /// fail validation are dropped individually at load; the reward profile itself is always kept.
+        /// </summary>
+        [JsonPropertyName("pool")]
+        public List<RewardPoolEntryDef> Pool { get; set; } = new List<RewardPoolEntryDef>();
+
+        /// <summary>
+        /// Bonus crates handed to a crate claimant AFTER the primary crate, inside the same claim lock
+        /// (WorldEventClaimRules.ResolveExtras). A coal claimant never gets them. The claim needs 1 + N free pack
+        /// slots up front; without them nothing is given and the claim stays retryable. Empty, the default,
+        /// means no extras and an unchanged claim. Zero entries are skipped.
+        /// </summary>
+        [JsonPropertyName("bonusCrateWcids")]
+        public List<uint> BonusCrateWcids { get; set; } = new List<uint>();
+
+        /// <summary>
+        /// When true, <see cref="BonusCrateWcids"/> pay only on a chain's final stage. A run that is not part of a
+        /// chain counts as its own final stage. Default false.
+        /// </summary>
+        [JsonPropertyName("bonusFinalStageOnly")]
+        public bool BonusFinalStageOnly { get; set; }
     }
 }

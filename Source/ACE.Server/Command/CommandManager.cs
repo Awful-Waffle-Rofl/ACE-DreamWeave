@@ -69,8 +69,16 @@ namespace ACE.Server.Command
             if (commandInfo == null || commandInfo.Attribute.Access <= AccessLevel.Player)
                 return;
 
-            var command = commandInfo.Attribute.Command;
+            LogCommandAudit(session, commandInfo.Attribute.Command, commandInfo.Attribute.Access, parameters, sudo);
+        }
 
+        /// <summary>
+        /// The [CMD_AUDIT] line itself, with an explicit access label. A handler registered at Player level that gates some
+        /// of its subcommands internally (/sky-decor) calls this for the privileged ones, since the dispatch-time audit
+        /// skips every Player-level command. Does no access check of its own.
+        /// </summary>
+        public static void LogCommandAudit(Session session, string command, AccessLevel accessLabel, string[] parameters, bool sudo)
+        {
             var paramText = FormatAuditParameters(command, parameters);
 
             // A web console run names the web ACCOUNT (PLAN-P4.md invariant 12); with no web context the
@@ -88,7 +96,7 @@ namespace ACE.Server.Command
             else
                 who = "<console>";
 
-            log.Info($"[CMD_AUDIT] {who} [{commandInfo.Attribute.Access}]{(sudo ? " (sudo)" : "")} @{command} {paramText}".TrimEnd());
+            log.Info($"[CMD_AUDIT] {who} [{accessLabel}]{(sudo ? " (sudo)" : "")} @{command} {paramText}".TrimEnd());
         }
 
         public static bool TryAddCommand(MethodInfo handler, string command, AccessLevel access, CommandHandlerFlag flags = CommandHandlerFlag.None, string description = "", string usage = "", bool overrides = true)

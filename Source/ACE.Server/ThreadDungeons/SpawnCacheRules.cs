@@ -19,7 +19,8 @@ namespace ACE.Server.ThreadDungeons
         public const string NotInsideMessage = "You must be inside your Thread to use this.";
         public const string NotCompleteMessage = "Your Thread is not complete yet.";
         public const string CooldownMessage = "Please wait before using /spawncache again.";
-        public const string FormingMessage = "Your Thread Cache is already forming.";
+        // The placement latch is per run, so in a group it may be another member's cache that is forming.
+        public const string FormingMessage = "A Thread Cache is already forming. Try again shortly.";
         public const string EmptyMessage = "Your Thread Cache is empty.";
 
         public static SpawnCacheRefusal FirstRefusal(bool ownsLiveRun, bool insideRunInstance, ThreadDungeonRunState state,
@@ -60,7 +61,10 @@ namespace ACE.Server.ThreadDungeons
             }
         }
 
-        /// <summary>Unclaimed loot: form a cache at the player and fill it. Otherwise: move the placed caches.</summary>
+        /// <summary>
+        /// Unclaimed loot: Summon, which moves the placed caches to the player AND forms new caches for the unclaimed loot.
+        /// Otherwise: Move, which only moves the placed caches.
+        /// </summary>
         public static CacheRequestMode ModeFor(bool hasUnclaimedLoot)
             => hasUnclaimedLoot ? CacheRequestMode.Summon : CacheRequestMode.Move;
     }

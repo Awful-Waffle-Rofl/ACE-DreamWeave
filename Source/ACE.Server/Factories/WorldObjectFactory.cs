@@ -10,6 +10,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -412,6 +413,10 @@ namespace ACE.Server.Factories
                 GuidManager.RecycleDynamicGuid(guid);
                 return null;
             }
+
+            // Per-copy creation roll (PropertyString.CreationRollSpec): roll this copy's stats and strip the spec.
+            // Must run BEFORE the stamp below so a rolled gear rating is recorded as born-with.
+            CreationRoll.Apply(worldObject);
 
             // Equipment mods: record the gear ratings this item is BORN with, while it still has no owner
             // and no history. Everything a player can be handed passes through here - vendor stock and NPC

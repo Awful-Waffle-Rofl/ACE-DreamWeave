@@ -1,3 +1,8 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.CompilerServices;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Entity.Enum;
@@ -131,5 +136,158 @@ namespace ACE.Server.Tests
 
             Assert.IsFalse(attacker.MonsterEffectStates[0].Announced, "the master switch must stop dispatch before the handler ever rolls");
         }
-    }
+
+        [TestMethod]
+        public void Restart_SupersededTickDealsNothingAndLeavesTheCurrentKeyIntact()
+        {
+            var attacker = TestCreatures.CreateAttacker();
+            var defender = TestCreatures.CreateDefender();
+            var guid = defender.Guid.Full;
+
+            var first = DotEffect.BeginDot(attacker, guid);
+            var second = DotEffect.BeginDot(attacker, guid);
+            var healthBefore = defender.Health.Current;
+
+            var outcome = DotEffect.RunTick(attacker, defender, DamageType.Acid, 5, 3, first);
+
+            Assert.AreEqual(DotEffect.TickOutcome.Superseded, outcome, "the old chain must quit once a newer proc restarts the DoT");
+            Assert.AreEqual(healthBefore, defender.Health.Current, "a superseded tick must deal no damage");
+            Assert.IsTrue(DotEffect.IsCurrent(attacker, guid, second), "the superseded tick must not touch the current key");
+
+            var current = DotEffect.RunTick(attacker, defender, DamageType.Acid, 5, 3, second);
+
+            Assert.AreEqual(DotEffect.TickOutcome.Dealt, current, "the current chain keeps ticking");
+            Assert.IsTrue(defender.Health.Current < healthBefore, "the current tick deals its damage");
+        }
+
+        [TestMethod]
+        public void Restart_LastTickFinishesAndRemovesTheKey()
+        {
+            var attacker = TestCreatures.CreateAttacker();
+            var defender = TestCreatures.CreateDefender();
+            var guid = defender.Guid.Full;
+
+            var token = DotEffect.BeginDot(attacker, guid);
+
+            Assert.AreEqual(DotEffect.TickOutcome.Finished, DotEffect.RunTick(attacker, defender, DamageType.Acid, 5, 1, token));
+            Assert.AreEqual(0, DotEffect.ActiveDotCount(attacker), "a naturally ended chain must not leak its key");
+        }
+
+        [TestMethod]
+        public void Restart_SupersededChainEndingDoesNotEvictTheNewerDot()
+        {
+            var attacker = TestCreatures.CreateAttacker();
+            var guid = 0xB0000001u;
+
+            var first = DotEffect.BeginDot(attacker, guid);
+            var second = DotEffect.BeginDot(attacker, guid);
+
+            DotEffect.EndDot(attacker, guid, first);
+
+            Assert.IsTrue(DotEffect.IsCurrent(attacker, guid, second));
+        }
+
+        [TestMethod]
+        public void Restart_DifferentAttackersDoNotSupersedeEachOther()
+        {
+            var attackerA = TestCreatures.CreateAttacker();
+            var attackerB = TestCreatures.CreateAttacker();
+            var guid = 0xB0000002u;
+
+            var a = DotEffect.BeginDot(attackerA, guid);
+            var b = DotEffect.BeginDot(attackerB, guid);
+
+            Assert.IsTrue(DotEffect.IsCurrent(attackerA, guid, a), "attacker A's DoT survives attacker B's proc on the same defender");
+            Assert.IsTrue(DotEffect.IsCurrent(attackerB, guid, b));
+        }
+
+        [TestMethod]
+        public void Restart_TokenStoreIsMonotonic()
+        {
+            var attacker = TestCreatures.CreateAttacker();
+            var guid = 0xB0000003u;
+
+            var token = DotEffect.BeginDot(attacker, guid);
+            DotEffect.EndDot(attacker, guid, token);
+            var next = DotEffect.BeginDot(attacker, guid);
+
+            Assert.IsTrue(next > token, "tokens only grow, so a stale token can never match a later key");
+        }
+
+        [TestMethod]
+        public void Restart_ASecondProcOnTheSamePairChangesTheCurrentToken()
+        {
+            Assert.IsTrue(PropertyManager.ModifyDouble("monster_effect_proc_chance_cap", 1.0));
+
+            var attacker = TestCreatures.CreateAttacker();
+            var defender = TestCreatures.CreateDefender();
+            var guid = defender.Guid.Full;
+            var damageEvent = new DamageEvent { Damage = 10.0f, CombatType = CombatType.Melee };
+
+            attacker.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("type=acid amount=10 chance=1.0"))));
+
+            attacker.ApplyOutgoingHitMonsterEffects(defender, damageEvent);
+            var first = DotEffect.CurrentToken(attacker, guid);
+            Assert.AreNotEqual(0L, first, "the first proc registers a DoT for the pair");
+
+            attacker.ApplyOutgoingHitMonsterEffects(defender, damageEvent);
+            var second = DotEffect.CurrentToken(attacker, guid);
+
+            Assert.AreNotEqual(first, second, "the second proc must restart the DoT with a fresh token");
+            Assert.AreEqual(1, DotEffect.ActiveDotCount(attacker), "one key per pair");
+        }
+
+        [TestMethod]
+        public void Restart_BookkeepingIsCollectedWithTheAttacker()
+        {
+            var weak = RegisterOnAThrowawayAttacker();
+
+            for (var i = 0; i < 3 && weak.IsAlive; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+
+            Assert.IsFalse(weak.IsAlive, "a monster that dies before its last tick must not be kept alive by the DoT bookkeeping");
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static WeakReference RegisterOnAThrowawayAttacker()
+        {
+            var attacker = TestCreatures.CreateAttacker();
+            DotEffect.BeginDot(attacker, 0xB0000004u);
+            return new WeakReference(attacker);
+        }
+
+        [TestMethod]
+        public void NotificationSuppression_IsPassedOnlyByTheTwoRiderEffects()
+        {
+            string serverDir = null;
+            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null && serverDir == null; dir = dir.Parent)
+            {
+                var candidate = Path.Combine(dir.FullName, "Source", "ACE.Server");
+                if (Directory.Exists(candidate))
+                    serverDir = candidate;
+            }
+
+            Assert.IsNotNull(serverDir, $"Could not find Source/ACE.Server by walking up from {AppContext.BaseDirectory}.");
+
+            var sep = Path.DirectorySeparatorChar;
+            var hits = new List<string>();
+
+            foreach (var file in Directory.EnumerateFiles(serverDir, "*.cs", SearchOption.AllDirectories))
+            {
+                if (file.Contains($"{sep}obj{sep}") || file.Contains($"{sep}bin{sep}"))
+                    continue;
+
+                if (File.ReadAllText(file).Contains("sendDefenderNotification: false", StringComparison.Ordinal))
+                    hits.Add(Path.GetFileName(file));
+            }
+
+            hits.Sort(StringComparer.Ordinal);
+
+            CollectionAssert.AreEqual(new[] { "DotEffect.cs", "FlatDamageEffect.cs" }, hits,
+                "only the flat-damage and DoT riders (which send their own chat line) may suppress the generic defender notification");
+        }    }
 }

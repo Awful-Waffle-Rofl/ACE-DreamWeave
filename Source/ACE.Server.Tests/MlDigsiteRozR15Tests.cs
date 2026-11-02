@@ -299,7 +299,7 @@ namespace ACE.Server.Tests
         {
             var sql = PooledLootSourceText.Read("Content/sql/weenies/1003255 Drumspeaker of Greenspire.sql");
 
-            StringAssert.Contains(sql, "VALUES (1003255, 2,     348, -1, 0, 0, False)");
+            StringAssert.Contains(sql, "VALUES (1003255, 2, 1007361, -1, 0, 0, False)", "Aun War-Spear (a Spear clone, PR #1745)");
             StringAssert.Contains(sql, "/* LightWeapons        Specialized */", "the spear must be a weapon it is skilled in");
             Assert.IsFalse(Regex.IsMatch(sql, @"\(1003255, 2, 1002906,"), "Buadren must not be in its create list: it has no spells");
         }
@@ -309,7 +309,7 @@ namespace ACE.Server.Tests
         {
             var sql = PooledLootSourceText.Read("Content/sql/weenies/1003672 Tureia the Underbeat.sql");
 
-            StringAssert.Contains(sql, "VALUES (1003672, 2,     301, -1, 0, 0, False) /* wield */");
+            StringAssert.Contains(sql, "VALUES (1003672, 2, 1007352, -1, 0, 0, False) /* wield */", "Aun War-Axe (a Battle Axe clone, PR #1745)");
             Assert.IsFalse(sql.Contains("1002906"), "Buadren (a Held caster) must not be in Tureia's create list: she has no spells");
             StringAssert.Contains(sql, "/* HeavyWeapons       Specialized */", "the axe must be a weapon she is skilled in");
         }

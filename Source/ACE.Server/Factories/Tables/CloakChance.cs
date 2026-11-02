@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 using ACE.Common;
@@ -146,6 +147,50 @@ namespace ACE.Server.Factories.Tables
                 return SpellId.Undef;
 
             return surgeSpells[rng];
+        }
+
+        /// <summary>
+        /// The upgraded Knot cloak's proc pool (ACE.Server.KnotLoot.UpgradedCloak): the retail pool with each surge
+        /// ring at level II, Cloaked in Skill and the three Shrouds unchanged. Eye of the Storm II is 6194, never the
+        /// duplicate EyeOfTheStormIIAlt (6197). Together with damage reduction this is 13 equal outcomes, the same
+        /// shape as <see cref="RollProcSpell"/>.
+        /// </summary>
+        public static readonly IReadOnlyList<SpellId> UpgradedSurgeSpells = new List<SpellId>()
+        {
+            SpellId.SearingDiscII,          // 6189
+            SpellId.HorizonsBladesII,       // 6190
+            SpellId.CassiusRingOfFireII,    // 6191
+            SpellId.NuhmudirasSpinesII,     // 6192
+            SpellId.HaloOfFrostII,          // 6193
+            SpellId.EyeOfTheStormII,        // 6194
+            SpellId.TectonicRiftsII,        // 6196
+            SpellId.CloudedSoulII,          // 6195
+
+            SpellId.CloakAllSkill,          // Cloaked in Skill
+
+            SpellId.CloakMagicDLower,       // Shroud of Darkness (Magic)
+            SpellId.CloakMeleeDLower,       // Shroud of Darkness (Melee)
+            SpellId.CloakMissileDLower,     // Shroud of Darkness (Missile)
+        };
+
+        /// <summary>
+        /// Pure: the upgraded proc for a draw <paramref name="r"/> in [0,1). Outcome i = floor(r x 13), clamped; the
+        /// last outcome is damage reduction (SpellId.Undef). NaN or negative reads as 0.
+        /// </summary>
+        public static SpellId RollUpgradedProcSpell(double r)
+        {
+            var outcomes = UpgradedSurgeSpells.Count + 1;
+
+            if (double.IsNaN(r) || r < 0)
+                r = 0;
+
+            var index = (int)Math.Min(Math.Floor(r * outcomes), outcomes - 1);
+
+            // handle Damage Reduction proc
+            if (index == UpgradedSurgeSpells.Count)
+                return SpellId.Undef;
+
+            return UpgradedSurgeSpells[index];
         }
     }
 }

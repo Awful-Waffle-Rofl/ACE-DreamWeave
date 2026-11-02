@@ -371,7 +371,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         private static string PlaceBody()
         {
             var src = PooledLootSourceText.Read(SpawnerPath);
-            var start = src.IndexOf("var upliftAttributes = UpliftsAttributes(", System.StringComparison.Ordinal);
+            // An archetype-uplifted creature raises its attributes through ArchetypeUplift instead (dynamic_dungeons_archetype_uplift).
+            var start = src.IndexOf("var upliftAttributes = archetypeInfo == null && UpliftsAttributes(", System.StringComparison.Ordinal);
             Assert.IsTrue(start >= 0, "the spawner must compute upliftAttributes through UpliftsAttributes");
             return src.Substring(start);
         }
@@ -421,7 +422,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var body = PlaceBody();
 
-            var uplift = body.IndexOf("ApplyUplift(run, creature, entry, plan, ownLevel, spellsRaised, attributesRaised, upliftAttributes);", System.StringComparison.Ordinal);
+            // logTag since 2026-10-22: PrepareForPlacement runs with no run when a speed course shapes a creature (ShapeCreature).
+            var uplift = body.IndexOf("ApplyUplift(logTag, creature, entry, plan, ownLevel, spellsRaised, attributesRaised, upliftAttributes);", System.StringComparison.Ordinal);
             var runMult = body.IndexOf("runSkill.InitLevel = (uint)Math.Clamp(Math.Round(runSkill.InitLevel * plan.RunSpeedMult)", System.StringComparison.Ordinal);
 
             Assert.IsTrue(uplift >= 0 && runMult >= 0, "both anchors must exist");
@@ -459,6 +461,223 @@ namespace ACE.Server.Tests.ThreadDungeons
             StringAssert.Contains(body, "creature.GetCreatureSkill(Skill.Run, false)");
             Assert.IsFalse(body.Contains("creature.GetCreatureSkill(Skill.Run)"),
                 "the default overload ADDS an Untrained Run row at InitLevel 0 (and a Run-less creature must not get one)");
+        }
+
+        // ---- the archetype uplift's three tunables (2026-10-23) ---------------------------------------------
+
+        private const string ArchetypeSwitch = "dynamic_dungeons_archetype_uplift";
+        private const string OffenseRatioKey = "dynamic_dungeons_uplift_offense_ratio";
+        private const string DefenseRatioKey = "dynamic_dungeons_uplift_defense_ratio";
+
+        [TestMethod]
+        public void The_archetype_uplift_tunables_are_registered_ship_on_and_neutral_and_match_the_compiled_defaults()
+        {
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties.ContainsKey(ArchetypeSwitch));
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties[ArchetypeSwitch].Item, "a new server setting ships ON");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultArchetypeUplift, ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties[ArchetypeSwitch].Item);
+
+            foreach (var key in new[] { OffenseRatioKey, DefenseRatioKey })
+            {
+                Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties.ContainsKey(key), key);
+                Assert.AreEqual(1.0, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[key].Item, 1e-12, $"{key}: 1 is the standard itself");
+            }
+
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftOffenseRatio, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[OffenseRatioKey].Item, 1e-12);
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftDefenseRatio, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[DefenseRatioKey].Item, 1e-12);
+
+            // The limits' own defaults carry the same values when a caller names none.
+            var limits = new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5);
+            Assert.AreEqual(DungeonPopulationLimits.DefaultArchetypeUplift, limits.ArchetypeUplift);
+            Assert.AreEqual(1.0, limits.UpliftOffenseRatio, 1e-12);
+            Assert.AreEqual(1.0, limits.UpliftDefenseRatio, 1e-12);
+        }
+
+        [TestMethod]
+        public void The_archetype_uplift_tunables_take_a_live_override_and_are_restored()
+        {
+            try
+            {
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyBool(ArchetypeSwitch, false), "ModifyBool returned false: key not registered");
+                Assert.IsFalse(ACE.Server.Managers.PropertyManager.GetBool(ArchetypeSwitch, true).Item);
+
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(OffenseRatioKey, 1.5), "ModifyDouble returned false: key not registered");
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(DefenseRatioKey, 0.75));
+                Assert.AreEqual(1.5, ACE.Server.Managers.PropertyManager.GetDouble(OffenseRatioKey, 1.0).Item, 1e-12);
+                Assert.AreEqual(0.75, ACE.Server.Managers.PropertyManager.GetDouble(DefenseRatioKey, 1.0).Item, 1e-12);
+            }
+            finally
+            {
+                ACE.Server.Managers.PropertyManager.ModifyBool(ArchetypeSwitch, DungeonPopulationLimits.DefaultArchetypeUplift);
+                ACE.Server.Managers.PropertyManager.ModifyDouble(OffenseRatioKey, DungeonPopulationLimits.DefaultUpliftOffenseRatio);
+                ACE.Server.Managers.PropertyManager.ModifyDouble(DefenseRatioKey, DungeonPopulationLimits.DefaultUpliftDefenseRatio);
+            }
+        }
+
+        [TestMethod]
+        public void An_uplift_ratio_is_sanitized_to_its_default_and_capped_at_the_ceiling()
+        {
+            const double Max = DungeonPopulationLimits.MaxUpliftRatio;
+
+            Assert.AreEqual(5.0, Max, 1e-12, "the ceiling the tunable descriptions document");
+            Assert.AreEqual(Max, ThreadDungeonSpawner.SanitizeDoubleDial(100.0, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(-1.0, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(double.NaN, 1.0, Max), 1e-12);
+            Assert.AreEqual(0.0, ThreadDungeonSpawner.SanitizeDoubleDial(0.0, 1.0, Max), 1e-12, "0 is the documented 'leave the axis authored'");
+            Assert.AreEqual(1.25, ThreadDungeonSpawner.SanitizeDoubleDial(1.25, 1.0, Max), 1e-12);
+        }
+
+        [TestMethod]
+        public void The_archetype_cap_is_registered_at_its_compiled_default_and_sanitized_to_its_ceiling()
+        {
+            const string CapKey = "dynamic_dungeons_uplift_archetype_cap";
+
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties.ContainsKey(CapKey));
+            Assert.AreEqual(1.25, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[CapKey].Item, 1e-12, "orchestrator ruling 2026-10-23");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftArchetypeCap, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[CapKey].Item, 1e-12);
+            Assert.AreEqual(1.25, new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5).UpliftArchetypeCap, 1e-12);
+
+            const double Max = DungeonPopulationLimits.MaxUpliftArchetypeCap;
+            Assert.AreEqual(Max, ThreadDungeonSpawner.SanitizeDoubleDial(50.0, 1.25, Max), 1e-12);
+            Assert.AreEqual(1.25, ThreadDungeonSpawner.SanitizeDoubleDial(-1.0, 1.25, Max), 1e-12);
+            Assert.AreEqual(0.0, ThreadDungeonSpawner.SanitizeDoubleDial(0.0, 1.25, Max), 1e-12, "0 = no cap survives");
+
+            try
+            {
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(CapKey, 1.5), "ModifyDouble returned false: key not registered");
+                Assert.AreEqual(1.5, ACE.Server.Managers.PropertyManager.GetDouble(CapKey, 1.25).Item, 1e-12);
+            }
+            finally
+            {
+                ACE.Server.Managers.PropertyManager.ModifyDouble(CapKey, DungeonPopulationLimits.DefaultUpliftArchetypeCap);
+            }
+
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+            StringAssert.Contains(body, "ReadShippedDoubleDial(\"dynamic_dungeons_uplift_archetype_cap\", DungeonPopulationLimits.DefaultUpliftArchetypeCap, DungeonPopulationLimits.MaxUpliftArchetypeCap)");
+        }
+
+        [TestMethod]
+        public void The_defense_cap_is_registered_at_its_compiled_default_and_sanitized_to_its_ceiling()
+        {
+            const string CapKey = "dynamic_dungeons_uplift_defense_cap";
+
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties.ContainsKey(CapKey));
+            Assert.AreEqual(1.0, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[CapKey].Item, 1e-12, "owner ruling 2026-10-23: defensive axes at the archetype median");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftDefenseCap, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[CapKey].Item, 1e-12);
+            Assert.AreEqual(1.0, new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5).UpliftDefenseCap, 1e-12);
+            Assert.AreEqual(1.1, new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, upliftDefenseCap: 1.1).UpliftDefenseCap, 1e-12);
+
+            const double Max = DungeonPopulationLimits.MaxUpliftArchetypeCap;
+            Assert.AreEqual(Max, ThreadDungeonSpawner.SanitizeDoubleDial(50.0, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(-1.0, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(double.NaN, 1.0, Max), 1e-12);
+            Assert.AreEqual(0.0, ThreadDungeonSpawner.SanitizeDoubleDial(0.0, 1.0, Max), 1e-12, "0 = no cap survives");
+            Assert.AreEqual(1.1, ThreadDungeonSpawner.SanitizeDoubleDial(1.1, 1.0, Max), 1e-12);
+
+            try
+            {
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(CapKey, 1.1), "ModifyDouble returned false: key not registered");
+                Assert.AreEqual(1.1, ACE.Server.Managers.PropertyManager.GetDouble(CapKey, 1.0).Item, 1e-12);
+            }
+            finally
+            {
+                ACE.Server.Managers.PropertyManager.ModifyDouble(CapKey, DungeonPopulationLimits.DefaultUpliftDefenseCap);
+            }
+
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+            StringAssert.Contains(body, "ReadShippedDoubleDial(\"dynamic_dungeons_uplift_defense_cap\", DungeonPopulationLimits.DefaultUpliftDefenseCap, DungeonPopulationLimits.MaxUpliftArchetypeCap)");
+        }
+
+        [TestMethod]
+        public void ReadLimits_reads_all_three_archetype_uplift_tunables_through_the_shipped_sanitizer()
+        {
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+
+            StringAssert.Contains(body, "archetypeUplift: PropertyManager.GetBool(\"dynamic_dungeons_archetype_uplift\", DungeonPopulationLimits.DefaultArchetypeUplift).Item");
+            StringAssert.Contains(body, "ReadShippedDoubleDial(\"dynamic_dungeons_uplift_offense_ratio\", DungeonPopulationLimits.DefaultUpliftOffenseRatio, DungeonPopulationLimits.MaxUpliftRatio)");
+            StringAssert.Contains(body, "ReadShippedDoubleDial(\"dynamic_dungeons_uplift_defense_ratio\", DungeonPopulationLimits.DefaultUpliftDefenseRatio, DungeonPopulationLimits.MaxUpliftRatio)");
+        }
+
+        [TestMethod]
+        public void ReadLimits_reads_both_weak_point_tunables_with_the_shipped_fallbacks()
+        {
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+
+            StringAssert.Contains(body, "GetBool(\"dynamic_dungeons_weak_point\", DungeonPopulationLimits.DefaultWeakPoint)");
+            StringAssert.Contains(body, "ReadShippedDoubleDial(\"dynamic_dungeons_weak_point_armor_cut\", DungeonPopulationLimits.DefaultWeakPointArmorCut, DungeonPopulationLimits.MaxWeakPointArmorCut)");
+        }
+
+        // ---- the two widening-leak fixes (2026-10-27) -------------------------------------------------------
+
+        private const string FamilyWeightingKey = "dynamic_dungeons_family_archetype_weighting";
+        private const string ResistFloorKey = "dynamic_dungeons_uplift_resist_floor";
+
+        [TestMethod]
+        public void The_widening_leak_tunables_are_registered_ship_on_and_match_the_compiled_defaults()
+        {
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties.ContainsKey(FamilyWeightingKey));
+            Assert.AreEqual(1.0, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[FamilyWeightingKey].Item, 1e-12, "ships at full strength");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultFamilyArchetypeWeighting, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties[FamilyWeightingKey].Item, 1e-12);
+
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties.ContainsKey(ResistFloorKey));
+            Assert.IsTrue(ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties[ResistFloorKey].Item, "a new server setting ships ON");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftResistFloor, ACE.Server.Managers.DefaultPropertyManager.DefaultBooleanProperties[ResistFloorKey].Item);
+
+            // The constructor carries the shipped values; a default(...) struct reads both as off (legacy).
+            var limits = new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5);
+            Assert.AreEqual(1.0, limits.FamilyArchetypeWeighting, 1e-12);
+            Assert.IsTrue(limits.UpliftResistFloor);
+            Assert.AreEqual(0.0, default(DungeonPopulationLimits).FamilyArchetypeWeighting, 1e-12);
+            Assert.IsFalse(default(DungeonPopulationLimits).UpliftResistFloor);
+
+            // The copy constructors carry both.
+            var off = new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, familyArchetypeWeighting: 0.0, upliftResistFloor: false).WithMonsterCounts(5, 10).WithForcedFamilyWidening();
+            Assert.AreEqual(0.0, off.FamilyArchetypeWeighting, 1e-12);
+            Assert.IsFalse(off.UpliftResistFloor);
+        }
+
+        [TestMethod]
+        public void The_family_weighting_is_sanitized_to_its_default_and_capped_at_one()
+        {
+            const double Max = DungeonPopulationLimits.MaxFamilyArchetypeWeighting;
+
+            Assert.AreEqual(1.0, Max, 1e-12, "a blend fraction");
+            Assert.AreEqual(Max, ThreadDungeonSpawner.SanitizeDoubleDial(3.0, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(-0.5, 1.0, Max), 1e-12);
+            Assert.AreEqual(1.0, ThreadDungeonSpawner.SanitizeDoubleDial(double.NaN, 1.0, Max), 1e-12);
+            Assert.AreEqual(0.0, ThreadDungeonSpawner.SanitizeDoubleDial(0.0, 1.0, Max), 1e-12, "0 is the legacy draw");
+            Assert.AreEqual(0.4, ThreadDungeonSpawner.SanitizeDoubleDial(0.4, 1.0, Max), 1e-12);
+        }
+
+        [TestMethod]
+        public void The_widening_leak_tunables_take_a_live_override_and_are_restored()
+        {
+            try
+            {
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyDouble(FamilyWeightingKey, 0.25), "ModifyDouble returned false: key not registered");
+                Assert.AreEqual(0.25, ACE.Server.Managers.PropertyManager.GetDouble(FamilyWeightingKey, 1.0).Item, 1e-12);
+
+                Assert.IsTrue(ACE.Server.Managers.PropertyManager.ModifyBool(ResistFloorKey, false), "ModifyBool returned false: key not registered");
+                Assert.IsFalse(ACE.Server.Managers.PropertyManager.GetBool(ResistFloorKey, true).Item);
+            }
+            finally
+            {
+                ACE.Server.Managers.PropertyManager.ModifyDouble(FamilyWeightingKey, DungeonPopulationLimits.DefaultFamilyArchetypeWeighting);
+                ACE.Server.Managers.PropertyManager.ModifyBool(ResistFloorKey, DungeonPopulationLimits.DefaultUpliftResistFloor);
+            }
+        }
+
+        [TestMethod]
+        public void ReadLimits_reads_both_widening_leak_tunables_with_the_shipped_fallbacks()
+        {
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+
+            StringAssert.Contains(body, "familyArchetypeWeighting: ReadShippedDoubleDial(\"dynamic_dungeons_family_archetype_weighting\", DungeonPopulationLimits.DefaultFamilyArchetypeWeighting, DungeonPopulationLimits.MaxFamilyArchetypeWeighting)");
+            StringAssert.Contains(body, "upliftResistFloor: PropertyManager.GetBool(\"dynamic_dungeons_uplift_resist_floor\", DungeonPopulationLimits.DefaultUpliftResistFloor).Item");
         }
     }
 }

@@ -93,7 +93,9 @@ namespace ACE.Server.Pvp.Templates
             {
                 // Shard worker thread: convert here, so only runtime biotas leave this callback.
                 List<ACE.Entity.Models.Biota> wielded = null, inventory = null;
-                string conversionError = null;
+                // Null means the read itself failed (SerializedShardDatabase answers a throwing read with null): never
+                // capture that as an empty kit.
+                string conversionError = possessed == null ? "the possession read failed" : null;
 
                 try
                 {

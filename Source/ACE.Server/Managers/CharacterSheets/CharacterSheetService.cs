@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -168,6 +169,103 @@ namespace ACE.Server.Managers.CharacterSheets
             {
                 log.Error($"[CHARSHEET] GetSheet failed for slug {slug}: {ex.GetFullMessage()}");
                 return new SheetResult(SheetOutcome.Failed, null);
+            }
+        }
+
+        /// <summary>Most entries one directory response carries; past it the response is marked truncated.</summary>
+        public const int MaxDirectoryEntries = 5000;
+
+        /// <summary>
+        /// The published-sheets directory. ONE link read (a join that already drops deleted characters), then
+        /// an in-memory PlayerManager lookup per row through the world seam - no per-row database read, no
+        /// build, no queueing, so it never waits on a world thread. A row whose player PlayerManager does not
+        /// know is dropped. The url is ToLink's, so it can never drift from sheet-link's.
+        /// </summary>
+        public DirectoryResult ListPublished()
+        {
+            if (!enabled())
+                return new DirectoryResult(SheetOutcome.Disabled, null);
+
+            // Single flight: concurrent callers queue on the lock and are answered from the entry the first
+            // one stored, so a burst costs one link read. Only Ok is ever stored.
+            lock (directoryLock)
+            {
+                var ttlSeconds = cacheSeconds();
+                var epoch = Interlocked.Read(ref directoryEpoch);
+
+                if (ttlSeconds > 0
+                    && directoryCache != null
+                    && directoryCacheEpoch == epoch
+                    && utcNow() - directoryCacheAt < TimeSpan.FromSeconds(ttlSeconds))
+                {
+                    return new DirectoryResult(SheetOutcome.Ok, directoryCache);
+                }
+
+                var result = BuildDirectory();
+
+                // Stored under the epoch read BEFORE the build: an Enable/Rotate/Disable that lands mid-build bumps
+                // the epoch, so this snapshot (which may predate it) fails the validity check above and is rebuilt.
+                if (result.Outcome == SheetOutcome.Ok && ttlSeconds > 0)
+                {
+                    directoryCache = result.Directory;
+                    directoryCacheAt = utcNow();
+                    directoryCacheEpoch = epoch;
+                }
+
+                return result;
+            }
+        }
+
+        private readonly object directoryLock = new object();
+        private SheetDirectory directoryCache;     // guarded by directoryLock
+        private DateTime directoryCacheAt;         // guarded by directoryLock
+        private long directoryCacheEpoch;          // guarded by directoryLock
+        private long directoryEpoch;               // bumped by every link write; Interlocked
+
+        /// <summary>Invalidates the directory cache: called after any link write attempt, successful or not.</summary>
+        private void DirectoryChanged() => Interlocked.Increment(ref directoryEpoch);
+
+        private DirectoryResult BuildDirectory()
+        {
+            try
+            {
+                if (!links.TryListPublished(out var rows) || rows == null)
+                    return new DirectoryResult(SheetOutcome.Failed, null);
+
+                var directory = new SheetDirectory { GeneratedAt = utcNow() };
+
+                // Ascending by character id, enforced here as well as in the DAO, so the cap always keeps
+                // the same set whatever order the repository hands rows back in.
+                foreach (var (characterId, slug, dbName) in rows.OrderBy(r => r.CharacterId))
+                {
+                    var info = world.PlayerInfo(characterId);
+
+                    if (info == null)
+                        continue;
+
+                    if (directory.Sheets.Count >= MaxDirectoryEntries)
+                    {
+                        directory.Truncated = true;
+                        break;
+                    }
+
+                    directory.Sheets.Add(new SheetDirectoryEntry
+                    {
+                        Slug = slug,
+                        Url = ToLink(new CharacterSheetLink { CharacterId = characterId, Slug = slug }).Url,
+                        // the DB name is the plain character name; a live admin's Name carries a "+" prefix
+                        Name = string.IsNullOrEmpty(dbName) ? info.Name : dbName,
+                        Level = info.Level,
+                        Heritage = info.Heritage,
+                    });
+                }
+
+                return new DirectoryResult(SheetOutcome.Ok, directory);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[CHARSHEET] ListPublished failed: {ex.GetFullMessage()}");
+                return new DirectoryResult(SheetOutcome.Failed, null);
             }
         }
 
@@ -440,6 +538,18 @@ namespace ACE.Server.Managers.CharacterSheets
 
         public LinkResult EnableOrRotate(uint characterGuid, bool rotate)
         {
+            try
+            {
+                return EnableOrRotateCore(characterGuid, rotate);
+            }
+            finally
+            {
+                DirectoryChanged();
+            }
+        }
+
+        private LinkResult EnableOrRotateCore(uint characterGuid, bool rotate)
+        {
             if (!enabled())
                 return new LinkResult(SheetOutcome.Disabled, null);
 
@@ -491,6 +601,18 @@ namespace ACE.Server.Managers.CharacterSheets
         }
 
         public LinkResult Disable(uint characterGuid)
+        {
+            try
+            {
+                return DisableCore(characterGuid);
+            }
+            finally
+            {
+                DirectoryChanged();
+            }
+        }
+
+        private LinkResult DisableCore(uint characterGuid)
         {
             if (!enabled())
                 return new LinkResult(SheetOutcome.Disabled, null);

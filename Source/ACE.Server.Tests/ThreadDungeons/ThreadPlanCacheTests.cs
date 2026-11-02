@@ -408,6 +408,217 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(0, ThreadPlanCache.Counts.Projections, "an unkeyable projection must not be stored");
         }
 
+        // ---- the archetype uplift's maps -------------------------------------------------------------------
+
+        private static DungeonSpawnPlan ArchetypePlan(IReadOnlyDictionary<string, SpeciesTableDef> species, DungeonEntryDef dungeon,
+            DungeonPopulationLimits limits, ThreadPlanMemo memo)
+        {
+            Func<uint, int> levelOf = Levels;
+            Func<uint, uint> healthOf = HealthOf;
+            Func<uint, DungeonStatProfile> profileOf = ProfileOf;
+            Func<uint, DungeonStatProfile> archetypeProfileOf = ProfileOf;
+
+            if (memo != null)
+            {
+                levelOf = memo.LevelOf;
+                healthOf = memo.HealthOf;
+                profileOf = memo.ProfileOf;
+                archetypeProfileOf = memo.ArchetypeProfileOf;
+            }
+
+            return DungeonPopulationBuilder.Build(Spec(), dungeon, Store(), species, levelOf, healthOf,
+                limits, new Random(7), profileOf, null, memo, archetypeProfileOf: archetypeProfileOf);
+        }
+
+        /// <summary>What the archetype context would hand the spawner for every uplifted wcid, in one comparable string.</summary>
+        private static string ArchetypeAnswers(DungeonSpawnPlan plan)
+            => string.Join("|", plan.Entries.Where(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss).Select(e => e.Wcid).Distinct().OrderBy(w => w)
+                .Select(w => plan.ArchetypeUplift.For(w))
+                .Select(i => i == null ? "null" : $"{i.Wcid}:{i.Archetype}:{i.Source}:{i.OwnLevel}:{i.Run.SampleCount}:{i.Own.SampleCount}:" +
+                                                  $"{i.Run.Core.MaxBaseArmor}:{i.Own.Core.MaxBaseArmor}:{i.Run.Health:R}:{i.Own.Health:R}:" +
+                                                  $"{i.Run.Core.EffectiveDefenseMedianFor(Skill.MeleeDefense)}:{i.AllOwn.EffectiveDefenseMedianFor(Skill.MagicDefense)}"));
+
+        [TestMethod]
+        public void A_warm_cache_reproduces_the_archetype_context_and_keys_its_standards_on_the_band_floor()
+        {
+            var species = Species();
+            var dungeon = Dungeon();
+
+            var uncached = ArchetypePlan(species, dungeon, Limits(), memo: null);
+            Assert.IsNotNull(uncached.ArchetypeUplift, "fixture: the widened band tags uplifted entries and the switch defaults on");
+
+            var cold = Memo2();
+            var coldPlan = ArchetypePlan(species, dungeon, Limits(), cold);
+            var warm = Memo2();
+            var warmPlan = ArchetypePlan(species, dungeon, Limits(), warm);
+
+            Assert.AreEqual(Shape(uncached), Shape(coldPlan));
+            Assert.AreEqual(Shape(uncached), Shape(warmPlan));
+            Assert.AreEqual(ArchetypeAnswers(uncached), ArchetypeAnswers(coldPlan));
+            Assert.AreEqual(ArchetypeAnswers(uncached), ArchetypeAnswers(warmPlan));
+            Assert.IsTrue(warm.AllCached, $"the second build should hit every lookup, hit {warm.Hits} of {warm.Lookups}");
+
+            var counts = ThreadPlanCache.Counts;
+            Assert.AreEqual(1, counts.Rosters, counts.ToString());
+            Assert.IsTrue(counts.ArchetypeStandards >= 2, "the run level and at least one own level: " + counts);
+            Assert.IsTrue(counts.ArchetypeProfiles > 0, counts.ToString());
+
+            // A changed band low floor is a different classifier and different standards, never the old answer.
+            var before = counts.ArchetypeStandards;
+            var lowerFloor = ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), Memo2());
+            Assert.AreEqual(2, ThreadPlanCache.Counts.Rosters, "the floor is part of the roster key");
+            Assert.IsTrue(ThreadPlanCache.Counts.ArchetypeStandards > before, "and of the standards key");
+            Assert.AreEqual(ArchetypeAnswers(ArchetypePlan(species, dungeon, Limits(bandLowFloorRatio: 0.5), memo: null)), ArchetypeAnswers(lowerFloor));
+        }
+
+        /// <summary>
+        /// The archetype-weighted family draw (dynamic_dungeons_family_archetype_weighting, 2026-10-27) classifies with the
+        /// memo's roster when there is one; the plan, its family and its note must be the same cold, warm and uncached, and
+        /// the draw must share the one roster with the archetype context (one roster stored).
+        /// </summary>
+        [TestMethod]
+        public void A_warm_cache_reproduces_the_archetype_weighted_family_draw()
+        {
+            var species = Species();
+            var dungeon = Dungeon();
+
+            var uncached = ArchetypePlan(species, dungeon, Limits(), memo: null);
+            Assert.IsTrue(uncached.Notes.Any(n => n.StartsWith("family: archetype-weighted draw")), "fixture: a free family on a widened band takes the weighted draw");
+
+            var cold = ArchetypePlan(species, dungeon, Limits(), Memo2());
+            var warm = Memo2();
+            var warmPlan = ArchetypePlan(species, dungeon, Limits(), warm);
+
+            Assert.AreEqual(Shape(uncached), Shape(cold));
+            Assert.AreEqual(Shape(uncached), Shape(warmPlan));
+            Assert.IsTrue(warm.AllCached, $"hit {warm.Hits} of {warm.Lookups}");
+            Assert.AreEqual(1, ThreadPlanCache.Counts.Rosters, "the draw and the archetype context share one roster");
+        }
+
+        /// <summary>
+        /// Code review 2026-10-23: the run-level standards are measured with the natural-only floor (1.0), but the
+        /// ROSTER that partitions them classifies each member against the cross-archetype standard measured with the
+        /// CONFIGURED band floor. Two rosters at different floors can disagree on a member's archetype, so the memoised
+        /// measurement must key on the roster's floor too, or a run at one band_low_floor is served the other's partition.
+        ///
+        /// Fixture: three natural members at levels 200-205 (two tough, one frail) and five low-level members at 110 with
+        /// a fifth of the armour. At floor 1.0 the frail member's standard is the natural three (armour 500, health 2000):
+        /// toughness ln(1000/2000) &lt; 0, a MeleeDps. At floor 0.25 its standard widens to the 110s (armour 100):
+        /// ln(500/100) + ln(1000/2000) &gt; 0, a MeleeTank.
+        /// </summary>
+        [TestMethod]
+        public void The_archetype_standards_memo_keys_on_the_rosters_band_floor()
+        {
+            TestGameTables.EnsureInitialized();
+
+            var band = new DungeonRosterBand(1.0, 1.15);
+            var levels = new Dictionary<uint, int> { [1001] = 200, [1002] = 205, [1003] = 205 };
+            for (var w = 1011u; w <= 1015u; w++)
+                levels[w] = 110;
+
+            DungeonStatProfile Profile(uint wcid)
+            {
+                var level = levels.TryGetValue(wcid, out var l) ? l : 0;
+                var armor = wcid >= 1011 ? 100u : 500u;
+                var health = wcid == 1001 ? 1000u : 2000u;
+
+                return new DungeonStatProfile(level, health, new Dictionary<Skill, uint> { [Skill.UnarmedCombat] = 300 }, 50, armor);
+            }
+
+            var tables = new Dictionary<string, SpeciesTableDef>
+            {
+                ["mixed"] = new SpeciesTableDef { Id = "mixed", Members = levels.Keys.Select(Trash).ToList() },
+            };
+
+            var rosterWide = new RosterArchetypes(tables, band, 0.25, Profile);
+            var rosterNatural = new RosterArchetypes(tables, band, 1.0, Profile);
+
+            Assert.AreEqual(CreatureArchetype.MeleeTank, rosterWide.Classify(1001).Archetype, "fixture: the widened standard makes the frail member a tank");
+            Assert.AreEqual(CreatureArchetype.MeleeDps, rosterNatural.Classify(1001).Archetype, "fixture: the natural standard makes it a dps");
+
+            string Describe(DungeonArchetypeStandards s)
+                => string.Join("|", DungeonArchetypeStandards.Partitioned.Select(a => $"{a}:{s.Get(a).SampleCount}:{s.Get(a).Core.MaxBaseArmor}:{s.Get(a).Health:R}"))
+                   + $"|all:{s.All.SampleCount}";
+
+            var freshWide = Describe(DungeonArchetypeStandards.Measure(tables, 200, Profile, rosterWide, band, DungeonPopulationBuilder.NaturalBandOnly));
+            var freshNatural = Describe(DungeonArchetypeStandards.Measure(tables, 200, Profile, rosterNatural, band, DungeonPopulationBuilder.NaturalBandOnly));
+            Assert.AreNotEqual(freshWide, freshNatural, "fixture: the two partitions must differ, or this test proves nothing");
+
+            var memo = ThreadPlanCache.ForRun(true, null, w => Profile(w).Level, w => Profile(w).Health, Profile, Profile);
+
+            Assert.AreEqual(freshWide, Describe(memo.ArchetypeStandards(tables, 200, Profile, rosterWide, band, DungeonPopulationBuilder.NaturalBandOnly, 1.0, rosterFloor: 0.25)));
+            Assert.AreEqual(freshNatural, Describe(memo.ArchetypeStandards(tables, 200, Profile, rosterNatural, band, DungeonPopulationBuilder.NaturalBandOnly, 1.0, rosterFloor: 1.0)),
+                "the second roster must not be served the first roster's partition");
+        }
+
+        [TestMethod]
+        public void A_build_with_no_archetype_delegate_never_touches_the_archetype_maps()
+        {
+            Plan(Species(), Dungeon(), Limits(), Memo());
+
+            var counts = ThreadPlanCache.Counts;
+            Assert.AreEqual(0, counts.ArchetypeProfiles + counts.Rosters + counts.ArchetypeStandards, counts.ToString());
+        }
+
+        private static ThreadPlanMemo Memo2(string archetypeKey = null) => ThreadPlanCache.ForRun(true, null, Levels, HealthOf, ProfileOf, ProfileOf, archetypeKey);
+
+        [TestMethod]
+        public void A_changed_spell_strip_key_drops_the_archetype_classifications()
+        {
+            var species = Species();
+            var dungeon = Dungeon();
+
+            ArchetypePlan(species, dungeon, Limits(), Memo2("1|2,3"));
+            Assert.IsTrue(ThreadPlanCache.Counts.Rosters > 0, "fixture: the archetype maps were filled");
+
+            ArchetypePlan(species, dungeon, Limits(), Memo2("1|2,3"));
+            Assert.IsTrue(ThreadPlanCache.Counts.Rosters > 0, "the same key keeps them");
+
+            var changed = Memo2("0|2,3");
+            Assert.AreEqual(0, ThreadPlanCache.Counts.Rosters + ThreadPlanCache.Counts.ArchetypeProfiles + ThreadPlanCache.Counts.ArchetypeStandards,
+                "a classification read off the old strip setting must never be served under the new one");
+            Assert.AreEqual(0, changed.Hits);
+
+            // A build with no key (a caller that has none) never invalidates.
+            ArchetypePlan(species, dungeon, Limits(), Memo2("0|2,3"));
+            var before = ThreadPlanCache.Counts.Rosters;
+            Memo2();
+            Assert.AreEqual(before, ThreadPlanCache.Counts.Rosters);
+        }
+
+        [TestMethod]
+        public void A_strip_change_with_the_uplift_off_and_the_weighting_on_misses_the_archetype_maps()
+        {
+            var species = Species();
+            var dungeon = Dungeon();
+            var stripA = new SpellStripConfig(true, new[] { 2, 3 });
+            var stripB = new SpellStripConfig(false, new[] { 2, 3 });
+
+            Assert.AreNotEqual(stripA.Key, stripB.Key, "fixture: the two strip settings key apart");
+
+            // uplift OFF, weighting ON: the family draw classifies with the maps, so the strip keys them
+            var keyA = ThreadDungeonSpawner.ArchetypeMapsKey(false, 1.0, stripA);
+            Assert.AreEqual(stripA.Key, keyA);
+
+            ArchetypePlan(species, dungeon, Limits(), Memo2(keyA));
+            Assert.IsTrue(ThreadPlanCache.Counts.Rosters > 0, "fixture: the archetype maps were filled");
+
+            var changed = Memo2(ThreadDungeonSpawner.ArchetypeMapsKey(false, 1.0, stripB));
+            Assert.AreEqual(0, ThreadPlanCache.Counts.Rosters + ThreadPlanCache.Counts.ArchetypeProfiles + ThreadPlanCache.Counts.ArchetypeStandards,
+                "a classification read off the old strip setting must not be served to the weighted family draw");
+            Assert.AreEqual(0, changed.Hits);
+
+            // control: with the weighting off too, nothing reads the maps, so the strip does not key (or invalidate) them
+            Assert.IsNull(ThreadDungeonSpawner.ArchetypeMapsKey(false, 0.0, stripB));
+            Assert.IsNull(ThreadDungeonSpawner.ArchetypeMapsKey(false, double.NaN, stripB));
+            Assert.AreEqual(stripB.Key, ThreadDungeonSpawner.ArchetypeMapsKey(true, 0.0, stripB), "the uplift alone still keys them");
+
+            ArchetypePlan(species, dungeon, Limits(), Memo2(keyA));
+            var before = ThreadPlanCache.Counts.Rosters;
+            Memo2(ThreadDungeonSpawner.ArchetypeMapsKey(false, 0.0, stripB));
+            Assert.AreEqual(before, ThreadPlanCache.Counts.Rosters, "both off: a strip change keeps the maps");
+        }
+
         // ---- invalidation --------------------------------------------------------------------------------
 
         /// <summary>
@@ -663,6 +874,48 @@ namespace ACE.Server.Tests.ThreadDungeons
             warm.BandMedianHealth(species, 1, Levels, HealthOf, DungeonRosterBand.Default);
 
             Assert.AreEqual(1, warm.Hits, "an entry stored before the cap was reached still hits");
+        }
+
+        /// <summary>
+        /// Code review 2026-10-26 F2: the damage ceiling's two maps CLEAR at their cap instead of silently ceasing to cache, so
+        /// the Max+1st store is kept and then hits; an original map still stops at its cap.
+        /// </summary>
+        [TestMethod]
+        public void A_clear_when_full_map_keeps_caching_past_its_cap()
+        {
+            var clearing = new ThreadPlanCache.BoundedMap<int, int>(4, "TestMap");
+            var stopping = new ThreadPlanCache.BoundedMap<int, int>(4);
+
+            for (var i = 1; i <= 5; i++)
+            {
+                clearing.TryStore(i, i * 10);
+                stopping.TryStore(i, i * 10);
+            }
+
+            Assert.AreEqual(1, clearing.Count, "the 5th store cleared the full map and was then kept");
+            Assert.IsTrue(clearing.TryGet(5, out var v) && v == 50, "Max+1 stores, then a hit");
+            Assert.IsFalse(clearing.TryGet(1, out _), "the earlier generation is gone");
+
+            Assert.AreEqual(4, stopping.Count);
+            Assert.IsFalse(stopping.TryGet(5, out _), "an original map still stops at its cap");
+
+            // And the live maps are the clearing kind, and reported in Counts.
+            ThreadPlanCache.Invalidate();
+
+            try
+            {
+                var memo = ThreadPlanCache.ForRun(true, null, Levels, HealthOf, null, perHitOf: w => CreaturePerHit.Empty);
+                memo.PerHitOf(1);
+                memo.PerHitOf(2);
+
+                Assert.AreEqual(2, ThreadPlanCache.Counts.PerHits);
+                Assert.AreEqual(0, ThreadPlanCache.Counts.DamageCeilingBaselines);
+                StringAssert.Contains(ThreadPlanCache.Counts.ToString(), "perHits=2");
+            }
+            finally
+            {
+                ThreadPlanCache.Invalidate();
+            }
         }
 
         [TestMethod]

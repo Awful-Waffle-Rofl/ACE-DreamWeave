@@ -55,6 +55,20 @@ namespace ACE.Server.Pvp
             set => _defenderReduction = value;
         }
 
+        private volatile BattlegroundPerformanceLedger _performance;
+
+        /// <summary>
+        /// Per-player performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats", "Conduct signals") for every battleground match and
+        /// for Tugak Brawl; null for 1v1 and 2v2. Set once by the coordinator when the match forms, before any player is bound, with every seat
+        /// already in it; the damage and heal hooks read it from landblock threads through a player's binding, with no lock, like
+        /// <see cref="CrystalSequence"/>. Two readers: the battleground performance modifier (its role stats), and a Tugak Brawl timeout, which ranks its survivors by player damage and so decides their placement, rating and payout.
+        /// </summary>
+        public BattlegroundPerformanceLedger Performance
+        {
+            get => _performance;
+            set => _performance = value;
+        }
+
         public DateTime CreatedAtUtc { get; }
 
         public DateTime? LiveSinceUtc { get; private set; }

@@ -523,7 +523,19 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private bool WaveTimeLimitStageValid(uint runInstance, int waveNumber)
         {
-            return WaveChallengeRunValid(runInstance) && waveChallengeWave == waveNumber;
+            return WaveChallengeRunValid(runInstance) && IsWaveDeadlineLive(waveChallengeWave, waveChallengeClearedWaves, waveNumber);
+        }
+
+        /// <summary>
+        /// Pure rule behind WaveTimeLimitStageValid: a deadline segment armed for 'segmentWave' may act only while
+        /// that wave is the live one AND has not been cleared. waveChallengeWave keeps its value through the
+        /// inter-wave breather after a clear (it only changes when the next wave spawns), so the live-wave test
+        /// alone let the cleared wave's deadline end the run during the gap. OnWaveCleared sets the cleared count
+        /// to at least the cleared wave's number, so cleared &gt;= segmentWave means this wave is done.
+        /// </summary>
+        public static bool IsWaveDeadlineLive(int liveWave, int clearedWaves, int segmentWave)
+        {
+            return liveWave == segmentWave && clearedWaves < segmentWave;
         }
 
         /// <summary>

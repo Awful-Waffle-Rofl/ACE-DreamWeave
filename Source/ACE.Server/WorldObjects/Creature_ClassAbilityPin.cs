@@ -1,6 +1,7 @@
 using System;
 
 using ACE.Entity.Enum;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 
 namespace ACE.Server.WorldObjects
@@ -132,7 +133,8 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// The movement speed multiplier in force while the window above is open, in the open interval
-        /// (0.0, 1.0]. Written only by <see cref="TryApplyClassAbilityMoveSlow"/>. Not persisted, like the
+        /// (0.0, 1.0]. Written only by <see cref="TryApplyClassAbilityMoveSlow"/> and
+        /// <see cref="TryApplyClassAbilityFrostSlow"/>. Not persisted, like the
         /// two pin timers above - a slow does not survive a server restart, and is not worth a biota row.
         /// </summary>
         public float ClassAbilityMoveSlowFactor;
@@ -153,22 +155,49 @@ namespace ACE.Server.WorldObjects
                 if (ClassAbilityMoveSlowUntil == 0.0)
                     return 1.0f;
 
-                if (Timers.RunningTime >= ClassAbilityMoveSlowUntil)
-                    return 1.0f;
-
-                var factor = ClassAbilityMoveSlowFactor;
-
-                if (factor <= 0.0f || factor > 1.0f)
-                    return 1.0f;
-
-                return factor;
+                return GetMovementSlowFactorAt(Timers.RunningTime);
             }
         }
 
         /// <summary>
-        /// Arms the post-pin movement slow. THE SINGLE WRITE SITE for the two fields above. Returns FALSE
-        /// when the slow was refused, so the caller can tell an armed slow from a skipped one and only
-        /// broadcast a visual for the former.
+        /// <see cref="CurrentMovementSlowFactor"/> at an explicit running-time clock. The same rules: neutral
+        /// 1.0f with no window, past the window, or for a stored factor outside (0.0, 1.0].
+        /// </summary>
+        internal float GetMovementSlowFactorAt(double now)
+        {
+            if (ClassAbilityMoveSlowUntil == 0.0)
+                return 1.0f;
+
+            if (now >= ClassAbilityMoveSlowUntil)
+                return 1.0f;
+
+            var factor = ClassAbilityMoveSlowFactor;
+
+            if (factor <= 0.0f || factor > 1.0f)
+                return 1.0f;
+
+            return factor;
+        }
+
+        /// <summary>
+        /// The speed multiplier every monster movement emit site writes into BOTH halves of a move: the wire
+        /// (MoveToParameters.Speed) and the server (MovementParameters.Speed). It is CurrentMovementSlowFactor
+        /// for an ordinary creature. CombatPet overrides it to multiply in the pet movement-speed floor
+        /// (CombatPet_SpeedFloor.cs), so a pet's value can exceed 1.0.
+        ///
+        /// Kept separate from CurrentMovementSlowFactor on purpose: that property keeps its (0.0, 1.0] contract
+        /// for the code that reasons about slows. Emit sites read this one, so the two halves of every move carry
+        /// the same number. Same hot-path rules as CurrentMovementSlowFactor: no allocation, no PropertyManager
+        /// read per call.
+        /// </summary>
+        public virtual float MovementSpeedFactor => CurrentMovementSlowFactor;
+
+        /// <summary>
+        /// Arms the post-pin movement slow. One of the TWO write sites for the two fields above; the other is
+        /// <see cref="TryApplyClassAbilityFrostSlow"/>, and both follow "the stronger slow wins, the later end
+        /// is kept" (see <see cref="ApplyPinSlowState"/>). Returns FALSE when the slow was refused, so the
+        /// caller can tell an armed slow from a skipped one and only broadcast a visual for the former. A pin
+        /// slow that meets a stronger running slow is refused (FALSE) and leaves that slow untouched.
         ///
         /// THE WINDOW IS DERIVED FROM ClassAbilityPinnedUntil, never from an independently recomputed
         /// now + pinSeconds. The pin may have been clamped or shaped by TryApplyClassAbilityPin, and the
@@ -190,8 +219,35 @@ namespace ACE.Server.WorldObjects
             if (!IsClassAbilityPinned)
                 return false;
 
+            return ApplyPinSlowState(slowSeconds, factor, Timers.RunningTime);
+        }
+
+        /// <summary>
+        /// The write half of <see cref="TryApplyClassAbilityMoveSlow"/>, after its refusals, at an explicit
+        /// running-time clock. The slot is SHARED with Elemental Proficiency Frost and the stronger slow wins
+        /// (ELEMENTAL-PROFICIENCY-DESIGN.md), with the same rule as the Frost entry point: while a STRONGER
+        /// (lower-factor) slow is running, the pin slow changes nothing - neither the running factor nor its
+        /// end time, so a weaker slow can never stretch a stronger one - and returns FALSE. Otherwise (nothing
+        /// running, or an equal or weaker running slow) it writes its own factor and the later of the running
+        /// end and this pin's window (ClassAbilityPinnedUntil + slowSeconds), and returns TRUE. With nothing
+        /// running that is exactly the pin's own factor and window, as before.
+        /// </summary>
+        internal bool ApplyPinSlowState(double slowSeconds, float factor, double now)
+        {
+            var existing = GetMovementSlowFactorAt(now);
+            var running = existing < 1.0f;
+
+            // one slot, the stronger slow wins: a weaker incoming slow neither replaces nor extends it
+            if (running && factor > existing)
+                return false;
+
+            var endTime = ClassAbilityPinnedUntil + slowSeconds;
+
+            if (running && ClassAbilityMoveSlowUntil > endTime)
+                endTime = ClassAbilityMoveSlowUntil;
+
             ClassAbilityMoveSlowFactor = factor;
-            ClassAbilityMoveSlowUntil = ClassAbilityPinnedUntil + slowSeconds;
+            ClassAbilityMoveSlowUntil = endTime;
 
             return true;
         }
@@ -221,6 +277,18 @@ namespace ACE.Server.WorldObjects
 
             ClearClassAbilityMoveSlow();
 
+            ReissueMoveForSpeedChange();
+        }
+
+        /// <summary>
+        /// Stops the leg in flight so the next Monster_Tick re-issues it at the CURRENT MovementSpeedFactor.
+        /// Forward velocity is latched once per movement leg (see <see cref="TickClassAbilityMoveSlow"/>), so
+        /// any change to the slow factor - the window closing, or Frost landing on a creature that is already
+        /// running - takes visible effect only through this. A no-op unless the creature is awake, has a
+        /// target and is moving.
+        /// </summary>
+        private void ReissueMoveForSpeedChange()
+        {
             // NOT WHILE RETURNING HOME. Cancelling a return-home move empties MoveToManager.PendingActions,
             // and Monster_Navigation.UpdatePosition then calls Sleep() on the spot - which would park the
             // creature wherever it stood instead of sending it home. TryApplyClassAbilityPin carves State.Return
@@ -252,8 +320,84 @@ namespace ACE.Server.WorldObjects
             SendUpdatePosition();
 
             // NextMoveTime is deliberately NOT pushed out: the next Monster_Tick (within 0.2s) sees
-            // !IsTurning && !IsMoving, calls StartTurn(), and re-issues the move at a factor of 1.0 on both the
-            // wire and the server.
+            // !IsTurning && !IsMoving, calls StartTurn(), and re-issues the move at the current factor on both
+            // the wire and the server.
+        }
+
+        /// <summary>
+        /// Elemental Proficiency Frost (Archmage T3): a movement slow written into the SAME slot Pinning Shot's
+        /// post-pin slow uses (ClassAbilityMoveSlowFactor / ClassAbilityMoveSlowUntil), so every movement emit
+        /// site, the stuck-detection suppression and the Monster_Tick restore apply to it unchanged.
+        ///
+        /// UNLIKE <see cref="TryApplyClassAbilityMoveSlow"/> IT NEEDS NO PIN. That method's pin-only gate is
+        /// Pinning Shot's own rule (its window is derived from the pin end) and stays as it is; this is a
+        /// second entry point, not a widening of the first.
+        ///
+        /// MERGE RULE (one shared slot, the stronger slow wins): applied when no slow is running, or when the
+        /// incoming factor is equal or stronger (lower) than the running one; the end time is then the later
+        /// of the two. A weaker incoming slow is refused outright and changes nothing - neither the factor nor
+        /// the window. No immunity window.
+        ///
+        /// Returns TRUE only for a NEW landing (no slow was running). A refresh returns FALSE, and so does a
+        /// refusal: an ineligible target (<see cref="ElementalProficiencyMath.IsEligibleTarget"/>), a dead
+        /// creature, a non-positive duration, a factor outside (0.0, 1.0), or a weaker slow than the running
+        /// one.
+        ///
+        /// When the factor actually changes, the leg in flight is re-issued
+        /// (<see cref="ReissueMoveForSpeedChange"/>) so a monster that is already running slows immediately
+        /// rather than at the end of its current leg. A same-factor refresh does not re-issue, so repeated
+        /// frost hits do not stutter the creature.
+        /// </summary>
+        public bool TryApplyClassAbilityFrostSlow(double seconds, float speedFactor)
+        {
+            if (!TryApplyClassAbilityFrostSlowState(seconds, speedFactor, Timers.RunningTime, out var newlyLanded, out var factorChanged))
+                return false;
+
+            if (factorChanged)
+                ReissueMoveForSpeedChange();
+
+            return newlyLanded;
+        }
+
+        /// <summary>
+        /// The state half of <see cref="TryApplyClassAbilityFrostSlow"/> at an explicit running-time clock, with
+        /// no movement side effect. Returns FALSE when refused (nothing written); otherwise TRUE, with
+        /// <paramref name="newlyLanded"/> = no slow was running and <paramref name="factorChanged"/> = the
+        /// effective speed factor moved.
+        /// </summary>
+        internal bool TryApplyClassAbilityFrostSlowState(double seconds, float speedFactor, double now, out bool newlyLanded, out bool factorChanged)
+        {
+            newlyLanded = false;
+            factorChanged = false;
+
+            if (seconds <= 0.0)
+                return false;
+
+            if (speedFactor <= 0.0f || speedFactor >= 1.0f)
+                return false;
+
+            if (!ElementalProficiencyMath.IsEligibleTarget(this) || IsDead)
+                return false;
+
+            var existing = GetMovementSlowFactorAt(now);
+            var running = existing < 1.0f;
+
+            // one slot, the stronger slow wins: a weaker incoming slow never displaces a running one
+            if (running && speedFactor > existing)
+                return false;
+
+            var endTime = now + seconds;
+
+            if (running && ClassAbilityMoveSlowUntil > endTime)
+                endTime = ClassAbilityMoveSlowUntil;
+
+            ClassAbilityMoveSlowFactor = speedFactor;
+            ClassAbilityMoveSlowUntil = endTime;
+
+            newlyLanded = !running;
+            factorChanged = speedFactor != existing;
+
+            return true;
         }
 
         private void ClearClassAbilityMoveSlow()

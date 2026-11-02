@@ -233,13 +233,24 @@ namespace ACE.Server.ThreadDungeons
                     yield return (def, DungeonModifierLevelScale.ScaleMagnitude(def.MonsterEffectKind, def.MinMagnitude, levelScale));
         }
 
+        /// <summary>
+        /// The health multiplier the run's creatures carry; 1.0 when no <see cref="HealthMult"/> modifier applies.
+        ///
+        /// The MAXIMUM across the gem's <see cref="HealthMult"/> modifiers (and the boss row's extras), never a
+        /// product, on the owner's ruling: Hardy (target monster) and Guarded (boss_guarded, target boss) both
+        /// carry this kind, and multiplying them stacked a boss to hardy x guarded (up to 2.0 x 3.0 = x6). The
+        /// greatest single modifier now sets the figure, so a boss is never tougher than its strongest health
+        /// modifier alone. The pack figure (forBoss false) sees only target-monster modifiers, so in practice it
+        /// is Hardy's magnitude alone and is unaffected. The result is floored at 1.0: a lone magnitude below
+        /// 1.0 no longer lowers health (unreachable with the shipped content).
+        /// </summary>
         public static double HealthMultiplier(DungeonGemSpec spec, IReadOnlyDictionary<string, ModifierDef> modifiers, IEnumerable<string> extraModifierIds, bool forBoss = false, double levelScale = 1.0)
         {
-            var product = 1.0;
+            var best = 1.0;
             foreach (var (def, magnitude) in Effects(spec, modifiers, extraModifierIds, forBoss, levelScale))
-                if (def.MonsterEffectKind == HealthMult && magnitude > 0)
-                    product *= magnitude;
-            return product;
+                if (def.MonsterEffectKind == HealthMult && !double.IsNaN(magnitude) && magnitude > 0)
+                    best = Math.Max(best, magnitude);
+            return best;
         }
 
         /// <summary>
@@ -297,9 +308,8 @@ namespace ACE.Server.ThreadDungeons
         ///      the owner's rule that a boss always outranks its own pack.
         ///
         /// Taking the max rather than multiplying is what keeps this idempotent and bounded: boss_guarded
-        /// alone reaches 3.0x and a trash hardy reaches 2.0x, so stacking an unconditional 4x on top would
-        /// land a modded level-275 boss near 24x its base health and risk a fight that cannot finish inside
-        /// the run's TTL.
+        /// (or hardy) alone reaches at most 3.0x, so stacking an unconditional 4x on top would land a boss at
+        /// 3.0 x 4.0 = 12x its base health and risk a fight that cannot finish inside the run's TTL.
         ///
         /// <paramref name="observedMaxNonBoss"/> is OBSERVED, not predicted: a creature's real
         /// Health.MaxValue folds a dat-driven attribute formula the pure builder cannot evaluate, and the

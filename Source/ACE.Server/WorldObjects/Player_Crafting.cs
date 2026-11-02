@@ -8,6 +8,7 @@ using ACE.Server.Entity;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp.Templates;
 using ACE.Server.WorldObjects.Entity;
 
@@ -163,6 +164,7 @@ namespace ACE.Server.WorldObjects
             var salvageBags = new List<WorldObject>();
             var salvageResults = new SalvageResults();
             var issuedRefusalSent = false;
+            var toolRefusalSent = false;
 
             foreach (var itemGuid in salvageItems)
             {
@@ -192,6 +194,17 @@ namespace ACE.Server.WorldObjects
                 if (IsTrading && item.IsBeingTradedOrContainsItemBeingTraded(ItemsInTradeWindow))
                 {
                     SendWeenieError(WeenieError.YouCannotSalvageItemsInTrading);
+                    continue;
+                }
+
+                // a multi-charge salvage Hammer carries a workmanship and a MaterialType like loot does, so
+                // nothing else refuses it - and salvaging it would turn a bought tool back into salvage
+                if (SalvageTool.IsSalvageTool(item))
+                {
+                    if (!toolRefusalSent)
+                        Session.Network.EnqueueSend(new GameMessageSystemChat($"The {item.Name} cannot be salvaged.", ChatMessageType.Broadcast));
+
+                    toolRefusalSent = true;
                     continue;
                 }
 
@@ -256,13 +269,22 @@ namespace ACE.Server.WorldObjects
 
                 // increase value of salvage bag - salvage skill is a factor,
                 // if bags aren't being combined here
-                var valueFactor = (float)added / amountProduced;
-                if (item.ItemType != ItemType.TinkeringMaterial)
+                if (item.ItemType == ItemType.TinkeringMaterial)
+                {
+                    // bag source: shared with the mule partial-salvage planner
+                    var bagAddedValue = SalvageCombine.ValueShare(item.Value ?? 0, added, amountProduced);
+
+                    salvageBag.Value = SalvageCombine.CapValue(salvageBag.Value ?? 0, bagAddedValue, valueCap, out _);
+                }
+                else
+                {
+                    var valueFactor = (float)added / amountProduced;
                     valueFactor *= GetCreatureSkill(Skill.Salvaging).Current / 387.0f * (1.0f + 0.25f * AugmentationBonusSalvage);
 
-                var addedValue = (int)Math.Round((item.Value ?? 0) * valueFactor);
+                    var addedValue = (int)Math.Round((item.Value ?? 0) * valueFactor);
 
-                salvageBag.Value = Math.Min((salvageBag.Value ?? 0) + addedValue, valueCap);
+                    salvageBag.Value = Math.Min((salvageBag.Value ?? 0) + addedValue, valueCap);
+                }
 
                 // a bit different here, since ACE handles overages
                 if (message != null)
@@ -348,42 +370,46 @@ namespace ACE.Server.WorldObjects
             var maxStructure = salvageBag.MaxStructure ?? SalvageForge.DefaultMaxStructure;
             var structure = salvageBag.Structure ?? 0;
 
-            var space = maxStructure - structure;
-            var amount = Math.Min(tryAmount, space);
-
-            salvageBag.Structure = (ushort)(structure + amount);
-
-            int addNum, addWorkmanship;
-
             if (item.ItemType == ItemType.TinkeringMaterial)
             {
-                // combining bags - split the source so both this bag and whatever the caller's loop
-                // pours into the next one keep the source's average workmanship, to within the
-                // half-unit-per-fragment rounding SplitSalvage's remarks describe
-                var srcNum = item.NumItemsInMaterial ?? 1;
-                var srcWorkmanship = item.ItemWorkmanship ?? 0;
+                // combining bags - SalvageCombine.Pour splits the source so both this bag and whatever the
+                // caller's loop pours into the next one keep the source's average workmanship, to within
+                // the half-unit-per-fragment rounding SplitSalvage's remarks describe. Value is tracked by
+                // AddSalvage, so it is passed as 0 here.
+                var pour = SalvageCombine.Pour(
+                    new SalvageCombine.BagState(structure, salvageBag.ItemWorkmanship ?? 0, salvageBag.NumItemsInMaterial ?? 0, 0),
+                    new SalvageCombine.BagState(tryAmount, item.ItemWorkmanship ?? 0, item.NumItemsInMaterial ?? 1, 0),
+                    maxStructure, int.MaxValue);
 
-                SplitSalvage(srcNum, srcWorkmanship, amount, tryAmount,
-                             out addNum, out addWorkmanship, out var remNum, out var remWorkmanship);
+                salvageBag.Structure = (ushort)pour.Target.Structure;
+                salvageBag.ItemWorkmanship = pour.Target.Iw;
+                salvageBag.NumItemsInMaterial = pour.Target.Nim;
 
                 // the source bag is scratch state - HandleSalvaging consumes it once AddSalvage's loop
                 // has drained it, so rewrite it down to the untransferred remainder for the next pass.
                 // Only on a partial transfer: a full transfer leaves remNum 0, and a bag with
                 // NumItemsInMaterial 0 would divide by zero in the Workmanship getter.
-                if (amount < tryAmount)
+                if (!pour.SourceFullyPoured)
                 {
-                    item.NumItemsInMaterial = remNum;
-                    item.ItemWorkmanship = remWorkmanship;
+                    item.NumItemsInMaterial = pour.SourceRemainder.Nim;
+                    item.ItemWorkmanship = pour.SourceRemainder.Iw;
                 }
+
+                salvageBag.Name = $"Salvage ({salvageBag.Structure})";
+
+                return pour.Added;
             }
-            else
-            {
-                // fresh salvaging - a stack of N identical items contributes N items' worth.
-                // Deliberately unchanged from the previous behaviour: this path already preserves the
-                // correct average on every bag it spills into, and reworking it is out of scope.
-                addNum = item.StackSize ?? 1;
-                addWorkmanship = (item.ItemWorkmanship ?? 0) * addNum;
-            }
+
+            var space = maxStructure - structure;
+            var amount = Math.Min(tryAmount, space);
+
+            salvageBag.Structure = (ushort)(structure + amount);
+
+            // fresh salvaging - a stack of N identical items contributes N items' worth.
+            // Deliberately unchanged from the previous behaviour: this path already preserves the
+            // correct average on every bag it spills into, and reworking it is out of scope.
+            var addNum = item.StackSize ?? 1;
+            var addWorkmanship = (item.ItemWorkmanship ?? 0) * addNum;
 
             salvageBag.ItemWorkmanship = (salvageBag.ItemWorkmanship ?? 0) + addWorkmanship;
             salvageBag.NumItemsInMaterial = (salvageBag.NumItemsInMaterial ?? 0) + addNum;

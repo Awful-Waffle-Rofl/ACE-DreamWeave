@@ -82,6 +82,28 @@ namespace ACE.Server.MlDigsite
     }
 
     /// <summary>
+    /// What to do with a wave that ended up with no live creatures and no kill to show for it (placed 0 after
+    /// its retry, or every body vanished). MlDigsiteRules.EmptyWaveAction decides it as a pure function.
+    /// </summary>
+    public enum MlDigsiteEmptyWaveAction
+    {
+        /// <summary>Not the last wave: arm the next wave after the breather. Not credited as a clear.</summary>
+        SkipToNext,
+
+        /// <summary>The last wave, first time empty: re-spawn that same wave once after the breather.</summary>
+        RespawnLast,
+
+        /// <summary>The last wave, empty again after its one re-spawn: end the run now at the stall outcome.</summary>
+        EndRun,
+
+        /// <summary>
+        /// As <see cref="EndRun"/>, but a checkpoint mini-boss is still alive: leave the run to the stall clock so
+        /// killing the boss can still count.
+        /// </summary>
+        LeaveToClock,
+    }
+
+    /// <summary>
     /// What one tick of an endless Waves encounter resolves to (MlDigsiteRules.WavesTick). The point of
     /// naming it is that the SAME value drives both what the tick does and whether the time-forced
     /// checkpoint mini-boss may go up on it (MlDigsiteRules.ShouldForceCheckpoint), so the two can never

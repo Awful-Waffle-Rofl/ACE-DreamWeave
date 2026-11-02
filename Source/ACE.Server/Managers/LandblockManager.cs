@@ -38,8 +38,9 @@ namespace ACE.Server.Managers
         private static readonly Dictionary<ulong, Landblock> landblocks = new Dictionary<ulong, Landblock>();
 
         /// <summary>
-        /// Live ephemeral instances, keyed by their full 32-bit instance id. An entry exists exactly while
-        /// its landblock is loaded.
+        /// Live ephemeral instances, keyed by their full 32-bit instance id, each with its footprint. An entry
+        /// exists exactly while its PRIMARY landblock is loaded; the primary of an outdoor instance group unloads
+        /// last (TryClaimGroupPrimaryForDestruction), so the entry outlives every landblock loaded under the id.
         ///
         /// <para/>
         /// Deliberately NOT protected by <see cref="landblockLock"/>. It used to be a plain Dictionary
@@ -627,12 +628,58 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
+        /// The landblock currently loaded at this id and instance, or null. NEVER loads one (unlike
+        /// <see cref="GetLandblock"/>), so a location gate can ask "what is here" without starting a landblock load.
+        /// </summary>
+        public static Landblock GetLoadedLandblock(LandblockId landblockId, uint instance)
+        {
+            landblockLock.EnterReadLock();
+            try
+            {
+                return LandblockDictFetch(landblockId.Raw | 0xFFFF, instance);
+            }
+            finally
+            {
+                landblockLock.ExitReadLock();
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="landblock"/> is the very object currently loaded at its id and instance: false once
+        /// it has unloaded, or once a different object has been loaded in its place.
+        /// </summary>
+        internal static bool IsCurrentInstance(Landblock landblock)
+        {
+            if (landblock == null)
+                return false;
+
+            landblockLock.EnterReadLock();
+            try
+            {
+                return ReferenceEquals(LandblockDictFetch(landblock.Id.Raw, landblock.Instance), landblock);
+            }
+            finally
+            {
+                landblockLock.ExitReadLock();
+            }
+        }
+
+        /// <summary>
         /// Returns a reference to a landblock, loading the landblock if not already active
         /// </summary>
         public static Landblock GetLandblock(LandblockId landblockId, uint instance, bool loadAdjacents, bool permaload = false, EphemeralRealm ephemeralRealm = null)
         {
-            if (loadAdjacents && ephemeralRealm != null)
-                throw new ArgumentException("Ephemeral instances may not load adjacents (indoor landblocks only)");
+            // A creator that registers a single-landblock instance (every dungeon copy, PvP match space and Thread)
+            // still may not ask for adjacents. Only an instance that declares a footprint may, which is the outdoor
+            // instance group case; a dungeon has no adjacents in any case (GetAdjacentIDs).
+            if (loadAdjacents && ephemeralRealm != null && ephemeralRealm.Footprint == null)
+                throw new ArgumentException("A single-landblock ephemeral instance may not load adjacents; only an instance that declares a footprint (EphemeralRealm.Footprint) may");
+
+            // The footprint a registering load will register: the realm's declared one, or the primary alone.
+            var registeringFootprint = ephemeralRealm == null ? null : (ephemeralRealm.Footprint ?? EphemeralFootprint.Single(landblockId.Landblock));
+
+            if (registeringFootprint != null && registeringFootprint.Primary != landblockId.Landblock)
+                throw new ArgumentException($"An ephemeral footprint's primary (0x{registeringFootprint.Primary:X4}) must be the landblock that registers it (0x{landblockId.Landblock:X4})");
 
             Landblock landblock;
 
@@ -648,9 +695,20 @@ namespace ACE.Server.Managers
             {
                 bool setAdjacents = false;
 
+                // Open World Threads: true when this landblock belongs to an instance using the lazy buffer ring (a live
+                // outdoor Thread run that recorded dynamic_dungeons_outdoor_lazy_buffer_ring at start). False for every
+                // other landblock, which keeps both decisions below exactly as they were.
+                bool lazyBufferRing;
+
                 var landblockIdClean = new LandblockId(landblockId.Raw | 0xFFFF);
 
                 landblock = LandblockDictFetch(landblockIdClean.Raw, instance);
+
+                // A registering load must build its own landblock. Finding one already loaded under the id means the
+                // allocator handed out an id something is still loaded under (see loadedPerEphemeralInstance), and
+                // the creator's realm will NOT be attached or registered: the caller gets an unregistered copy.
+                if (landblock != null && ephemeralRealm != null)
+                    log.Error($"LandblockManager: registering load of 0x{landblockIdClean.Landblock:X4} found a landblock already loaded under instance {instance:X8} (role {landblock.GroupRole}); the new ephemeral realm was NOT registered");
 
                 if (landblock == null)
                 {
@@ -663,19 +721,44 @@ namespace ACE.Server.Managers
                         landblock = new Landblock(landblockIdClean, instance);
                         LandblockDictCommit(landblockIdClean.Raw, instance, landblock);
 
+                        // Instance groups: decide what this copy is BEFORE Init, which reads it to choose its
+                        // content. A registering load is the primary. Any other load under an ephemeral id - a
+                        // footprint member, an adjacency load, RelocateObjectForPhysics, a physics seam
+                        // (LScape.get_landblock) - looks the instance up, and a member inherits the primary's
+                        // realm. Everything else is bare terrain with no realm, never a full base-world copy.
+                        EphemeralFootprint liveFootprint = null;
+                        Landblock livePrimary = null;
+
+                        if (ephemeralRealm == null && EphemeralInstanceGroup.IsEphemeralInstance(instance))
+                            ephemeralInstances.TryGet(instance, out livePrimary, out liveFootprint);
+
+                        landblock.GroupRole = EphemeralInstanceGroup.Classify(landblockIdClean.Landblock, instance, liveFootprint, ephemeralRealm != null);
+
                         if (ephemeralRealm != null)
                         {
                             landblock.InnerRealmInfo = ephemeralRealm;
 
-                            if (!ephemeralInstances.TryRegister(instance, landblock))
+                            if (!ephemeralInstances.TryRegister(instance, landblock, registeringFootprint))
                                 log.Error($"LandblockManager: failed to add ephemeral instance {instance:X8} to ephemeral landblocks!");
                         }
+                        else if (EphemeralInstanceGroup.InheritsRealm(landblock.GroupRole))
+                            landblock.InnerRealmInfo = livePrimary?.InnerRealmInfo;
+
+                        // A buffer carries no realm, so the instance's realm is read from the creator or the live primary.
+                        lazyBufferRing = EphemeralInstanceGroup.UsesLazyBufferRing(ephemeralRealm ?? livePrimary?.InnerRealmInfo);
+
+                        if (landblock.GroupRole == EphemeralLoadRole.Orphan && liveFootprint != null)
+                            log.Error($"LandblockManager: landblock 0x{landblockIdClean.Landblock:X4} is the primary of live instance {instance:X8} but was loaded without registering it; loading it as bare terrain");
+                        else if (landblock.GroupRole != EphemeralLoadRole.NotEphemeral && landblock.GroupRole != EphemeralLoadRole.Primary && log.IsDebugEnabled)
+                            log.Debug($"LandblockManager: landblock 0x{landblockIdClean.Landblock:X4} instance {instance:X8} loaded as {landblock.GroupRole}");
 
                         if (!loadedLandblocks.Add(landblock))
                         {
                             log.Error($"LandblockManager: failed to add {LandblockKey(landblockIdClean.Raw, instance):X16} to active landblocks!");
                             return landblock;
                         }
+
+                        CountEphemeralLoad(instance, +1);
 
                         landblockGroupPendingAdditions.Add(landblock);
                     }
@@ -688,12 +771,16 @@ namespace ACE.Server.Managers
 
                     setAdjacents = true;
                 }
+                else
+                    lazyBufferRing = EphemeralInstanceGroup.UsesLazyBufferRing(landblock.InnerRealmInfo);
 
                 if (permaload)
                     landblock.Permaload = true;
 
-                // load adjacents, if applicable
-                if (loadAdjacents)
+                // load adjacents, if applicable. Under an ephemeral instance only a footprint landblock expands
+                // (EphemeralInstanceGroup.LoadsAdjacents), so adjacency loading reaches one buffer ring past the
+                // footprint and no further - and under the lazy buffer ring not even that: the ring loads on demand.
+                if (loadAdjacents && EphemeralInstanceGroup.LoadsAdjacents(landblock.GroupRole, lazyBufferRing))
                 {
                     var adjacents = GetAdjacentIDs(landblock);
                     foreach (var adjacent in adjacents)
@@ -702,9 +789,12 @@ namespace ACE.Server.Managers
                     setAdjacents = true;
                 }
 
-                // cache adjacencies
+                // cache adjacencies. Under the lazy buffer ring the neighbours' PHYSICS adjacency lists are refreshed
+                // too: no footprint landblock re-requests its adjacents any more, so a member or buffer that loads after
+                // its neighbour would otherwise stay out of that neighbour's physics visibility scan
+                // (PhysicsLandblock.GetServerObjects). Without the ring the traverse stays unsynced, exactly as before.
                 if (setAdjacents)
-                    SetAdjacents(landblock, true, true);
+                    SetAdjacents(landblock, true, true, traversePSync: lazyBufferRing);
 
                 // the id is now backed by a registered landblock (or was already loaded), so it no longer
                 // needs to be reserved against a colliding allocation. Lock free - see the registry.
@@ -716,6 +806,23 @@ namespace ACE.Server.Managers
             }
 
             return landblock;
+        }
+
+        /// <summary>
+        /// Every landblock currently loaded under <paramref name="instance"/> (an outdoor instance group's primary,
+        /// members and bare buffer copies alike). A snapshot taken under the read lock; NEVER loads anything.
+        /// </summary>
+        internal static List<Landblock> GetLoadedLandblocksUnder(uint instance)
+        {
+            landblockLock.EnterReadLock();
+            try
+            {
+                return loadedLandblocks.Where(lb => lb.Instance == instance).ToList();
+            }
+            finally
+            {
+                landblockLock.ExitReadLock();
+            }
         }
 
         /// <summary>
@@ -840,9 +947,11 @@ namespace ACE.Server.Managers
 
         /// <summary>
         /// Rebuilds the adjacency cache for a landblock, and optionally rebuilds the adjacency caches
-        /// for the adjacent landblocks if traverse is true
+        /// for the adjacent landblocks if traverse is true. <paramref name="traversePSync"/> also resyncs those adjacent
+        /// landblocks' physics adjacency lists where it is thread safe (EphemeralInstanceGroup.DecideNeighbourPhysicsSync);
+        /// only the lazy buffer ring of an outdoor Thread run passes true.
         /// </summary>
-        private static void SetAdjacents(Landblock landblock, bool traverse = true, bool pSync = false)
+        private static void SetAdjacents(Landblock landblock, bool traverse = true, bool pSync = false, bool traversePSync = false)
         {
             landblock.Adjacents = GetAdjacents(landblock);
 
@@ -852,7 +961,16 @@ namespace ACE.Server.Managers
             if (traverse)
             {
                 foreach (var adjacent in landblock.Adjacents)
-                    SetAdjacents(adjacent, false);
+                {
+                    var sync = traversePSync
+                        ? EphemeralInstanceGroup.DecideNeighbourPhysicsSync(true, adjacent.IsDungeon, CurrentlyTickingLandblockGroupsMultiThreaded, adjacent.CurrentLandblockGroup, CurrentMultiThreadedTickingLandblockGroup.Value)
+                        : EphemeralInstanceGroup.NeighbourPhysicsSync.Skip;
+
+                    if (sync == EphemeralInstanceGroup.NeighbourPhysicsSync.SkipCrossThread)
+                        log.Error($"LandblockManager.SetAdjacents: not resyncing the physics adjacents of 0x{adjacent.Id.Landblock:X4} instance {adjacent.Instance:X8} from 0x{landblock.Id.Landblock:X4}: it ticks in another landblock group ({adjacent.CurrentLandblockGroup}) than this thread's ({CurrentMultiThreadedTickingLandblockGroup.Value})");
+
+                    SetAdjacents(adjacent, false, sync == EphemeralInstanceGroup.NeighbourPhysicsSync.Sync);
+                }
             }
         }
 
@@ -904,9 +1022,18 @@ namespace ACE.Server.Managers
             if (!unloadingForShutdown && !landblock.TryClaimForDestruction())
                 return false;
 
-            // ace.threads.unload.duration: timed for ephemeral landblocks only (Threads are their main
-            // producer), across Unload and the deregistration below. The ordinary world's unloads are untimed.
-            var unloadStart = landblock.InnerRealmInfo != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            // Instance groups: a group's primary unloads LAST, because its unload is what unregisters the instance.
+            // Held while a player is anywhere else in the group; otherwise the rest of the group is queued first and
+            // the primary waits for it, so the id stays registered (and unallocatable) until nothing is loaded under
+            // it. A single-landblock instance has no other landblocks and unloads exactly as before. Shutdown is
+            // exempt for the same reason it is exempt from the claim above.
+            if (!unloadingForShutdown && landblock.GroupRole == EphemeralLoadRole.Primary && !TryClaimGroupPrimaryForDestruction(landblock))
+                return false;
+
+            // ace.threads.unload.duration: timed for an ephemeral instance's PRIMARY only (Threads are their main
+            // producer), across Unload and the deregistration below. A group's members and buffers are untimed so
+            // they cannot skew the per-run metric, and so are the ordinary world's unloads.
+            var unloadStart = landblock.InnerRealmInfo != null && EphemeralInstanceGroup.TimesUnload(landblock.GroupRole) ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
 
             landblock.Unload();
 
@@ -918,10 +1045,14 @@ namespace ACE.Server.Managers
                 // remove from list of managed landblocks
                 if (loadedLandblocks.Remove(landblock))
                 {
+                    CountEphemeralLoad(landblock.Instance, -1);
+
                     LandblockDictCommit(landblock.Id.Raw, landblock.Instance, null);
 
-                    if (landblock.InnerRealmInfo != null)
-                        ephemeralInstances.TryUnregister(landblock.Instance);
+                    // Only the primary's unload may unregister (EphemeralInstanceGroup.MayUnregister), and only while
+                    // the registration is still this landblock's: a member, buffer or stale copy never ends an instance.
+                    if (landblock.InnerRealmInfo != null && EphemeralInstanceGroup.MayUnregister(landblock.Id.Landblock, ephemeralInstances.GetFootprint(landblock.Instance)))
+                        ephemeralInstances.TryUnregister(landblock.Instance, landblock);
 
                     // remove from landblock group
                     for (int i = landblockGroups.Count - 1; i >= 0 ; i--)
@@ -978,6 +1109,44 @@ namespace ACE.Server.Managers
                 log.Error($"LandblockManager: failed to unload {landblock.Id.Raw:X8}");
 
             return true;
+        }
+
+        /// <summary>
+        /// Instance groups: the group half of the unload claim for a primary (<see cref="EphemeralInstanceGroup.DecidePrimaryUnload"/>).
+        /// True when the primary is the last landblock loaded under its instance and may be torn down. False when
+        /// a player is on another landblock of the group (the primary's idle clock is refreshed), or when other
+        /// landblocks are still loaded (they are queued for destruction now, and the primary's next heartbeat
+        /// re-queues it). World thread only, from the unload drain.
+        /// </summary>
+        private static bool TryClaimGroupPrimaryForDestruction(Landblock primary)
+        {
+            List<Landblock> others;
+            int occupied;
+
+            landblockLock.EnterReadLock();
+            try
+            {
+                others = EphemeralInstanceGroup.SelectGroupOthers(loadedLandblocks, primary, lb => lb.Instance, lb => lb.HasPlayerIncludingPending(), out occupied);
+            }
+            finally
+            {
+                landblockLock.ExitReadLock();
+            }
+
+            switch (EphemeralInstanceGroup.DecidePrimaryUnload(others.Count, occupied))
+            {
+                case EphemeralInstanceGroup.PrimaryUnloadDecision.HoldOccupied:
+                    primary.KeepActiveForGroup();
+                    return false;
+
+                case EphemeralInstanceGroup.PrimaryUnloadDecision.DrainGroupFirst:
+                    foreach (var other in others)
+                        AddToDestructionQueue(other);
+                    return false;
+
+                default:
+                    return true;
+            }
         }
 
         /// <summary>
@@ -1044,7 +1213,8 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
-        /// Returns the live landblock for an ephemeral instance, or null if it isn't loaded.
+        /// Returns the live landblock for an ephemeral instance - its PRIMARY, for an outdoor instance group - or
+        /// null if it isn't loaded.
         ///
         /// <para/>
         /// This was <c>GetEphemeralLandblockUnsafe</c>, and the name was accurate: the read was an
@@ -1060,6 +1230,15 @@ namespace ACE.Server.Managers
             return ephemeralInstances.Get(instance);
         }
 
+        /// <summary>
+        /// One coherent, lock-free read of a live ephemeral instance: its primary landblock (the one that registered
+        /// it, see <see cref="GetEphemeralLandblock"/>) and its footprint. False, with both null, when it is not live.
+        /// </summary>
+        public static bool TryGetEphemeralInstance(uint instance, out Landblock primary, out EphemeralFootprint footprint)
+        {
+            return ephemeralInstances.TryGet(instance, out primary, out footprint);
+        }
+
         /// <summary>Live registered ephemeral instances. Lock free (the registry is concurrent); for the metrics gauge.</summary>
         public static int EphemeralInstanceCount => ephemeralInstances.LiveCount;
 
@@ -1067,7 +1246,11 @@ namespace ACE.Server.Managers
         /// Milliseconds the most recent <see cref="GetLandblock"/> call ON THIS THREAD waited to enter the landblock
         /// lock. Written at the top of every call, so it is only meaningful when read on the same thread right after
         /// one returns (ThreadDungeonManager.TryStart does exactly that). A loadAdjacents call recurses, and the
-        /// value then reflects the innermost call; no ephemeral load takes that path.
+        /// value then reflects the innermost call. Two ephemeral creators take that path: the Developer-only
+        /// /enter-instance-group seam (RealmManager.GetNewEphemeralGroupLandblock), which does not read the value, and an
+        /// outdoor Thread run (RealmManager.GetNewThreadOutdoorLandblock), which also loads every footprint member after the
+        /// primary. TryStart does read it there, so for an outdoor run ace.threads.lb_create.lock_wait reports the last
+        /// GetLandblock call of the group (the innermost call of the last member load), not the whole group's wait.
         /// </summary>
         [ThreadStatic]
         public static double LastLockWaitMs;
@@ -1079,8 +1262,41 @@ namespace ACE.Server.Managers
         /// </summary>
         public static uint RequestNewEphemeralInstanceIDv1(ushort homeRealmId)
         {
-            return ephemeralInstances.RequestNewInstanceId(homeRealmId);
+            return ephemeralInstances.RequestNewInstanceId(homeRealmId, IsAnyLandblockLoadedUnder);
         }
+
+        /// <summary>
+        /// How many landblocks are loaded under each ephemeral instance id. An entry exists exactly while at least one
+        /// is: written only beside loadedLandblocks.Add (GetLandblock) and loadedLandblocks.Remove (UnloadOne), both
+        /// under <see cref="landblockLock"/>'s write lock, so there is one writer at a time; read lock free by the id
+        /// allocator. It is what stops a fresh instance from being handed an id a stale copy is still loaded under
+        /// (a bare orphan, or a group member still waiting in the unload throttle), which the registry alone cannot
+        /// see because those copies are not registered.
+        /// </summary>
+        private static readonly ConcurrentDictionary<uint, int> loadedPerEphemeralInstance = new ConcurrentDictionary<uint, int>();
+
+        /// <summary>Caller holds landblockLock's write lock. Persistent instances are not counted.</summary>
+        private static void CountEphemeralLoad(uint instance, int delta)
+        {
+            if (!EphemeralInstanceGroup.IsEphemeralInstance(instance))
+                return;
+
+            loadedPerEphemeralInstance.TryGetValue(instance, out var count);
+            count += delta;
+
+            if (count > 0)
+                loadedPerEphemeralInstance[instance] = count;
+            else
+            {
+                loadedPerEphemeralInstance.TryRemove(instance, out _);
+
+                if (count < 0)
+                    log.Error($"LandblockManager: loaded-landblock count for instance {instance:X8} went negative");
+            }
+        }
+
+        /// <summary>True while any landblock is loaded under this ephemeral instance id. Lock free.</summary>
+        private static bool IsAnyLandblockLoadedUnder(uint instance) => loadedPerEphemeralInstance.ContainsKey(instance);
 
         public static void DoEnvironChange(EnvironChangeType environChangeType)
         {

@@ -391,6 +391,10 @@ namespace ACE.Server.WorldObjects
             var runSkill = GetCreatureSkill(Skill.Run).Current;
             var runRate = MovementSystem.GetRunRate(burden, (int)runSkill, 1.0f);
 
+            // World Events Hold: a wave runner's run-speed multiplier (never a player). One field read for every other creature.
+            if (!(this is Player))
+                return ACE.Server.WorldEvents.WorldEventHooks.HoldRunRate(this, (float)runRate);
+
             return (float)runRate;
         }
 
@@ -478,7 +482,10 @@ namespace ACE.Server.WorldObjects
             // a live pin. It is stated that way round on purpose - "no damage path reaches a chess piece" would
             // be an argument from absence, and would stop being true the moment a pin was applied from anywhere
             // other than a landed player hit.
-            mvp.Speed = CurrentMovementSlowFactor;
+            //
+            // MovementSpeedFactor is CurrentMovementSlowFactor for every creature except a combat pet, where it also
+            // carries the pet speed floor (CombatPet_SpeedFloor.cs). The wire half reads the same member.
+            mvp.Speed = MovementSpeedFactor;
 
             return mvp;
         }
@@ -595,6 +602,11 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Open World Threads (R11a/b): an outdoor run creature is contained by the circle and drops a player target
+            // that left it. One null check for every other creature (Creature_OutdoorPerimeter.cs).
+            if (P_OutdoorPerimeter != null && OutdoorPerimeterTick())
+                return;
+
             // WaffleACE fork, World Events boss confinement. Past the tether but still inside HomeRadius:
             // drop the current target (a Taunt hold included - the tether outranks it) and re-acquire from
             // the in-tether candidates only, so a boss that has been walked out by one kiter turns on the
@@ -648,7 +660,7 @@ namespace ACE.Server.WorldObjects
             // argument, and leaving it null lands MoveToParameters' own 1.0f default on the wire. Pass the slow
             // factor explicitly so a creature slowed by Pinning Shot runs home at the same rate the server is
             // simulating (GetMovementParameters below sets the server half from the same property).
-            MoveTo(home, RunRate, false, 1.0f, CurrentMovementSlowFactor);
+            MoveTo(home, RunRate, false, 1.0f, MovementSpeedFactor);
 
             var homePos = new Physics.Common.Position(home);
 

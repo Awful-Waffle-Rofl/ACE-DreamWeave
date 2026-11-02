@@ -316,6 +316,10 @@ namespace ACE.Server.Tests
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Npc));
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Decor));
             Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Add));
+
+            // World Events Hold H5: a knight IS placed through Spawn's loop, and it is a friendly the run's monsters attack -
+            // making it hostile to players would be this class's failure pointed the wrong way.
+            Assert.IsFalse(SpawnedCreatureHostility.NormalizesHostility(WorldEventSpawnKind.Protected));
         }
 
         [TestMethod]
@@ -328,6 +332,7 @@ namespace ACE.Server.Tests
                 WorldEventSpawnKind.Wave, WorldEventSpawnKind.Boss,
                 WorldEventSpawnKind.Source, WorldEventSpawnKind.InertObjective,
                 WorldEventSpawnKind.Npc, WorldEventSpawnKind.Decor, WorldEventSpawnKind.Add,
+                WorldEventSpawnKind.Protected,
             };
 
             foreach (WorldEventSpawnKind kind in System.Enum.GetValues(typeof(WorldEventSpawnKind)))

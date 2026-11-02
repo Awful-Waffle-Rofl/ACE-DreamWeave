@@ -303,23 +303,15 @@ namespace ACE.Server.Pvp.Templates
             biota.PropertiesInt[PropertyInt.Bonded] = (int)BondedStatus.Bonded;
             biota.PropertiesInt[PropertyInt.Value] = 0;
 
-            // Issued ammunition and spell components weigh nothing: the loadout is not the player's own gear, and a full
-            // quiver of arrows plus chorizite would otherwise burden them. Both figures are zeroed so every recompute
-            // (Stackable load, SetStackSize, AdjustStack on merge / consumption) derives 0 from StackUnitEncumbrance.
-            if (IsWeightlessIssuedType(biota.WeenieType))
-            {
-                biota.PropertiesInt[PropertyInt.EncumbranceVal] = 0;
-                biota.PropertiesInt[PropertyInt.StackUnitEncumbrance] = 0;
-            }
+            // EVERY issued item weighs nothing (armor, weapons, ammunition, components, food, potions): the loadout is not
+            // the player's own gear, and it must never push them over their normal burden. Both figures are zeroed so every
+            // recompute (Stackable load, SetStackSize, AdjustStack on merge / consumption) derives 0 from StackUnitEncumbrance;
+            // the unit figure is harmless on an item that never stacks.
+            biota.PropertiesInt[PropertyInt.EncumbranceVal] = 0;
+            biota.PropertiesInt[PropertyInt.StackUnitEncumbrance] = 0;
 
             return biota;
         }
-
-        /// <summary>
-        /// TRUE for the weenie types an issued kit hands out weightless: Ammunition (arrows, quarrels, atlatl darts) and
-        /// SpellComponent (chorizite and the other components). Every other issued item keeps its captured burden.
-        /// </summary>
-        public static bool IsWeightlessIssuedType(WeenieType type) => type == WeenieType.Ammunition || type == WeenieType.SpellComponent;
 
         /// <summary>True when the biota carries the issued mark. The biota-level twin of PvpTemplate.IsIssued.</summary>
         public static bool IsIssuedBiota(Biota biota, ReaderWriterLockSlim rwLock = null)

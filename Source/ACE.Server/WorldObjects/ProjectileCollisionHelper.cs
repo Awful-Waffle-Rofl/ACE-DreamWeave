@@ -21,6 +21,16 @@ namespace ACE.Server.WorldObjects
 
             //Console.WriteLine($"Projectile.OnCollideObject - {WorldObject.Name} ({WorldObject.Guid}) -> {target.Name} ({target.Guid})");
 
+            // a cosmetic projectile (a Reflect return arrow, a multi-shot visual) can never damage anything,
+            // whatever it touches: its damage, if any, is resolved by whoever launched it. Checked on the flag
+            // itself rather than left to the ProjectileTarget test below, so a cosmetic that still carries a
+            // target is refused too.
+            if (worldObject.IsCosmeticProjectile)
+            {
+                OnCollideEnvironment(worldObject);
+                return;
+            }
+
             if (worldObject.ProjectileTarget == null || worldObject.ProjectileTarget != target)
             {
                 //Console.WriteLine("Unintended projectile target! (should be " + ProjectileTarget.Guid.Full.ToString("X8") + " - " + ProjectileTarget.Name + ")");
@@ -51,17 +61,32 @@ namespace ACE.Server.WorldObjects
                     if (damageEvent != null && damageEvent.HasDamage)
                         worldObject.EnqueueBroadcast(new GameMessageSound(worldObject.Guid, Sound.Collision, 1.0f));
                 }
-                else if (sourceCreature != null && sourceCreature.AttackTarget != null)
+                else if (sourceCreature != null)
                 {
-                    // todo: clean this up
-                    var targetPlayer = sourceCreature.AttackTarget as Player;
+                    // The player this shot hurts is the creature it STRUCK, never the firer's CURRENT AttackTarget.
+                    // The guard at the top already pinned target == ProjectileTarget (the launch-time target), and
+                    // the damage just below is resolved against targetCreature's armor, shield and resists. Keying
+                    // the recipient on AttackTarget instead (as this line did, inherited from upstream) meant a monster
+                    // that retargeted while the arrow was in flight - Taunt, FindNextTarget, a pet pulling aggro -
+                    // handed the struck creature's mitigated damage to a DIFFERENT player: a hit resolved against a
+                    // lightly armoured caster or a pet landed on the tank, and the creature actually struck took
+                    // nothing. A player struck while the firer targeted a pet also fell into the pet branch below,
+                    // bypassing Player.TakeDamage.
+                    //
+                    // The branch no longer requires sourceCreature.AttackTarget != null either: the firer dropping
+                    // aggro mid-flight does not stop an arrow that already reached its launch-time target (pinned
+                    // above) while that target is alive (checked above), so it lands like any other.
+                    // Pinned by MonsterMissileRecipientSourceTests.
+                    var targetPlayer = targetCreature as Player;
 
-                    damageEvent = DamageEvent.CalculateDamage(sourceCreature, targetCreature, worldObject);
+                    // a shot at a PLAYER holds its monster-effect riders back until Reflect has decided below:
+                    // a bounced shot's DoT, debuff and leech must never reach the player it was aimed at
+                    damageEvent = DamageEvent.CalculateDamage(sourceCreature, targetCreature, worldObject, deferOutgoingHitEffects: targetPlayer != null);
 
                     // survival arena engagement-stall test: a monster missile reaching a player counts whether it
                     // hit, was evaded or was reflected (see Player.NoteSurvivalEngagement). Keyed on the creature
-                    // actually struck, not on targetPlayer above, which is the firer's AttackTarget.
-                    (targetCreature as Player)?.NoteSurvivalEngagement(sourceCreature);
+                    // actually struck - the same creature as targetPlayer above.
+                    targetPlayer?.NoteSurvivalEngagement(sourceCreature);
 
                     if (targetPlayer != null)
                     {
@@ -70,7 +95,15 @@ namespace ACE.Server.WorldObjects
                         // evaded, blocked or parried carries no damage to reflect and is left to the
                         // avoidance path below, so reflect never double-dips with the avoidance tier.
                         reflectedProjectile = damageEvent.HasDamage
-                            && targetPlayer.TryReflectProjectile(sourceCreature, CombatType.Missile, damageEvent.DamageType, damageEvent.Damage);
+                            && targetPlayer.TryReflectProjectile(sourceCreature, CombatType.Missile, damageEvent.DamageType, damageEvent.Damage, IncomingDamageOrigin.DirectHit);
+
+                        // a bounce resolves against the firer (Player.LaunchReflectedMissile: the firer's own
+                        // defenses, a cosmetic return arrow, damage and the reflected riders on arrival); any
+                        // other outcome is a shot that reached the player, so its held-back riders run now
+                        if (reflectedProjectile)
+                            targetPlayer.LaunchReflectedMissile(sourceCreature, worldObject, damageEvent);
+                        else
+                            damageEvent.ApplyDeferredOutgoingHitEffects();
 
                         // monster damage player
                         if (damageEvent.HasDamage && !reflectedProjectile)

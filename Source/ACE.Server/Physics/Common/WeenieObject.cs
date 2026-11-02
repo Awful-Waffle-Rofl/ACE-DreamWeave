@@ -7,6 +7,7 @@ using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.Physics.Animation;
 using ACE.Server.Physics.Collision;
+using ACE.Server.WorldEvents;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Physics.Common
@@ -32,6 +33,15 @@ namespace ACE.Server.Physics.Common
 
         public PlayerKillerStatus PlayerKillerStatus { get; set; }
 
+        /// <summary>
+        /// WaffleACE fork, World Events Hold: the run id of a knight (0 for everything else), cached at construction from
+        /// the creature's Hold tag (WorldEventHooks.HoldPhysicsRunIds), so the visibility filter is a field compare.
+        /// </summary>
+        public uint HoldKnightRunId { get; set; }
+
+        /// <summary>WaffleACE fork, World Events Hold: the run id of a wave monster or finale boss (0 for everything else), cached the same way.</summary>
+        public uint HoldMonsterRunId { get; set; }
+
         public WeenieObject() { }
 
         public WeenieObject(WorldObject worldObject)
@@ -43,7 +53,12 @@ namespace ACE.Server.Physics.Common
 
             IsCombatPet = worldObject is CombatPet;
 
-            IsMonster = creature.IsMonster && !IsCombatPet;
+            // WaffleACE fork, World Events Hold: the tag is set before EnterWorld and this object is built during it, so the
+            // cached run ids are final. A knight never reads as a MONSTER to physics (pets would attack it and it would build
+            // its own target list); it is a target only for its own run's monsters (ObjectMaint).
+            (HoldKnightRunId, HoldMonsterRunId) = WorldEventHooks.HoldPhysicsRunIds(creature);
+
+            IsMonster = creature.IsMonster && !IsCombatPet && !WorldEventHooks.PhysicsIsHoldKnight(HoldKnightRunId);
 
             Faction1Bits = creature.Faction1Bits ?? FactionBits.None;
 

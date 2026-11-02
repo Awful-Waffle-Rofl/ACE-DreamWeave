@@ -412,6 +412,19 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Bob (deposit and withdraw)", Player.FormatLogDetail(AccountVaultAction.Grant, "Bob", 1));
         }
 
+        /// <summary>
+        /// A Combine row carries a SIGNED count: negative for bags a partial-salvage combine took off a
+        /// row, positive for bags it produced. The generic branch would render a debit with neither its
+        /// sign nor its number.
+        /// </summary>
+        [TestMethod]
+        public void FormatLogDetail_ForCombine_ShowsDirectionAndCount()
+        {
+            Assert.AreEqual("Salvage (40) (combined away x3)", Player.FormatLogDetail(AccountVaultAction.Combine, "Salvage (40)", -3));
+            Assert.AreEqual("Salvage (100) (combined into x1)", Player.FormatLogDetail(AccountVaultAction.Combine, "Salvage (100)", 1));
+            Assert.AreEqual("Salvage (20)", Player.FormatLogDetail(AccountVaultAction.Combine, "Salvage (20)", 0));
+        }
+
         /// <summary>A Revoke row's Count is always 0 and carries no unit-count meaning at all.</summary>
         [TestMethod]
         public void FormatLogDetail_ForRevoke_ShowsOnlyTheName()
@@ -812,10 +825,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void GranterName_PrefersTheCurrentName_ThenTheStoredOne_ThenNothing()
         {
-            Assert.AreEqual("Newname", Player.ChooseGranterName("Newname", "Oldname"));
-            Assert.AreEqual("Oldname", Player.ChooseGranterName(null, "Oldname"));
-            Assert.IsNull(Player.ChooseGranterName(null, null));
-            Assert.IsNull(Player.ChooseGranterName(null, "<unknown>"), "WriteLog's placeholder is not a name");
+            Assert.AreEqual("Newname", ACE.Server.Entity.AccountVault.VaultGranterName.Choose("Newname", "Oldname"));
+            Assert.AreEqual("Oldname", ACE.Server.Entity.AccountVault.VaultGranterName.Choose(null, "Oldname"));
+            Assert.IsNull(ACE.Server.Entity.AccountVault.VaultGranterName.Choose(null, null));
+            Assert.IsNull(ACE.Server.Entity.AccountVault.VaultGranterName.Choose(null, "<unknown>"), "WriteLog's placeholder is not a name");
         }
 
         /// <summary>

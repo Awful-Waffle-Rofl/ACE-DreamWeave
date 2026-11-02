@@ -66,6 +66,25 @@ namespace ACE.Server.WorldObjects
             ActivationResponse |= ActivationResponse.Use;
         }
 
+        /// <summary>
+        /// Open World Threads R9: makes this door permanently open and unlocked, for an outdoor run's copy. Called on
+        /// every kept door across the footprint BEFORE it enters the world (Landblock.CreateWorldObjects), so the create
+        /// packet already carries the open state and no broadcast is needed. Monsters with AiOptions 0 cannot open a
+        /// door (OnCollideObject), so a closed door would wall them off; and Reset re-locks a DefaultLocked door after
+        /// ResetInterval, so DefaultLocked goes and DefaultOpen is set, which makes Reset reopen it instead. Locked is
+        /// cleared FIRST: SetEphemeralValues re-derives DefaultLocked from a Locked door.
+        /// </summary>
+        public void ForceOpenUnlocked()
+        {
+            IsLocked = false;
+            DefaultLocked = false;
+            DefaultOpen = true;
+
+            CurrentMotionState = motionOpen;
+            IsOpen = true;
+            Ethereal = true;
+        }
+
         public string LockCode
         {
             get => GetProperty(PropertyString.LockCode);
@@ -83,9 +102,33 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>
+        /// Speed course boss fight: the door is sealed shut and refuses every use, including from the far side a locked
+        /// door normally opens from (the `behind` case in ActOnUse). Ephemeral, never persisted; set and cleared by
+        /// LiveSpeedCourseWorld.SetSealDoor on the landblock thread.
+        /// </summary>
+        public bool SealedShut { get; set; }
+
         public override void ActOnUse(WorldObject worldObject)
         {
+            // DIVERGES FROM UPSTREAM (WaffleACE, 2026-10-27): a door the player's own Pinnacle fight spawned (the Olthoi Matron's
+            // pit doors) hands the use to the fight and nothing else happens. First line, ahead of IsBusy: a prop door is sealed
+            // shut, and the player's use must reach the script even while a script-driven Open/Close animation holds IsBusy.
+            if (worldObject is Player user && ACE.Server.Pinnacles.PinnacleFightManager.TryHandlePropUse(this, user))
+                return;
+
             if (IsBusy) return;
+
+            if (SealedShut)
+            {
+                if (worldObject is Player sealedPlayer)
+                {
+                    sealedPlayer.Session.Network.EnqueueSend(new GameEventCommunicationTransientString(sealedPlayer.Session, "The door is sealed shut!"));
+                    EnqueueBroadcast(new GameMessageSound(Guid, Sound.OpenFailDueToLock, 1.0f));
+                }
+
+                return;
+            }
 
             var player = worldObject as Player;
             var behind = player != null && player.GetRelativeDir(this).HasFlag(Quadrant.Back);

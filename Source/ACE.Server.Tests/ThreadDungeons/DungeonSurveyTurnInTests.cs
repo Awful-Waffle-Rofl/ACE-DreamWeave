@@ -69,6 +69,113 @@ namespace ACE.Server.Tests.ThreadDungeons
             return ledger;
         }
 
+        // ---------------- the exact count the Archivist speaks beside the band ----------------
+
+        [TestMethod]
+        public void CountMessage_Zero_WhenWindowDead()
+        {
+            var ledger = new PlanLedger { Count = 7 };
+            ledger.Stamps[DungeonSurveyRules.Window] = Now - 2 * 86400;
+
+            var plan = DungeonSurveyRules.Plan(ledger, Clock());
+
+            Assert.AreEqual("By my count you have filed 0 surveys today.", SurveyArchivistStation.CountMessage(plan.Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_Zero_WhenNeverFiled()
+        {
+            var plan = DungeonSurveyRules.Plan(new PlanLedger(), Clock());
+
+            Assert.AreEqual("By my count you have filed 0 surveys today.", SurveyArchivistStation.CountMessage(plan.Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_One_IsSingular()
+        {
+            var plan = DungeonSurveyRules.Plan(Ledger(1), Clock());
+
+            Assert.AreEqual("By my count you have filed 1 survey today.", SurveyArchivistStation.CountMessage(plan.Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_AFew_MatchesBandLt5()
+        {
+            var plan = DungeonSurveyRules.Plan(Ledger(4), Clock());
+
+            Assert.AreEqual(SurveyBand.Lt5, plan.Band);
+            Assert.AreEqual("By my count you have filed 4 surveys today.", SurveyArchivistStation.CountMessage(plan.Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_AtAndAboveTen_IsTheExactCount()
+        {
+            Assert.AreEqual("By my count you have filed 10 surveys today.",
+                SurveyArchivistStation.CountMessage(DungeonSurveyRules.Plan(Ledger(10), Clock()).Count));
+            Assert.AreEqual("By my count you have filed 23 surveys today.",
+                SurveyArchivistStation.CountMessage(DungeonSurveyRules.Plan(Ledger(23, 1, 5, 10), Clock()).Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_TwoAndThree_ArePlural()
+        {
+            Assert.AreEqual("By my count you have filed 2 surveys today.", SurveyArchivistStation.CountMessage(DungeonSurveyRules.Plan(Ledger(2), Clock()).Count));
+            Assert.AreEqual("By my count you have filed 3 surveys today.", SurveyArchivistStation.CountMessage(DungeonSurveyRules.Plan(Ledger(3), Clock()).Count));
+        }
+
+        [TestMethod]
+        public void CountMessage_Negative_ClampsToZero()
+        {
+            Assert.AreEqual("By my count you have filed 0 surveys today.", SurveyArchivistStation.CountMessage(-3));
+        }
+
+        [TestMethod]
+        public void Plan_SecondVisitAfterTurnIn_StillReportsFullDayCount()
+        {
+            var plan = DungeonSurveyRules.Plan(Ledger(12, 1, 5, 10), Clock());
+
+            Assert.AreEqual(12, plan.Count);
+            Assert.IsTrue(plan.Held);
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.BandTenMessage, "By my count you have filed 12 surveys today." },
+                SurveyArchivistStation.ImmediateLines(plan).ToArray());
+        }
+
+        // ---------------- the synchronous lines HandleTurnIn tells ----------------
+
+        [TestMethod]
+        public void ImmediateLines_DeadWindow_NothingFiledThenZeroCount()
+        {
+            var ledger = new PlanLedger { Count = 7 };
+            ledger.Stamps[DungeonSurveyRules.Window] = Now - 2 * 86400;
+
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.NothingFiledMessage, "By my count you have filed 0 surveys today." },
+                SurveyArchivistStation.ImmediateLines(DungeonSurveyRules.Plan(ledger, Clock())).ToArray());
+        }
+
+        [TestMethod]
+        public void ImmediateLines_LiveWindowBelowOne_NothingFiledThenZeroCount()
+        {
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.NothingFiledMessage, "By my count you have filed 0 surveys today." },
+                SurveyArchivistStation.ImmediateLines(DungeonSurveyRules.Plan(Ledger(0), Clock())).ToArray());
+        }
+
+        [TestMethod]
+        public void ImmediateLines_Bands_BandThenMatchingCount()
+        {
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.BandLt5Message, "By my count you have filed 1 survey today." },
+                SurveyArchivistStation.ImmediateLines(DungeonSurveyRules.Plan(Ledger(1), Clock())).ToArray());
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.BandFiveMessage, "By my count you have filed 5 surveys today." },
+                SurveyArchivistStation.ImmediateLines(DungeonSurveyRules.Plan(Ledger(5), Clock())).ToArray());
+            CollectionAssert.AreEqual(
+                new[] { SurveyArchivistStation.BandTenMessage, "By my count you have filed 10 surveys today." },
+                SurveyArchivistStation.ImmediateLines(DungeonSurveyRules.Plan(Ledger(10), Clock())).ToArray());
+        }
+
         // ---------------- the five paper traces from the deleted weenie header ----------------
 
         /// <summary>Trace 1: "count 3, nothing paid" -> BAND_LT5 + tier 1 paid.</summary>

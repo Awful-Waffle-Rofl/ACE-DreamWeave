@@ -34,7 +34,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void HuntersMark_TunablesMatchSignedOffDefaults()
         {
-            Assert.AreEqual(0.01, D("class_ability_huntersmark_percent_per_rank"), 1e-9);
+            Assert.AreEqual(0.02, D("class_ability_huntersmark_percent_per_rank"), 1e-9);
             Assert.AreEqual(10.0, D("class_ability_huntersmark_duration_seconds"), 1e-9);
         }
 
@@ -44,7 +44,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.10, D("class_ability_pinningshot_chance_base"), 1e-9);
             Assert.AreEqual(0.10, D("class_ability_pinningshot_chance_step"), 1e-9);
             Assert.AreEqual(5.0, D("class_ability_pinningshot_duration_seconds"), 1e-9);
-            Assert.AreEqual(15.0, D("class_ability_pinningshot_immunity_seconds"), 1e-9);
+            Assert.AreEqual(8.0, D("class_ability_pinningshot_immunity_seconds"), 1e-9);
 
             // the post-pin movement slow (2026-09-29): 10 seconds at a fifth speed, measured from the pin END.
             // Zero seconds, or a factor outside the open interval (0.0, 1.0), disables the slow with no
@@ -91,26 +91,73 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(0.06, D("class_ability_reflectmagic_chance_base"), 1e-9);
             Assert.AreEqual(0.06, D("class_ability_reflectmagic_chance_step"), 1e-9);
+
+            // the creature-spell immunity window (2026-10-17): 0.15/0.30/0.45s by rank
+            Assert.AreEqual(0.15, D("class_ability_reflectmagic_immunity_seconds_base"), 1e-9);
+            Assert.AreEqual(0.15, D("class_ability_reflectmagic_immunity_seconds_step"), 1e-9);
         }
 
         [TestMethod]
         public void Adrenaline_TunablesMatchSignedOffDefaults()
         {
-            Assert.AreEqual(0.02, D("class_ability_adrenaline_percent_per_rank"), 1e-9);
+            Assert.AreEqual(0.04, D("class_ability_adrenaline_percent_per_rank"), 1e-9, "doubled from 0.02 in the 2026-10-24 Berserker pass");
             Assert.AreEqual(6.0, D("class_ability_adrenaline_window_seconds"), 1e-9);
         }
 
+        // Vengeance_TunablesMatchSignedOffDefaults lived here until 2026-10-24: Vengeance was retired in the
+        // Berserker pass and its two keys deleted (Database/Updates/Shard/2026-10-24-06-Retire-Berserker-Keys.sql).
+
         [TestMethod]
-        public void Vengeance_TunablesMatchSignedOffDefaults()
+        public void BerserkerPass_NewTunablesMatchSignedOffDefaults()
         {
-            Assert.AreEqual(0.04, D("class_ability_vengeance_percent_per_rank"), 1e-9);
-            Assert.AreEqual(15.0, D("class_ability_vengeance_window_seconds"), 1e-9);
+            // Berserk Rage: 5 s immunity, 90/60/30 s cooldown by rank, x1.5 outgoing while raging
+            Assert.AreEqual(5.0, D("class_ability_berserkrage_duration_seconds"), 1e-9);
+            Assert.AreEqual(90.0, D("class_ability_berserkrage_cooldown_seconds_r1"), 1e-9);
+            Assert.AreEqual(60.0, D("class_ability_berserkrage_cooldown_seconds_r2"), 1e-9);
+            Assert.AreEqual(30.0, D("class_ability_berserkrage_cooldown_seconds_r3"), 1e-9);
+            Assert.AreEqual(1.5, D("class_ability_berserkrage_damage_multiplier"), 1e-9);
+
+            // Heavy Blows: power part +25% per rank; Intimidate: 15 defense per rank
+            Assert.AreEqual(0.25, D("class_ability_heavyblows_stretch_per_rank"), 1e-9);
+            Assert.AreEqual(15.0, D("class_ability_intimidate_defense_per_rank"), 1e-9);
+
+            // Whirlwind: +35% / +75% / +100% stamina by rank
+            Assert.AreEqual(0.35, D("class_ability_whirlwind_stamina_surcharge_r1"), 1e-9);
+            Assert.AreEqual(0.75, D("class_ability_whirlwind_stamina_surcharge_r2"), 1e-9);
+            Assert.AreEqual(1.0, D("class_ability_whirlwind_stamina_surcharge_r3"), 1e-9);
+
+            // Damage Rating: 30% / 60% / 100% of total Crit Damage Rating
+            Assert.AreEqual(0.30, D("class_ability_damagerating_critdamage_conversion_r1"), 1e-9);
+            Assert.AreEqual(0.60, D("class_ability_damagerating_critdamage_conversion_r2"), 1e-9);
+            Assert.AreEqual(1.00, D("class_ability_damagerating_critdamage_conversion_r3"), 1e-9);
+
+            // Bloodlust 0.015 -> 0.03
+            Assert.AreEqual(0.03, D("class_ability_bloodlust_percent_per_rank"), 1e-9);
+        }
+
+        // QuickenedCasting_TunablesMatchSignedOffDefaults lived here until 2026-10-24: Quickened Casting was retired
+        // in the Archmage pass and its key deleted (Database/Updates/Shard/2026-10-24-11-Retire-Archmage-Keys.sql).
+
+        [TestMethod]
+        public void ArchmagePass_NewTunablesMatchSignedOffDefaults()
+        {
+            // Elemental Inversion 2%/rank, Arcane Hollow 10%/rank, Volatile Wall 3/6/10%, Mana Rush cap +50%
+            Assert.AreEqual(0.02, D("class_ability_elementalinversion_chance_per_rank"), 1e-9);
+            Assert.AreEqual(0.10, D("class_ability_arcanehollow_ignore_per_rank"), 1e-9);
+            Assert.AreEqual(0.03, D("class_ability_volatilewall_bonus_r1"), 1e-9);
+            Assert.AreEqual(0.06, D("class_ability_volatilewall_bonus_r2"), 1e-9);
+            Assert.AreEqual(0.10, D("class_ability_volatilewall_bonus_r3"), 1e-9);
+            Assert.AreEqual(0.50, D("class_ability_netherrush_max_bonus"), 1e-9);
+
+            // Mana Barrier cap 0.25 -> 0.30
+            Assert.AreEqual(0.30, D("class_ability_manabarrier_max_share"), 1e-9);
         }
 
         [TestMethod]
-        public void QuickenedCasting_TunablesMatchSignedOffDefaults()
+        public void VolatileElements_TunableMatchesSignedOffDefault()
         {
-            Assert.AreEqual(0.20, D("class_ability_quickenedcasting_percent_per_rank"), 1e-9);
+            // Spellsword T2, 2026-10-30: 8/16/24% weakest-element chance at ranks 1-3
+            Assert.AreEqual(0.08, D("class_ability_volatileelements_chance_per_rank"), 1e-9);
         }
 
         [TestMethod]
@@ -167,9 +214,12 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Hemomancy_TunablesMatchSignedOffDefaults()
         {
-            Assert.AreEqual(0.02, D("class_ability_hemomancy_tick_percent_per_rank"), 1e-9);
-            Assert.AreEqual(0.01, D("class_ability_hemomancy_heal_fraction"), 1e-9);
-            Assert.AreEqual(0.02, D("class_ability_hemomancy_drain_percent_per_rank"), 1e-9);
+            // Blood Mage buff pass rework: the heal-armed damage buff's keys. The old tick/heal/drain keys
+            // are no longer read (their defaults retire in a later package).
+            Assert.AreEqual(0.02, D("class_ability_hemomancy_damage_percent_per_rank"), 1e-9);
+            Assert.AreEqual(0.05, D("class_ability_hemomancy_heal_threshold_fraction"), 1e-9);
+            Assert.AreEqual(8.0, D("class_ability_hemomancy_duration_seconds"), 1e-9);
+            Assert.AreEqual(2.0, D("class_ability_hemomancy_leech_window_seconds"), 1e-9);
         }
 
         [TestMethod]
@@ -181,10 +231,14 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void RunicWard_TunablesMatchSignedOffDefaults()
         {
+            // Spellsword pass 2026-10-24: gain 3/5/7% -> 3/6/9%, flat 15% cap -> per-rank 10/20/30%
             Assert.AreEqual(0.03, D("class_ability_runicward_gain_base"), 1e-9);
-            Assert.AreEqual(0.02, D("class_ability_runicward_gain_step"), 1e-9);
-            Assert.AreEqual(0.15, D("class_ability_runicward_cap_fraction"), 1e-9);
+            Assert.AreEqual(0.03, D("class_ability_runicward_gain_step"), 1e-9);
+            Assert.AreEqual(0.10, D("class_ability_runicward_cap_fraction_r1"), 1e-9);
+            Assert.AreEqual(0.20, D("class_ability_runicward_cap_fraction_r2"), 1e-9);
+            Assert.AreEqual(0.30, D("class_ability_runicward_cap_fraction_r3"), 1e-9);
             Assert.AreEqual(12.0, D("class_ability_runicward_duration_seconds"), 1e-9);
+            Assert.AreEqual(100, PropertyManager.GetLong("class_ability_runicward_shield_level").Item);
         }
     }
 }

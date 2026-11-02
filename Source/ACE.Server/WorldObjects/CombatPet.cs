@@ -3,6 +3,7 @@ using System.Collections.Generic;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
@@ -51,26 +52,102 @@ namespace ACE.Server.WorldObjects
 
         private void SetEphemeralValues()
         {
+            // Custom Summons: the two combat-role flags are weenie data that never change while the pet is out,
+            // so they are read once here rather than on every tick and every target candidate
+            NeverInitiates = GetProperty(PropertyBool.SummonNeverInitiates) ?? false;
+            SummonTauntInterval = GetProperty(PropertyFloat.SummonTauntInterval) ?? 0.0;
+
+            // Custom Summons Task 6: a caster brain pet never starts a fight, whatever its weenie says
+            if (GetProperty(PropertyBool.SummonCasterBrain) ?? false)
+                MarkCasterPet();
         }
 
-        public override bool? Init(Player player, PetDevice petDevice, bool spawnStagger = false)
+        /// <summary>
+        /// Puts this pet on the caster brain (CombatPet_Caster): from the weenie's SummonCasterBrain flag, or from a
+        /// bound spell at summon time. A caster also never initiates (design doc: "Ranged summons never initiate
+        /// aggro" applies to all casters).
+        /// </summary>
+        private void MarkCasterPet()
         {
-            var success = base.Init(player, petDevice, spawnStagger);
+            IsCasterPet = true;
+            NeverInitiates = true;
+        }
+
+        public override bool? Init(Player player, PetDevice petDevice, PetSummonSource source, bool spawnStagger = false)
+        {
+            var success = base.Init(player, petDevice, source, spawnStagger);
 
             if (success == null || !success.Value)
                 return success;
 
-            SetCombatMode(CombatMode.Melee);
+            // everything that shapes the pet from its source and its owner's Empowered Summons lives in
+            // ApplySummonStats, which touches no world state so it can be tested without a Player
+            ApplySummonStats(source, player.GetEmpoweredSummonsStatMod(), player.GetEmpoweredSummonsDurationMod());
+
+            // the stance switch animates and broadcasts, so it is the world-touching half and stays here
+            SetCombatMode(SummonStance);
+
             MonsterState = State.Awake;
             IsAwake = true;
 
-            // copy ratings from pet device
-            DamageRating = petDevice.GearDamage;
-            DamageResistRating = petDevice.GearDamageResist;
-            CritDamageRating = petDevice.GearCritDamage;
-            CritDamageResistRating = petDevice.GearCritDamageResist;
-            CritRating = petDevice.GearCrit;
-            CritResistRating = petDevice.GearCritResist;
+            // class ability Summon 2x: put the owner's other combat pet, if any, on this one's expiry clock.
+            // Must run AFTER the Lifespan bump in ApplySummonStats - the sibling adopts this pet's whole
+            // clock, Lifespan included - which is why it is called here rather than from Pet.Init alongside
+            // the slot write.
+            SyncSiblingCombatPetLifespan(player);
+
+            // are CombatPets supposed to attack monsters that are in the same faction as the pet owner?
+            // if not, there are a couple of different approaches to this
+            // the easiest way for the code would be to simply set Faction1Bits for the CombatPet to match the pet owner's
+            // however, retail pcaps did not contain Faction1Bits for CombatPets
+
+            // doing this the easiest way for the code here, and just removing during appraisal
+            Faction1Bits = player.Faction1Bits;
+
+            return true;
+        }
+
+        /// <summary>
+        /// The combat stance a freshly summoned pet takes. A caster (it carries a bound spell) never melees, so
+        /// it takes Magic; otherwise Missile when the pet weenie is ranged, else Melee - which is what every
+        /// retail pet has always been. A ranged caster is still a caster.
+        /// </summary>
+        internal static CombatMode ChooseSummonStance(bool hasBoundSpells, bool isRanged)
+        {
+            if (hasBoundSpells)
+                return CombatMode.Magic;
+
+            return isRanged ? CombatMode.Missile : CombatMode.Melee;
+        }
+
+        /// <summary>
+        /// The stance ApplySummonStats chose for this pet. Init performs the actual switch
+        /// (SetCombatMode(SummonStance)) because that animates and broadcasts; this is the decision alone.
+        /// </summary>
+        public CombatMode SummonStance { get; private set; } = CombatMode.Melee;
+
+        /// <summary>
+        /// Shapes this pet from <paramref name="source"/> and the owner's Empowered Summons multipliers:
+        /// gear ratings, combat stance (recorded in <see cref="SummonStance"/>), the Empowered Summons stat
+        /// bump (health, damage, armor, resists, attack and magic skills), the Loyalty lifespan bump, and the
+        /// bound spells. Reads nothing from the owner or the world and sends nothing - the owner's multipliers
+        /// arrive as <paramref name="statMod"/> and <paramref name="durationMod"/> (1.0 = none), so a retail
+        /// source with no bound spells comes out exactly as the inline code in Init always made it.
+        /// </summary>
+        public void ApplySummonStats(PetSummonSource source, float statMod, float durationMod)
+        {
+            SummonStance = ChooseSummonStance(source.HasBoundSpells, IsRanged);
+
+            if (source.HasBoundSpells)
+                MarkCasterPet();
+
+            // copy ratings from the summon source
+            DamageRating = source.GearDamage;
+            DamageResistRating = source.GearDamageResist;
+            CritDamageRating = source.GearCritDamage;
+            CritDamageResistRating = source.GearCritDamageResist;
+            CritRating = source.GearCrit;
+            CritResistRating = source.GearCritResist;
 
             // class ability: Empowered Summons scales the pet's stats (health, damage, defenses). A rating
             // point is ~1% here, so the same fraction feeds health (as a %) and the rating pools (as points).
@@ -91,7 +168,6 @@ namespace ACE.Server.WorldObjects
             //   - damage              -> DamageRating (pre-existing, unchanged)
             // No new tunable was needed - this still reuses class_ability_empoweredsummons_percent_per_rank
             // and the existing Leadership rider unchanged; only the set of properties it reaches grew.
-            var statMod = player.GetEmpoweredSummonsStatMod();
             if (statMod > 1.0f)
             {
                 var bonusFraction = statMod - 1.0f;
@@ -127,40 +203,52 @@ namespace ACE.Server.WorldObjects
                 ResistElectric = (ResistElectric ?? 1.0) * resistMod;
                 ResistNether = (ResistNether ?? 1.0) * resistMod;
 
-                // accuracy: the pet is always melee (SetCombatMode(CombatMode.Melee) above), so its current
-                // attack skill is its melee weapon skill. InitLevel is the same "bonus baked into the skill
-                // record" field a player's character-creation bonus uses, so bumping it here scales Current
-                // (and everything derived from it, including to-hit) permanently for this pet's lifetime.
-                var attackSkill = GetCreatureSkill(GetCurrentAttackSkill());
+                // accuracy: the pet's current attack skill is its weapon skill (melee or missile; a pet with
+                // no weapon uses Unarmed). InitLevel is the same "bonus baked into the skill record" field a
+                // player's character-creation bonus uses, so bumping it here scales Current (and everything
+                // derived from it, including to-hit) permanently for this pet's lifetime.
+                var attackSkillId = GetCurrentAttackSkill();
+                var attackSkill = GetCreatureSkill(attackSkillId);
                 if (attackSkill != null)
                     attackSkill.InitLevel += (uint)Math.Round(attackSkill.Current * bonusFraction);
+
+                // a caster's spell power rides on its magic school skills, so they get the same bump the
+                // attack skill got. Only schools the pet already has a row for (GetCreatureSkill with
+                // add: false never creates one), and never the attack skill a second time.
+                foreach (var school in MagicSchoolSkills)
+                {
+                    if (school == attackSkillId)
+                        continue;
+
+                    var magicSkill = GetCreatureSkill(school, false);
+                    if (magicSkill != null)
+                        magicSkill.InitLevel += (uint)Math.Round(magicSkill.Current * bonusFraction);
+                }
             }
 
             // class ability: Empowered Summons' Loyalty rider lengthens how long the pet stays out. Read
-            // here, at summon time, for the same reason the stat half above is: the pet keeps the duration
-            // it was summoned with even if the owner's Loyalty changes while it is in the world. Applied to
-            // the weenie's own Lifespan (43 s on every combat-pet weenie) rather than a replacement value,
-            // so a pet weenie that ever carries a different number still scales proportionally.
-            var durationMod = player.GetEmpoweredSummonsDurationMod();
-
+            // at summon time (by Init), for the same reason the stat half above is: the pet keeps the
+            // duration it was summoned with even if the owner's Loyalty changes while it is in the world.
+            // Applied to the weenie's own Lifespan (43 s on every combat-pet weenie) rather than a
+            // replacement value, so a pet weenie that ever carries a different number still scales
+            // proportionally.
             if (durationMod > 1.0f && Lifespan.HasValue && Lifespan.Value > 0)
                 Lifespan = (int)Math.Round(Lifespan.Value * durationMod);
 
-            // class ability Summon 2x: put the owner's other combat pet, if any, on this one's expiry clock.
-            // Must run AFTER the Lifespan bump above - the sibling adopts this pet's whole clock, Lifespan
-            // included - which is why it is called here rather than from Pet.Init alongside the slot write.
-            SyncSiblingCombatPetLifespan(player);
+            // a caster's bound spells go into its runtime spellbook, which is what the shared monster spell
+            // path (HasKnownSpells, TryRollSpell) reads. A retail source has none, so nothing is added.
+            if (source.BoundSpell1.HasValue)
+                Biota.GetOrAddKnownSpell((int)source.BoundSpell1.Value, BiotaDatabaseLock, out _);
 
-            // are CombatPets supposed to attack monsters that are in the same faction as the pet owner?
-            // if not, there are a couple of different approaches to this
-            // the easiest way for the code would be to simply set Faction1Bits for the CombatPet to match the pet owner's
-            // however, retail pcaps did not contain Faction1Bits for CombatPets
-
-            // doing this the easiest way for the code here, and just removing during appraisal
-            Faction1Bits = player.Faction1Bits;
-
-            return true;
+            if (source.BoundSpell2.HasValue)
+                Biota.GetOrAddKnownSpell((int)source.BoundSpell2.Value, BiotaDatabaseLock, out _);
         }
+
+        /// <summary>The five magic school skills Empowered Summons raises alongside the attack skill.</summary>
+        private static readonly Skill[] MagicSchoolSkills =
+        {
+            Skill.WarMagic, Skill.LifeMagic, Skill.CreatureEnchantment, Skill.ItemEnchantment, Skill.VoidMagic
+        };
 
         /// <summary>
         /// Soul Tether reduces the damage this pet takes. Read here - at the pet's incoming-damage site, on
@@ -207,17 +295,24 @@ namespace ACE.Server.WorldObjects
             // the follow and reach tunables, once per tick (see CombatPet_Follow.tickSettings)
             tickSettings = PetFollowSettings.Read();
 
+            // Custom Summons: a never-initiates pet (Archer, casters) holds its current target only while that
+            // monster is still engaged with its side, and takes an assist target only on the same terms. Read
+            // once per tick. False for every other pet, which keeps exactly today's rule.
+            var neverInitiates = NeverInitiates;
+
             var current = AttackTarget as Creature;
-            var currentValid = current != null && !current.IsDead && IsVisibleTarget(current);
+            var currentValid = current != null && !current.IsDead && IsVisibleTarget(current)
+                && PetEngagement.HoldsCurrentTarget(neverInitiates, current, P_PetOwner);
 
             var owner = P_PetOwner;
             var assistCandidate = owner?.LastAttackedMonster;
 
             // the property read is skipped when there is nothing to assist with
             var assistOn = assistCandidate != null && owner.SummonAttackOnTarget;
-            var assistValid = assistOn && IsValidAssistTarget(assistCandidate);
+            var assistValid = assistOn && IsValidAssistTarget(assistCandidate, neverInitiates);
 
-            switch (PetAssistTargeting.Decide(assistOn, assistValid, ReferenceEquals(assistCandidate, AttackTarget), currentValid, IsAnimating))
+            switch (PetAssistTargeting.Decide(assistOn, assistValid, ReferenceEquals(assistCandidate, AttackTarget), currentValid, IsAnimating,
+                CasterHoldsTarget(current, currentValid)))
             {
                 case PetTargetAction.SwitchToAssist:
                     SwitchAttackTarget(assistCandidate);
@@ -238,8 +333,10 @@ namespace ACE.Server.WorldObjects
 
             // a target acquired while running back to the owner must end that run now: Monster_Tick's attack
             // branch sees IsMoving and calls Movement(), which would carry the pet on to its owner instead of
-            // turning toward the new target
-            if (AttackTarget != null)
+            // turning toward the new target. Not for a caster pet: holding a target does not mean it acts on
+            // it (every spell may be Redundant there, and then it follows), so TickCaster ends the follow itself
+            // exactly when it starts a cast or a chase - stopping here would cancel that follow every tick.
+            if (AttackTarget != null && !IsCasterPet)
                 StopFollowingOwner();
 
             CheckTargetReachable();
@@ -298,7 +395,7 @@ namespace ACE.Server.WorldObjects
         /// same filter as GetNearbyMonsters, and inside MaxChaseRange - Movement() abandons any chase at that
         /// range, so a farther assist target would be re-picked on the next tick and abandoned again, forever.
         /// </summary>
-        private bool IsValidAssistTarget(Creature candidate)
+        private bool IsValidAssistTarget(Creature candidate, bool neverInitiates)
         {
             if (ReferenceEquals(candidate, this) || candidate.IsDead)
                 return false;
@@ -306,7 +403,7 @@ namespace ACE.Server.WorldObjects
             if (!IsVisibleTarget(candidate))
                 return false;
 
-            if (!IsPetTargetCandidate(candidate))
+            if (!AcceptsPetTarget(candidate, neverInitiates))
                 return false;
 
             // the same cylinder distance GetDistanceToTarget measures for the MaxChaseRange cancel in Movement()
@@ -348,7 +445,7 @@ namespace ACE.Server.WorldObjects
 
         public override bool FindNextTarget()
         {
-            var nearbyMonsters = GetNearbyMonsters();
+            var nearbyMonsters = GetNearbyMonsters(NeverInitiates);
             if (nearbyMonsters.Count == 0)
             {
                 //Console.WriteLine($"{Name}.FindNextTarget(): empty");
@@ -372,19 +469,160 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Returns a list of attackable monsters in this pet's visible targets
+        /// Returns a list of attackable monsters in this pet's visible targets. With
+        /// <paramref name="neverInitiates"/> (a SummonNeverInitiates pet), only monsters already engaged with
+        /// the owner or the owner's pets (PetEngagement.IsEngagedWithOwner).
         /// </summary>
-        public List<Creature> GetNearbyMonsters()
+        public List<Creature> GetNearbyMonsters(bool neverInitiates = false)
         {
             var monsters = new List<Creature>();
 
             foreach (var creature in PhysicsObj.ObjMaint.GetVisibleTargetsValuesOfTypeCreature())
             {
-                if (IsPetTargetCandidate(creature))
+                if (AcceptsPetTarget(creature, neverInitiates))
                     monsters.Add(creature);
             }
 
             return monsters;
+        }
+
+        /// <summary>
+        /// Custom Summons (PropertyBool 9088): this pet never starts a fight. It skips PetCheckMonsters' waking,
+        /// and picks targets - nearest, owner assist, and multishot extra arrows - only among monsters already
+        /// engaged with its owner or the owner's pets. The Archer and every caster carry it; Tank, Melee and
+        /// every retail pet do not, and behave exactly as before. Cached from the weenie at construction
+        /// (SetEphemeralValues).
+        /// </summary>
+        public bool NeverInitiates { get; private set; }
+
+        /// <summary>
+        /// Custom Summons (item 3 of the review): whether this pet may loose a missile at
+        /// <paramref name="target"/> at the moment of release. A never-initiates pet holds fire unless the
+        /// target is still engaged with its owner's side - a monster can drop out of combat (go Return, fall
+        /// asleep) during the wind-up, and an arrow landing then would wake it. Every other pet always may.
+        /// </summary>
+        internal bool MayLooseAt(WorldObject target) =>
+            !NeverInitiates || (target is Creature monster && PetEngagement.IsEngagedWithOwner(monster, P_PetOwner));
+
+        /// <summary>
+        /// Custom Summons Tank (PropertyFloat 9021): seconds between taunt pulses, 0 for every other pet. Cached
+        /// from the weenie at construction (SetEphemeralValues).
+        /// </summary>
+        public double SummonTauntInterval { get; private set; }
+
+        /// <summary>
+        /// The whole target rule for this pet: IsPetTargetCandidate (alive, attackable, not ignored as
+        /// unreachable, faction), plus, for a never-initiates pet, engagement with the owner's side. Reads the
+        /// candidate monster's AttackTarget across objects - see PetEngagement for why that read is safe on the
+        /// parallel tick.
+        /// </summary>
+        internal bool AcceptsPetTarget(Creature creature, bool neverInitiates)
+        {
+            if (!IsPetTargetCandidate(creature))
+                return false;
+
+            return !neverInitiates || PetEngagement.IsEngagedWithOwner(creature, P_PetOwner);
+        }
+
+        /// <summary>
+        /// A pet's multishot extra arrows obey its own target rule (AcceptsPetTarget): never a dead,
+        /// unattackable or same-faction creature, and for a never-initiates pet never a monster that is not
+        /// already engaged - so an extra arrow can never wake an idle monster. Splash from a caster's ring or
+        /// blast spell is deliberately NOT filtered (owner ruling 2026-11-01): only the primary must be engaged.
+        /// </summary>
+        public override bool AcceptsMultiShotExtraTarget(Creature creature) => AcceptsPetTarget(creature, NeverInitiates);
+
+        /// <summary>
+        /// The pet half of Monster_Tick's combat branch, run after this pet's attack step: wakes nearby monsters
+        /// (PetCheckMonsters, today's behaviour) unless this is a never-initiates pet, then fires the Tank's
+        /// taunt pulse when one is due.
+        /// </summary>
+        public void PetCombatTick()
+        {
+            // returns at once for a never-initiates pet
+            PetCheckMonsters();
+
+            TickTauntPulse();
+        }
+
+        /// <summary>Timers.RunningTime at which the next taunt pulse may fire. Runtime only.</summary>
+        private double nextTauntPulseAt;
+
+        /// <summary>
+        /// The pulse clock, pure over its inputs: true (and the next pulse scheduled <paramref name="interval"/>
+        /// seconds out) when a pulse is due at <paramref name="now"/>. A non-positive interval never pulses. The
+        /// first combat tick of a Tank pulses at once.
+        /// </summary>
+        internal bool TryConsumeTauntPulse(double now, double interval)
+        {
+            if (interval <= 0.0 || now < nextTauntPulseAt)
+                return false;
+
+            nextTauntPulseAt = now + interval;
+            return true;
+        }
+
+        /// <summary>
+        /// Custom Summons Tank: every SummonTauntInterval seconds (PropertyFloat 9021, read from the pet's weenie),
+        /// taunt every monster already engaged with the owner's side within the player Taunt ability's rank-3
+        /// radius, for the player Taunt's base hold. Never wakes an idle monster. A pet without the property
+        /// never pulses.
+        ///
+        /// THREADING: runs on this pet's landblock tick. Each candidate is only WRITTEN (ApplyTaunt) when it is
+        /// in this pet's own landblock group - the same cross-group guard Monster_Magic.TryRollSpell uses - and
+        /// in direct line of sight, as the player Taunt requires.
+        /// </summary>
+        public void TickTauntPulse()
+        {
+            if (!TryConsumeTauntPulse(Timers.RunningTime, SummonTauntInterval))
+                return;
+
+            ApplyTauntPulse(PhysicsObj.ObjMaint.GetVisibleTargetsValuesOfTypeCreature(), CanTauntReach);
+        }
+
+        /// <summary>
+        /// The pulse over an explicit candidate set: taunts each PetEngagement.IsTauntPulseCandidate monster that
+        /// <paramref name="canReach"/> accepts, and returns how many were taunted. Split from TickTauntPulse so a
+        /// test can drive the real ApplyTaunt without a landblock.
+        /// </summary>
+        internal int ApplyTauntPulse(IEnumerable<Creature> candidates, Func<Creature, bool> canReach)
+        {
+            var owner = P_PetOwner;
+
+            if (owner == null || Location == null)
+                return 0;
+
+            var radius = TauntAbility.RadiusForRank(TauntAbility.TopRank);
+            var duration = TauntAbility.EffectiveDuration(TauntAbility.BaseDuration());
+
+            var taunted = 0;
+
+            foreach (var monster in candidates)
+            {
+                if (monster?.Location == null)
+                    continue;
+
+                if (!PetEngagement.IsTauntPulseCandidate(monster, owner, Location.DistanceTo(monster.Location), radius))
+                    continue;
+
+                if (!canReach(monster))
+                    continue;
+
+                monster.ApplyTaunt(this, duration);
+                taunted++;
+            }
+
+            return taunted;
+        }
+
+        /// <summary>The world-touching half of the pulse filter: same landblock group, then line of sight.</summary>
+        private bool CanTauntReach(Creature monster)
+        {
+            if (CurrentLandblock == null || monster.CurrentLandblock == null ||
+                CurrentLandblock.CurrentLandblockGroup != monster.CurrentLandblock.CurrentLandblockGroup)
+                return false;
+
+            return IsDirectVisible(monster);
         }
 
         /// <summary>

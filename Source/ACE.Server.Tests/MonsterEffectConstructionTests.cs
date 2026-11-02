@@ -89,7 +89,7 @@ namespace ACE.Server.Tests
         /// MonsterEffectRegistry.reservedKinds is empty, and every shipped kind resolves to a real handler
         /// rather than sitting inert. SEVENTEEN now, not sixteen: "immune" landed with the ML digsite Boss
         /// Rush mechanic sets as this framework's first externally toggled filter, through the registry's own
-        /// one-file-and-one-line rule.
+        /// one-file-and-one-line rule. EIGHTEEN with "scatter" (the Threads damage-ceiling taunt-hold shortener).
         /// </summary>
         [TestMethod]
         public void AllShippedKinds_ResolveToAHandler()
@@ -98,11 +98,11 @@ namespace ACE.Server.Tests
             {
                 "flatdamage", "leech", "execute", "rangeramp", "speed", "reflect", "avoid", "dot",
                 "debuff", "castspell", "dispel", "recast", "ramp", "ward", "manabarrier", "riposte",
-                "immune",
+                "immune", "scatter",
             };
 
-            Assert.AreEqual(17, kinds.Length, "this test's own list must cover every shipped kind");
-            Assert.AreEqual(17, MonsterEffectRegistry.KnownKinds.Count, "reservedKinds must be empty - every known kind is a shipped handler");
+            Assert.AreEqual(18, kinds.Length, "this test's own list must cover every shipped kind");
+            Assert.AreEqual(18, MonsterEffectRegistry.KnownKinds.Count, "reservedKinds must be empty - every known kind is a shipped handler");
 
             foreach (var kind in kinds)
             {

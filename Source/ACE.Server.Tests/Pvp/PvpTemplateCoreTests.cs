@@ -450,12 +450,47 @@ namespace ACE.Server.Tests.Pvp
             var biota = OwnBiota();
             var record = Apply(biota, rwLock, Template());
 
-            CollectionAssert.AreEquivalent(new[] { 4, 5 }, record.AddedSpells, "3 was already known");
-            CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5 }, biota.PropertiesSpellBook.Keys.ToList(), "own spells stay so spell bars survive");
+            var ravenFury = (int)SpellId.CurseRavenFury;
+
+            CollectionAssert.AreEquivalent(new[] { 4, 5, ravenFury }, record.AddedSpells, "3 was already known; Raven Fury is always granted");
+            CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4, 5, ravenFury }, biota.PropertiesSpellBook.Keys.ToList(), "own spells stay so spell bars survive");
 
             Restore(biota, rwLock, record);
 
             CollectionAssert.AreEquivalent(new[] { 1, 2, 3 }, biota.PropertiesSpellBook.Keys.ToList());
+        }
+
+        /// <summary>
+        /// Playtest 2026-10-16: the 2h template was snapshotted from a character that never learned Curse of Raven Fury, the only
+        /// thing that hurts in a Tugak Brawl, so the cast gate refused it. Every template now carries it, whatever its definition says.
+        /// </summary>
+        [TestMethod]
+        public void Spells_RavenFuryIsCastableUnderATemplateThatLacksIt_AndAKnownCopySurvivesTheRestore()
+        {
+            var ravenFury = (int)SpellId.CurseRavenFury;
+            var definition = Template();
+            Assert.IsFalse(definition.Spells.Contains(ravenFury), "precondition: the definition does not name it");
+
+            // A player who does not know it: added for the match, castable, removed at exit.
+            var rwLock = new ReaderWriterLockSlim();
+            var biota = OwnBiota();
+            var record = Apply(biota, rwLock, definition);
+
+            Assert.IsTrue(biota.PropertiesSpellBook.ContainsKey(ravenFury), "added to the spellbook at apply");
+            Assert.IsNull(PvpTemplateGate.DecideCast((uint)ravenFury, true, false, record.TemplateSpells), "the cast gate allows it");
+            Assert.IsNotNull(PvpTemplateGate.DecideCast(999u, true, false, record.TemplateSpells), "control: a spell the template lacks is still refused");
+
+            Restore(biota, rwLock, record);
+            Assert.IsFalse(biota.PropertiesSpellBook.ContainsKey(ravenFury), "template-added, so removed at exit");
+
+            // A player who already knows it (the queue-join grant teaches it): kept after the exit.
+            var knows = OwnBiota();
+            knows.PropertiesSpellBook[ravenFury] = 2.0f;
+            var knowsRecord = Apply(knows, rwLock, definition);
+
+            CollectionAssert.DoesNotContain(knowsRecord.AddedSpells, ravenFury, "already known, so not template-added");
+            Restore(knows, rwLock, knowsRecord);
+            Assert.IsTrue(knows.PropertiesSpellBook.ContainsKey(ravenFury), "a known copy survives the restore");
         }
 
         // ================= record =================

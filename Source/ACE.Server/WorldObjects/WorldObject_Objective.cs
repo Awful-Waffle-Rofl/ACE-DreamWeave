@@ -254,6 +254,46 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // A speed course tells its runner its own Seal lines (SpeedCourseRun), so a contributor to a live course's Seal
+            // (the east lectern) contributes silently instead of sending the generic progress line. Other keys in the
+            // instance (the start lever's stub door) keep their line.
+            if (notify != null && ACE.Server.SpeedCourses.SpeedCourseManager.OwnsObjectiveChat(landblock, key))
+                notify = null;
+
+            ContributeCore(landblock, key, ResolveObjectiveTokenKey(ObjectiveLockToken, Guid.Full), ResolveObjectiveWeight(ObjectiveLockWeight), ObjectiveLockExpiry, ObjectiveLockResets, notify, this, $"{Name} (0x{Guid}, wcid {WeenieClassId})");
+        }
+
+        /// <summary>
+        /// Contributes <paramref name="token"/> to the gate keyed <paramref name="key"/> in
+        /// <paramref name="landblock"/>, for callers that are not a WorldObject (a solved puzzle gate, a
+        /// hazard result). Gate resolution is identical to the instance form: same landblock only, lowest
+        /// guid on ambiguity. The token never expires and never resets the lock, and the same token
+        /// contributed twice still counts once (ObjectiveLock replaces by token key). With no contributor
+        /// object, a non-Door gate is activated by itself.
+        /// </summary>
+        /// <param name="notify">The player to show progress to, or null.</param>
+        public static void ContributeToObjectiveLock(Landblock landblock, string key, string token, double weight, Player notify)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+
+            if (landblock == null)
+            {
+                log.Warn($"[OBJECTIVE] static contribution of token '{token}' to objective lock '{key}' with no landblock - the contribution is dropped.");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(token))
+            {
+                log.Warn($"[OBJECTIVE] static contribution to objective lock '{key}' in landblock 0x{landblock.Id.Raw:X8} has no token - dropped.");
+                return;
+            }
+
+            ContributeCore(landblock, key, token, weight, null, false, notify, null, $"static token '{token}'");
+        }
+
+        private static void ContributeCore(Landblock landblock, string key, string tokenKey, double weight, double? expirySeconds, bool resets, Player notify, WorldObject contributor, string label)
+        {
             // ToList() snapshot, documented as taken specifically to avoid cross-thread issues
             // (Landblock.GetAllWorldObjectsForDiagnostics, Landblock.cs:1516-1521). Deliberately NOT
             // memoized on the contributor: contributions per run number in the low tens, a puzzle room
@@ -277,7 +317,7 @@ namespace ACE.Server.WorldObjects
 
             if (!gateGuid.HasValue)
             {
-                log.Warn($"[OBJECTIVE] {Name} (0x{Guid}, wcid {WeenieClassId}) contributes to objective lock '{key}' but landblock 0x{landblock.Id.Raw:X8} (instance 0x{landblock.Instance:X8}) holds no object with that ObjectiveLockKey and a positive ObjectiveLockRequired - no gate, contribution dropped.");
+                log.Warn($"[OBJECTIVE] {label} contributes to objective lock '{key}' but landblock 0x{landblock.Id.Raw:X8} (instance 0x{landblock.Instance:X8}) holds no object with that ObjectiveLockKey and a positive ObjectiveLockRequired - no gate, contribution dropped.");
                 return;
             }
 
@@ -288,7 +328,7 @@ namespace ACE.Server.WorldObjects
 
             var now = DateTime.UtcNow;
 
-            if (ObjectiveLockResets)
+            if (resets)
             {
                 // Null-conditional on purpose: no lock allocated means no progress has been made, and
                 // punishing a player for a wrong answer they gave first is nothing to do. Reset is also a
@@ -304,10 +344,10 @@ namespace ACE.Server.WorldObjects
             var objectiveLock = gate.P_ObjectiveLock ??= new ObjectiveLock(gate.ObjectiveLockRequired ?? 0);
 
             var satisfied = objectiveLock.Contribute(
-                ResolveObjectiveTokenKey(ObjectiveLockToken, Guid.Full),
-                ResolveObjectiveWeight(ObjectiveLockWeight),
+                tokenKey,
+                weight,
                 now,
-                ResolveObjectiveExpiry(ObjectiveLockExpiry, now));
+                ResolveObjectiveExpiry(expirySeconds, now));
 
             if (satisfied)
             {
@@ -331,7 +371,7 @@ namespace ACE.Server.WorldObjects
                 if (notify != null)
                     notify.Session.Network.EnqueueSend(new GameMessageSystemChat($"{gate.Name} has opened!", ChatMessageType.Broadcast));
 
-                OpenObjectiveGate(gate, this);
+                OpenObjectiveGate(gate, contributor ?? gate);
                 return;
             }
 

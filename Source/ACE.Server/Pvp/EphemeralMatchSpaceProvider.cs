@@ -56,6 +56,9 @@ namespace ACE.Server.Pvp
 
         public void Release(MatchSpace s) => core.Release(s);
 
+        /// <summary>Battleground rejoin: admits a returning player's new Player object to the space's realm. False when the space is gone.</summary>
+        public bool AdmitLate(MatchSpace s, Player player) => core.AdmitLate(s, player);
+
         /// <summary>The live-server side of the seam: every call here touches RealmManager / LandblockManager.</summary>
         private sealed class LiveMatchInstanceHost : IMatchInstanceHost<Player, Landblock>
         {
@@ -271,6 +274,21 @@ namespace ACE.Server.Pvp
                 return MatchSpaceReadiness.Gone;
 
             return host.CreateCompleted(landblock) ? MatchSpaceReadiness.Ready : MatchSpaceReadiness.Loading;
+        }
+
+        /// <summary>
+        /// Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): admits <paramref name="player"/> to the space's
+        /// EphemeralRealm, through the same host call Allocate admits with. False when the space no longer resolves to its own copy (gone,
+        /// or the instance id now belongs to another), the copy has no realm, or the player is null.
+        /// </summary>
+        public bool AdmitLate(MatchSpace space, TPlayer player)
+        {
+            if (player == null)
+                return false;
+
+            var landblock = ResolveLive(space);
+
+            return landblock != null && host.Admit(landblock, player);
         }
 
         /// <summary>

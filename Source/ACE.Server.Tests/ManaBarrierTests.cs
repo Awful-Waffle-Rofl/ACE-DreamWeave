@@ -48,8 +48,9 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(0.06, D("class_ability_manabarrier_base"), 1e-9);
             Assert.AreEqual(0.06, D("class_ability_manabarrier_step"), 1e-9);
-            Assert.AreEqual(0.25, D("class_ability_manabarrier_max_share"), 1e-9);
+            Assert.AreEqual(0.30, D("class_ability_manabarrier_max_share"), 1e-9, "raised from 0.25 in the 2026-10-24 Archmage pass");
             Assert.AreEqual(1.0, D("class_ability_manabarrier_mana_per_health"), 1e-9);
+            Assert.AreEqual(50L, PropertyManager.GetLong("class_ability_manabarrier_mana_floor").Item);
 
             // Mana Barrier's own Magic Defense divisor pair (class_ability_manabarrier_magicdef_per_trained /
             // _per_spec) was DELETED by the multiplicative-affinity migration mirroring Soul Tether's
@@ -258,6 +259,93 @@ namespace ACE.Server.Tests
             Assert.AreEqual(200u, absorbed.DamageAbsorbed);
             Assert.AreEqual(0u, absorbed.DamageAfter);
             Assert.AreEqual(200u, absorbed.ManaSpent);
+        }
+
+        // ---- mana floor ---------------------------------------------------------------------------
+
+        [TestMethod]
+        public void AbsorbDamage_ManaWellAboveFloor_AbsorbsInFull()
+        {
+            var absorbed = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 1000, manaPerHealth: 1.0, manaFloor: 50);
+
+            Assert.AreEqual(50u, absorbed.DamageAbsorbed);
+            Assert.AreEqual(50u, absorbed.ManaSpent);
+            Assert.AreEqual(150u, absorbed.DamageAfter);
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_ManaAboveFloor_SpendsOnlyTheExcess()
+        {
+            // wants 250 absorbed, but 80 mana with a floor of 50 leaves only 30 spendable
+            var absorbed = ManaBarrierAbility.AbsorbDamage(1000, 0.25, currentMana: 80, manaPerHealth: 1.0, manaFloor: 50);
+
+            Assert.AreEqual(30u, absorbed.DamageAbsorbed);
+            Assert.AreEqual(30u, absorbed.ManaSpent);
+            Assert.AreEqual(970u, absorbed.DamageAfter);
+            Assert.AreEqual(1000u, absorbed.DamageAfter + absorbed.DamageAbsorbed);
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_ManaAtFloor_AbsorbsNothing()
+        {
+            var absorbed = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 50, manaPerHealth: 1.0, manaFloor: 50);
+
+            Assert.AreEqual(200u, absorbed.DamageAfter);
+            Assert.AreEqual(0u, absorbed.DamageAbsorbed);
+            Assert.AreEqual(0u, absorbed.ManaSpent);
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_ManaBelowFloor_AbsorbsNothing()
+        {
+            var absorbed = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 10, manaPerHealth: 1.0, manaFloor: 50);
+
+            Assert.AreEqual(200u, absorbed.DamageAfter);
+            Assert.AreEqual(0u, absorbed.DamageAbsorbed);
+            Assert.AreEqual(0u, absorbed.ManaSpent);
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_FloorSweep_NeverSpendsBelowTheFloorAndSplitsExactly()
+        {
+            const uint incoming = 100000;
+            foreach (var rate in new[] { 0.5, 1.3, 1.7, 2.0 })
+            {
+                foreach (var mana in new uint[] { 51, 80, 100 })
+                {
+                    var absorbed = ManaBarrierAbility.AbsorbDamage(incoming, 1.0, mana, rate, manaFloor: 50);
+
+                    Assert.IsTrue(absorbed.ManaSpent <= mana - 50u,
+                        $"rate {rate}, mana {mana}: spent {absorbed.ManaSpent} breaches the floor");
+                    Assert.AreEqual(incoming, absorbed.DamageAfter + absorbed.DamageAbsorbed,
+                        $"rate {rate}, mana {mana}: split must be exact");
+                }
+            }
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_HugeFloor_AbsorbsNothing()
+        {
+            var absorbed = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: uint.MaxValue, manaPerHealth: 1.0, manaFloor: long.MaxValue);
+
+            Assert.AreEqual(200u, absorbed.DamageAfter);
+            Assert.AreEqual(0u, absorbed.DamageAbsorbed);
+            Assert.AreEqual(0u, absorbed.ManaSpent);
+        }
+
+        [TestMethod]
+        public void AbsorbDamage_FloorOfZeroOrNegative_MatchesTheOldBehaviour()
+        {
+            var old = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 20, manaPerHealth: 1.0);
+            var zero = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 20, manaPerHealth: 1.0, manaFloor: 0);
+            var negative = ManaBarrierAbility.AbsorbDamage(200, 0.25, currentMana: 20, manaPerHealth: 1.0, manaFloor: -40);
+
+            Assert.AreEqual(20u, old.DamageAbsorbed);
+            Assert.AreEqual(old.DamageAbsorbed, zero.DamageAbsorbed);
+            Assert.AreEqual(old.ManaSpent, zero.ManaSpent);
+            Assert.AreEqual(old.DamageAbsorbed, negative.DamageAbsorbed);
+            Assert.AreEqual(old.ManaSpent, negative.ManaSpent);
+            Assert.AreEqual(old.DamageAfter, negative.DamageAfter);
         }
     }
 }

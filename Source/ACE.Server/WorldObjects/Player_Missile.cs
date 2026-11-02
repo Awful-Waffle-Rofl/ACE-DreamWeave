@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 
 using ACE.Entity.Enum;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
@@ -255,8 +256,17 @@ namespace ACE.Server.WorldObjects
                 var staminaCost = GetAttackStamina(GetAccuracyRange());
                 UpdateVitalDelta(Stamina, -staminaCost);
 
-                var projectile = LaunchProjectile(launcher, ammo, target, origin, orientation, velocity);
+                // Pinning Shot: ONE roll for the whole volley (primary, extras, overflow arrows and any Double
+                // Volley re-fire), carried on each projectile so no arrow re-rolls. Null = not learned.
+                var volleyPinRoll = RollClassAbilityVolleyPin();
+
+                var projectile = LaunchProjectile(launcher, ammo, target, origin, orientation, velocity, volleyPinRoll: volleyPinRoll);
                 UpdateAmmoAfterLaunch(ammo);
+
+                // PvP conduct: a shot at an enemy is activity even if the arrow misses (a hit also stamps at the damage gate)
+                // (LaunchProjectile can return null after the ammo and stamina are spent; nothing was fired then)
+                if (projectile != null)
+                    StampPvpAttackAttempt(target);
 
                 // PROTOTYPE: multi-shot - damage is still resolved directly (cleave-style) rather than via
                 // ProjectileCollisionHelper, so one acquired creature can never block another from being hit.
@@ -268,45 +278,45 @@ namespace ACE.Server.WorldObjects
                 // Extra arrows come from two stacking sources: a multi-shot weapon and class abilities
                 // (e.g. Multishot). One damage multiplier per extra shot: weapon-granted arrows use
                 // the weapon's own multiplier, skill-granted arrows each supply their own.
-                var shotMultipliers = new List<float>();
-
-                for (var i = 0; i < weapon.MultiShotCount; i++)
-                    shotMultipliers.Add(weapon.MultiShotDamageMultiplier);
+                var shotMultipliers = WeaponMultiShotMultipliers(weapon);
 
                 AddClassAbilityMissileShots(shotMultipliers);
 
                 // captured so a Double Volley re-fire can repeat the exact same extra-target spread
-                var volleyExtraShots = new List<(Creature target, float mult)>();
+                var volleyExtraShots = new List<(Creature target, float mult, bool isPrimary)>();
 
-                if (shotMultipliers.Count > 0 && creature != null && creature is not Player)
-                {
-                    var multiShotTargets = GetMultiShotTargets(creature, weapon, shotMultipliers.Count);
+                // Every cleave-style arrow at the primary (overflow arrows, the Double Volley re-fire) resolves
+                // damage directly and its cosmetic projectile never collides, so nothing physical stops it at a
+                // wall. Gate them on the same line-of-sight test GetMultiShotTargets applies to secondary
+                // targets; the real primary projectile above still collides normally either way. Evaluated
+                // lazily and at most once: the sight test builds a physics object and runs a transition, and
+                // an ordinary shot with no cleave arrows must not pay for it.
+                var cleaveVolley = creature != null && creature is not Player;
+                bool? primaryInSightCache = null;
+                bool PrimaryInSight() => primaryInSightCache ??= IsDirectVisible(creature);
 
-                    var shotIndex = 0;
-                    foreach (var extraTarget in multiShotTargets)
-                    {
-                        var damageMultiplier = shotMultipliers[shotIndex];
-                        shotIndex++;
-
-                        // extra-target spread is secondary - the player aimed at creature, not extraTarget,
-                        // so it must not steal the pet's assist target off the real shot target.
-                        FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, damageMultiplier, primaryTarget: false);
-                        volleyExtraShots.Add((extraTarget, damageMultiplier));
-                    }
-                }
+                // the extra arrows themselves (secondary targets, overflow onto the primary, the sight gate)
+                // are the Creature-level volley a combat pet also fires - see Creature.FireMultiShotVolley
+                if (shotMultipliers.Count > 0 && cleaveVolley)
+                    volleyExtraShots = FireMultiShotVolley(launcher, ammo, weapon, creature, projectileSpeed, shotMultipliers, PrimaryInSight, volleyPinRoll);
 
                 // class ability: Double Volley - a chance to immediately fire a full second volley at no
                 // ammo/stamina cost. The repeat is entirely cleave-style (a cosmetic primary arrow at the
                 // main target plus the same extra-target spread), so it never re-enters the attack state
                 // machine or consumes resources. PvP-excluded like multi-shot.
-                if (creature != null && creature is not Player && TryClassAbilityDoubleVolley())
+                if (cleaveVolley && TryClassAbilityDoubleVolley())
                 {
                     // Double Volley's re-fire at creature is still the player's real target, so it records normally.
-                    FireMultiShotArrow(launcher, ammo, creature, projectileSpeed, 1.0f, primaryTarget: true);
+                    // The re-fire shares the volley's single Pinning Shot roll (owner ruling), as do its overflow arrows.
+                    // Out of sight, only the re-fire at the primary is dropped; volleyExtraShots already holds no
+                    // overflow arrows then, and its secondary targets each passed their own sight check.
+                    if (PrimaryInSight())
+                        FireMultiShotArrow(launcher, ammo, creature, projectileSpeed, 1.0f, primaryTarget: true, volleyPinRoll: volleyPinRoll);
 
-                    foreach (var (extraTarget, mult) in volleyExtraShots)
-                        // same spread as above - secondary, must not steal the pet's assist target.
-                        FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, mult, primaryTarget: false);
+                    foreach (var (extraTarget, mult, isPrimary) in volleyExtraShots)
+                        // same spread as above - secondary extras must not steal the pet's assist target; an
+                        // overflow arrow at the primary is the real target and records normally.
+                        FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, mult, primaryTarget: isPrimary, volleyPinRoll: volleyPinRoll);
                 }
             });
 
@@ -375,63 +385,12 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// PROTOTYPE: spawns a purely visual arrow flying at an extra multi-shot target, and returns it so the
-        /// caller can also use it as the damageSource for DamageTarget (it carries ProjectileSource/ProjectileLauncher/
-        /// ProjectileAmmo from LaunchProjectile, which DamageEvent.CalculateDamage requires to correctly resolve
-        /// missile combat/weapon - see the call site in LaunchMissile). Damage is NOT resolved by this projectile
-        /// colliding - ProjectileTarget is cleared (and IsCosmeticProjectile set) right after creation so
-        /// ProjectileCollisionHelper never applies a second, redundant hit or a hit/miss message for it, no matter
-        /// what it physically collides with (or fails to). Instead the caller delays its own DamageTarget call by
-        /// flightTime, so the extra target takes damage when the (visual) arrow actually arrives, not the instant
-        /// it's fired. The physics engine's own homing/target tracking (set inside LaunchProjectile, independent of
-        /// the WorldObject-level ProjectileTarget field) still points at the real extraTarget, so the flight itself
-        /// looks correct.
+        /// A multi-shot arrow (Creature.FireMultiShotArrow) arriving: resolved through the player's own
+        /// DamageTarget, exactly the call the arrow always made before the volley was lifted to Creature.
         /// </summary>
-        /// <summary>
-        /// Fires one cleave-style multi-shot arrow at a target: spawns the cosmetic projectile and schedules
-        /// its delayed DamageTarget so damage lands when the (visual) arrow arrives. Shared by the normal
-        /// multi-shot spread and the Double Volley class-ability re-fire. No-op if the projectile can't spawn.
-        /// </summary>
-        private void FireMultiShotArrow(WorldObject launcher, WorldObject ammo, Creature target, float projectileSpeed, float damageMultiplier, bool primaryTarget = true)
+        protected override void ResolveMultiShotArrowImpact(Creature target, WorldObject cosmeticProjectile, float damageMultiplier, bool primaryTarget)
         {
-            // The cosmetic projectile must be spawned BEFORE damage is calculated, and used as the
-            // damageSource - DamageEvent.CalculateDamage classifies CombatType.Missile (and resolves
-            // Weapon) purely from damageSource.ProjectileSource/ProjectileLauncher being set, which only
-            // a real (even if visual-only) projectile object carries.
-            var cosmeticProjectile = LaunchCosmeticMultiShotProjectile(launcher, ammo, target, projectileSpeed, out var flightTime);
-
-            if (cosmeticProjectile == null)
-                return;
-
-            var impactChain = new ActionChain();
-            impactChain.AddDelaySeconds(flightTime);
-            // multiShotArrow: an extra-target arrow (primaryTarget false) scales its procs by its own fraction
-            // too; the Double Volley re-fire at the primary target (primaryTarget true, multiplier 1.0) does not.
-            impactChain.AddAction(this, () => DamageTarget(target, cosmeticProjectile, damageMultiplier, primaryTarget, multiShotArrow: !primaryTarget));
-            impactChain.EnqueueChain();
-        }
-
-        private WorldObject LaunchCosmeticMultiShotProjectile(WorldObject launcher, WorldObject ammo, WorldObject extraTarget, float projectileSpeed, out float flightTime)
-        {
-            var aimVelocity = GetAimVelocity(extraTarget, projectileSpeed);
-            var aimLevel = GetAimLevel(aimVelocity);
-
-            var localOrigin = GetProjectileSpawnOrigin(ammo.WeenieClassId, aimLevel);
-
-            var velocity = CalculateProjectileVelocity(localOrigin, extraTarget, projectileSpeed, out Vector3 origin, out Quaternion orientation, out flightTime);
-
-            if (velocity == Vector3.Zero)
-                return null;
-
-            var cosmeticProjectile = LaunchProjectile(launcher, ammo, extraTarget, origin, orientation, velocity);
-
-            if (cosmeticProjectile == null)
-                return null;
-
-            cosmeticProjectile.IsCosmeticProjectile = true;
-            cosmeticProjectile.ProjectileTarget = null;
-
-            return cosmeticProjectile;
+            DamageTarget(target, cosmeticProjectile, damageMultiplier, primaryTarget);
         }
 
         // TODO: the damage pipeline currently uses the creature ammo instead of the projectile
@@ -441,7 +400,9 @@ namespace ACE.Server.WorldObjects
 
         public override float GetAimHeight(WorldObject target)
         {
-            switch (AttackHeight.Value)
+            // AttackHeight is null for a player who has not attacked since login, and a Reflect return arrow
+            // is aimed from exactly such a player - Medium, the same default DamageEvent applies
+            switch (AttackHeight ?? ACE.Entity.Enum.AttackHeight.Medium)
             {
                 case ACE.Entity.Enum.AttackHeight.High: return 1.0f;
                 case ACE.Entity.Enum.AttackHeight.Medium: return 2.0f;

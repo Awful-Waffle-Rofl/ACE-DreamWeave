@@ -5,6 +5,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.Pvp.Rules;
 using ACE.Server.WeaponMods;
@@ -231,8 +232,25 @@ namespace ACE.Server.WorldObjects
             // Damage Rating class ability (Berserker T3): +3/6/10 into the same additive pool
             var classAbilityBonus = this is Player drPlayer ? drPlayer.GetClassAbilityRating(ClassAbilityId.DamageRating) : 0;
 
+            // Heal Boost Rating class ability (Blood Mage T2): its OWN granted rating also counts as Damage
+            // Rating by rank. Read through GetClassAbilityRating, so suppression zeroes it too.
+            var healBoostConversion = this is Player hbrcPlayer
+                ? RatingAbility.HealBoostDamageRatingConversion(hbrcPlayer.GetClassAbilityRating(ClassAbilityId.HealBoostRating))
+                : 0;
+
+            // Damage Rating class ability (Berserker T3, 2026-10-24): adds 30/60/100% (by rank) of the player's
+            // TOTAL Critical Damage Rating. The rank is recovered from the grant above (classAbilityBonus, read
+            // through GetClassAbilityRating), so PK-facet / PvP-arena suppression zeroes this exactly as it zeroes
+            // the +3/6/10. GetCritDamageRating is only computed when there is a grant to convert with.
+            var critDamageConversion = classAbilityBonus > 0
+                ? RatingAbility.DamageRatingCritDamageConversion(classAbilityBonus, GetCritDamageRating())
+                : 0;
+
+            // Knot loot: Glass Turtle Bracelet wrist trade, signed (a net loss stays negative), Player wielders only
+            var knotWrist = this is Player kwp ? kwp.GetKnotWristRating(KnotRatingKind.Damage) : 0;
+
             // heritage / weapon type bonus factored in elsewhere?
-            return damageRating + equipment + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus;
+            return damageRating + equipment + knotWrist + enchantments - weaknessRating + augBonus + lumAugBonus + classAbilityBonus + healBoostConversion + critDamageConversion;
         }
 
         public int GetDamageResistRating(CombatType? combatType = null, bool directDamage = true)
@@ -264,7 +282,10 @@ namespace ACE.Server.WorldObjects
             // Damage Resist Rating class ability (Vanguard T2): +3/6/10 into the same additive pool
             var classAbilityBonus = this is Player drrPlayer ? drrPlayer.GetClassAbilityRating(ClassAbilityId.DamageResistRating) : 0;
 
-            return damageResistRating + equipment + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus;
+            // Knot loot: Glass Turtle Bracelet wrist trade, signed (a net loss stays negative), Player wielders only
+            var knotWrist = this is Player kwp ? kwp.GetKnotWristRating(KnotRatingKind.DamageResist) : 0;
+
+            return damageResistRating + equipment + knotWrist + enchantments - netherDotDamageRating + augBonus + lumAugBonus + specBonus + classAbilityBonus;
         }
 
         public float GetDamageResistRatingMod(CombatType? combatType = null, bool directDamage = true, WorldObject attacker = null)

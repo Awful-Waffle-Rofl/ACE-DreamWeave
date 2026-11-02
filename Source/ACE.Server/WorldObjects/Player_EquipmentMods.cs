@@ -56,7 +56,7 @@ namespace ACE.Server.WorldObjects
         }
 
         // Transient runtime state for the Bloodlust equipment mod's fractional heal carry. Deliberately NOT
-        // persisted, matching the frenzy / nether rush stack state in Player_ClassAbilityBuffs: it is a
+        // persisted, matching the frenzy / mana rush stack state in Player_ClassAbilityBuffs: it is a
         // sub-point remainder worth less than one health, so losing it is beneath notice. All access is on
         // the player's landblock thread (the outgoing-damage path), so no locking is needed - the same
         // threading assumption the rest of the class-ability runtime state relies on.
@@ -143,11 +143,12 @@ namespace ACE.Server.WorldObjects
             }
             else if (damageEvent.CombatType == CombatType.Melee)
             {
-                // Savage Blows: unconditional melee percent. No stamina is charged - the surcharge is the
-                // ABILITY's cost mechanic, and a player who never learned it has nothing to pay it with.
-                var savageBlows = GetStandaloneEquipmentModValue(EquipmentModId.SavageBlows);
-                if (savageBlows > 0.0)
-                    damageEvent.Damage *= (float)(1.0 + savageBlows);
+                // Heavy Blows (mod 17, was Savage Blows until 2026-10-24 - repurposed in place): unconditional
+                // melee percent for a player WITHOUT the ability. A Heavy Blows owner gets the same term inside
+                // HeavyBlowsAbility.ModifyOutgoingDamage instead (GetStandaloneEquipmentModValue is the rank-0 read).
+                var heavyBlows = GetStandaloneEquipmentModValue(EquipmentModId.SavageBlows);
+                if (heavyBlows > 0.0)
+                    damageEvent.Damage *= (float)(1.0 + heavyBlows);
 
                 // Blood Fury's rank-0 mirror lived here until 2026-08-17. The ability was retired and mod 18 /
                 // PropertyFloat 8117 was repurposed as Break Armor's proc-chance MACHINERY mod, which has no
@@ -211,7 +212,9 @@ namespace ACE.Server.WorldObjects
                 return;
 
             // same attacker filter as ApplyIncomingDamageClassAbilities: monsters only, never PvP or self
-            if (source is not Creature attacker || PvpClassifier.IsPvp(attacker, this) || attacker == this || attacker.IsDead)
+            var attacker = ClassAbilityAttackerFilter.EnemyCreature(source, this);
+
+            if (attacker == null)
                 return;
 
             if (TryGetClassAbility(ClassAbilityId.Thorns, out _))

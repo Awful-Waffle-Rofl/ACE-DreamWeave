@@ -71,6 +71,7 @@ namespace ACE.Server.Tests
 
         private Action<uint, uint?, uint, int, string> savedPreWithdrawHook;
         private Func<uint, uint?, uint, string, bool> savedIsListedHook;
+        private Func<uint, uint?, uint, int, string, int?> savedWouldDelistHook;
         private Func<uint, ACE.Entity.Models.Weenie> savedWeenieLookup;
 
         [TestInitialize]
@@ -85,8 +86,10 @@ namespace ACE.Server.Tests
 
             savedPreWithdrawHook = AccountVaultStore.PreWithdrawHook;
             savedIsListedHook = AccountVaultStore.IsListedHook;
+            savedWouldDelistHook = AccountVaultStore.WithdrawWouldDelistHook;
             AccountVaultStore.PreWithdrawHook = null;
             AccountVaultStore.IsListedHook = null;
+            AccountVaultStore.WithdrawWouldDelistHook = null;
 
             // The default lookup reads DatabaseManager.World, which no unit test has.
             savedWeenieLookup = MarketManager.WeenieLookup;
@@ -126,6 +129,7 @@ namespace ACE.Server.Tests
 
             AccountVaultStore.PreWithdrawHook = savedPreWithdrawHook;
             AccountVaultStore.IsListedHook = savedIsListedHook;
+            AccountVaultStore.WithdrawWouldDelistHook = savedWouldDelistHook;
             MarketManager.WeenieLookup = savedWeenieLookup;
 
             PropertyManager.ModifyLong("account_vault_entry_cap", DefaultPropertyManager.DefaultLongProperties["account_vault_entry_cap"].Item);
@@ -239,6 +243,7 @@ namespace ACE.Server.Tests
             // Production wiring (MarketManager.Initialize()), which the three-seam overload leaves out.
             AccountVaultStore.PreWithdrawHook = MarketManager.OnVaultWithdraw;
             AccountVaultStore.IsListedHook = MarketManager.IsListed;
+            AccountVaultStore.WithdrawWouldDelistHook = MarketManager.WithdrawWouldDelist;
         }
 
         private static Dictionary<string, (long count, long value)> ClassRows(FakeVaultBackend backend, uint accountId)
@@ -676,6 +681,85 @@ namespace ACE.Server.Tests
             Assert.IsFalse(result.Ok);
             Assert.AreEqual(MarketError.ItemNotFound, result.Error);
             Assert.AreEqual(0, MarketManager.GetActiveListingsForAccount(SellerAccount).Count, "no listing of any kind");
+        }
+
+        // ---- a mule grantee and a listed class line (GranteeListedWithdrawTests' ledger cases, on a class line) ----
+
+        private const uint GranteeAccount = 8703;
+        private const uint GranteeCharacter = 0x50000873;
+        private static readonly VaultActor GranteeVaultActor = new VaultActor(GranteeAccount, GranteeCharacter, "Classgrantee");
+
+        private void GrantWithdraw()
+            => sellerBackend.Grants.Add(new AccountVaultGrant
+            {
+                OwnerAccountId = SellerAccount, GranteeCharacterGuid = GranteeCharacter, GranteeCharacterName = "Classgrantee", CanWithdraw = true,
+            });
+
+        private static bool Withdraw(AccountVaultStore store, VaultActor actor, VaultEntry entry, int amount, out List<WorldObject> withdrawn, out string reason)
+        {
+            var ok = false;
+            List<WorldObject> got = null;
+            string why = null;
+
+            store.Enqueue(() => ok = store.TryWithdraw(entry, amount, actor, out got, out why, GroupTakeOrder.Front));
+
+            withdrawn = got ?? new List<WorldObject>();
+            reason = why;
+            return ok;
+        }
+
+        [TestMethod]
+        public void Grantee_PartlyListedClassLine_MayTakeTheUnlistedRemainder_AndTheListingStands()
+        {
+            SeedLineA();
+            GrantWithdraw();
+            StartMarket();
+
+            var listing = ListClass(lineA, 2);
+
+            var ok = Withdraw(sellerStore, GranteeVaultActor, Line(lineA), 2, out var got, out var reason);
+
+            Assert.IsTrue(ok, reason);
+            Assert.AreEqual(2, got.Count, "the two unlisted items came out");
+            Assert.AreEqual(2, Line(lineA).Count, "the two listed items are still on the line");
+            Assert.AreEqual(MarketListingStatus.Active, MarketManager.GetListing(listing.Id).Status);
+        }
+
+        [TestMethod]
+        public void Grantee_PartlyListedClassLine_DiggingIntoTheListedPart_IsRefused_AndNothingMoves()
+        {
+            SeedLineA();
+            GrantWithdraw();
+            StartMarket();
+
+            var listing = ListClass(lineA, 2);
+
+            var ok = Withdraw(sellerStore, GranteeVaultActor, Line(lineA), 3, out var got, out var reason);
+
+            Assert.IsFalse(ok, "a grantee withdrew class items the owner has listed");
+            Assert.AreEqual("Only 2 of that item can be withdrawn. The rest is listed on the market by its owner.", reason);
+            Assert.AreEqual(0, got.Count);
+            Assert.AreEqual(4, Line(lineA).Count, "the line did not move");
+            Assert.AreEqual(4, TotalCount(sellerBackend, SellerAccount));
+            Assert.AreEqual(MarketListingStatus.Active, MarketManager.GetListing(listing.Id).Status);
+        }
+
+        [TestMethod]
+        public void Grantee_FullyListedClassLine_IsRefusedWithThePlainMessage()
+        {
+            SeedLineA();
+            GrantWithdraw();
+            StartMarket();
+
+            var listing = ListClass(lineA, 4);
+
+            var ok = Withdraw(sellerStore, GranteeVaultActor, Line(lineA), 1, out var got, out var reason);
+
+            Assert.IsFalse(ok);
+            Assert.AreEqual(AccountVaultStore.ListedByOwnerMessage, reason, "no free remainder means the plain refusal, never 'Only 0'");
+            Assert.AreEqual(0, got.Count);
+            Assert.AreEqual(4, Line(lineA).Count);
+            Assert.AreEqual(MarketListingStatus.Active, MarketManager.GetListing(listing.Id).Status);
         }
     }
 }

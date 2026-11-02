@@ -29,24 +29,27 @@ namespace ACE.Server.Tests
             DamageType.Cold, DamageType.Fire, DamageType.Acid, DamageType.Electric,
         };
 
-        // ---- 1. all seven damage types present, and only those seven -----------------------------
+        /// <summary>The seven physical/elemental types plus Nether (owner ruling 2026-10-27: void ladders).</summary>
+        private static readonly DamageType[] EightTypes = SevenTypes.Concat(new[] { DamageType.Nether }).ToArray();
+
+        // ---- 1. all eight damage types present, and only those eight -----------------------------
 
         [TestMethod]
-        public void StreakByType_ContainsExactlyTheSevenPhysicalElementalTypes()
+        public void StreakByType_ContainsExactlyTheSevenPhysicalElementalTypesPlusNether()
         {
-            CollectionAssert.AreEquivalent(SevenTypes, SpellswordSpellTables.StreakByType.Keys.ToArray());
+            CollectionAssert.AreEquivalent(EightTypes, SpellswordSpellTables.StreakByType.Keys.ToArray());
         }
 
         [TestMethod]
-        public void BlastByType_ContainsExactlyTheSevenPhysicalElementalTypes()
+        public void BlastByType_ContainsExactlyTheSevenPhysicalElementalTypesPlusNether()
         {
-            CollectionAssert.AreEquivalent(SevenTypes, SpellswordSpellTables.BlastByType.Keys.ToArray());
+            CollectionAssert.AreEquivalent(EightTypes, SpellswordSpellTables.BlastByType.Keys.ToArray());
         }
 
         [TestMethod]
-        public void RingByType_ContainsExactlyTheSevenPhysicalElementalTypes()
+        public void RingByType_ContainsExactlyTheSevenPhysicalElementalTypesPlusNether()
         {
-            CollectionAssert.AreEquivalent(SevenTypes, SpellswordSpellTables.RingByType.Keys.ToArray());
+            CollectionAssert.AreEquivalent(EightTypes, SpellswordSpellTables.RingByType.Keys.ToArray());
         }
 
         // ---- 2. ladder lengths and rung levels ----------------------------------------------------
@@ -82,7 +85,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void EveryStreakLadderArray_HasTheSameLengthAsStreakLevels()
         {
-            foreach (var type in SevenTypes)
+            foreach (var type in EightTypes)
             {
                 Assert.AreEqual(SpellswordSpellTables.StreakLevels.Length, SpellswordSpellTables.StreakByType[type].Length,
                     $"{type}: Streak ladder length does not match StreakLevels - a mismatch would silently misreport that rung's level");
@@ -92,7 +95,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void EveryBlastLadderArray_HasTheSameLengthAsBlastLevels()
         {
-            foreach (var type in SevenTypes)
+            foreach (var type in EightTypes)
             {
                 Assert.AreEqual(SpellswordSpellTables.BlastLevels.Length, SpellswordSpellTables.BlastByType[type].Length,
                     $"{type}: Blast ladder length does not match BlastLevels - a mismatch would silently misreport that rung's level");
@@ -247,10 +250,20 @@ namespace ACE.Server.Tests
                 DamageType.Health, magicSkillCurrent: 400, rank: 3, thresholdScale: 1.0));
 
             Assert.IsNull(SpellswordSpellTables.SelectSpell(SpellswordSpellTables.StreakByType, SpellswordSpellTables.StreakLevels,
-                DamageType.Nether, magicSkillCurrent: 400, rank: 3, thresholdScale: 1.0));
-
-            Assert.IsNull(SpellswordSpellTables.SelectSpell(SpellswordSpellTables.StreakByType, SpellswordSpellTables.StreakLevels,
                 DamageType.Base, magicSkillCurrent: 400, rank: 3, thresholdScale: 1.0));
+        }
+
+        /// <summary>
+        /// Nether used to return null here and proc nothing. Owner ruling 2026-10-27: it fires the void
+        /// ladder. Rank 3 at skill 400 caps at level 7 = Nether Streak VII, numeric id 5347.
+        /// </summary>
+        [TestMethod]
+        public void SelectSpell_Nether_FiresTheVoidLadder_NotNull()
+        {
+            var spellId = SpellswordSpellTables.SelectSpell(SpellswordSpellTables.StreakByType, SpellswordSpellTables.StreakLevels,
+                DamageType.Nether, magicSkillCurrent: 400, rank: 3, thresholdScale: 1.0);
+
+            Assert.AreEqual(5347u, (uint)spellId.Value);
         }
 
         /// <summary>

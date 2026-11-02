@@ -76,6 +76,7 @@ namespace ACE.Server.Tests
         private uint nextVaultRow = 1;
 
         private Action<uint, uint?, uint, int, string> savedPreWithdrawHook;
+        private Func<uint, ACE.Entity.Models.Weenie> savedWeenieLookup;
 
         [TestInitialize]
         public void Setup()
@@ -89,6 +90,8 @@ namespace ACE.Server.Tests
             // Another class may have left the market's hook installed; a sale here must not delist itself.
             savedPreWithdrawHook = AccountVaultStore.PreWithdrawHook;
             AccountVaultStore.PreWithdrawHook = null;
+
+            savedWeenieLookup = MarketManager.WeenieLookup;
 
             sellerBackend = new FakeVaultBackend();
             buyerBackend = new FakeVaultBackend();
@@ -112,6 +115,7 @@ namespace ACE.Server.Tests
             MarketManager.Shutdown();
 
             AccountVaultStore.PreWithdrawHook = savedPreWithdrawHook;
+            MarketManager.WeenieLookup = savedWeenieLookup;
 
             PropertyManager.ModifyLong("account_vault_entry_cap", DefaultPropertyManager.DefaultLongProperties["account_vault_entry_cap"].Item);
             PropertyManager.ModifyBool("account_vault_class_storage", DefaultPropertyManager.DefaultBooleanProperties["account_vault_class_storage"].Item);
@@ -507,6 +511,87 @@ namespace ACE.Server.Tests
             Assert.AreEqual(2, result.Value.Count, "an item whose deposit outcome is unknown is charged for");
 
             AssertPartialSale(listingId, delivered: 2, listedAfter: 1);
+        }
+
+        // ---- a Wanted fill drawn from a CLASS line ----
+
+        /// <summary>
+        /// A FILL from the seller's class line whose delivery is refused on item 2 of 3: one item is the
+        /// buyer's and is paid for, and the two undelivered ones go back INTO THE SELLER'S CLASS ROW -
+        /// not onto the stack ledger, and not into the vault container as stored biotas. The receipt is
+        /// what routes them there (UndoTake reads it); a receipt that lost their class provenance would
+        /// file them as biotas, which takes their pooled shares out of the line for good.
+        /// </summary>
+        [TestMethod]
+        public void Fill_FromASellerClassLine_DepositRefusedOnItem2_ReturnsTheRestToTheClassRow_NotTheLedgerOrABiota()
+        {
+            // PlaceOrder and MarketSalvageMaterials reach Player's static initializer; see MarketBuyOrderTests.
+            MarketOrderFillTests.EnsurePlayerStaticFieldsSeeded();
+
+            sellerWorld.ClassifyResult = true;
+            buyerWorld.ClassifyResult = true;
+
+            // FakeVaultWorld builds a bag with no MaterialType; the real Granite bag weenie carries one.
+            sellerWorld.MaterializeTransform = wo => { wo.MaterialType = ACE.Entity.Enum.MaterialType.Granite; return wo; };
+            buyerWorld.MaterializeTransform = sellerWorld.MaterializeTransform;
+
+            sellerVault = SeedContainer(sellerBackend, sellerWorld, SellerAccount, AccountVaultStore.VaultItemCapacity);
+            buyerVault = SeedContainer(buyerBackend, buyerWorld, BuyerAccount, AccountVaultStore.VaultItemCapacity);
+
+            BuildStores();
+
+            var sellerActor = new VaultActor(SellerAccount, SellerCharacter, "Partialseller");
+
+            foreach (var value in new[] { 250, 251, 253 })
+            {
+                var bag = FakeVaultWorld.MakeSalvageBag(BagWcid, 100, 70, 10, value, "Salvage (100)");
+                bag.MaterialType = ACE.Entity.Enum.MaterialType.Granite;
+
+                var ok = false;
+                string reason = null;
+                sellerStore.Enqueue(() => ok = sellerStore.TryDeposit(bag, sellerActor, out reason));
+                Assert.IsTrue(ok, $"could not seed a deposit: {reason}");
+            }
+
+            Assert.AreEqual(0, sellerVault.Inventory.Count, "control: the seller's bags are a class line, not stored biotas");
+            var sellerCountBefore = sellerBackend.Classes.Where(c => c.AccountId == SellerAccount).Sum(c => c.Count);
+            var sellerValueBefore = sellerBackend.Classes.Where(c => c.AccountId == SellerAccount).Sum(c => c.TotalValue);
+            Assert.AreEqual(3, sellerCountBefore);
+
+            StartMarket();
+
+            // PlaceOrder names the bag through WeenieLookup, whose default reads DatabaseManager.World.
+            // Teardown restores the saved seam.
+            MarketManager.WeenieLookup = _ => null;
+
+            var placed = MarketManager.PlaceOrder(Buyer, (int)ACE.Entity.Enum.MaterialType.Granite, MarketBuyOrderKind.SalvageBag, 3, Price, MarketChannel.Web);
+            Assert.IsTrue(placed.Ok, $"placing failed with {placed.Error}");
+
+            var calls = 0;
+            buyerBackend.ClassAdjustOverride = (key, delta) => ++calls == 2 ? AccountVaultStackAdjustResult.Refused : (AccountVaultStackAdjustResult?)null;
+            buyerBackend.FailAddVault = true;
+
+            var seller = new MarketActor(SellerAccount, SellerCharacter, "Partialseller");
+            var result = MarketManager.FillOrder(seller, placed.Value.Id, 3, MarketChannel.Web);
+
+            var sellerCount = sellerBackend.Classes.Where(c => c.AccountId == SellerAccount).Sum(c => c.Count);
+            var sellerValue = sellerBackend.Classes.Where(c => c.AccountId == SellerAccount).Sum(c => c.TotalValue);
+            var buyerCount = buyerBackend.Classes.Where(c => c.AccountId == BuyerAccount).Sum(c => c.Count);
+            var buyerValue = buyerBackend.Classes.Where(c => c.AccountId == BuyerAccount).Sum(c => c.TotalValue);
+
+            Assert.AreEqual(1, buyerCount, "one bag reached the buyer");
+            Assert.AreEqual(2, sellerCount, "the two undelivered bags are back on the seller's class row");
+            Assert.AreEqual(sellerValueBefore, sellerValue + buyerValue, "CONSERVATION of pooled value across both vaults");
+            Assert.AreEqual(0, sellerVault.Inventory.Count, "no undelivered bag came back as a stored biota");
+            Assert.AreEqual(0, sellerBackend.Stacks.Where(s => s.AccountId == SellerAccount).Sum(s => s.Count), "and none went onto the stack ledger");
+            Assert.AreEqual(2, sellerBackend.Logs.Where(l => l.Action == (int)ACE.Entity.Enum.AccountVaultAction.Return && l.ClassKey != null).Sum(l => l.Count),
+                "both returns were CLASS returns");
+
+            // Custody and conservation are asserted FIRST, so a regression reports the custody itself rather than a bare refusal.
+            Assert.IsTrue(result.Ok, $"a fill that delivered one bag is a partial fill, got {result.Error}");
+            Assert.AreEqual(1, result.Value.Count);
+            Assert.AreEqual(Price, wallet.GetBalanceMmd(SellerCharacter), "the seller is paid for the one bag that arrived");
+            Assert.AreEqual(2, MarketManager.GetBuyOrder(placed.Value.Id).CountRemaining);
         }
 
         // ---- the classification rule, directly ----

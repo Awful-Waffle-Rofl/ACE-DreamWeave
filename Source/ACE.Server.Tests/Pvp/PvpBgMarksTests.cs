@@ -25,7 +25,7 @@ namespace ACE.Server.Tests.Pvp
             new Setup(true, BattlegroundTunables.Defaults with { MarksWin = 7, MarksLoss = 3, MarksDraw = 5, MarksScale = scale });
 
         private static int Marks(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, Setup s) =>
-            PvpArenaRewards.BgMarksFor(result, forfeited, wentLive, sameIp, s.Enabled, s.Bg);
+            PvpArenaRewards.BgMarksFor(result, forfeited, wentLive, sameIp, s.Enabled, s.Bg, withheld: false);
 
         // ---------------- defaults ----------------
 
@@ -37,7 +37,82 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(1, d.MarksLoss);
             Assert.AreEqual(1, d.MarksDraw);
             Assert.AreEqual(1.0, d.MarksScale);
-            Assert.AreEqual(10, d.MarksDailyCap);
+            Assert.AreEqual(0, d.MarksDailyCap, "owner spec 2026-10-15: no cap on battleground Marks");
+        }
+
+        [TestMethod]
+        public void Defaults_PayOneMarkPerBattleground_PlusOneForAWin_WithNoDailyCap()
+        {
+            var bg = BattlegroundTunables.Defaults;
+
+            Assert.AreEqual(2, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false), "1 for completing + 1 for the win");
+            Assert.AreEqual(1, PvpArenaRewards.BgMarksFor(PvpBloodResult.Loss, false, true, false, true, bg, withheld: false));
+            Assert.AreEqual(1, PvpArenaRewards.BgMarksFor(PvpBloodResult.Draw, false, true, false, true, bg, withheld: false));
+
+            var today = 100;
+            var decision = PvpArenaRewards.DecideCap(storedCount: 500, storedDay: today, today: today, dailyCap: bg.MarksDailyCap);
+            Assert.IsTrue(decision.Pay, "the default cap never refuses, however many matches were paid today");
+        }
+
+        // ---------------- Double Marks window multiplier (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows") ----------------
+
+        private static int Doubled(PvpBloodResult result, double scale, double bonus) =>
+            PvpArenaRewards.BgMarksFor(result, false, true, false, true, BattlegroundTunables.Defaults with { MarksScale = scale }, withheld: false, bonusMultiplier: bonus);
+
+        [TestMethod]
+        public void BonusMultiplier_DoublesWinLossAndDraw_AtTheShippedAmounts()
+        {
+            Assert.AreEqual(4, Doubled(PvpBloodResult.Win, 1.0, 2.0));
+            Assert.AreEqual(2, Doubled(PvpBloodResult.Loss, 1.0, 2.0));
+            Assert.AreEqual(2, Doubled(PvpBloodResult.Draw, 1.0, 2.0));
+        }
+
+        [TestMethod]
+        public void BonusMultiplier_DefaultOfOne_ChangesNothing()
+        {
+            var bg = BattlegroundTunables.Defaults;
+
+            Assert.AreEqual(PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false),
+                PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: false, bonusMultiplier: 1.0));
+        }
+
+        /// <summary>Scale 1.5 times bonus 2.0 on a base of 1 is exactly 3; scale 1.25 times bonus 2.0 on a base of 1 is 2.5, which rounds away from zero to 3.</summary>
+        [TestMethod]
+        public void BonusMultiplier_MultipliesWithTheScale_ThenRoundsHalvesAwayFromZero()
+        {
+            Assert.AreEqual(6, Doubled(PvpBloodResult.Win, 1.5, 2.0), "2 x 1.5 x 2");
+            Assert.AreEqual(3, Doubled(PvpBloodResult.Loss, 1.5, 2.0), "1 x 1.5 x 2");
+            Assert.AreEqual(3, Doubled(PvpBloodResult.Loss, 1.25, 2.0), "1 x 1.25 x 2 = 2.5 rounds up");
+            Assert.AreEqual(2, Doubled(PvpBloodResult.Loss, 0.9, 2.0), "1 x 0.9 x 2 = 1.8");
+            Assert.AreEqual(8, Doubled(PvpBloodResult.Win, 1.0, 4.0), "a larger multiplier is honoured");
+        }
+
+        [TestMethod]
+        public void SanitizeBonusMultiplier_NanInfinityAndBelowOne_ReadAsOne()
+        {
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(double.NaN));
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(double.PositiveInfinity));
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(double.NegativeInfinity));
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(0.5));
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(-3.0));
+            Assert.AreEqual(1.0, PvpArenaRewards.SanitizeBonusMultiplier(1.0));
+            Assert.AreEqual(2.0, PvpArenaRewards.SanitizeBonusMultiplier(2.0));
+            Assert.AreEqual(2, Doubled(PvpBloodResult.Win, 1.0, double.NaN), "a NaN bonus pays the ordinary amount");
+            Assert.AreEqual(2, Doubled(PvpBloodResult.Win, 1.0, 0.1), "a bonus below 1 never reduces pay");
+        }
+
+        [TestMethod]
+        public void BonusMultiplier_DoesNotRescueTheZeroCases()
+        {
+            var bg = BattlegroundTunables.Defaults;
+
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, true, true, false, true, bg, withheld: false, bonusMultiplier: 2.0), "forfeit");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, false, false, true, bg, withheld: false, bonusMultiplier: 2.0), "never Live");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, true, true, bg, withheld: false, bonusMultiplier: 2.0), "same IP");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, false, bg, withheld: false, bonusMultiplier: 2.0), "switch off");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg, withheld: true, bonusMultiplier: 2.0), "withheld");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg with { MarksWin = 0 }, withheld: false, bonusMultiplier: 2.0), "a zero base");
+            Assert.AreEqual(int.MaxValue, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, bg with { MarksScale = 1e300 }, withheld: false, bonusMultiplier: 1e300), "saturates");
         }
 
         // ---------------- amount ----------------
@@ -59,7 +134,17 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(0, Marks(PvpBloodResult.Win, false, false, false, d), "never went Live");
             Assert.AreEqual(0, Marks(PvpBloodResult.Win, false, true, true, d), "same-IP opponents");
             Assert.AreEqual(0, Marks(PvpBloodResult.Win, true, true, false, d), "forfeiter");
-            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, null), "no dials");
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, true, null, false), "no dials");
+        }
+
+        [TestMethod]
+        public void BgMarksFor_Withheld_PaysZero_WhateverTheOutcome_AndFalseChangesNothing()
+        {
+            var d = Dials();
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, d.Enabled, d.Bg, withheld: true));
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Loss, false, true, false, d.Enabled, d.Bg, withheld: true));
+            Assert.AreEqual(0, PvpArenaRewards.BgMarksFor(PvpBloodResult.Draw, false, true, false, d.Enabled, d.Bg, withheld: true));
+            Assert.AreEqual(7, PvpArenaRewards.BgMarksFor(PvpBloodResult.Win, false, true, false, d.Enabled, d.Bg, withheld: false), "control: the same call not withheld pays");
         }
 
         [TestMethod]

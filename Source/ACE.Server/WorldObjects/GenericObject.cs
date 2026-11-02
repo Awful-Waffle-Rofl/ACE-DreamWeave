@@ -51,7 +51,12 @@ namespace ACE.Server.WorldObjects
                 return;
 
             // World Events (WaffleACE): the Weave Cache reward giver opts in by PropertyBool.WorldEventCache and runs its claim here (TECH-DESIGN 2.8 option C).
-            if (GetProperty(PropertyBool.WorldEventCache) == true && WorldEvents.WorldEventCacheHandler.TryHandleUse(this, player))
+            if (WorldEvents.WorldEventHooks.TryUseCache(this, player))
+                return;
+
+            // World Events Hold: a Shrine of Restoration the running Hold run placed heals its knights. One property read for
+            // every object no run stamped.
+            if (WorldEvents.WorldEventHooks.TryUseHoldShrine(this, player))
                 return;
 
             // Marketplace Tinkerer's Inspiration pedestal: opts in by PropertyBool.TinkerersInspiration and applies its free tinkering buffs here.

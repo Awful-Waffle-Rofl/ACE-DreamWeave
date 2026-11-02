@@ -131,12 +131,38 @@ namespace ACE.Server.WorldObjects
             var setItems = EquippedObjects.Values.Where(i => i.HasItemSet && i.EquipmentSetId == item.EquipmentSetId).ToList();
 
             var spells = GetSpellSet(setItems);
+            var scale = GetSpellSetScale(setItems);
 
             // get the spells from before / without this item
             setItems.Remove(item);
             var prevSpells = GetSpellSet(setItems);
+            var prevScale = GetSpellSetScale(setItems);
 
             EquipDequipItemFromSet(item, spells, prevSpells);
+
+            RescaleSetSpells(item, spells, prevSpells, prevScale, scale);
+        }
+
+        /// <summary>
+        /// SetBonusMaxLevel (upgraded Knot cloak): a set spell active both before and after a change keeps its
+        /// enchantment, so when the set-spell scale moved (a level gained past the dat's top tier, for example) the
+        /// enchantment is rebuilt, and EnchantmentManager.BuildEntry applies the new scale. A no-op whenever the two
+        /// scales are equal, which is always the case for a retail set (both exactly 1.0).
+        /// </summary>
+        private void RescaleSetSpells(WorldObject addItem, List<Spell> spells, List<Spell> prevSpells, double prevScale, double scale)
+        {
+            if (prevScale == scale || addItem?.EquipmentSetId == null)
+                return;
+
+            foreach (var spell in spells.Intersect(prevSpells))
+            {
+                var existing = EnchantmentManager.GetEnchantment(spell.Id, addItem.EquipmentSetId.Value);
+
+                if (existing != null)
+                    EnchantmentManager.Dispel(existing);
+
+                CreateItemSpell(addItem, spell.Id);
+            }
         }
 
         public void EquipDequipItemFromSet(WorldObject item, List<Spell> spells, List<Spell> prevSpells, WorldObject surrogateItem = null)
@@ -169,10 +195,12 @@ namespace ACE.Server.WorldObjects
             var surrogateItem = setItems.LastOrDefault();
 
             var spells = GetSpellSet(setItems);
+            var scale = GetSpellSetScale(setItems);
 
             // get the spells from before / with this item
             setItems.Add(item);
             var prevSpells = GetSpellSet(setItems);
+            var prevScale = GetSpellSetScale(setItems);
 
             if (surrogateItem == null)
             {
@@ -183,6 +211,10 @@ namespace ACE.Server.WorldObjects
             }
 
             EquipDequipItemFromSet(item, spells, prevSpells, surrogateItem);
+
+            // with no surrogate the set is now empty and every spell was removed above
+            if (surrogateItem != null)
+                RescaleSetSpells(surrogateItem, spells, prevSpells, prevScale, scale);
         }
 
         public void OnItemLevelUp(WorldObject item, int prevItemLevel)
@@ -194,10 +226,14 @@ namespace ACE.Server.WorldObjects
             var levelDiff = prevItemLevel - (item.ItemLevel ?? 0);
 
             var prevSpells = GetSpellSet(setItems, levelDiff);
+            var prevScale = GetSpellSetScale(setItems, levelDiff);
 
             var spells = GetSpellSet(setItems);
+            var scale = GetSpellSetScale(setItems);
 
             EquipDequipItemFromSet(item, spells, prevSpells);
+
+            RescaleSetSpells(item, spells, prevSpells, prevScale, scale);
         }
 
         public void CreateSentinelBuffPlayers(IEnumerable<Player> players, bool self = false, ulong maxLevel = 8)

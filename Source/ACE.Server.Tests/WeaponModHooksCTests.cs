@@ -10,11 +10,13 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// The three weapon mods v4 hooks wired in this change: Recovery (natural regeneration), Arcane Defender
-    /// (a wand as a virtual shield) and Panic Reload (conditional attack speed with a hostile in melee range).
+    /// The three weapon mods v4 hooks wired in this change: Recovery (natural regeneration), Defensive Weapon
+    /// (formerly Arcane Defender: a flat shield armor level, virtual with no shield) and Panic Reload
+    /// (conditional attack speed with a hostile in melee range). Defensive Weapon's 2026-10-25 widening (every
+    /// class, 100/200 ceilings, adds to a real shield and to Thorns) is covered in DefensiveWeaponTests.
     ///
     /// WHAT IS COVERED HERE is everything that can be decided from pure inputs: the registry rows themselves,
-    /// SkillFormula.CalcArmorMod at Arcane Defender's catalog magnitude, the regeneration product including
+    /// SkillFormula.CalcArmorMod at Defensive Weapon's two ceilings, the regeneration product including
     /// the combat-stance halving Recovery must not escape, and Panic Reload's per-candidate threat predicate.
     ///
     /// WHAT IS NOT, AND WHY, follows WeaponModTierBTests' rule exactly: the hooks themselves need a live
@@ -66,8 +68,8 @@ namespace ACE.Server.Tests
             var expected = new (WeaponModId Id, PropertyFloat Record, double MaxRoll, WeaponClass Classes, string Name)[]
             {
                 (WeaponModId.Recovery,       PropertyFloat.WeaponModRecovery,       0.50, WeaponClass.All,     "Recovery"),
-                (WeaponModId.ArcaneDefender, PropertyFloat.WeaponModArcaneDefender, 25,   WeaponClass.Caster,  "Arcane Defender"),
-                (WeaponModId.PanicReload,    PropertyFloat.WeaponModPanicReload,    0.10, WeaponClass.Missile, "Panic Reload"),
+                (WeaponModId.DefensiveWeapon, PropertyFloat.WeaponModDefensiveWeapon, 200,  WeaponClass.All,     "Defensive Weapon"),
+                (WeaponModId.PanicReload,    PropertyFloat.WeaponModPanicReload,    0.50, WeaponClass.Missile, "Panic Reload"),
             };
 
             foreach (var row in expected)
@@ -89,7 +91,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void HookedRows_ReadZeroWithTheGateOff()
         {
-            var ids = new[] { WeaponModId.Recovery, WeaponModId.ArcaneDefender, WeaponModId.PanicReload };
+            var ids = new[] { WeaponModId.Recovery, WeaponModId.DefensiveWeapon, WeaponModId.PanicReload };
 
             foreach (var id in ids)
             {
@@ -99,24 +101,30 @@ namespace ACE.Server.Tests
             }
         }
 
-        // ---------------- Arcane Defender ----------------
+        // ---------------- Defensive Weapon (formerly Arcane Defender) ----------------
 
         /// <summary>
-        /// THE PIN. Arcane Defender's whole effect is one number: at the catalog MaxRoll of 25, run through
-        /// SkillFormula.CalcArmorMod with SkillFormula.ArmorMod = 200/3, an incoming frontal blow lands at
-        /// 66.667 / (25 + 66.667) = 0.7273 of its damage. If this number moves, the row was retuned or the
-        /// armor formula changed, and either way the design figure needs re-deriving.
+        /// THE PIN. With no shield, Defensive Weapon's whole effect is one number per ceiling, run through
+        /// SkillFormula.CalcArmorMod with SkillFormula.ArmorMod = 200/3: at the full 200 (two-handed melee,
+        /// missile, caster) a frontal blow lands at 66.667 / (200 + 66.667) = 0.25 of its damage; at the
+        /// one-handed melee ceiling of 100 it lands at 66.667 / 166.667 = 0.40. If either moves, the row was
+        /// retuned or the armor formula changed, and either way the design figure needs re-deriving. (Until
+        /// 2026-10-25 this pinned Arcane Defender's 25: 0.7273.)
         /// </summary>
         [TestMethod]
-        public void ArcaneDefender_AtMaxRollDeflectsToTheDesignFigure()
+        public void DefensiveWeapon_AtEachCeilingDeflectsToTheDesignFigure()
         {
-            const float armorLevel = 25.0f;
+            var full = WeaponModRegistry.Get(WeaponModId.DefensiveWeapon).MaxRoll;
+            var oneHanded = full * DefensiveWeaponMath.OneHandedMeleeCeilingFactor;
 
-            var expected = SkillFormula.ArmorMod / (armorLevel + SkillFormula.ArmorMod);
+            Assert.AreEqual(200.0, full, 1e-9);
+            Assert.AreEqual(100.0, oneHanded, 1e-9);
 
-            Assert.AreEqual(0.727272f, expected, 1e-5f, "SkillFormula.CalcArmorMod(25) is no longer 66.667/91.667");
-            Assert.AreEqual(expected, SkillFormula.CalcArmorMod(armorLevel), 1e-6f);
-            Assert.AreEqual(expected, WeaponModCombat.ArcaneShieldMod(armorLevel, 1.0f), 1e-6f);
+            Assert.AreEqual(0.25f, SkillFormula.CalcArmorMod((float)full), 1e-6f, "SkillFormula.CalcArmorMod(200) is no longer 66.667/266.667");
+            Assert.AreEqual(0.40f, SkillFormula.CalcArmorMod((float)oneHanded), 1e-6f, "SkillFormula.CalcArmorMod(100) is no longer 66.667/166.667");
+
+            Assert.AreEqual(0.25f, WeaponModCombat.ArcaneShieldMod(full, 1.0f), 1e-6f);
+            Assert.AreEqual(0.40f, WeaponModCombat.ArcaneShieldMod(oneHanded, 1.0f), 1e-6f);
         }
 
         /// <summary>
@@ -125,7 +133,7 @@ namespace ACE.Server.Tests
         /// assertion.
         /// </summary>
         [TestMethod]
-        public void ArcaneDefender_IgnoreShieldScalesTheLevelNotTheResult()
+        public void DefensiveWeapon_IgnoreShieldScalesTheLevelNotTheResult()
         {
             var halved = WeaponModCombat.ArcaneShieldMod(25.0, 0.5f);
 
@@ -143,7 +151,7 @@ namespace ACE.Server.Tests
         /// already got, so the branch can never make a player take MORE damage than before.
         /// </summary>
         [TestMethod]
-        public void ArcaneDefender_AbsentOrMalformedIsTheUnmoddedResult()
+        public void DefensiveWeapon_AbsentOrMalformedIsTheUnmoddedResult()
         {
             Assert.AreEqual(1.0f, WeaponModCombat.ArcaneShieldMod(0.0, 1.0f), 1e-6f);
             Assert.AreEqual(1.0f, WeaponModCombat.ArcaneShieldMod(-10.0, 1.0f), 1e-6f);
@@ -152,28 +160,26 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// A wand-only Arcane Defender player must NOT gain Shield Block or Thorns, and the reason is
-        /// structural rather than arithmetic: both abilities gate on GetEquippedShield() != null directly
-        /// (Player_ClassAbilityCombat.cs:42 for Shield Block, ApplyThornsReflect's shield check for Thorns) and neither one ever reads
-        /// GetShieldMod, which is the only function this change touches. GetShieldMod has exactly one caller,
-        /// DamageEvent.cs:391.
-        ///
-        /// Those gates need a live Player to exercise, so what is asserted here is the property that makes the
-        /// argument hold: Arcane Defender is Caster-class only, so its carrier is the wand, and a wand is not
-        /// a shield - GetEquippedShield() and GetCasterOnlyModValue read different EquipMask slots
-        /// (Creature_Equipment.cs GetEquippedShield vs GetEquippedWand). The full check is a live-loop row.
+        /// SUPERSEDED 2026-10-25 (owner ruling): Defensive Weapon rolls on EVERY class, so its carrier is the
+        /// main-hand melee/missile weapon or the wand (Player.GetDefensiveWeaponModValue), never a shield - a
+        /// shield is CombatUse.Shield and classifies as no weapon at all, so it cannot carry the record. That
+        /// a SHIELDLESS Defensive Weapon player still gains neither Shield Block nor Thorns is asserted by
+        /// source scan in DefensiveWeaponTests; this test pins only the class set the hooks now read.
         /// </summary>
         [TestMethod]
-        public void ArcaneDefender_IsCasterOnlyAndThereforeNeverRidesAShield()
+        public void DefensiveWeapon_RollsOnEveryWeaponClassButNeverOnAShield()
         {
-            Assert.IsTrue(WeaponModRegistry.TryGet(WeaponModId.ArcaneDefender, out var definition));
+            Assert.IsTrue(WeaponModRegistry.TryGet(WeaponModId.DefensiveWeapon, out var definition));
 
-            Assert.AreEqual(WeaponClass.Caster, definition.Classes,
-                "Arcane Defender must stay caster-only: the hook reads the WAND, and a melee or missile roll would be dead");
+            Assert.AreEqual(WeaponClass.All, definition.Classes, "Defensive Weapon rolls on melee, missile and caster");
 
             Assert.IsTrue(definition.AppliesTo(WeaponClass.Caster));
-            Assert.IsFalse(definition.AppliesTo(WeaponClass.Melee));
-            Assert.IsFalse(definition.AppliesTo(WeaponClass.Missile));
+            Assert.IsTrue(definition.AppliesTo(WeaponClass.Melee));
+            Assert.IsTrue(definition.AppliesTo(WeaponClass.Missile));
+
+            // a shield is never a weapon, so it can never be the carrier
+            Assert.AreEqual(WeaponClass.None, WeaponClassifier.Classify(ACE.Entity.Enum.ItemType.MeleeWeapon, ACE.Entity.Enum.CombatUse.Shield));
+            Assert.IsFalse(definition.AppliesTo(WeaponClass.None));
         }
 
         // ---------------- Recovery ----------------
@@ -302,21 +308,22 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Panic Reload's own multiplier at the catalog MaxRoll: +10% attack speed while the condition holds.
+        /// Panic Reload's own multiplier at the catalog MaxRoll: +50% attack speed while the condition holds
+        /// (raised from +10% on 2026-10-25, owner ruling).
         /// It composes multiplicatively with Quickening on the same bow, and both land inside
         /// ApplyClassAbilityAttackSpeed's single ceiling clamp, which is what bounds the axis.
         /// </summary>
         [TestMethod]
-        public void PanicReload_AtMaxRollIsTenPercentAndComposesWithQuickening()
+        public void PanicReload_AtMaxRollIsFiftyPercentAndComposesWithQuickening()
         {
             var panicReload = WeaponModRegistry.Get(WeaponModId.PanicReload).MaxRoll;
             var quickening = WeaponModRegistry.Get(WeaponModId.Quickening).MaxRoll;
 
-            Assert.AreEqual(1.10, WeaponModCombat.DamageMultiplier(panicReload), 1e-9);
+            Assert.AreEqual(1.50, WeaponModCombat.DamageMultiplier(panicReload), 1e-9);
 
             var composed = WeaponModCombat.DamageMultiplier(quickening) * WeaponModCombat.DamageMultiplier(panicReload);
 
-            Assert.AreEqual(1.24 * 1.10, composed, 1e-9);
+            Assert.AreEqual(1.24 * 1.50, composed, 1e-9);
 
             // not additive - the two are separate terms in one product
             Assert.AreNotEqual(1.0 + quickening + panicReload, composed, 1e-6);

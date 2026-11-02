@@ -36,6 +36,9 @@ namespace ACE.Server.WorldObjects
             OpenTeleportWatch(TeleportWatchRules.ClassifyKind(lastLoginTimestamp, LastPortalTeleportTimestamp, LoginTimestamp), false,
                 Location?.Cell ?? 0, Location?.Instance ?? 0);
 
+            // server-side arrival fallback: a login waits on the same LoginComplete, so it gets the same backstop
+            ScheduleForcedArrivalBackstop();
+
             // The /lph window opens at login and is reset by /lph start.
             ResetLumRateWindow();
 
@@ -192,6 +195,10 @@ namespace ACE.Server.WorldObjects
             // catch up the one-time Thread-Guide notice for a character already at level 50 or more
             SendThreadGuideNoticeIfDue();
 
+            // catch up the one-time PvP eligibility notice for a character who had cleared a Thread before this login
+            // (including a veteran whose clears pre-date ThreadClearsLifetime)
+            SendPvpEligibleNoticeIfDue();
+
             // once per login: point a player left without a guide fragment back to the Thread-Guide
             SendThreadGuideLoginReminderIfDue();
 
@@ -221,11 +228,20 @@ namespace ACE.Server.WorldObjects
             // benign and the next login continues.
             ApplyClassAbilityOverhaulRespec();
 
+            // Class ability reprice waves (ClassAbilityRepricing): unlearn reworked abilities, take back
+            // affected tokens and recompute available points. AFTER the overhaul respec (a character
+            // it just cleared owns nothing to reprice) and BEFORE the audit below, which must measure settled
+            // state. Per-character guard PropertyInt 9092 plus the class_ability_reprice_sweep_enabled kill
+            // switch, so an abort is benign and the next login continues. Returns TRUE when its points
+            // phase is waiting on a confirmed character save; that phase then runs the audit itself.
+            var capAuditDeferred = ApplyClassAbilityRepricing();
+
             // CAP audit ledger, round 3: detect a ledger/counter mismatch at login. Must run AFTER the
-            // three calls above - they mutate the CAP counters and/or the quest-registry rows this
+            // four calls above - they mutate the CAP counters and/or the quest-registry rows this
             // audit reads, so auditing before them would measure a state about to change. Read-only;
             // completes asynchronously (queued shard read) and never blocks login.
-            AuditClassAbilityPointLedger();
+            if (!capAuditDeferred)
+                AuditClassAbilityPointLedger();
 
             HandleSkillCreditRefund();
             HandleSkillTemplesReset();
@@ -349,7 +365,9 @@ namespace ACE.Server.WorldObjects
 
         public void SendPropertyUpdatesAndOverrides()
         {
-            if (!PropertyManager.GetBool("require_spell_comps").Item)
+            // Login only ever sends false, exactly as before the waiver: an unbound player with require_spell_comps on gets nothing.
+            // (pvpBinding is in memory only and a relog does not rebind, so PvpMatchComponentsWaived is false here in practice.)
+            if (PvpMatchComponentsWaived || !PropertyManager.GetBool("require_spell_comps").Item)
                 Session.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyBool(this, PropertyBool.SpellComponentsRequired, false));
         }
 

@@ -100,6 +100,15 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // Reprice wave not yet applied (kill switch off at login): a token or instant-learn bought now at
+            // the NEW price would later be refunded or ranked up as if paid at the OLD one. Covers both the
+            // trainer vendor's instant learn and the voucher purchase, which both run this gate first.
+            if (ClassAbilityRepricePendingFor(def.Id))
+            {
+                error = ClassAbilityRepricing.PendingRefusal;
+                return false;
+            }
+
             var rank = GetClassAbilityRank(def.Id);
 
             var eval = ClassAbilityTokenCatalog.Evaluate(def, rank, tier, AvailableClassAbilityPoints);
@@ -408,6 +417,14 @@ namespace ACE.Server.WorldObjects
                 // here), so refusing them would strand prepaid points forever. Anything the retired table
                 // doesn't recognise is still refused: an unpriceable token must not be guessed at.
                 return TryRefundRetiredVoucher(voucher, (ClassAbilityId)tokenSkillId, out error);
+            }
+
+            // Reprice wave not yet applied: this token may have been bought at the OLD price, and refunding it
+            // here would pay the NEW one. The next migrated login refunds it at the old price instead.
+            if (ClassAbilityRepricePendingFor(def.Id))
+            {
+                error = ClassAbilityRepricing.PendingRefusal;
+                return false;
             }
 
             var tier = voucher.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0;

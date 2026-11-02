@@ -317,7 +317,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "Experience: x2.00",
                 "Luminance: x2.00",
                 "Entries: 1 of 3",
-                "Bound to Filo's Doom. It crumbles when the dungeon is cleared or its last entry is spent; a death after the clear leaves no way back in.",
+                "Bound to Filo's Doom. It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes.",
             });
 
             Assert.AreEqual(expected, desc);
@@ -325,7 +325,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
         /// <summary>
         /// Orchestrator ruling on Task 5 (R29): a GROUP run's owner gem and every member key say they die when the
-        /// Thread closes; a solo gem keeps its clear-time line byte for byte, and the default is solo.
+        /// Thread closes; a solo gem keeps its own line (owner ruling 2026-10-10: it survives the clear), and the default is solo.
         /// </summary>
         [TestMethod]
         public void ComposeLongDesc_group_bound_line_replaces_only_the_crumble_sentence()
@@ -337,7 +337,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var group = ThreadDungeonGemHandler.ComposeLongDesc(spec, "Filo's Doom", 1, 3, LookupFake, null, groupRun: true);
 
             Assert.AreEqual(solo, soloExplicit, "groupRun defaults to the solo text");
-            StringAssert.EndsWith(solo, "\nBound to Filo's Doom. It crumbles when the dungeon is cleared or its last entry is spent; a death after the clear leaves no way back in.");
+            StringAssert.EndsWith(solo, "\nBound to Filo's Doom. It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes.");
             StringAssert.EndsWith(group, "\nBound to Filo's Doom. It crumbles when this Thread closes.");
             Assert.AreEqual("It crumbles when this Thread closes.", ThreadDungeonGemHandler.GroupBoundLineTail);
 

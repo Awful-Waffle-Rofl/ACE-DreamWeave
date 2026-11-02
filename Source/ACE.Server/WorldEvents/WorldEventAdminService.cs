@@ -71,6 +71,10 @@ namespace ACE.Server.WorldEvents
         public string RewardId { get; set; }
         public int? TeaserSeconds { get; set; }
         public int? MinDurationSeconds { get; set; }
+
+        /// <summary>Absent/null = the source default; else random | none | wisps | balls | rain (case-insensitive).</summary>
+        public string Hazard { get; set; }
+
         public WorldEventLocationBody Location { get; set; }
     }
 
@@ -349,6 +353,9 @@ namespace ACE.Server.WorldEvents
                 return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused,
                     reason: $"min_duration_seconds must be between 0 and {WorldEvent.DefaultMaxDurationSeconds - 1}");
 
+            if (!WorldEventHazards.TryNormalizeRequest(body.Hazard, out var hazard, out var hazardError))
+                return WorldEventAdminOutcome.Fail(MarketError.WorldEventRefused, reason: hazardError);
+
             var random = body.Random == true;
 
             // The composer's own refusals for these name in-game flags ("missing --goal"); the web body is
@@ -398,6 +405,7 @@ namespace ACE.Server.WorldEvents
                 PositionAnchorId = WorldEventComposer.WebAnchorId,
                 AllowedSourceIds = allowed,
                 Invoker = invoker,
+                Hazard = hazard,
                 TeaserLeadSeconds = teaser,
                 MinDurationSeconds = minDuration
             };
@@ -475,7 +483,12 @@ namespace ACE.Server.WorldEvents
                 })
                 .ToList();
 
+            // Only goals some listed (web-startable) source offers: a goal no source here can be crossed with (World Events
+            // Hold's defend_envoys, listed by the non-web ambush source only) would be a dead choice in the panel.
+            var offeredGoals = new HashSet<string>(sources.SelectMany(s => s.compatible_goals), StringComparer.Ordinal);
+
             var goals = store.Goals.Values
+                .Where(g => offeredGoals.Contains(g.Id))
                 .OrderBy(g => g.Id, StringComparer.Ordinal)
                 .Select(g => new
                 {
@@ -533,6 +546,7 @@ namespace ACE.Server.WorldEvents
                 families,
                 bosses,
                 rewards,
+                hazards = WorldEventHazards.RequestWords,
                 limits = new
                 {
                     max_families = WorldEventComposer.MaxComposedFamilies,

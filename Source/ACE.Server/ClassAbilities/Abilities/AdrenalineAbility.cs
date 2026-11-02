@@ -6,8 +6,9 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Berserker T1 splash: taking damage arms the next attack OR SPELL within 6 seconds for 2/4/6/8/10%
-    /// more damage by rank. Covering spells as well as swings is deliberate - it keeps the entry from being
+    /// Berserker T1 splash: taking damage arms the next attack OR SPELL within 6 seconds for 4/8/12/16/20%
+    /// more damage by rank (doubled from 2/4/6/8/10% on 2026-10-24, Berserker pass, which also REMOVED its
+    /// Recklessness affinity outright - the bonus is now rank alone, with no multiplier anywhere). Covering spells as well as swings is deliberate - it keeps the entry from being
     /// dead weight on a Berserker who splashed a caster class - and the short window is what ties the payoff
     /// to actually standing in the fight, which is the class's whole premise.
     ///
@@ -44,11 +45,14 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "adrenaline",
             DisplayName = "Adrenaline",
             Description = "When you take damage, your next attack or spell within 6 seconds deals " +
-                          "2/4/6/8/10% more damage (by rank). Higher Recklessness multiplies the bonus.",
+                          "4/8/12/16/20% more damage (by rank).",
             MaxRank = 5,
             CostPerRank = new[] { 1, 1, 1, 1, 1 },
             Implemented = true,
-            AffinitySkill = Skill.Recklessness,
+            // NO AFFINITY (owner ruling 2026-10-24, Berserker pass): the Recklessness multiplier was removed
+            // from every read of this ability, so AffinitySkill is null and no GetClassAbilityAffinityMultiplier
+            // call remains in this file.
+            AffinitySkill = null,
         };
 
         /// <summary>
@@ -98,8 +102,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return;
 
             var bonus = DamageBonus(rank,
-                PropertyManager.GetDouble("class_ability_adrenaline_percent_per_rank").Item,
-                attacker.GetClassAbilityAffinityMultiplier(Skill.Recklessness));
+                PropertyManager.GetDouble("class_ability_adrenaline_percent_per_rank").Item);
 
             if (bonus <= 0.0)
                 return;
@@ -131,29 +134,22 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return 1.0f;
 
             var bonus = DamageBonus(rank,
-                PropertyManager.GetDouble("class_ability_adrenaline_percent_per_rank").Item,
-                caster.GetClassAbilityAffinityMultiplier(Skill.Recklessness));
+                PropertyManager.GetDouble("class_ability_adrenaline_percent_per_rank").Item);
 
             return (float)(1.0 + bonus);
         }
 
         /// <summary>
-        /// The armed strike's damage bonus as a fraction: rank * perRank, multiplied by the Recklessness
-        /// affinity factor. Pure, so both consumers and the readout share one expression.
-        ///
-        /// Recklessness MULTIPLIES this ability's OWN rank bonus (the 2026-09-12 model) rather than riding
-        /// additively beside it, so it is worth more the more ranks are bought and exactly nothing at rank
-        /// 0. At zero effective Recklessness the multiplier is exactly 1.0 and the bonus is bit-identical to
-        /// rank alone.
+        /// The armed strike's damage bonus as a fraction: rank * perRank, and nothing else. Pure, so both
+        /// consumers and the readout share one expression. The Recklessness multiplier this used to take was
+        /// removed on 2026-10-24 (owner ruling) together with the doubling of the per-rank rate.
         /// </summary>
-        public static double DamageBonus(int rank, double percentPerRank, double affinityMultiplier)
+        public static double DamageBonus(int rank, double percentPerRank)
         {
             if (rank <= 0)
                 return 0.0;
 
-            var rankBonus = rank * percentPerRank;
-
-            return rankBonus * (affinityMultiplier < 1.0 ? 1.0 : affinityMultiplier);
+            return rank * percentPerRank;
         }
 
         /// <summary>
@@ -161,28 +157,22 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// the bonus as if the window were open; this is a "how strong is the ability" readout, not a "is
         /// your window currently armed" simulation.
         ///
-        /// Affinity is a MULTIPLIER on the rank term but is reported as the AMOUNT that multiplier adds, so
-        /// the three displayed terms stay in one unit and sum exactly to Effective. No cap applies to this
-        /// ability at any term, so CapNote is always null. It carries no equipment mod, so Gear is 0.
+        /// No affinity (removed 2026-10-24), no cap and no equipment mod, so Affinity and Gear are always 0
+        /// and Effective equals Skill.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var perRank = PropertyManager.GetDouble("class_ability_adrenaline_percent_per_rank").Item;
 
-            var rankBonus = rank <= 0 ? 0.0 : rank * perRank;
-
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.Recklessness);
-
-            var skill = rankBonus * 100.0;
-            var affinity = (DamageBonus(rank, perRank, multiplier) - rankBonus) * 100.0;
+            var skill = DamageBonus(rank, perRank) * 100.0;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
                 Skill = skill,
-                Affinity = affinity,
+                Affinity = 0.0,
                 Gear = 0.0,
-                Effective = skill + affinity,
+                Effective = skill,
                 Unit = "%",
                 Label = "next hit dmg",
                 Per = null,

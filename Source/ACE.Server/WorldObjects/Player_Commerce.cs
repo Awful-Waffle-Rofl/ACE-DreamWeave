@@ -858,10 +858,11 @@ namespace ACE.Server.WorldObjects
 
             var cost = new List<WorldObject>();
 
-            // Always-on banking shop hook: for currencies the bank holds (pyreals + promissory notes),
-            // spend from inventory first, then draw the remainder from the bank. Non-bankable alternate
+            // Always-on banking shop hook: for currencies the bank holds (pyreals, promissory notes,
+            // Marks of the Hopeslayer, Class Ability Points and MMDs), spend from inventory first, then draw the
+            // remainder from the bank. Non-bankable alternate
             // currencies fall through to the original inventory-only path below.
-            var altName = GetAlternateCurrencyName(currentWcid); // non-null only for promissory notes
+            var altName = GetAlternateCurrencyName(currentWcid); // non-null only for the bank-backed alternate currencies
             var bankable = currentWcid == coinStackWcid || altName != null;
 
             if (destroy && bankable)

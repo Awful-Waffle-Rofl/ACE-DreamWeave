@@ -244,5 +244,54 @@ namespace ACE.Server.Tests
             Assert.IsNull(WorldObject.SelectObjectiveGateGuid(Candidates((0x70000010u, "lca_pentagon", 3)), null, out _));
             Assert.IsNull(WorldObject.SelectObjectiveGateGuid(Candidates((0x70000010u, "lca_pentagon", 3)), "   ", out _));
         }
+
+        // =======================================================================================
+        // Static contribution (Speed Season 3): the lock-level rules the static helper relies on
+        // =======================================================================================
+
+        [TestMethod]
+        public void ExplicitToken_ContributedTwice_CountsOnce()
+        {
+            var gate = new ACE.Server.Entity.ObjectiveLock(2);
+            var key = WorldObject.ResolveObjectiveTokenKey("p1", 0x70000001u);
+
+            Assert.IsFalse(gate.Contribute(key, 1, Utc(2026, 1, 1)));
+            Assert.IsFalse(gate.Contribute(key, 1, Utc(2026, 1, 1)), "the same explicit token is one contributor");
+            Assert.AreEqual(1.0, gate.CurrentWeight(Utc(2026, 1, 1)), 1e-9);
+            Assert.IsFalse(gate.Latched);
+        }
+
+        [TestMethod]
+        public void LatchedLock_IgnoresFurtherContributions()
+        {
+            var gate = new ACE.Server.Entity.ObjectiveLock(1);
+
+            Assert.IsTrue(gate.Contribute("a", 1, Utc(2026, 1, 1)));
+            Assert.IsTrue(gate.Latched);
+
+            Assert.IsFalse(gate.Contribute("b", 5, Utc(2026, 1, 1)), "a latched lock never reports a second opening");
+            gate.Reset();
+            Assert.IsTrue(gate.Latched, "reset cannot re-close a latched lock");
+        }
+
+        [TestMethod]
+        public void WeightedSeal_P1P3AndTwoRites_Opens_ButP1AndAllRites_DoesNot()
+        {
+            const double required = 8;
+            var now = Utc(2026, 1, 1);
+
+            var open = new ACE.Server.Entity.ObjectiveLock(required);
+            Assert.IsFalse(open.Contribute("p1", 3, now));
+            Assert.IsFalse(open.Contribute("p3", 3, now));
+            Assert.IsFalse(open.Contribute("north_rite", 1, now));
+            Assert.IsTrue(open.Contribute("east_rite", 1, now), "3 + 3 + 1 + 1 = 8");
+
+            var shut = new ACE.Server.Entity.ObjectiveLock(required);
+            Assert.IsFalse(shut.Contribute("p1", 3, now));
+            Assert.IsFalse(shut.Contribute("north_rite", 1, now));
+            Assert.IsFalse(shut.Contribute("east_rite", 1, now));
+            Assert.IsFalse(shut.Contribute("south_rite", 1, now), "P1 and all three rites weigh 6");
+            Assert.IsFalse(shut.Latched);
+        }
     }
 }

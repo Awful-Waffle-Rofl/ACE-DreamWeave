@@ -45,7 +45,9 @@ namespace ACE.Server.Tests
             // Training; see RetiredClassAbilities' "enhanced_missiledefense" entry).
             Assert.AreEqual(SkillHelper.ValidSkills.Count - 1, skillCount, "one Enhanced skill per valid player skill except the retired Missile Defense");
             Assert.AreEqual(6, attrCount, "one Enhanced attribute per primary attribute");
-            Assert.AreEqual(3, vitalCount, "one Enhanced vital per secondary attribute");
+            // TWO since 2026-10-24: Enhanced Stamina retired (Berserker pass; see RetiredClassAbilities'
+            // "enhanced_stamina" entry), so GenerateAll skips MaxStamina. Health and Mana remain.
+            Assert.AreEqual(2, vitalCount, "one Enhanced vital per secondary attribute except the retired Stamina");
 
             foreach (var enhanced in generated)
             {

@@ -111,6 +111,12 @@ namespace ACE.Entity.Enum.Properties
         /// constrained by the object's part count.
         /// </summary>
         VisualEffectScript               = 9000,
+
+        // Custom Summons: on a caster summon device, the first scroll-bound spell id.
+        SummonBoundSpell1                = 9001,
+
+        // Custom Summons: on a caster summon device, the second scroll-bound spell id.
+        SummonBoundSpell2                = 9002,
     }
 
     public static class PropertyDataIdExtensions

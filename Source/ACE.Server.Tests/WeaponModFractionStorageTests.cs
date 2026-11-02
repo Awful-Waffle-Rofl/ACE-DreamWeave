@@ -247,7 +247,8 @@ namespace ACE.Server.Tests
                 foreach (var share in new[] { 0.25, 0.6, 1.0 })
                 {
                     var weapon = WeaponModTestKit.MakeWeapon();
-                    var magnitude = definition.MaxRoll * share * scale;
+                    // the ceiling ON THIS WEAPON: Defensive Weapon reaches a different ceiling per carrier
+                    var magnitude = definition.MaxRollFor(weapon) * share * scale;
 
                     WeaponModTinkerSet.ApplySpecial(weapon, definition, magnitude);
 
@@ -300,10 +301,11 @@ namespace ACE.Server.Tests
 
                 weapon.SetProperty(definition.Record, 0.5);
 
-                Assert.AreEqual(definition.MaxRoll * 0.5, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id, true, 1.0), 1e-12,
+                // resolved against the CARRIER: MaxRollFor(weapon) is MaxRoll for every row without a per-item ceiling
+                Assert.AreEqual(definition.MaxRollFor(weapon) * 0.5, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id, true, 1.0), 1e-12,
                     $"{definition.Id}: the combat read must resolve the fraction against MaxRoll, not return it raw");
 
-                Assert.AreEqual(definition.MaxRoll * 0.25, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id, true, 0.5), 1e-12,
+                Assert.AreEqual(definition.MaxRollFor(weapon) * 0.25, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id, true, 0.5), 1e-12,
                     $"{definition.Id}: the combat read must apply the live scale");
 
                 Assert.AreEqual(0.0, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id, false, 1.0), 1e-12,

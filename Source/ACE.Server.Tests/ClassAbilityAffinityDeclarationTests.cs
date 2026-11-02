@@ -104,11 +104,18 @@ namespace ACE.Server.Tests
         /// <see cref="ClassAbilityDefinition.AdditionalAffinitySkills"/>. Keyed by ability, then by the
         /// declared skill; the value is the repo-relative file asserted to still contain the call.
         ///
-        /// The primary-affinity tables above cannot cover these: the handler scan allows exactly one skill
-        /// per file and treats anything else as another ability's rider, and a secondary rider computed in
-        /// Player_ClassAbilityBuffs is invisible to a scan of ClassAbilities/Abilities either way. So every
-        /// entry in AdditionalAffinitySkills must appear here, and
+        /// The primary-affinity tables above cannot cover these: a secondary rider computed in
+        /// Player_ClassAbilityBuffs is invisible to a scan of ClassAbilities/Abilities. So every entry in
+        /// AdditionalAffinitySkills must appear here, and
         /// <see cref="EverySecondaryAffinity_IsBackedByASourceCall"/> fails when one does not.
+        ///
+        /// A secondary rider may also live in the ability's OWN handler file (Sundermark carried one - Void
+        /// Magic on its Nether branch - until the 2026-10-30 ruling moved that branch onto Life Magic; no live
+        /// ability uses the same-file form today). The handler scan otherwise allows exactly one skill
+        /// per file, so it subtracts a skill from a file's calls ONLY when that skill is in the definition's
+        /// AdditionalAffinitySkills AND its row here names that same handler file
+        /// (<see cref="SameFileSecondarySkills"/>). A second skill declared any other way - not listed, or
+        /// listed against a different file - is still a second skill, and still fails the scan.
         /// </summary>
         private static readonly Dictionary<ClassAbilityId, Dictionary<Skill, string>> SecondaryScalingCalls =
             new Dictionary<ClassAbilityId, Dictionary<Skill, string>>
@@ -119,7 +126,62 @@ namespace ACE.Server.Tests
             {
                 [Skill.Loyalty] = "Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs",
             },
+
+            // Sundermark's Void Magic row (the Nether branch's same-file rider, owner ruling 2026-10-27) was
+            // removed 2026-10-30: owner ruling option B scales every Sundermark roll, Nether included, on
+            // Life Magic alone, so the definition no longer declares AdditionalAffinitySkills.
         };
+
+        /// <summary>
+        /// The skills the handler scan must NOT count against <paramref name="handlerFullPath"/>: those in
+        /// <paramref name="definition"/>'s AdditionalAffinitySkills whose <paramref name="secondaryCalls"/> row
+        /// names that same file. Anything else - an undeclared skill, or one whose row points elsewhere -
+        /// is returned nowhere and so stays visible to the one-skill-per-file rule. Pure over its arguments
+        /// so the negative cases are testable on a synthetic table.
+        /// </summary>
+        internal static Skill[] SameFileSecondarySkills(ClassAbilityDefinition definition, string handlerFullPath, string repoRoot,
+            IReadOnlyDictionary<ClassAbilityId, Dictionary<Skill, string>> secondaryCalls)
+        {
+            if (definition?.AdditionalAffinitySkills == null || definition.AdditionalAffinitySkills.Length == 0)
+                return new Skill[0];
+
+            if (!secondaryCalls.TryGetValue(definition.Id, out var rows))
+                return new Skill[0];
+
+            var handler = Path.GetFullPath(handlerFullPath);
+
+            return definition.AdditionalAffinitySkills
+                .Where(s => rows.TryGetValue(s, out var file)
+                    && string.Equals(Path.GetFullPath(Path.Combine(repoRoot, file.Replace('/', Path.DirectorySeparatorChar))), handler, StringComparison.OrdinalIgnoreCase))
+                .Distinct()
+                .ToArray();
+        }
+
+        /// <summary>
+        /// The negative cases of <see cref="SameFileSecondarySkills"/>: a second skill is subtracted ONLY when
+        /// it is both declared in AdditionalAffinitySkills and mapped to this very file. Synthetic definitions
+        /// and tables, so the live registry's contents cannot make it vacuous.
+        /// </summary>
+        [TestMethod]
+        public void SameFileSecondarySkills_SubtractsOnlyADeclaredRiderMappedToThisFile()
+        {
+            var repoRoot = RepoRoot();
+            var handlerRel = "Source/ACE.Server/ClassAbilities/Abilities/SundermarkAbility.cs";
+            var handler = Path.Combine(repoRoot, handlerRel.Replace('/', Path.DirectorySeparatorChar));
+
+            var declared = new ClassAbilityDefinition { Id = ClassAbilityId.Sundermark, AffinitySkill = Skill.LifeMagic, AdditionalAffinitySkills = new[] { Skill.VoidMagic } };
+            var undeclared = new ClassAbilityDefinition { Id = ClassAbilityId.Sundermark, AffinitySkill = Skill.LifeMagic };
+
+            var sameFile = new Dictionary<ClassAbilityId, Dictionary<Skill, string>> { [ClassAbilityId.Sundermark] = new Dictionary<Skill, string> { [Skill.VoidMagic] = handlerRel } };
+            var otherFile = new Dictionary<ClassAbilityId, Dictionary<Skill, string>> { [ClassAbilityId.Sundermark] = new Dictionary<Skill, string> { [Skill.VoidMagic] = "Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs" } };
+            var noRow = new Dictionary<ClassAbilityId, Dictionary<Skill, string>>();
+
+            CollectionAssert.AreEqual(new[] { Skill.VoidMagic }, SameFileSecondarySkills(declared, handler, repoRoot, sameFile), "declared AND mapped to this file: subtracted");
+
+            Assert.AreEqual(0, SameFileSecondarySkills(undeclared, handler, repoRoot, sameFile).Length, "a row alone, without the declaration, subtracts nothing");
+            Assert.AreEqual(0, SameFileSecondarySkills(declared, handler, repoRoot, noRow).Length, "a declaration alone, without a row, subtracts nothing");
+            Assert.AreEqual(0, SameFileSecondarySkills(declared, handler, repoRoot, otherFile).Length, "a row naming a different file subtracts nothing");
+        }
 
         /// <summary>
         /// Every secondary affinity a LIVE registry ability declares is named in
@@ -182,6 +244,9 @@ namespace ACE.Server.Tests
                     continue;
 
                 var definition = DefinitionFor(file, text);
+
+                // A declared same-file secondary rider is not a second primary - see SecondaryScalingCalls.
+                skills = skills.Except(SameFileSecondarySkills(definition, file.FullName, RepoRoot(), SecondaryScalingCalls)).ToArray();
 
                 if (ForeignScalingCalls.TryGetValue(file.Name, out var exception))
                 {
@@ -270,7 +335,9 @@ namespace ACE.Server.Tests
 
                 var own = ForeignScalingCalls.TryGetValue(file.Name, out var exception)
                     ? new[] { exception.Own }
-                    : ScalingCall.Matches(text).Select(m => ParseSkill(m.Groups["skill"].Value, file.Name)).Distinct().ToArray();
+                    : ScalingCall.Matches(text).Select(m => ParseSkill(m.Groups["skill"].Value, file.Name)).Distinct()
+                        .Except(SameFileSecondarySkills(definition, file.FullName, RepoRoot(), SecondaryScalingCalls))
+                        .ToArray();
 
                 if (own.Length == 1)
                     backed[definition.Id] = own[0];

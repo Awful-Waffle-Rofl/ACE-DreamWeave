@@ -43,12 +43,14 @@ namespace ACE.Server.WeaponMods
         /// therefore exceed its own ceiling, which is why the result is clamped rather than trusted; the clamp
         /// is what keeps "[140%]" off the panel.
         /// </summary>
-        public static int IntensityPercent(WeaponModDefinition definition, double magnitude, double scale)
+        public static int IntensityPercent(WeaponModDefinition definition, double magnitude, double scale, WorldObject item = null)
         {
             if (definition == null || double.IsNaN(magnitude) || magnitude <= 0.0)
                 return 0;
 
-            var max = WeaponModValue.MaxMagnitude(definition, scale);
+            // the ceiling ON THE CARRIER: a per-item ceiling (Defensive Weapon) must be measured against the
+            // same item the magnitude was read off, or a one-handed sword at a full roll would read 50%
+            var max = WeaponModValue.MaxMagnitude(definition, scale, item);
 
             // covers NaN, a muted scale, and any row whose ceiling is not a positive number - all of which
             // would otherwise divide into an infinity and clamp to a confident-looking 100
@@ -79,12 +81,12 @@ namespace ACE.Server.WeaponMods
         /// The bracket is dropped entirely when <see cref="IntensityPercent"/> cannot report one, so a line
         /// that cannot compute an honest figure loses the figure and keeps the modifier.
         /// </summary>
-        public static string Describe(WeaponModDefinition definition, double magnitude, double scale)
+        public static string Describe(WeaponModDefinition definition, double magnitude, double scale, WorldObject item = null)
         {
             if (definition == null)
                 return string.Empty;
 
-            var percent = IntensityPercent(definition, magnitude, scale);
+            var percent = IntensityPercent(definition, magnitude, scale, item);
             var intensity = percent > 0 ? $" [{percent}%]" : string.Empty;
 
             return $"{definition.DisplayName}{intensity}: {Effect(definition, magnitude)}";
@@ -132,7 +134,7 @@ namespace ACE.Server.WeaponMods
                 return lines;
 
             foreach (var (definition, magnitude) in WeaponModTinkerSet.ReadSpecials(weapon))
-                lines.Add($"- {Describe(definition, magnitude)}");
+                lines.Add($"- {Describe(definition, magnitude, WeaponModValue.MagnitudeScale(), weapon)}");
 
             if (!WeaponModTinkerSet.IsManaged(weapon))
                 return lines;

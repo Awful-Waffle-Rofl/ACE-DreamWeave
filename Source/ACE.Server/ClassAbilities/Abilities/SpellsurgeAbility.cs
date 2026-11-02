@@ -7,15 +7,16 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Spellsword T2: a landed WAR PROC stacks +2% proc chance (cap 5, 10 second decay). Full ramp
-    /// +10 percentage points, so Spellblade runs 20% -> 30%, Runeblade 15% -> 25%, Spellstorm 10% -> 20%.
-    /// SPELLSWORD-DESIGN.md sec 5e.
+    /// Spellsword T2: a landed WAR PROC stacks +0.67/1.33/2 percentage points of proc chance by rank (cap 5,
+    /// 10 second decay). Full ramp +3.3/6.7/10 percentage points by rank. SPELLSWORD-DESIGN.md sec 5e.
     ///
-    /// SINGLE RANK, AND THAT IS THE CONTAINMENT. A chance bonus on a chance mechanic feeds itself, so the
-    /// entry was flagged as quadratic at review. The hard 5-stack cap bounds it completely, and because
-    /// stacks are earned by proccing, the ramp is self-limiting: the steady state sits below the cap
-    /// whenever the base chance is low, which is exactly where the compounding would otherwise be worst
-    /// (sec 5e). A rank ladder on top of that would reopen the question for nothing, hence MaxRank 1.
+    /// THE STACK CAP IS THE CONTAINMENT, not the rank count. A chance bonus on a chance mechanic feeds
+    /// itself, so the entry was flagged as quadratic at review. The hard 5-stack cap bounds it completely,
+    /// and because stacks are earned by proccing, the ramp is self-limiting: the steady state sits below the
+    /// cap whenever the base chance is low, which is exactly where the compounding would otherwise be worst
+    /// (sec 5e). It shipped single-rank for that reason; the 2026-10-24 Spellsword pass gave it three ranks
+    /// at 1/1/1 whose rank buys the PER-STACK rate only, so the cap (and therefore the bound) is unchanged
+    /// and rank 3 is exactly the old single rank's +2 points per stack.
     ///
     /// WHY THIS CARRIES NO HOOK INTERFACE. Same shape as Resonance: the stack pool lives on the Player
     /// (Player_ClassAbilityBuffs.cs). The three war proc handlers add a stack when their proc lands, and
@@ -42,17 +43,37 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "spellsurge",
             DisplayName = "Spellsurge",
-            Description = "Each landed war proc raises your proc chance by 2 percentage points, up to 5 stacks " +
-                          "(+10 points), decaying after 10 seconds without a proc. Sundermark's vulnerability " +
-                          "proc does not build stacks.",
-            MaxRank = 1,
-            CostPerRank = new[] { 3 },
+            Description = "Each landed war proc raises your proc chance by 0.67/1.33/2 percentage points (by rank), up " +
+                          "to 5 stacks (+3.3/6.7/10 points), decaying after 10 seconds without a proc. Sundermark's " +
+                          "vulnerability proc does not build stacks.",
+            MaxRank = 3,
+            CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: one rank at 3 -> three at 1/1/1 (ClassAbilityRepricing wave 4, PromoteToPaid)
             Implemented = true,
         };
 
         /// <summary>
+        /// The per-stack proc-chance fraction at a given rank: the r1/r2/r3 tunables (0.0067 / 0.0133 / 0.02).
+        /// Ranks above 3 clamp to the rank-3 value, the same shape as ResonanceAbility.PerStack. 0 for
+        /// rank &lt;= 0.
+        /// </summary>
+        public static double PerStack(int rank, double perStackR1, double perStackR2, double perStackR3)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            if (rank == 1)
+                return Math.Max(0.0, perStackR1);
+
+            if (rank == 2)
+                return Math.Max(0.0, perStackR2);
+
+            return Math.Max(0.0, perStackR3);
+        }
+
+        /// <summary>
         /// The proc-chance bonus for a given stack count, as a FRACTION to add to a proc chance
-        /// (3 stacks at the 0.02 default -> 0.06). Pure for testability.
+        /// (3 stacks at a 0.02 per-stack rate -> 0.06). Pure for testability. <paramref name="perStack"/> is
+        /// the rank's rate from <see cref="PerStack"/>.
         ///
         /// Returns 0 for rank &lt;= 0 or stacks &lt;= 0. The caller owns clamping stacks to the cap; this
         /// deliberately does not, so the cap stays a single tunable read in one place
@@ -82,7 +103,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Reports the PER-STACK proc-chance bonus: Skill from the tunable ProcChanceBonus() above is fed,
+        /// Reports the PER-STACK proc-chance bonus: Skill from the rank's PerStack() rate that ProcChanceBonus() above is fed,
         /// no affinity rider, Gear from the SURGE mod which is added to that same per-stack rate. The
         /// 5-stack cap bounds how many stacks a player can hold, not the per-stack rate itself, so it never
         /// reduces this readout and CapNote is always null.
@@ -97,7 +118,10 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var perStack = rank <= 0 ? 0.0 : PropertyManager.GetDouble("class_ability_spellsurge_per_stack").Item;
+            var perStack = PerStack(rank,
+                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r1").Item,
+                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r2").Item,
+                PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r3").Item);
 
             var gearPerStack = rank <= 0
                 ? 0.0

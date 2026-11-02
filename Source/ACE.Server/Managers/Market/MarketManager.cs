@@ -53,6 +53,14 @@ namespace ACE.Server.Managers.Market
         private static volatile bool enabled;
 
         /// <summary>
+        /// True when the last Initialize could not read market_listing, so the index is EMPTY rather than
+        /// known-empty: Active listings may exist in the shard that this process cannot see. Read only by
+        /// <see cref="WithdrawWouldDelist"/>, which fails closed on it. Cleared by every Initialize and by
+        /// Shutdown.
+        /// </summary>
+        private static volatile bool loadFailed;
+
+        /// <summary>
         /// False until Initialize has rebuilt the index successfully, AND false whenever the
         /// market_enabled tunable is off. Every player-facing entry point refuses while false.
         /// </summary>
@@ -86,6 +94,8 @@ namespace ACE.Server.Managers.Market
 
             AccountVaultStore.PreWithdrawHook = OnVaultWithdraw;
             AccountVaultStore.IsListedHook = IsListed;
+            AccountVaultStore.IsListedHookIndexTrusted = IsListingIndexTrusted;
+            AccountVaultStore.WithdrawWouldDelistHook = WithdrawWouldDelist;
         }
 
         /// <summary>
@@ -111,12 +121,14 @@ namespace ACE.Server.Managers.Market
                 changeSequence = 0;
                 FeedGeneration = Guid.NewGuid().ToString("N");
                 enabled = false;
+                loadFailed = false;
             }
 
             var rows = marketRepository.GetAllListings();
 
             if (rows == null)
             {
+                loadFailed = true;
                 log.Error("[MARKET] could not read market_listing; the market stays DISABLED rather than serving an empty index. Restart once the shard is reachable.");
                 return;
             }
@@ -189,8 +201,13 @@ namespace ACE.Server.Managers.Market
                 // leaving the hook installed would answer "nothing is listed" from an index that no
                 // longer knows anything rather than from one that does.
                 AccountVaultStore.IsListedHook = null;
+                AccountVaultStore.IsListedHookIndexTrusted = null;
+
+                // And the non-owner withdraw guard, which reads the same index.
+                AccountVaultStore.WithdrawWouldDelistHook = null;
 
                 enabled = false;
+                loadFailed = false;
                 listings.Clear();
                 transactions.Clear();
                 salesInFlight.Clear();
@@ -339,7 +356,7 @@ namespace ACE.Server.Managers.Market
                     break;
 
                 default:
-                    snapshot = MarketSnapshot.FromItem(entry.WorldObject);
+                    snapshot = MarketSnapshot.FromItem(entry.WorldObject, includeSuit: true);
                     break;
             }
 
@@ -600,6 +617,14 @@ namespace ACE.Server.Managers.Market
         }
 
         /// <summary>
+        /// Wired into <see cref="AccountVaultStore.IsListedHookIndexTrusted"/> beside <see cref="IsListed"/>.
+        /// The RAW <c>enabled</c> field, not <see cref="Enabled"/>: Initialize sets it only after the listing read
+        /// succeeded and leaves it false when that read failed (an EMPTY index, not a known-empty one), while
+        /// the market_enabled kill switch does not make an index that loaded any less accurate.
+        /// </summary>
+        public static bool IsListingIndexTrusted() => enabled;
+
+        /// <summary>
         /// Whether this vault row carries an ACTIVE listing right now. Wired into
         /// <see cref="AccountVaultStore.IsListedHook"/> on startup, beside
         /// <see cref="OnVaultWithdraw"/>, so the vault can refuse to barrel something that is for
@@ -651,23 +676,74 @@ namespace ACE.Server.Managers.Market
                 if (ownTake)
                     return;
 
-                if (itemGuid != null)
-                {
-                    Close(listing, MarketListingStatus.Delisted);
-                    return;
-                }
-
-                // The ledger rule, applied to the class line: the listing survives a withdraw that
-                // leaves at least its listed count on the line, and is delisted by one that does not.
-                var heldAfter = (classDisplayId != null ? HeldClassItems(accountId, classDisplayId) : HeldLedgerUnits(accountId, wcid)) - amount;
-
-                if (heldAfter < listing.Count)
+                if (WithdrawClosesListing(listing, accountId, itemGuid, wcid, amount, classDisplayId, out _))
                     Close(listing, MarketListingStatus.Delisted);
             }
             catch (Exception ex)
             {
                 log.Error($"[MARKET] the pre-withdraw hook threw for account {accountId}, wcid {wcid}: {ex.GetFullMessage()}. The withdraw proceeds; the listing may be stale until the next invalidation pass.");
             }
+        }
+
+        /// <summary>
+        /// The non-owner guard's question, wired into <see cref="AccountVaultStore.WithdrawWouldDelistHook"/>:
+        /// would this withdraw close an active listing? Null when it would not;
+        /// <see cref="AccountVaultStore.WithdrawGuardUnavailable"/> when the listing read failed and the
+        /// market cannot tell; otherwise how much could
+        /// be taken without closing it (0 for a stored item or group). Answers with the SAME rule
+        /// <see cref="OnVaultWithdraw"/> applies (<see cref="WithdrawClosesListing"/>), so what the guard
+        /// refuses is exactly what the auto-delist would have cancelled.
+        ///
+        /// Ignores the market's own sale-in-flight exemption on purpose: a grantee withdraw is never the
+        /// market's own take, and one that would starve a sale in flight is refused like any other.
+        /// </summary>
+        public static int? WithdrawWouldDelist(uint accountId, uint? itemGuid, uint wcid, int amount, string classDisplayId)
+        {
+            // The raw field, not Enabled, for the same reason as OnVaultWithdraw: a market paused by the
+            // market_enabled tunable still has listings that a withdraw would cancel, so the guard keeps
+            // answering. enabled is false in exactly two states, and they are opposites here:
+            //  - the listing read FAILED at Initialize (loadFailed): Active listings may exist that this
+            //    process cannot see, so refuse every non-owner withdraw as unavailable rather than guess;
+            //  - otherwise Initialize has not run, or Shutdown ran: nothing is indexed, so allow.
+            // KNOWN LIMIT: with Config Market.Enabled=false, Program.cs never calls Initialize, this hook
+            // is never wired, and the store allows a grantee withdraw over a row the shard still lists.
+            if (!enabled)
+                return loadFailed ? AccountVaultStore.WithdrawGuardUnavailable : (int?)null;
+
+            MarketListing listing;
+
+            lock (indexLock)
+                listing = ActiveListingFor(accountId, itemGuid, wcid, classDisplayId);
+
+            if (listing == null)
+                return null;
+
+            if (!WithdrawClosesListing(listing, accountId, itemGuid, wcid, amount, classDisplayId, out var held))
+                return null;
+
+            return (int)Math.Clamp(held - listing.Count, 0, int.MaxValue);
+        }
+
+        /// <summary>
+        /// THE auto-delist rule, shared by <see cref="OnVaultWithdraw"/> (which closes) and
+        /// <see cref="WithdrawWouldDelist"/> (which refuses a non-owner instead):
+        ///  - a stored item or group (non-null guid): any withdraw closes it, because a group reports
+        ///    every member's withdraw under the representative the listing names;
+        ///  - a ledger row or class line: the listing survives a withdraw that leaves at least its
+        ///    listed count on the row, and is closed by one that does not.
+        /// <paramref name="held"/> is the row's count before the withdraw for the ledger and class
+        /// arms, and 0 for the guid arm.
+        /// </summary>
+        private static bool WithdrawClosesListing(MarketListing listing, uint accountId, uint? itemGuid, uint wcid, int amount, string classDisplayId, out long held)
+        {
+            held = 0;
+
+            if (itemGuid != null)
+                return true;
+
+            held = classDisplayId != null ? HeldClassItems(accountId, classDisplayId) : HeldLedgerUnits(accountId, wcid);
+
+            return held - amount < listing.Count;
         }
 
         /// <summary>
@@ -1045,6 +1121,13 @@ namespace ACE.Server.Managers.Market
                     // The identity a class line is listed and barreled by (32 lowercase hex). Present
                     // only when is_class is true; null on every other row.
                     class_key = entry.Kind == VaultEntryKind.Class ? entry.ClassDisplayId : null,
+
+                    // True on a class line: this server counts and takes class lines toward a Wanted
+                    // fill (CountMatching / TryTakeMatching). Omitted on every other row, whose kind has
+                    // always counted. The web counts a class line toward a fill ONLY when this is true,
+                    // so a server that predates class fills - and never sends it - is never asked to
+                    // fill from a line it would refuse.
+                    fills_orders = entry.Kind == VaultEntryKind.Class ? true : (bool?)null,
                     wcid = entry.Wcid,
                     count = entry.Count,
                     name = snapshot.Name,

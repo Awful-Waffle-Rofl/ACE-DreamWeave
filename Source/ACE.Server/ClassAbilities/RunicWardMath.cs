@@ -4,27 +4,27 @@ namespace ACE.Server.ClassAbilities
 {
     /// <summary>
     /// Pure arithmetic for the Spellsword T2 entry Runic Ward: each landed weapon hit inscribes a ward worth
-    /// 3/5/7% of that hit's damage by rank, the pool is capped at 15% of the Spellsword's maximum health, it
-    /// absorbs incoming damage, it lapses 12 seconds after the last weapon hit, and landing a war spell
-    /// SPENDS the whole remaining pool into that spell's damage.
+    /// 3/6/9% of that hit's damage by rank, the pool is capped at 10/20/30% of the Spellsword's maximum
+    /// health by rank, it absorbs incoming damage, and it lapses 12 seconds after the last weapon hit. It
+    /// drains ONLY by absorbing: the war-spell spend (and its Spend helper) was removed 2026-10-24.
     ///
     /// Kept as a pure static for the same reason <see cref="SanguineWardMath"/> is: Player's static
     /// initializer cannot run under the unit test host, so anything left inline on Player is untestable.
     ///
-    /// THREE DIFFERENCES FROM SANGUINE WARD, ALL DELIBERATE, because the two pools look alike and a reader
+    /// TWO DIFFERENCES FROM SANGUINE WARD, BOTH DELIBERATE, because the two pools look alike and a reader
     /// who assumes they are the same shape will get each one wrong:
     ///  1. IT ACCUMULATES. <see cref="Inscribe"/> ADDS to whatever is still standing (up to the cap), where
     ///     SanguineWardMath.Grant discards it. Runic Ward is built by many small hits rather than granted
     ///     whole by one cast, so refreshing instead of adding would delete the ramp that is the ability.
-    ///  2. IT IS CAPPED, at a fraction of maximum health, because an accumulating pool with no ceiling is
-    ///     unbounded temporary HP. Sanguine Ward needs no cap: one cast's worth is its own ceiling.
-    ///  3. IT CAN BE SPENT ON PURPOSE (<see cref="Spend"/>), which is the decision the entry exists to pose.
-    ///     Sanguine Ward only ever expires unused.
+    ///  2. IT IS CAPPED, at a per-rank fraction of maximum health, because an accumulating pool with no
+    ///     ceiling is unbounded temporary HP. Sanguine Ward needs no cap: one cast's worth is its own ceiling.
     ///
     /// Like Sanguine Ward it is TEMPORARY HP, NOT DAMAGE REDUCTION, and must not be "improved" into DR
     /// later: damage reduction is a shared additive axis (POWER-LEDGER lists Mana Barrier and Battle
     /// Hardened on it) that would need a cross-class ceiling check, while an absorb pool touches neither the
-    /// mitigation nor the avoidance budget.
+    /// mitigation nor the avoidance budget. The ward SHIELD (owner ruling 2026-10-24) is the one exception
+    /// and it lives outside this file: Player.GetWardShieldLevel feeds Creature.GetShieldMod a flat shield
+    /// armor level while the pool is up.
     /// </summary>
     public static class RunicWardMath
     {
@@ -53,7 +53,7 @@ namespace ACE.Server.ClassAbilities
 
         /// <summary>
         /// The fraction of a landed weapon hit's damage that goes into the ward: base + (rank-1)*step
-        /// (3/5/7% at ranks 1-3), multiplied by the Item Tinkering affinity factor. 0 for rank 0 /
+        /// (3/6/9% at ranks 1-3), multiplied by the Item Tinkering affinity factor. 0 for rank 0 /
         /// unlearned, so the caller can apply it unconditionally.
         ///
         /// <paramref name="affinityMultiplier"/> is <see cref="ClassAbilityAffinity.Multiplier"/>'s return
@@ -68,6 +68,26 @@ namespace ACE.Server.ClassAbilities
             var rankFraction = Math.Max(0.0, gainBase + (rank - 1) * gainStep);
 
             return rankFraction * (affinityMultiplier < 1.0 ? 1.0 : affinityMultiplier);
+        }
+
+        /// <summary>
+        /// The pool's ceiling as a fraction of maximum health at a given rank: the r1/r2/r3 tunables
+        /// (0.10 / 0.20 / 0.30). Ranks above 3 clamp to the rank-3 value; 0 for rank &lt;= 0 (no ward can be
+        /// held without the ability). The Item Tinkering affinity never touches this - it rides the per-hit
+        /// gain only.
+        /// </summary>
+        public static double CapFraction(int rank, double capR1, double capR2, double capR3)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            if (rank == 1)
+                return Math.Max(0.0, capR1);
+
+            if (rank == 2)
+                return Math.Max(0.0, capR2);
+
+            return Math.Max(0.0, capR3);
         }
 
         /// <summary>
@@ -160,14 +180,5 @@ namespace ACE.Server.ClassAbilities
                 Remaining = remaining,
             };
         }
-
-        /// <summary>
-        /// What a landed war spell cashes the ward in for: the WHOLE remaining pool, or 0 if the window has
-        /// lapsed. The caller clears the ward and adds this to the spell's damage.
-        ///
-        /// All or nothing on purpose - a partial spend would let a Spellsword keep a defensive pool AND
-        /// collect the offensive payoff, which is precisely the choice the entry exists to force.
-        /// </summary>
-        public static uint Spend(in WardState state, double now) => IsExpired(state, now) ? 0u : state.Amount;
     }
 }

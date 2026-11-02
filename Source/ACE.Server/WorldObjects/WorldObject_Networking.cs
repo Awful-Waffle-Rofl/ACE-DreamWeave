@@ -224,6 +224,9 @@ namespace ACE.Server.WorldObjects
         {
             var objDesc = CalculateObjDesc();
 
+            // World Events Hold: a corrupted monster's tint. One type test and field read for everything else.
+            ACE.Server.WorldEvents.WorldEventHooks.ApplyHoldTint(this, objDesc);
+
             writer.Write((byte)0x11);
             writer.Write((byte)objDesc.SubPalettes.Count);
             writer.Write((byte)objDesc.TextureChanges.Count);
@@ -891,7 +894,9 @@ namespace ACE.Server.WorldObjects
             if (WeenieType == WeenieType.Admin || WeenieType == WeenieType.Sentinel)
                 UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Player, CloakStatus < CloakStatus.Creature);
 
-            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, Attackable);
+            // World Events Hold: a knight that shows its health bar is sent as attackable (the server still refuses every
+            // attack on it). Unchanged for everything else.
+            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, ACE.Server.WorldEvents.WorldEventHooks.HoldClientAttackable(this, Attackable));
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.PlayerKiller, PlayerKillerStatus == PlayerKillerStatus.PK);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.HiddenAdmin, HiddenAdmin);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.UiHidden, UiHidden);

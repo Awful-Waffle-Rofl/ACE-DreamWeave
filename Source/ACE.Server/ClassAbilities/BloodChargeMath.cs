@@ -30,6 +30,21 @@ namespace ACE.Server.ClassAbilities
         };
 
         /// <summary>
+        /// Sanguine Reserve's PER-CHARGE value after its affinity: the class_ability_bloodmage_charge_per_stack
+        /// tunable MULTIPLIED by the Creature Enchantment affinity multiplier (the standard shape: amount =
+        /// rankBonus * multiplier). The BLOOD CHARGE gear term is NOT part of this - it stays additive inside
+        /// <see cref="DamageMultiplier"/>'s parenthesis, so an item never compounds with the skill.
+        ///
+        /// This is also the value Exsanguinate's burst multiplies, by design: the burst reads the same
+        /// per-charge value the ramp does, so the affinity reaches the burst without a second rider.
+        ///
+        /// The multiplier is floored at 1.0, the NEUTRAL factor: a caller handing over 0.0 (the neutral value
+        /// of the old additive primitive) degrades to the bare tunable instead of deleting the whole ramp.
+        /// </summary>
+        public static double PerChargeValue(double perStack, double affinityMultiplier) =>
+            perStack * Math.Max(1.0, affinityMultiplier);
+
+        /// <summary>
         /// TRUE once more than expireSeconds have elapsed since the last stack was added - the same
         /// "now minus last touch, compared against the window" shape as FrenzyAbility's expiry check.
         /// </summary>

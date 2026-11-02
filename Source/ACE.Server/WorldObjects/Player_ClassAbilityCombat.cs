@@ -8,10 +8,12 @@ using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.EquipmentMods;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.MonsterEffects;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp.Rules;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.WorldObjects
@@ -118,6 +120,17 @@ namespace ACE.Server.WorldObjects
 
                 // blocked hits trigger Thorns at full strength (base behaviour - the enemy hit the shield)
                 ApplyThornsReflect(attacker, damageType, 1.0);
+
+                // A blocked hit is a hit for the cloak spell proc. FLOOR ONLY, by owner ruling: the block
+                // returns from the damage calculation before any damage figure exists, so there is no
+                // damage_percent to roll on and 0f is passed on purpose. TryProcSpell's chance is therefore
+                // max(cloak_min_proc, Cloaked in Power floor) - 0 at the shipped defaults, so only Cloaked in
+                // Power wearers (or a raised cloak_min_proc) ever proc off a block. Parry is deliberately
+                // excluded.
+                var blockCloak = EquippedCloak;
+
+                if (blockCloak != null && Cloak.HasProcSpell(blockCloak))
+                    Cloak.TryProcSpell(this, attacker, blockCloak, 0f);
             }
             else if (outcome == ClassAbilityAvoidanceOutcome.Parry)
             {
@@ -237,7 +250,8 @@ namespace ACE.Server.WorldObjects
         private const uint PocketSandPowerLevel = 1;
 
         /// <summary>
-        /// Reflects a fraction of the equipped shield's effective armor level back at the attacker via the
+        /// Reflects a fraction of the equipped shield's effective armor level (plus the Defensive Weapon weapon
+        /// mod's level, since 2026-10-25) back at the attacker via the
         /// Thorns class ability (and/or the Thorns equipment mod), at strengthMultiplier of full (1.0 for
         /// every trigger today; Shield Check's scaled parry reflect was retired on 2026-09-12). No-op without
         /// Thorns learned or the mod equipped, without a shield equipped, or when the attacker is out of
@@ -246,8 +260,10 @@ namespace ACE.Server.WorldObjects
         /// THIS IS THE SINGLE PLACE A THORNS REFLECT HAPPENS, and every trigger reaches it: the physical
         /// incoming-damage hook (ThornsAbility.OnDamageTaken, from Player.TakeDamage - melee, missile), the
         /// rank-0 equipment-mod path (ApplyEquipmentModIncomingDamage), the shield-BLOCK avoidance path
-        /// (OnClassAbilityAttackAvoided) and the three direct magic sites (ApplyThornsOnMagicHit, from
-        /// SpellProjectile.DamageTarget, HandleCastSpell_Boost and HandleCastSpell_Transfer).
+        /// (OnClassAbilityAttackAvoided), the three direct magic sites (ApplyThornsOnMagicHit, from
+        /// SpellProjectile.DamageTarget, HandleCastSpell_Boost and HandleCastSpell_Transfer), and a projectile
+        /// Reflect bounced (TryReflectProjectile), which never reaches any of the others. A spell hit Reflect's
+        /// immunity window blocks to 0 needs no site of its own: the magic sites run after the write either way.
         ///
         /// CLOSE-RANGE PUNISH (user ruling 2026-10-07, mirroring the monster reflect effect's on=hit ruling):
         /// the attacker must be within class_ability_thorns_max_range metres of this player when the hit
@@ -283,7 +299,8 @@ namespace ACE.Server.WorldObjects
             if (shield == null)
                 return;
 
-            var shieldArmorLevel = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0) + shield.EnchantmentManager.GetArmorMod();
+            // Knot loot: Shield of the Rose's armor bonus counts as base shield AL, so Thorns scales off it too.
+            var shieldArmorLevel = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0) + KnotTraitCombat.ShieldArmorBonus(shield, this) + shield.EnchantmentManager.GetArmorMod();
 
             var percentPerRank = PropertyManager.GetDouble("class_ability_thorns_percent_per_rank").Item;
 
@@ -293,7 +310,12 @@ namespace ACE.Server.WorldObjects
                     PropertyManager.GetDouble("class_ability_thorns_shield_per_spec").Item) * 0.01
                 : 0.0;
 
-            var baseReflect = ThornsAbility.ComputeReflectDamage(shieldArmorLevel, rank, percentPerRank, shieldScale, gearMod);
+            // Defensive Weapon (owner ruling 2026-10-25) adds its armor level to the shield's for Thorns, the same
+            // level GetShieldMod adds after the Shield-skill cap. Only here, past the shield check above: with no
+            // shield equipped Defensive Weapon does NOT enable Thorns. Stance-bound (0 in NonCombat).
+            var reflectArmorLevel = DefensiveWeaponMath.ThornsArmorLevel(shieldArmorLevel, GetDefensiveWeaponShieldLevel());
+
+            var baseReflect = ThornsAbility.ComputeReflectDamage(reflectArmorLevel, rank, percentPerRank, shieldScale, gearMod);
             var reflect = (uint)Math.Round(baseReflect * strengthMultiplier);
 
             if (reflect == 0)
@@ -317,8 +339,9 @@ namespace ACE.Server.WorldObjects
         /// deliberately not wired: a DoT never triggers Thorns.
         ///
         /// WHY THORNS IS WIRED BY NAME HERE INSTEAD OF THROUGH ApplyIncomingDamageClassAbilities. That
-        /// dispatch reaches every IIncomingDamageAbility, and Vengeance rides it too with physical-only
-        /// tracking; calling the whole dispatch from a magic site would silently widen every handler on it.
+        /// dispatch reaches every IIncomingDamageAbility, and any future handler on it inherits physical-only
+        /// tracking (Vengeance rode it until its 2026-10-24 retirement); calling the whole dispatch from a magic
+        /// site would silently widen every handler on it.
         /// This method reaches Thorns and nothing else.
         ///
         /// Mirrors the physical path's two calls in Player.TakeDamage: the attacker filter is the one
@@ -337,7 +360,9 @@ namespace ACE.Server.WorldObjects
             if (origin != IncomingDamageOrigin.DirectHit)
                 return;
 
-            if (source is not Creature attacker || PvpClassifier.IsPvp(attacker, this) || attacker == this || attacker.IsDead)
+            var attacker = ClassAbilityAttackerFilter.EnemyCreature(source, this);
+
+            if (attacker == null)
                 return;
 
             ApplyThornsReflect(attacker, GetThornsMagicReflectDamageType(spellDamageType), 1.0);
@@ -373,7 +398,7 @@ namespace ACE.Server.WorldObjects
 
             // Riposte equipment mod (MACHINERY): +pp on the counter's weapon-damage fraction, unreachable
             // without the ability - the gate above returned. The counter still routes through DamageTarget,
-            // so it carries the standalone outgoing mods (Venom, Savage Blows, ...) exactly like the
+            // so it carries the standalone outgoing mods (Venom, Heavy Blows, ...) exactly like the
             // ability's own counter does.
             var fraction = (float)RiposteAbility.CounterFraction(rank,
                 PropertyManager.GetDouble("class_ability_riposte_fraction_base").Item,
@@ -394,34 +419,18 @@ namespace ACE.Server.WorldObjects
 
                 SendClassAbilityCombatMessage($"You riposte {attacker.Name}!");
 
-                // the counter's own base swing cost stays free (it's a reflex, not a paid swing), but it
-                // still pays the Savage Blows per-swing surcharge like any other swing, so it gets the
-                // damage bonus on the same terms. GetPowerRange() reflects the player's own outgoing-attack
-                // power bar, which has nothing to do with a reflex triggered by being parried, so use a
-                // fixed PowerAccuracy.Medium base for the surcharge calculation instead.
+                // the counter's swing cost is free (it's a reflex, not a paid swing). The Savage Blows
+                // surcharge it used to pay, and the flag save/restore around it, went with that ability's
+                // retirement (2026-10-24, Berserker pass).
                 //
-                // The counter fires from its own delayed ActionChain, which can land BETWEEN the strikes
-                // of a swing already in flight (the swing's own strikes are delayed chain actions too), so
-                // ApplySavageBlowsStamina here would otherwise clobber SavageBlowsSwingPaid with the
-                // counter's own outcome and strand the in-flight swing's remaining strikes/cleave hits with
-                // the wrong bonus state. Save and restore the flag around the counter so it never leaks.
-                var swingPaid = SavageBlowsSwingPaid;
-                try
-                {
-                    var counterBase = GetAttackStamina(PowerAccuracy.Medium);
-                    var sbCost = ApplySavageBlowsStamina(attacker, counterBase, 0);
-                    if (sbCost > 0)
-                        UpdateVitalDelta(Stamina, -sbCost);
-
-                    // a riposte is a reflex against whoever hit YOU, not a target the player chose, so it must
-                    // not steal the pet off the player's target.
-                    DamageTarget(attacker, weapon, fraction, primaryTarget: false);
-                }
-                finally
-                {
-                    SavageBlowsSwingPaid = swingPaid;
-                }
+                // a riposte is a reflex against whoever hit YOU, not a target the player chose, so it must
+                // not steal the pet off the player's target.
+                //
+                // powerBarSwing: false - a counter is not a swing, so the player's bar (stale from the last
+                // swing, or the 0.5 default) must not trip the Spellsword full-power upgrade or multiplier.
+                DamageTarget(attacker, weapon, fraction, primaryTarget: false, powerBarSwing: false);
             });
+
             chain.EnqueueChain();
         }
 

@@ -105,6 +105,11 @@ namespace ACE.Server.Command.Handlers
                     target.MuleUpgrade();
                     break;
 
+                case MuleCommandKind.AutoSalvageSet:
+                case MuleCommandKind.AutoSalvageStatus:
+                    target.MuleAutoSalvage(result.Enabled);
+                    break;
+
                 case MuleCommandKind.Help:
                     target.MuleHelp();
                     break;
@@ -133,6 +138,9 @@ namespace ACE.Server.Command.Handlers
         void MuleSearchAll(string pattern);
         void MuleSearchMine(string pattern);
         void MuleUpgrade();
+
+        /// <summary>/mule autosalvage: null enabled is the status query, a value sets the preference.</summary>
+        void MuleAutoSalvage(bool? enabled);
         void MuleHelp();
         void UsageError(string message);
     }
@@ -170,6 +178,8 @@ namespace ACE.Server.Command.Handlers
 
         public void MuleUpgrade() => player.HandleActionMuleUpgrade();
 
+        public void MuleAutoSalvage(bool? enabled) => player.HandleActionMuleAutoSalvage(enabled);
+
         /// <summary>
         /// Deliberately NOT routed through a HandleActionX on Player the way every other arm is: help
         /// touches no vault state, needs no store, and has no cooldown to respect, so giving it a
@@ -198,6 +208,8 @@ namespace ACE.Server.Command.Handlers
         SearchAll,
         SearchMine,
         Upgrade,
+        AutoSalvageSet,
+        AutoSalvageStatus,
         Help,
         UsageError
     }
@@ -220,6 +232,12 @@ namespace ACE.Server.Command.Handlers
         public string UsageError { get; }
 
         /// <summary>
+        /// Only meaningful for AutoSalvageSet: the preference to store. Null for every other kind,
+        /// including AutoSalvageStatus. Deliberately not CanWithdraw, which means something else.
+        /// </summary>
+        public bool? Enabled { get; }
+
+        /// <summary>
         /// Only meaningful for Search - the free-text pattern to filter on. May be an empty string,
         /// meaning "clear the filter", but is never null for a Search result.
         /// </summary>
@@ -234,8 +252,9 @@ namespace ACE.Server.Command.Handlers
         /// </summary>
         public IReadOnlyList<string> SearchTokens { get; }
 
-        private MuleCommandResult(MuleCommandKind kind, string name, bool canWithdraw, string usageError, string pattern, IReadOnlyList<string> searchTokens = null)
+        private MuleCommandResult(MuleCommandKind kind, string name, bool canWithdraw, string usageError, string pattern, IReadOnlyList<string> searchTokens = null, bool? enabled = null)
         {
+            Enabled = enabled;
             Kind = kind;
             Name = name;
             CanWithdraw = canWithdraw;
@@ -256,6 +275,8 @@ namespace ACE.Server.Command.Handlers
         public static MuleCommandResult SearchAll(string pattern) => new MuleCommandResult(MuleCommandKind.SearchAll, null, false, null, pattern ?? string.Empty);
         public static MuleCommandResult SearchMine(string pattern) => new MuleCommandResult(MuleCommandKind.SearchMine, null, false, null, pattern ?? string.Empty);
         public static MuleCommandResult Upgrade() => new MuleCommandResult(MuleCommandKind.Upgrade, null, false, null, null);
+        public static MuleCommandResult AutoSalvageSet(bool enabled) => new MuleCommandResult(MuleCommandKind.AutoSalvageSet, null, false, null, null, null, enabled);
+        public static MuleCommandResult AutoSalvageStatus() => new MuleCommandResult(MuleCommandKind.AutoSalvageStatus, null, false, null, null);
         public static MuleCommandResult Error(string message) => new MuleCommandResult(MuleCommandKind.UsageError, null, false, message, null);
     }
 
@@ -295,7 +316,7 @@ namespace ACE.Server.Command.Handlers
     public static class MuleCommandParser
     {
         public const string UsageMessage =
-            "Usage: /mule [playername] | grant <name> [withdraw] | revoke <name> | access | log | search [all|mine|<owner>] [pattern] | upgrade | help";
+            "Usage: /mule [playername] | grant <name> [withdraw] | revoke <name> | access | log | search [all|mine|<owner>] [pattern] | upgrade | autosalvage [on|off] | help";
 
         /// <summary>
         /// The one copy of /mule's help. Used BOTH as the CommandHandler attribute's usage string and
@@ -315,6 +336,7 @@ namespace ACE.Server.Command.Handlers
             + "/mule search mine <text>       - search your own mule\n"
             + "/mule search <owner> <text>    - open a shared mule filtered to <text>\n"
             + "/mule upgrade                  - buy +100 vault entries for your account (price rises each time)\n"
+            + "/mule autosalvage [on|off]     - combine partial salvage bags as they are stored (default on)\n"
             + "/mule help                     - show this list\n"
             + "A name with a space must be quoted: /mule grant \"+Testing thing\" withdraw";
 
@@ -350,6 +372,7 @@ namespace ACE.Server.Command.Handlers
         private const string LogUsage = "Usage: /mule log";
         private const string UpgradeUsage = "Usage: /mule upgrade";
         private const string HelpUsage = "Usage: /mule help";
+        public const string AutoSalvageUsage = "Usage: /mule autosalvage [on|off]";
 
         /// <summary>
         /// The inverse of this parser's own rule, for building a /mule command that is shown TO a
@@ -411,6 +434,12 @@ namespace ACE.Server.Command.Handlers
             if (string.Equals(head, "upgrade", StringComparison.OrdinalIgnoreCase))
                 return parameters.Length == 1 ? MuleCommandResult.Upgrade() : MuleCommandResult.Error(UpgradeUsage);
 
+            // "autosalvage" is a reserved word too, with the same accepted cost: a character literally
+            // named Autosalvage cannot be summoned by "/mule Autosalvage". It takes one optional on/off
+            // argument; anything else, or any extra token, is a usage error.
+            if (string.Equals(head, "autosalvage", StringComparison.OrdinalIgnoreCase))
+                return ParseAutoSalvage(parameters);
+
             // "help" joins grant/revoke/access/log as a reserved word, with the same accepted cost this
             // class's remarks already record: a character literally named Help cannot be summoned by
             // "/mule Help". Unlike the others it takes no argument at all, so anything after it is a
@@ -426,6 +455,23 @@ namespace ACE.Server.Command.Handlers
                 return MuleCommandResult.Error(QuoteNameMessage);
 
             return string.IsNullOrWhiteSpace(head) ? MuleCommandResult.Error(UsageMessage) : MuleCommandResult.SummonOther(head);
+        }
+
+        private static MuleCommandResult ParseAutoSalvage(string[] parameters)
+        {
+            if (parameters.Length == 1)
+                return MuleCommandResult.AutoSalvageStatus();
+
+            if (parameters.Length == 2)
+            {
+                if (string.Equals(parameters[1], "on", StringComparison.OrdinalIgnoreCase))
+                    return MuleCommandResult.AutoSalvageSet(true);
+
+                if (string.Equals(parameters[1], "off", StringComparison.OrdinalIgnoreCase))
+                    return MuleCommandResult.AutoSalvageSet(false);
+            }
+
+            return MuleCommandResult.Error(AutoSalvageUsage);
         }
 
         private static MuleCommandResult ParseGrant(string[] parameters)

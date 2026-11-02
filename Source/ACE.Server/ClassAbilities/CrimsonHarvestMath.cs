@@ -57,5 +57,24 @@ namespace ACE.Server.ClassAbilities
 
             return inRange.ToArray();
         }
+
+        /// <summary>
+        /// The number of EXTRA creatures (beyond the primary target) a Drain strikes at the given rank:
+        /// <paramref name="e1"/>, <paramref name="e2"/>, <paramref name="e3"/> for ranks 1-3. Rank 0 or
+        /// below owns nothing and strikes none; a rank above 3 clamps to rank 3's value. Never negative,
+        /// so a mis-set tunable cannot ask <see cref="SelectSecondaryTargets"/> for a negative count.
+        /// </summary>
+        public static int SecondaryTargetCap(int rank, long e1, long e2, long e3)
+        {
+            if (rank <= 0)
+                return 0;
+
+            var extras = rank == 1 ? e1 : rank == 2 ? e2 : e3;
+
+            if (extras < 0)
+                return 0;
+
+            return extras > int.MaxValue ? int.MaxValue : (int)extras;
+        }
     }
 }

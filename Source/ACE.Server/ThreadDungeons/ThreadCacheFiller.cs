@@ -59,7 +59,7 @@ namespace ACE.Server.ThreadDungeons
         internal static Func<ThreadLootLedgerEntry, List<WorldObject>> EntryMaterializer = MaterializeEntry;
 
         /// <summary>
-        /// Test seam for the FIXED half of the boss bonus (Trade Notes and salvage bags). Production is
+        /// Test seam for the FIXED half of the boss bonus (Trade Notes, Durable Legendary Key and salvage bags). Production is
         /// ThreadDungeonRewardSpawner.BuildBossBonusFixedItems. The Legendary-table half is counted and built in
         /// batches behind <see cref="BonusRollCounter"/> and <see cref="BonusRollBuilder"/>.
         /// </summary>
@@ -221,12 +221,12 @@ namespace ACE.Server.ThreadDungeons
             budget ??= ThreadLootRollBudget.Unlimited();
             var round = run.NextDealRound();
 
-            void Pile(WorldObject item, string rareFinderName)
+            void Pile(WorldObject item, string rareFinderName, int? fixedOrder = null)
             {
                 if (item == null)
                     return;
 
-                if (!run.AddToHeldPile(run.OwnerGuid, new HeldPileItem(item, rareFinderName, round)))
+                if (!run.AddToHeldPile(run.OwnerGuid, new HeldPileItem(item, rareFinderName, round, null, fixedOrder)))
                     item.Destroy();
             }
 
@@ -243,8 +243,11 @@ namespace ACE.Server.ThreadDungeons
                 var bonus = buildBonus(run) ?? new List<WorldObject>();
                 budget.Spend(bonus.Count);
 
+                // Tagged with its list index so the pile sort keeps notes, key, salvage first and in that order.
+                var fixedIndex = 0;
+
                 foreach (var item in bonus)
-                    Pile(item, null);
+                    Pile(item, null, fixedIndex++);
 
                 if (countBonusRolls != null)
                 {
@@ -361,7 +364,7 @@ namespace ACE.Server.ThreadDungeons
 
             // 2. The boss bonus, claimed only when there is room to start it and the step still has budget. The latch
             // is one-shot (TryClaimLootBonus), and the claiming step does two things:
-            //   - it builds the FIXED half whole - the Trade Notes and salvage bags, a handful of cheap creates - and
+            //   - it builds the FIXED half whole - the Trade Notes, Durable Legendary Key and salvage bags, a handful of cheap creates - and
             //     charges the budget its item count, since each is a loot roll of its own;
             //   - it COUNTS the Legendary-table half and parks the count on the run (TrySetPooledBonusRolls), exactly
             //     as the group deal has done since the bonus was pooled.

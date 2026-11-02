@@ -1099,6 +1099,8 @@ namespace ACE.Server.Command.Handlers.Processors
             DatabaseManager.World.ClearSpellCache();
             WorldObject.ClearSpellCache();
             MonsterSpellShapeCache.Clear();
+            Creature.ClearHoldOffensiveSpellCache();
+            CasterSpellFactsCache.Clear();
 
             // load spell from db
             var spell = DatabaseManager.World.GetCachedSpell(spellId);
@@ -2801,6 +2803,8 @@ namespace ACE.Server.Command.Handlers.Processors
                 DatabaseManager.World.ClearSpellCache();
                 WorldObject.ClearSpellCache();
                 MonsterSpellShapeCache.Clear();
+                Creature.ClearHoldOffensiveSpellCache();
+                CasterSpellFactsCache.Clear();
             }
 
             if (mode.HasFlag(CacheType.Weenie))

@@ -12,13 +12,17 @@ using log4net;
 namespace ACE.Server.WorldObjects
 {
     /// <summary>
-    /// WaffleACE motion-stall watchdog (mitigation, not a root-cause fix).
+    /// WaffleACE motion-stall watchdog: the safety net behind the root-cause fix in MotionTable.GetObjectSequence.
     ///
     /// The stall: MoveToManager.BeginTurnToHeading does nothing while PhysicsObj.IsAnimating, with no timeout,
-    /// and IsAnimating only drops when MotionInterp.PendingMotions drains through MotionDone. If one MotionDone
-    /// is ever lost, the queue never drains and every later turn-to (corpse open, any use) waits forever until the
-    /// next use cancels it with a silent UseDone. Jumping or portaling clears the queue, which is why both "fix" it.
-    /// Why MotionDone goes missing is still unknown; the WARN line this writes is the evidence for that hunt.
+    /// and IsAnimating only drops when MotionInterp.PendingMotions drains through MotionDone. That queue drains
+    /// through its MotionTableManager twin (PendingAnimations), whose nodes complete only after NumAnims AnimDone
+    /// hooks. The known cause was an upstream overcount of NumAnims in GetObjectSequence's Action fallback branch
+    /// (fixed there): the twin head then waited for a hook that never came, the queue never drained, and every later
+    /// turn-to (corpse open, any use) waited until the next use cancelled it with a silent UseDone. Jumping or
+    /// portaling drains both queues, which is why both "fix" it. The watchdog clear does the same: it drains the twin
+    /// queue and then MotionInterp's (DrainPendingMotions), so a cleared player does not re-stall behind the twin
+    /// head. Its WARN line, which carries the twin head, is the evidence if any other cause turns up.
     ///
     /// The pure decision lives here, outside Player, because Player's static constructor touches the world
     /// database and so Player statics are unreachable from ACE.Server.Tests. The PropertyManager reads go
@@ -269,16 +273,86 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// The [MOTION_STALL] line. Kept in one place so the admin path and the auto path cannot drift.
+        /// The [MOTION_STALL] line. Kept in one place so the admin path and the auto path cannot drift. twin, when
+        /// given (DescribeTwinQueue), is appended after the trigger.
         /// </summary>
-        public static string FormatClearLine(string name, uint guid, int cleared, double staleSeconds, string motions, bool contact, string trigger, int suppressed)
+        public static string FormatClearLine(string name, uint guid, int cleared, double staleSeconds, string motions, bool contact, string trigger, int suppressed, string twin = null)
         {
             var line = $"[MOTION_STALL] {name} (0x{guid:X8}) cleared {cleared} pending motion(s) stale for {staleSeconds:0.0}s: {motions} contact={contact} trigger={trigger}";
+
+            if (twin != null)
+                line += $" {twin}";
 
             if (suppressed > 0)
                 line += $" suppressedSinceLast={suppressed}";
 
             return line;
+        }
+
+        /// <summary>
+        /// "twinHead=Ready:2 twinCount=5 animCounter=1": the MotionTableManager queue that drains MotionInterp's. A head
+        /// whose NumAnims exceeds animCounter with no link animation left to play is the stuck node. Null when there
+        /// is no MotionTableManager.
+        /// </summary>
+        public static string DescribeTwinQueue(MotionTableManager mtm)
+        {
+            if (mtm?.PendingAnimations == null)
+                return null;
+
+            var head = mtm.PendingAnimations.First?.Value;
+            var headText = head == null ? "-" : $"{(MotionCommand)head.Motion}:{head.NumAnims}";
+
+            return $"twinHead={headText} twinCount={mtm.PendingAnimations.Count} animCounter={mtm.AnimationCounter}";
+        }
+
+        /// <summary>Trigger name of the cast-turn timeout clear (Player.CheckCastTurnTimeout).</summary>
+        public const string CastTimeoutTrigger = "cast_timeout";
+
+        /// <summary>
+        /// Whether a clear may drain the MotionTableManager twin queue. Always when no cast is in progress. While
+        /// casting, draining fires HandleMotionDone_Magic, which for a pending cast gesture schedules a DoCastSpell one
+        /// tick later; so it is allowed only for the cast_timeout clear that is about to fail the cast
+        /// (allowWhileCasting): FailCast clears IsCasting in the same call, and that scheduled DoCastSpell re-checks
+        /// IsCasting and CastNum before it runs. The Release outcome and every other trigger keep the MotionInterp-only clear.
+        /// </summary>
+        public static bool ShouldDrainTwin(bool casting, bool allowWhileCasting, string trigger)
+        {
+            if (!casting)
+                return true;
+
+            return allowWhileCasting && trigger == CastTimeoutTrigger;
+        }
+
+        /// <summary>
+        /// Drains the pending motions and returns how many MotionInterp nodes were pending.
+        ///
+        /// drainTwin: PhysicsObj.RemoveLinkAnimations first, which removes the sequence's link animations and runs
+        /// MotionTableManager.HandleEnterWorld - AnimationDone(false) until the twin queue is empty, each completion
+        /// popping its MotionInterp node through MotionDone. This is what a jump already does (Player.HandleActionJump
+        /// and MotionInterp.LeaveGround), so the MotionDone(success=false) callbacks it fires are ones players already
+        /// trigger. ClearPendingMotions then drops any MotionInterp node that had no twin and resets IsAnimating.
+        ///
+        /// Without drainTwin only the MotionInterp queue is cleared (the HandleExitWorld way); a stuck twin node then
+        /// stays and the queue refills behind it.
+        ///
+        /// A forced drain can end a FastTick chug (drink / eat) early. HandleMotionDone_UseConsumable ignores the
+        /// success flag: the UseMotion node's completion runs the consume callback and sets UseMotion to Ready, and a
+        /// later Ready node completed by the same drain then finishes the chug (FinishChugging, UseDone). The result is
+        /// an early finish with the item already consumed, never a player left stuck in the chug.
+        /// </summary>
+        public static int DrainPendingMotions(PhysicsObj physicsObj, MotionInterp minterp, bool drainTwin)
+        {
+            if (minterp?.PendingMotions == null)
+                return 0;
+
+            var count = minterp.PendingMotions.Count;
+
+            if (drainTwin && physicsObj != null)
+                physicsObj.RemoveLinkAnimations();
+
+            minterp.ClearPendingMotions();
+
+            return count;
         }
 
         /// <summary>

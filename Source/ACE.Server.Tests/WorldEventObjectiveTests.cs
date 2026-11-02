@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 
 using ACE.Entity;
+using ACE.Server.Managers;
 using ACE.Server.WorldEvents;
 using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldEvents.Objectives;
@@ -420,13 +421,27 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Factory_Hold_ReturnsAnError()
         {
-            var goal = new GoalDef { Id = "hold", DisplayName = "Hold", Type = "Hold", TypeKind = GoalType.Hold, HoldSeconds = 60 };
-            var evt = BuildEvent(goal, BossDef.None);
+            // world_events_hold_enabled is seeded OFF (its shipped value) so this class never reads it from a database,
+            // whatever ran before it; WorldEventHoldObjectiveTests covers the switch in both positions.
+            const string key = "world_events_hold_enabled";
 
-            var objective = WorldEventObjectiveFactory.Create(evt, out var error);
+            PropertyManager.ModifyBool(key, false);
 
-            Assert.IsNull(objective);
-            StringAssert.Contains(error, "Hold");
+            try
+            {
+                var goal = new GoalDef { Id = "hold", DisplayName = "Hold", Type = "Hold", TypeKind = GoalType.Hold, HoldSeconds = 60 };
+                var evt = BuildEvent(goal, BossDef.None);
+
+                var objective = WorldEventObjectiveFactory.Create(evt, out var error);
+
+                Assert.IsNull(objective);
+                StringAssert.Contains(error, "Hold");
+                StringAssert.Contains(error, key);
+            }
+            finally
+            {
+                PropertyManager.ModifyBool(key, DefaultPropertyManager.DefaultBooleanProperties[key].Item);
+            }
         }
 
         [TestMethod]

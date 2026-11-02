@@ -138,6 +138,12 @@ namespace ACE.Entity.Enum
         /// once-per-account, once-per-IP claim and branches TestSuccess (granted, or ungated) or
         /// TestFailure (already claimed), both looked up by Quest == Message.
         /// </summary>
-        ClaimRewardOnce               = 9003
+        ClaimRewardOnce               = 9003,
+
+        /// <summary>
+        /// Non-retail. Message = a PvP daily giver's name (PvpDailyCatalog.Vidorian / Ferah / LerRhan). Sends the target player their
+        /// standing on that giver's PvP dailies as [Arena] chat lines (Player.SendPvpDailyStatus). Not branching; runs no emote set.
+        /// </summary>
+        PvpDailyStatus                = 9004
     }
 }

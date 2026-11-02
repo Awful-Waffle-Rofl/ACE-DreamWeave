@@ -38,6 +38,9 @@ namespace ACE.Server.Factories.Tables.Wcids
                 _combined.Add(cloakWcid);
         }
 
+        /// <summary>Every wcid the loot tables can roll. Read by the loot-catalog tool.</summary>
+        public static WeenieClassName[] AllWcids() => System.Linq.Enumerable.ToArray(_combined);
+
         public static bool Contains(WeenieClassName wcid)
         {
             return _combined.Contains(wcid);

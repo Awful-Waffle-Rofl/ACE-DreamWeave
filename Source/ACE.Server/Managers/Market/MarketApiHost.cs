@@ -71,6 +71,9 @@ namespace ACE.Server.Managers.Market
         /// <summary>The suit_builder_enabled live switch. Gates the two /v1/accounts/me/suit* and suit-profile routes and NOTHING else; independent of MarketManager.Enabled. Null reads as OFF (an unwired host serves no suit route); Program.cs wires it.</summary>
         public Func<bool> SuitBuilderEnabled { get; set; }
 
+        /// <summary>The suit_character_moves_enabled live switch, reported as character_moves on GET /v1/accounts/me/suit/inventory. Null reads as OFF. The transfer service enforces the same switch itself; this only tells the client.</summary>
+        public Func<bool> SuitCharacterMovesEnabled { get; set; }
+
         /// <summary>POST /v1/accounts/me/suit/transfers and its status route. Null makes both answer server_error. Internal: the service moves vault items and is not part of the public surface.</summary>
         internal ACE.Server.Entity.AccountVault.SuitTransferService SuitTransfers { get; set; }
 
@@ -580,6 +583,35 @@ namespace ACE.Server.Managers.Market
                 }
             });
 
+            // PUBLIC directory of every published sheet: same gating as the slug route (key only, its own
+            // in-flight gate). A literal route, so it never competes with /v1/sheets/{slug}.
+            a.MapGet("/v1/sheets", (HttpContext ctx) =>
+            {
+                if (!KeyOk(ctx))
+                    return NoBody(ctx);
+
+                if (options.CharacterSheets == null)
+                    return Error(MarketError.SheetsDisabled);
+
+                if (!sheetLimiter.TryEnterInFlight())
+                    return Error(MarketError.SheetBusy);
+
+                try
+                {
+                    var result = options.CharacterSheets.ListPublished();
+                    return result.Outcome == SheetOutcome.Ok ? Results.Json(result.Directory, Json) : Error(SheetError(result.Outcome));
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[CHARSHEET] unhandled error serving the sheet directory: {ex.GetFullMessage()}");
+                    return Error(MarketError.ServerError);
+                }
+                finally
+                {
+                    sheetLimiter.ExitInFlight();
+                }
+            });
+
             a.MapGet("/v1/accounts/me/characters/{guid:long}/sheet-link", (HttpContext ctx, long guid) =>
                 Guard(ctx, requireSession: true, isWrite: false, handler: accountId => SheetLinkReply(accountId, guid, s => s.GetLink((uint)guid))));
 
@@ -598,6 +630,7 @@ namespace ACE.Server.Managers.Market
                 Guard(ctx, requireSession: true, isWrite: true, handler: accountId => SheetLinkReply(accountId, guid, s => s.Disable((uint)guid))));
 
             MapSuitRoutes(a);
+            MapClassAbilityRoutes(a);
 
             MapSuitTransferRoutes(a);
 

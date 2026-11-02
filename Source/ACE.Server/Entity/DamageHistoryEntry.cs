@@ -16,6 +16,14 @@ namespace ACE.Server.Entity
         public uint CurrentHealth;
         public uint MaxHealth;
 
+        /// <summary>
+        /// The damage the hit carried into the health write, after every mitigation but BEFORE the write clamped it
+        /// to the victim's remaining health. Amount is the clamped figure, so on an overkill hit the two differ and
+        /// only this one says how hard the victim was hit. Null at sinks that do not record it; the death line
+        /// (Player.OnDeath) shows nothing rather than fall back to the clamped Amount.
+        /// </summary>
+        public uint? Thrown;
+
         public DateTime Time;
 
         /// <summary>

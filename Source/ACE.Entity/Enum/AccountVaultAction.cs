@@ -39,5 +39,8 @@ namespace ACE.Entity.Enum
         /// character.
         /// </summary>
         Fold     = 7,
+
+        /// <summary>A stored partial salvage bag recombined with its group into fuller bags; one row per affected value/class key.</summary>
+        Combine  = 8,
     }
 }

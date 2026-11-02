@@ -37,8 +37,23 @@ namespace ACE.Server.Entity
             var character = DatabaseManager.Shard.BaseDatabase.GetCharacterStubByGuid(Guid.Full);
 
             if (character != null)
+            {
                 Account = DatabaseManager.Authentication.GetAccountById(character.AccountId);
+                CharacterOptions1 = character.CharacterOptions1;
+                CharacterOptions2 = character.CharacterOptions2;
+                HasCharacterOptions = true;
+            }
         }
+
+        /// <summary>
+        /// The persisted character option words, held so reads such as the /top deaths privacy check need no database
+        /// access. Set from the character row at construction; PlayerManager overwrites them from the live Character when
+        /// a player goes offline, since the row can lag an unsaved option change. HasCharacterOptions is false when the row
+        /// was missing, which readers must treat as unknown.
+        /// </summary>
+        public int CharacterOptions1 { get; set; }
+        public int CharacterOptions2 { get; set; }
+        public bool HasCharacterOptions { get; set; }
 
         public bool IsDeleted => DatabaseManager.Shard.BaseDatabase.GetCharacterStubByGuid(Guid.Full).IsDeleted;
         public bool IsPendingDeletion => DatabaseManager.Shard.BaseDatabase.GetCharacterStubByGuid(Guid.Full).DeleteTime > 0 && !IsDeleted;

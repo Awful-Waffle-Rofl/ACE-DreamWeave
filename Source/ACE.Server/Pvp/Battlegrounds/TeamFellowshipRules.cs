@@ -42,6 +42,15 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// <summary>The match is Closed or Canceled: any team fellowship still standing is dissolved and the bookkeeping dropped.</summary>
         void Dispose(Guid matchId);
 
+        /// <summary>
+        /// Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): a participant back from a held seat goes back into
+        /// their team's fellowship when it still stands with a live member and they are in no fellowship. Best effort; the default does
+        /// nothing.
+        /// </summary>
+        void Readmit(Guid matchId, int teamIndex, uint characterId)
+        {
+        }
+
         /// <summary>Dissolves any team fellowship whose match is not in <paramref name="activeMatchIds"/> (a backstop for a missed Dispose).</summary>
         void Sweep(IReadOnlyCollection<Guid> activeMatchIds);
     }

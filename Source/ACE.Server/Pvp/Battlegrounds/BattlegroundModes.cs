@@ -73,7 +73,8 @@ namespace ACE.Server.Pvp.Battlegrounds
                 // Inert for an objective mode: only the arena timeout path (EliminationWinCondition.ResolveTimeout) reads
                 // it; ScoreWinCondition rates every outcome, a timeout draw included.
                 timeoutRated: true,
-                rating: new TeamEloModel(),
+                // Team Elo scaled by individual performance (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance"); exactly team Elo when Resolve passes no modifiers.
+                rating: new PerformanceTeamEloModel(),
                 timeLimitTunableKey: KothTimeLimitTunableKey,
                 mapPool: MapPoolFor(KothModeKey),
                 // Premades queue as before, and each team is put in a server-built fellowship at Countdown
@@ -112,7 +113,8 @@ namespace ACE.Server.Pvp.Battlegrounds
                 accept: AcceptPolicy.AllOrNothing,
                 // A timeout is a RATED defender win in this mode, never an unrated draw (owner ruling 3).
                 timeoutRated: true,
-                rating: new TeamEloModel(),
+                // Team Elo scaled by individual performance (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance"); exactly team Elo when Resolve passes no modifiers.
+                rating: new PerformanceTeamEloModel(),
                 timeLimitTunableKey: AdTimeLimitTunableKey,
                 mapPool: pool,
                 fellowship: TeamFellowshipPolicy.TeamFellowship,

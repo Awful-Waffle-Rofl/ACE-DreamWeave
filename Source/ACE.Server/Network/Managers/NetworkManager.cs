@@ -351,6 +351,12 @@ namespace ACE.Server.Network.Managers
         {
             int sessionCount = 0;
 
+            // outbound ring settings: read once here, never per message
+            OutboundRingSettings.Refresh();
+
+            // inbound loss-recovery settings (crypto look-ahead for new sessions, stall limit): same, never per packet
+            InboundRecoverySettings.Refresh();
+
             sessionLock.EnterUpgradeableReadLock();
             try
             {
@@ -372,6 +378,9 @@ namespace ACE.Server.Network.Managers
                     sessionCount++;
                 }
                 ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.DoSessionWork_RemoveSessions);
+
+                // outbound ring control sample (serial, under the session lock); never throws
+                OutboundRingMonitor.OnSessionWork(sessionMap);
             }
             finally
             {

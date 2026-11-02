@@ -233,14 +233,16 @@ namespace ACE.Server.EquipmentMods
                 DisplayName = "Frenzied Pace",
                 LinkedAbility = ClassAbilityId.Frenzy,
                 Standalone = false,
-                MaxMagnitude = 0.003,
+                // HALVED 0.003 -> 0.0015 on 2026-10-24 (Berserker pass, owner ruling) because Frenzy's stack
+                // caps doubled (3/6/10 -> 6/12/20): the per-stack magnitude halves so the mod's PEAK (per-stack
+                // x cap) is unchanged. Potency is what is stored on an item and the magnitude is resolved at
+                // read (EquipmentModValue.Resolve), so every already-rolled item rebalances with no migration.
+                MaxMagnitude = 0.0015,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                // TWO decimals now suffice. This is still the one per-stack mod in the catalog, but raising
-                // MaxMagnitude from 0.0015 to 0.003 doubled the whole display range in proportion: the floor
-                // (still the catalog default 0.10 potency) now prints 0.03% and a perfect roll prints 0.3%,
-                // both legible at two decimals. The old four-decimal format existed to keep the 0.015% floor
-                // off "0.0", a problem that no longer exists at double the magnitude.
-                DisplayFormat = "+{0:0.##}% attack speed per Frenzy stack",
+                // THREE decimals again, because the magnitude halved: the floor (the catalog default 0.10
+                // potency) prints 0.015% and a perfect roll 0.15%. Two decimals would render the floor as
+                // 0.01 or 0.02 depending on binary rounding; three keep it exact.
+                DisplayFormat = "+{0:0.###}% attack speed per Frenzy stack",
             },
             new EquipmentModDefinition
             {
@@ -256,10 +258,19 @@ namespace ACE.Server.EquipmentMods
             },
             new EquipmentModDefinition
             {
+                // REPURPOSED IN PLACE 2026-10-24 (Berserker pass): this was the Savage Blows mod. Savage Blows
+                // was retired and Heavy Blows took its slot, so the row (id 17, PropertyFloat
+                // 8116, renamed GearModSavageBlows -> GearModHeavyBlows) now links Heavy Blows. The EquipmentModId
+                // member keeps the name SavageBlows: MarketItemMods.Token derives saved Browse-URL tokens from it.
+                // Its MAGNITUDE MEANING IS UNCHANGED: a flat,
+                // unconditional melee damage percent (perfect roll +2.7%), STANDALONE exactly as before - the
+                // rank-0 half in Player.ApplyEquipmentModOutgoingDamage pays it with no ability, and a Heavy
+                // Blows owner gets it inside HeavyBlowsAbility.ModifyOutgoingDamage instead (never both).
+                // Every already-rolled item keeps a live mod of the same strength and simply re-labels.
                 Id = EquipmentModId.SavageBlows,
-                Property = PropertyFloat.GearModSavageBlows,
-                DisplayName = "Savage Blows",
-                LinkedAbility = ClassAbilityId.SavageBlows,
+                Property = PropertyFloat.GearModHeavyBlows,
+                DisplayName = "Heavy Blows",
+                LinkedAbility = ClassAbilityId.HeavyBlows,
                 Standalone = true,
                 MaxMagnitude = 0.027,
                 HookKind = EquipmentModHookKind.StreamDamagePercentMelee,
@@ -350,16 +361,16 @@ namespace ACE.Server.EquipmentMods
             {
                 Id = EquipmentModId.ElementalRend,
                 Property = PropertyFloat.GearModElementalRend,
-                DisplayName = "Elemental Rend",
+                DisplayName = "Elemental Proficiency",
                 LinkedAbility = ClassAbilityId.ElementalRend,
                 Standalone = false,
-                MaxMagnitude = 0.02,
-                // Proc-chance mod: capped alongside Acid Proc/Echo Cast/Double Volley/Nether Bloom so an
-                // uncapped stack cannot push a chance-on-hit ability toward a guarantee. 3.0 = three perfect
-                // rolls.
+                MaxMagnitude = 0.05,
+                // Effect amplifier, no longer a proc-chance mod (Elemental Rend became Elemental Proficiency):
+                // the summed value G multiplies the magnitude of Fire, Lightning, Acid and Pierce effects by
+                // (1 + G). One perfect roll = +5%; StackCap 3.0 (three perfect rolls) bounds the total at +15%.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}% vulnerability proc chance",
+                DisplayFormat = "+{0:0.##}% elemental effect",
             },
             new EquipmentModDefinition
             {
@@ -557,7 +568,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.036,
                 // Proc-chance mod: capped alongside the other six new proc-chance rows (Runeblade,
-                // Sundermark, Surge, Spellstorm, Cascade, Dispelling Edge) so an uncapped stack cannot push
+                // Sundermark, Surge, Spellstorm, Cascade, Dispelling Dance) so an uncapped stack cannot push
                 // a chance-on-hit ability toward a guarantee. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
@@ -588,7 +599,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.036,
                 // Proc-chance mod: capped alongside Spellblade/Sundermark/Surge/Spellstorm/Cascade/
-                // Dispelling Edge. 3.0 = three perfect rolls.
+                // Dispelling Dance. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% Runeblade proc chance",
@@ -602,7 +613,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.015,
                 // Proc-chance mod: capped alongside Spellblade/Runeblade/Surge/Spellstorm/Cascade/
-                // Dispelling Edge. 3.0 = three perfect rolls.
+                // Dispelling Dance. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% Sundermark proc chance",
@@ -616,7 +627,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.0051,
                 // Proc-chance mod: capped alongside Spellblade/Runeblade/Sundermark/Spellstorm/Cascade/
-                // Dispelling Edge. 3.0 = three perfect rolls.
+                // Dispelling Dance. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.###}% war proc chance per Spellsurge stack",
@@ -630,7 +641,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.033,
                 // Proc-chance mod: capped alongside Spellblade/Runeblade/Sundermark/Surge/Cascade/
-                // Dispelling Edge. 3.0 = three perfect rolls.
+                // Dispelling Dance. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% Spellstorm proc chance",
@@ -644,7 +655,7 @@ namespace ACE.Server.EquipmentMods
                 Standalone = false,
                 MaxMagnitude = 0.025,
                 // Proc-chance mod: capped alongside Spellblade/Runeblade/Sundermark/Surge/Spellstorm/
-                // Dispelling Edge. 3.0 = three perfect rolls.
+                // Dispelling Dance. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
                 DisplayFormat = "+{0:0.##}% Cascade chain chance",
@@ -653,7 +664,10 @@ namespace ACE.Server.EquipmentMods
             {
                 Id = EquipmentModId.DispellingEdge,
                 Property = PropertyFloat.GearModDispellingEdge,
-                DisplayName = "Dispelling Edge",
+                // Player-facing name follows the ability's 2026-10-24 rename (Dispelling Edge -> Dispelling
+                // Dance). The enum member is NOT renamed: MarketItemMods.Token derives the saved-URL token
+                // from it, so the market token stays "Dispelling Edge".
+                DisplayName = "Dispelling Dance",
                 LinkedAbility = ClassAbilityId.DispellingEdge,
                 Standalone = false,
                 MaxMagnitude = 0.02,
@@ -661,7 +675,7 @@ namespace ACE.Server.EquipmentMods
                 // Cascade. 3.0 = three perfect rolls.
                 StackCap = 3.0,
                 HookKind = EquipmentModHookKind.AbilityMachinery,
-                DisplayFormat = "+{0:0.##}% Dispelling Edge proc chance",
+                DisplayFormat = "+{0:0.##}% Dispelling Dance proc chance",
             },
 
             // --- Vanguard correction (Provoke, Bellow) ---

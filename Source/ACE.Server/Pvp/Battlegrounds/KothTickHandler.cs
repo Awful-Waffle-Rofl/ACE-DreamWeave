@@ -15,7 +15,7 @@ namespace ACE.Server.Pvp.Battlegrounds
     /// min_holders counted and the other with none holds: the holder gains hold_points, every other team loses
     /// decay_points, floored at 0. Contested or empty changes nothing. Dedupe is a scoring rule only: every eligible player on the point is drained.
     /// </summary>
-    public sealed class KothTickHandler : IObjectiveModeHandler
+    public sealed class KothTickHandler : IObjectiveModeHandler, ITeamColourAware
     {
         private enum HoldKind { Neutral, Contested, Held }
 
@@ -31,6 +31,9 @@ namespace ACE.Server.Pvp.Battlegrounds
         private DateTime? _nextAnnounceUtc;
         private HoldKind _holdKind = HoldKind.Neutral;
         private int _holder = -1;
+
+        /// <summary>Team index to colour once the coordinator binds them; null names the teams West and East as before.</summary>
+        private IReadOnlyDictionary<int, PvpTeamColour> _colours;
 
         /// <param name="layout">
         /// The map the hill moves over (<see cref="BattlegroundLayout.ZonePairs"/>). Null, or a layout with no pairs, means
@@ -79,8 +82,32 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// <summary>The next time a score tick runs. Null until the match goes live.</summary>
         public DateTime? NextScoreUtc => _nextScoreUtc;
 
-        /// <summary>"West" / "East" (<see cref="BattlegroundText.TeamName"/>).</summary>
-        public string TeamName(int team) => BattlegroundText.TeamName(team);
+        /// <summary>
+        /// The team's colour name ("Red" / "Blue") once the match's colours are bound (Docs/Pvp/TEMPLATES.md "Team hue": King of
+        /// the Hill names its teams by colour, by the colour the coin gave each team, never by its index or spawn side); "West" / "East"
+        /// (<see cref="BattlegroundText.TeamName"/>) before that. Chat, scores and the team fellowship names all read this.
+        /// </summary>
+        public string TeamName(int team) =>
+            _colours != null && _colours.TryGetValue(team, out var colour) ? BattlegroundText.ColourTeamName(colour) : BattlegroundText.TeamName(team);
+
+        /// <summary>Binds the match's team colours (see <see cref="TeamName"/>). Spawn sides are unchanged: only the names move.</summary>
+        public void BindTeamColours(IReadOnlyDictionary<int, PvpTeamColour> colours) => _colours = colours;
+
+        /// <summary>
+        /// Both scores as one phrase: "Red 120, Blue 45" with Red first once two distinct colours are bound, else "West 120, East 45"
+        /// as before.
+        /// </summary>
+        private string ScorePair(int score0, int score1)
+        {
+            if (_colours != null && _colours.TryGetValue(0, out var c0) && _colours.TryGetValue(1, out var c1) && c0 != c1)
+            {
+                return c0 == PvpTeamColour.Red
+                    ? BattlegroundText.ScorePair(TeamName(0), score0, TeamName(1), score1)
+                    : BattlegroundText.ScorePair(TeamName(1), score1, TeamName(0), score0);
+            }
+
+            return BattlegroundText.ScorePair(TeamName(0), score0, TeamName(1), score1);
+        }
 
         /// <summary>
         /// The result line the coordinator has always sent for a King of the Hill match: the score win, the timeout draw, or the timeout
@@ -91,9 +118,9 @@ namespace ACE.Server.Pvp.Battlegrounds
             var score0 = scores != null && scores.TryGetValue(0, out var a) ? a : 0;
             var score1 = scores != null && scores.TryGetValue(1, out var b) ? b : 0;
 
-            return outcome.Reason == EndReason.Score && outcome.WinningTeams.Count == 1 ? BattlegroundText.ScoreWin(outcome.WinningTeams.First(), score0, score1)
-                : outcome.Reason == EndReason.Timeout && outcome.IsDraw ? BattlegroundText.TimeUpDraw(score0, score1)
-                : outcome.Reason == EndReason.Timeout && outcome.WinningTeams.Count == 1 ? BattlegroundText.TimeUpWin(outcome.WinningTeams.First(), score0, score1)
+            return outcome.Reason == EndReason.Score && outcome.WinningTeams.Count == 1 ? BattlegroundText.ScoreWin(TeamName(outcome.WinningTeams.First()), ScorePair(score0, score1))
+                : outcome.Reason == EndReason.Timeout && outcome.IsDraw ? BattlegroundText.TimeUpDraw(ScorePair(score0, score1))
+                : outcome.Reason == EndReason.Timeout && outcome.WinningTeams.Count == 1 ? BattlegroundText.TimeUpWin(TeamName(outcome.WinningTeams.First()), ScorePair(score0, score1))
                 : null;
         }
 
@@ -121,7 +148,7 @@ namespace ACE.Server.Pvp.Battlegrounds
             if (scores == null || scoreTarget <= 0)
                 return "";
 
-            return BattlegroundText.StatusScore(scores.TryGetValue(0, out var a) ? a : 0, scores.TryGetValue(1, out var b) ? b : 0, scoreTarget);
+            return BattlegroundText.StatusScore(ScorePair(scores.TryGetValue(0, out var a) ? a : 0, scores.TryGetValue(1, out var b) ? b : 0), scoreTarget);
         }
 
         public void OnLive(IMatchContext m)
@@ -219,6 +246,11 @@ namespace ACE.Server.Pvp.Battlegrounds
                 }
             }
 
+            // Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): each IP-deduped sample that counted toward the hold
+            // check earns one tick of hill time, held or contested alike. Collection only; the score above is unaffected.
+            foreach (var s in counted)
+                ctx.CreditObjectiveTime(s.CharacterId, _dials.KothTickSeconds);
+
             // Dedupe is a scoring rule only: every eligible player on the point is drained.
             foreach (var s in eligible)
                 ctx.RequestDrain(s.CharacterId, _dials.KothDrainHealth, _dials.KothDrainStamina, _dials.KothDrainMana, _dials.KothDrainLethal);
@@ -233,7 +265,7 @@ namespace ACE.Server.Pvp.Battlegrounds
 
                 ctx.Announce(kind switch
                 {
-                    HoldKind.Held => BattlegroundText.ZoneHeld(heldBy),
+                    HoldKind.Held => BattlegroundText.ZoneHeld(TeamName(heldBy)),
                     HoldKind.Contested => BattlegroundText.ZoneContested(),
                     _ => BattlegroundText.ZoneNeutral()
                 });
@@ -243,7 +275,7 @@ namespace ACE.Server.Pvp.Battlegrounds
             {
                 ctx.ScoreBoard.TryGetValue(0, out var west);
                 ctx.ScoreBoard.TryGetValue(1, out var east);
-                ctx.Announce(BattlegroundText.Scores(west, east));
+                ctx.Announce(BattlegroundText.Scores(ScorePair(west, east)));
                 _nextAnnounceUtc = utcNow + TimeSpan.FromSeconds(_dials.KothScoreAnnounceSeconds);
             }
         }

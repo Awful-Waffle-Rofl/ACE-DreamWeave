@@ -111,10 +111,13 @@ namespace ACE.Server.WorldEvents
                 return;
             }
 
-            var rewardRadius = composition.Source?.RewardRadius ?? 0f;
-            var audience = WorldEventAudienceSampler.Sample(anchor, rewardRadius);
+            // The objective's participant radius and staff rule (World Events Hold H6), and its claim policy's cache rule; a
+            // run whose objective sets none is the source's rewardRadius, the sampler's staff rule and the axis's value exactly.
+            var rewardRadius = evt.EffectiveParticipantRadius;
+            var audience = WorldEventAudienceSampler.Sample(anchor, rewardRadius, evt.ObjectiveCountsStaff());
+            var perCache = ParticipantsPerCacheFor(evt, reward);
 
-            var count = ComputeCacheCount(audience.Count, reward.ParticipantsPerCache, reward.CacheCount, out var unclamped);
+            var count = ComputeCacheCount(audience.Count, perCache, reward.CacheCount, out var unclamped);
 
             if (unclamped > count)
                 log.Warn($"[WORLDEVENT] run={evt.RunId} caches clamped from {unclamped} to {count}");
@@ -190,7 +193,7 @@ namespace ACE.Server.WorldEvents
             else
                 wcidSource = "profile";
 
-            log.Info($"[WORLDEVENT] run={runId} rewarding audience={audience.Count} perCache={Math.Max(1, reward.ParticipantsPerCache)} cacheCount={reward.CacheCount} caches={count} wcid={cacheWcid} source={wcidSource}");
+            log.Info($"[WORLDEVENT] run={runId} rewarding audience={audience.Count} perCache={Math.Max(1, perCache)} cacheCount={reward.CacheCount} caches={count} wcid={cacheWcid} source={wcidSource}");
 
             var cacheEffectScript = CacheEffectScript();
             var cacheEffectRepeatSeconds = ReadCacheEffectRepeatSeconds();
@@ -263,6 +266,13 @@ namespace ACE.Server.WorldEvents
 
             log.Info($"[WORLDEVENT] run={evt.RunId} cache destroy scheduled={caches.Count}");
         }
+
+        /// <summary>
+        /// The participants-per-cache rule SpawnCaches uses: the run's claim policy's ParticipantsPerCache when positive
+        /// (World Events Hold's participants_per_cache), else the reward axis's own value, exactly as before.
+        /// </summary>
+        internal static int ParticipantsPerCacheFor(WorldEvent evt, Defs.RewardDef reward) =>
+            WorldEventCacheHandler.ClaimPolicyFor(evt).EffectiveParticipantsPerCache(reward?.ParticipantsPerCache ?? 0);
 
         /// <summary>
         /// ceil(audience / participantsPerCache), at least one cache and at most <see cref="MaxCachesPerRun"/>.

@@ -11,6 +11,7 @@ using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
+using ACE.Server.Tests.ThreadDungeons;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Tests
@@ -585,16 +586,105 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// A multi-shot extra arrow's fraction reaches the proc: 0.5 -> 50. A fresh event (the primary arrow,
-        /// melee, a Riposte counter - anything DamageTarget did not flag as an extra arrow) reads 1.0.
+        /// A partial-damage strike's fraction (a multi-shot extra arrow, a Riposte counter) reaches the proc:
+        /// 0.5 -> 50. A fresh event (the primary arrow, ordinary melee - anything DamageTarget called with the
+        /// default multiplier) reads 1.0.
         /// </summary>
         [TestMethod]
         public void ProcDamageMultiplier_MultiShotExtraArrow_ScalesTheProc()
         {
-            Assert.AreEqual(1.0f, new DamageEvent().MultiShotProcMultiplier);
+            Assert.AreEqual(1.0f, new DamageEvent().StrikeFractionProcMultiplier);
 
-            var extra = new DamageEvent { DamageRatingMod = 1.0f, DamageResistanceRatingMod = 1.0f, MultiShotProcMultiplier = 0.5f };
+            var extra = new DamageEvent { DamageRatingMod = 1.0f, DamageResistanceRatingMod = 1.0f, StrikeFractionProcMultiplier = 0.5f };
             Assert.AreEqual(50u, PoisonWeaponAbility.ComputePoisonDamage(ProcFlat, 0.0, extra.ProcDamageMultiplier));
+        }
+
+        /// <summary>
+        /// A Riposte counter (owner ruling 2026-10-15) takes its rank fraction into the procs exactly as a
+        /// Multishot extra arrow does: Riposte rank 1 (0.40) -> 40 poison. Player.DamageTarget needs a live
+        /// Session (the harness cannot build one), so the single copy point is pinned against the source text:
+        /// the assignment is unconditional (no per-caller flag), Riposte passes its fraction, Multishot passes its
+        /// own multiplier, and the strike's own copy is the separate `Damage *=` that no proc reads.
+        /// </summary>
+        [TestMethod]
+        public void ProcDamageMultiplier_RiposteCounter_ScalesTheProcLikeMultishot()
+        {
+            var riposte = new DamageEvent { DamageRatingMod = 1.0f, DamageResistanceRatingMod = 1.0f, StrikeFractionProcMultiplier = 0.40f };
+            Assert.AreEqual(0.40, riposte.ProcDamageMultiplier, 1e-6);
+            Assert.AreEqual(40u, PoisonWeaponAbility.ComputePoisonDamage(ProcFlat, 0.0, riposte.ProcDamageMultiplier));
+
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Combat.cs"),
+                "public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f, bool primaryTarget = true, bool powerBarSwing = true)");
+
+            StringAssert.Contains(body, "damageEvent.StrikeFractionProcMultiplier = damageMultiplier;");
+            Assert.IsFalse(body.Contains("multiShotArrow"), "no per-caller gate: every caller's fraction reaches the procs");
+
+            // ORDER: the procs read the fraction inside the two hooks below, so the copy must precede both
+            var assign = body.IndexOf("damageEvent.StrikeFractionProcMultiplier = damageMultiplier;", System.StringComparison.Ordinal);
+            var outgoing = body.IndexOf("ApplyOutgoingDamageClassAbilities(target, damageEvent);", System.StringComparison.Ordinal);
+            var equip = body.IndexOf("ApplyEquipmentModOutgoingDamage(", System.StringComparison.Ordinal);
+            Assert.IsTrue(assign >= 0 && outgoing >= 0 && equip >= 0, "all three statements present");
+            Assert.IsTrue(assign < outgoing, "fraction copied before the class-ability outgoing hooks");
+            Assert.IsTrue(assign < equip, "fraction copied before the equipment-mod outgoing hook");
+
+            StringAssert.Contains(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_ClassAbilityCombat.cs"),
+                "DamageTarget(attacker, weapon, fraction, primaryTarget: false, powerBarSwing: false);");
+            // the multishot arrow's fraction: Creature.FireMultiShotArrow (lifted from Player_Missile, Custom
+            // Summons Task 3) hands it to ResolveMultiShotArrowImpact, whose Player override is DamageTarget
+            StringAssert.Contains(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Creature_Missile.cs"),
+                "ResolveMultiShotArrowImpact(target, cosmeticProjectile, damageMultiplier, primaryTarget));");
+            StringAssert.Contains(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Missile.cs"),
+                "DamageTarget(target, cosmeticProjectile, damageMultiplier, primaryTarget);");
+        }
+
+        /// <summary>
+        /// Acid Proc: a re-proc on a running wound is a pure refresh and fires no immediate tick (owner ruling
+        /// 2026-10-15); a new wound, or an entry whose loop already finished, still ticks at once. The decision is
+        /// the pure helper; the second half pins that ApplyAcidProcDot gates the immediate tick on it, decides
+        /// BEFORE it touches the entry, and still resets the full tick budget.
+        /// </summary>
+        [TestMethod]
+        public void AcidProc_Refresh_FiresNoImmediateTick_NewWoundDoes()
+        {
+            // new wound at the default budget: immediate tick, and the loop carries the other two
+            Assert.AreEqual((true, true), Player.PlanAcidProc(loopActive: false, configuredTicks: 3));
+            // refresh of a running wound: no fresh tick, no second loop
+            Assert.AreEqual((false, false), Player.PlanAcidProc(loopActive: true, configuredTicks: 3));
+            // one-tick budget: the immediate tick spends it all, so no loop
+            Assert.AreEqual((true, false), Player.PlanAcidProc(loopActive: false, configuredTicks: 1));
+            // an entry left behind with its loop finished (loopActive false) is a new wound: it ticks again
+            Assert.AreEqual((true, true), Player.PlanAcidProc(loopActive: false, configuredTicks: 2));
+
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs"),
+                "public void ApplyAcidProcDot(Creature target, uint tickAmount)");
+
+            var decide = body.IndexOf("var plan = PlanAcidProc(dot.LoopActive, configuredTicks);", System.StringComparison.Ordinal);
+            var reset = body.IndexOf("dot.RemainingTicks = configuredTicks;", System.StringComparison.Ordinal);
+            var tick = body.IndexOf("ApplyOneAcidTick(target, dot);", System.StringComparison.Ordinal);
+
+            Assert.IsTrue(decide >= 0 && reset > decide && tick > reset, "decide first, reset the budget, then the (gated) tick");
+            StringAssert.Contains(body, "if (plan.TickNow)");
+            StringAssert.Contains(body, "if (plan.StartLoop && dot.RemainingTicks > 0)");
+        }
+
+        /// <summary>
+        /// A scheduled Acid Proc chain is bound to the entry instance it was started for: after
+        /// ResetClassAbilityTransientState clears the dictionary, a stale chain must not adopt a NEW entry for
+        /// the same guid and run a second loop. Pinned against the source text (the entry type is private).
+        /// </summary>
+        [TestMethod]
+        public void AcidProc_ScheduledChain_BailsOnAReplacedEntry()
+        {
+            var src = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs");
+            var body = PooledLootSourceText.MethodBody(src, "private void ScheduleAcidProcTick(Creature target, uint guid, AcidProcDot startedFor)");
+
+            var lookup = body.IndexOf("if (!acidProcDots.TryGetValue(guid, out var dot) || !ReferenceEquals(dot, startedFor))", System.StringComparison.Ordinal);
+            var tick = body.IndexOf("ApplyOneAcidTick(target, dot);", System.StringComparison.Ordinal);
+            var remove = body.IndexOf("acidProcDots.Remove(guid);", System.StringComparison.Ordinal);
+
+            Assert.IsTrue(lookup >= 0, "identity check present");
+            Assert.IsTrue(tick > lookup && remove > lookup, "the identity bail comes before any tick or removal");
+            StringAssert.Contains(body, "ScheduleAcidProcTick(target, guid, startedFor);");
         }
 
         /// <summary>
@@ -611,7 +701,7 @@ namespace ACE.Server.Tests
                 DamageRatingMod = Creature.AdditiveCombine(Creature.GetPositiveRatingMod(20), Creature.GetPositiveRatingMod(30), 1.0f, 1.0f),
                 DamageResistanceRatingMod = Creature.GetNegativeRatingMod(25),
                 ClassAbilityCritDamageBonus = 0.30,
-                MultiShotProcMultiplier = 0.5f,
+                StrikeFractionProcMultiplier = 0.5f,
             };
 
             Assert.AreEqual(1.56, e.ProcDamageMultiplier, 1e-6);
@@ -701,14 +791,17 @@ namespace ACE.Server.Tests
             parent.LifeProjectileDamage = 420;
             parent.SpellweaveDamageMod = 1.25f;
             parent.LifeProjectileStamp = new LifeProjectileCastStamp(1.2f, 1.21f, BloodChargeCastOutcome.Accrue);
+            parent.ProcDamageScale = 0.49f;
 
             var child = NewProjectile();
             Assert.AreEqual(0u, child.LifeProjectileDamage, "precondition: a fresh projectile carries no basis");
+            Assert.AreEqual(1.0f, child.ProcDamageScale, "precondition: a fresh projectile is unscaled");
 
             SpellProjectile.CopyPerCastStamps(child, parent);
 
             Assert.AreEqual(420u, child.LifeProjectileDamage);
             Assert.AreEqual(1.25f, child.SpellweaveDamageMod);
+            Assert.AreEqual(0.49f, child.ProcDamageScale, "a Cascade / Echo / AOE child of a Nether proc keeps the parent's parity scale");
             Assert.AreEqual(parent.LifeProjectileStamp.DamageMultiplier, child.LifeProjectileStamp.DamageMultiplier);
             Assert.AreEqual(parent.LifeProjectileStamp.Bursts, child.LifeProjectileStamp.Bursts);
             Assert.AreEqual(parent.LifeProjectileStamp.GrantsCharge, child.LifeProjectileStamp.GrantsCharge);
@@ -883,36 +976,48 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void Frenzy_StackCap_Is3_6_10_ByRank()
+        public void Frenzy_StackCap_Is6_12_20_ByRank()
         {
+            // Berserker pass 2026-10-24: caps doubled from 3 / 6 / 10 alongside the halved per-stack rate
             Assert.AreEqual(0, FrenzyAbility.StackCap(0));
-            Assert.AreEqual(3, FrenzyAbility.StackCap(1));
-            Assert.AreEqual(6, FrenzyAbility.StackCap(2));
-            Assert.AreEqual(10, FrenzyAbility.StackCap(3));
+            Assert.AreEqual(6, FrenzyAbility.StackCap(1));
+            Assert.AreEqual(12, FrenzyAbility.StackCap(2));
+            Assert.AreEqual(20, FrenzyAbility.StackCap(3));
         }
 
         [TestMethod]
-        public void Frenzy_AddsFivePercentAttackSpeedPerStack()
+        public void Frenzy_AddsTwoAndAHalfPercentAttackSpeedPerStack()
         {
             var perStack = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item;
 
-            // spec (Round 6): +5% per stack - nominal +50% at the rank-3 cap, which no longer
-            // saturates the raised 3.5x anim ceiling
-            Assert.AreEqual(0.05, perStack, 1e-9);
+            // Berserker pass 2026-10-24: +2.5% per stack (was 5%), so the rank-3 cap of 20 stacks is still
+            // nominal +50%, and the rank-1 cap of 6 is +15% exactly as the old rank-1 cap of 3 was
+            Assert.AreEqual(0.025, perStack, 1e-9);
             Assert.AreEqual(1.0f, FrenzyAbility.AttackSpeedMultiplier(0, perStack), 1e-6f);
-            Assert.AreEqual(1.15f, FrenzyAbility.AttackSpeedMultiplier(3, perStack), 1e-5f);   // rank-1 cap
-            Assert.AreEqual(1.50f, FrenzyAbility.AttackSpeedMultiplier(10, perStack), 1e-5f);  // rank-3 cap = +50%
+            Assert.AreEqual(1.15f, FrenzyAbility.AttackSpeedMultiplier(6, perStack), 1e-5f);   // rank-1 cap
+            Assert.AreEqual(1.50f, FrenzyAbility.AttackSpeedMultiplier(20, perStack), 1e-5f);  // rank-3 cap = +50%
+        }
+
+        [TestMethod]
+        public void Frenzy_ExpireWindowIsFifteenSeconds()
+        {
+            // Berserker pass 2026-10-24: 10 -> 15 seconds without a landed melee hit before stacks reset
+            Assert.AreEqual(15.0, PropertyManager.GetDouble("class_ability_frenzy_expire_seconds").Item, 1e-9);
         }
 
         /// <summary>
-        /// FINDINGS-LEDGER L6-73 (user decision 2026-07-25): Frenzy is a two-handed / dual-wield melee
-        /// ability. The stance predicate is the pure half of the gate; the two call sites that consume it
-        /// (Player.OnFrenzyLandedHit for the trigger, Player.GetFrenzyAttackSpeedMod for the application)
-        /// need live combat state and are verified in-game.
+        /// Berserker pass 2026-10-24 (owner ruling): ALL melee qualifies - unarmed, a single one-hander with or
+        /// without a shield, two-handed and dual wield. Until then it was two-handed / dual wield only
+        /// (FINDINGS-LEDGER L6-73). The stance predicate is the pure half of the gate; the two call sites that
+        /// consume it (Player.OnFrenzyLandedHit for the trigger, Player.GetFrenzyAttackSpeedMod for the
+        /// application) need live combat state and are verified in-game.
         /// </summary>
         [TestMethod]
-        public void Frenzy_QualifyingStances_AreTwoHandedAndDualWieldMeleeOnly()
+        public void Frenzy_QualifyingStances_AreEveryMeleeStance()
         {
+            Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.HandCombat));
+            Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.SwordCombat));
+            Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.SwordShieldCombat));
             Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.TwoHandedSwordCombat));
             Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.TwoHandedStaffCombat));
             Assert.IsTrue(FrenzyAbility.IsQualifyingStance(MotionStance.DualWieldCombat));
@@ -934,11 +1039,6 @@ namespace ACE.Server.Tests
             // magic
             Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.Magic));
 
-            // unarmed, and a single one-hander with or without a shield (no offhand weapon = no dual wield)
-            Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.HandCombat));
-            Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.SwordCombat));
-            Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.SwordShieldCombat));
-
             // out of combat, and an unset stance (CurrentMotionState may be null)
             Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.NonCombat));
             Assert.IsFalse(FrenzyAbility.IsQualifyingStance(MotionStance.Invalid));
@@ -946,31 +1046,31 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Guards the predicate against enum drift: exactly three of the MotionStance values may qualify.
+        /// Guards the predicate against enum drift: exactly the six melee MotionStance values may qualify.
         /// A new stance added to the enum defaults to non-qualifying, and this fails if that changes.
         /// </summary>
         [TestMethod]
-        public void Frenzy_ExactlyThreeStancesQualify()
+        public void Frenzy_ExactlySixStancesQualify()
         {
             var qualifying = Enum.GetValues(typeof(MotionStance))
                 .Cast<MotionStance>()
                 .Where(s => FrenzyAbility.IsQualifyingStance(s))
                 .ToList();
 
-            Assert.AreEqual(3, qualifying.Count, $"qualifying stances: {string.Join(", ", qualifying)}");
+            Assert.AreEqual(6, qualifying.Count, $"qualifying stances: {string.Join(", ", qualifying)}");
         }
 
         [TestMethod]
         public void Frenzy_RecklessRider_AddsToPerStackRate()
         {
             var perStack = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item;
-            Assert.AreEqual(0.05, perStack, 1e-9);
+            Assert.AreEqual(0.025, perStack, 1e-9);
 
-            // rider = 0 reproduces today's value exactly (5%/stack, +50% at 10 stacks)
-            Assert.AreEqual(1.50f, FrenzyAbility.AttackSpeedMultiplier(10, perStack + 0.0), 1e-5f);
+            // rider = 0 reproduces the base value exactly (2.5%/stack, +50% at 20 stacks)
+            Assert.AreEqual(1.50f, FrenzyAbility.AttackSpeedMultiplier(20, perStack + 0.0), 1e-5f);
 
-            // a +1% Recklessness rider adds to the per-stack rate: 6%/stack, +60% at 10 stacks
-            Assert.AreEqual(1.60f, FrenzyAbility.AttackSpeedMultiplier(10, perStack + 0.01), 1e-5f);
+            // a +0.5% Recklessness rider adds to the per-stack rate: 3%/stack, +60% at 20 stacks
+            Assert.AreEqual(1.60f, FrenzyAbility.AttackSpeedMultiplier(20, perStack + 0.005), 1e-5f);
         }
 
         [TestMethod]
@@ -992,6 +1092,10 @@ namespace ACE.Server.Tests
             // caps at MaxStacks (5): rank 3 -> 1 + 5 * 0.15 = 1.75, and more stacks don't exceed it
             Assert.AreEqual(1.75f, NetherRushAbility.CastSpeedMultiplier(5, 3, perRank), 1e-5f);
             Assert.AreEqual(1.75f, NetherRushAbility.CastSpeedMultiplier(99, 3, perRank), 1e-5f);
+
+            // Mana Rush cap (2026-10-24): the TOTAL is clamped at the passed max bonus - +50% holds rank 3's 75% at 1.5
+            Assert.AreEqual(1.50f, NetherRushAbility.CastSpeedMultiplier(5, 3, perRank, 0.0, 0.50), 1e-5f);
+            Assert.AreEqual(1.45f, NetherRushAbility.CastSpeedMultiplier(3, 3, perRank, 0.0, 0.50), 1e-5f, "under the cap the ramp is untouched");
         }
 
         /// <summary>
@@ -1130,59 +1234,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1.0f, VoidDamageAbility.DamageMultiplier(0, perRank), 1e-5f);
         }
 
-        [TestMethod]
-        public void FlatCastSpeed_ConstantMultiplierPerRank()
-        {
-            var perRank = PropertyManager.GetDouble("class_ability_flatcastspeed_percent_per_rank").Item;
-            Assert.AreEqual(1.10f, FlatCastSpeedAbility.CastSpeedMultiplier(1, perRank), 1e-5f);
-            Assert.AreEqual(1.30f, FlatCastSpeedAbility.CastSpeedMultiplier(3, perRank), 1e-5f);
-            Assert.AreEqual(1.0f, FlatCastSpeedAbility.CastSpeedMultiplier(0, perRank), 1e-5f);
-        }
-
-        [TestMethod]
-        public void QuickenedCasting_ConstantMultiplierPerRank()
-        {
-            var perRank = PropertyManager.GetDouble("class_ability_quickenedcasting_percent_per_rank").Item;
-
-            // spec: +20% per rank, so +100% at rank 5
-            Assert.AreEqual(0.20, perRank, 1e-9);
-
-            Assert.AreEqual(1.20f, QuickenedCastingAbility.CastSpeedMultiplier(1, perRank), 1e-5f);
-            Assert.AreEqual(2.00f, QuickenedCastingAbility.CastSpeedMultiplier(5, perRank), 1e-5f);
-            Assert.AreEqual(1.0f, QuickenedCastingAbility.CastSpeedMultiplier(0, perRank), 1e-5f);
-        }
-
-        /// <summary>
-        /// The assertion most worth having for Quickened Casting: it must classify a damaging spell as
-        /// unaffected regardless of school, and a buff/debuff (Enchantment/FellowEnchantment) as affected -
-        /// UNLESS that "buff/debuff" is actually a damage- or heal-over-time spell dressed up as a stat mod,
-        /// which stays excluded too. A war bolt is MetaSpellType.Projectile, so it never even reaches the
-        /// MetaSpellType gate - this pins the classification the composed cast-speed product depends on to
-        /// keep a war bolt bit-identical at rank 5.
-        /// </summary>
-        [TestMethod]
-        public void QuickenedCasting_AffectsSpell_OnlyClassifiesNonDamagingBuffsAndDebuffs()
-        {
-            // damaging spells of every relevant MetaSpellType are unaffected, DoT flag or not
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.Projectile, false));
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.LifeProjectile, false));
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.Boost, false));
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.Transfer, false));
-
-            // a plain buff/debuff (protection, bane, imperil, vulnerability) of either Enchantment shape
-            // qualifies
-            Assert.IsTrue(QuickenedCastingAbility.AffectsSpell(SpellType.Enchantment, false));
-            Assert.IsTrue(QuickenedCastingAbility.AffectsSpell(SpellType.FellowEnchantment, false));
-
-            // a damage/heal-over-time spell dressed up as an Enchantment is excluded - "damaging spells are
-            // completely unaffected" must hold even for this shape
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.Enchantment, true));
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.FellowEnchantment, true));
-
-            // everything else (portal spells, dispels) is unaffected too
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.Dispel, false));
-            Assert.IsFalse(QuickenedCastingAbility.AffectsSpell(SpellType.PortalRecall, false));
-        }
+        // FlatCastSpeed_ConstantMultiplierPerRank, QuickenedCasting_ConstantMultiplierPerRank and
+        // QuickenedCasting_AffectsSpell_OnlyClassifiesNonDamagingBuffsAndDebuffs lived here until 2026-10-24: both
+        // abilities were retired in the Archmage pass (see ArchmagePassMechanicsTests for their replacements).
 
         [TestMethod]
         public void Spellweave_DamageMultiplier_RankPlusAffinityAddedAmount()
@@ -1361,22 +1415,6 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ElementalRend_ChancePerRank_PlusLifeMagicRider()
-        {
-            var chanceBase = PropertyManager.GetDouble("class_ability_elementalrend_chance_base").Item;
-            var chanceStep = PropertyManager.GetDouble("class_ability_elementalrend_chance_step").Item;
-            Assert.AreEqual(0.10, chanceBase, 1e-9);
-            Assert.AreEqual(0.08, chanceStep, 1e-9);
-
-            // ranks 1-3 with no rider -> 10/18/26%
-            Assert.AreEqual(0.10f, ElementalRendAbility.RendChance(1, chanceBase, chanceStep, 0.0), 1e-5f);
-            Assert.AreEqual(0.18f, ElementalRendAbility.RendChance(2, chanceBase, chanceStep, 0.0), 1e-5f);
-            Assert.AreEqual(0.26f, ElementalRendAbility.RendChance(3, chanceBase, chanceStep, 0.0), 1e-5f);
-            // unlearned -> no chance
-            Assert.AreEqual(0.0f, ElementalRendAbility.RendChance(0, chanceBase, chanceStep, 0.5), 1e-5f);
-        }
-
-        [TestMethod]
         public void ElementalRend_VulnMapping_MatchesElement_AndClampsLevel()
         {
             // each war damage type maps to its own element's "...Other" vuln at the spell's level
@@ -1513,17 +1551,17 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void DoubleVolley_ChancePerRank_IsSixTwelveEighteen()
+        public void DoubleVolley_ChancePerRank_IsTenTwentyThirty()
         {
             var chanceBase = PropertyManager.GetDouble("class_ability_doublevolley_chance_base").Item;
             var chanceStep = PropertyManager.GetDouble("class_ability_doublevolley_chance_step").Item;
-            Assert.AreEqual(0.06, chanceBase, 1e-9);
-            Assert.AreEqual(0.06, chanceStep, 1e-9);
+            Assert.AreEqual(0.10, chanceBase, 1e-9);
+            Assert.AreEqual(0.10, chanceStep, 1e-9);
 
             // affinityMultiplier = 1.0 (neutral, untrained Run) reproduces the rank-only ladder exactly
-            Assert.AreEqual(0.06f, DoubleVolleyAbility.Chance(1, chanceBase, chanceStep, 1.0), 1e-5f);
-            Assert.AreEqual(0.12f, DoubleVolleyAbility.Chance(2, chanceBase, chanceStep, 1.0), 1e-5f);
-            Assert.AreEqual(0.18f, DoubleVolleyAbility.Chance(3, chanceBase, chanceStep, 1.0), 1e-5f);
+            Assert.AreEqual(0.10f, DoubleVolleyAbility.Chance(1, chanceBase, chanceStep, 1.0), 1e-5f);
+            Assert.AreEqual(0.20f, DoubleVolleyAbility.Chance(2, chanceBase, chanceStep, 1.0), 1e-5f);
+            Assert.AreEqual(0.30f, DoubleVolleyAbility.Chance(3, chanceBase, chanceStep, 1.0), 1e-5f);
             Assert.AreEqual(0.0f, DoubleVolleyAbility.Chance(0, chanceBase, chanceStep, 1.0), 1e-5f);
         }
 
@@ -1533,11 +1571,11 @@ namespace ACE.Server.Tests
             var chanceBase = PropertyManager.GetDouble("class_ability_doublevolley_chance_base").Item;
             var chanceStep = PropertyManager.GetDouble("class_ability_doublevolley_chance_step").Item;
 
-            // rank 3: rankBonus = 0.06 + 2*0.06 = 0.18. A 1.5x multiplier -> 0.27, and passing 0.0 for the
+            // rank 3: rankBonus = 0.10 + 2*0.10 = 0.30. A 1.5x multiplier -> 0.45, and passing 0.0 for the
             // cap must leave it UNCAPPED (never clamped against class_ability_affinity_chance_cap).
             var chance = DoubleVolleyAbility.Chance(3, chanceBase, chanceStep, 1.5, 0.0);
 
-            Assert.AreEqual(0.27f, chance, 1e-5f);
+            Assert.AreEqual(0.45f, chance, 1e-5f);
         }
 
         [TestMethod]
@@ -1551,47 +1589,26 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1.0f, WitheringAbility.DotMultiplier(0, perRank, 0.5), 1e-5f);
         }
 
+        /// <summary>
+        /// Hemomancy's heal-armed damage multiplier (Blood Mage buff pass rework; the old DoT tick bonus,
+        /// flat tick heal and Drain cap bonus are gone): 1 + rank * per-rank * Healing multiplier while
+        /// active, exactly 1.0 while inactive or at rank 0.
+        /// </summary>
         [TestMethod]
-        public void Hemomancy_TickMultiplier_PerRankPlusHealingRider()
+        public void Hemomancy_DamageMultiplier_PerRankTimesHealingMultiplier_OnlyWhileActive()
         {
-            var perRank = PropertyManager.GetDouble("class_ability_hemomancy_tick_percent_per_rank").Item;
+            var perRank = PropertyManager.GetDouble("class_ability_hemomancy_damage_percent_per_rank").Item;
             Assert.AreEqual(0.02, perRank, 1e-9);
 
             // rank 5, no affinity: 1 + 5*0.02 = 1.10 (+10%, the signed-off max)
-            Assert.AreEqual(1.10f, HemomancyAbility.TickMultiplier(5, perRank, 0.0), 1e-5f);
+            Assert.AreEqual(1.10f, HemomancyMath.DamageMultiplier(5, perRank, 1.0, active: true), 1e-5f);
 
-            // rank 1 with an affinity rider: 1 + 0.02 + 0.01
-            Assert.AreEqual(1.03f, HemomancyAbility.TickMultiplier(1, perRank, 0.01), 1e-5f);
+            // rank 1, Healing multiplier 1.5: 1 + 0.02*1.5
+            Assert.AreEqual(1.03f, HemomancyMath.DamageMultiplier(1, perRank, 1.5, active: true), 1e-5f);
 
-            // rank 0: bit-identical to no ability at all, regardless of any (impossible) rider
-            Assert.AreEqual(1.0f, HemomancyAbility.TickMultiplier(0, perRank, 0.5), 1e-5f);
-        }
-
-        [TestMethod]
-        public void Hemomancy_DrainMultiplier_PerRankPlusHealingRider()
-        {
-            var perRank = PropertyManager.GetDouble("class_ability_hemomancy_drain_percent_per_rank").Item;
-            Assert.AreEqual(0.02, perRank, 1e-9);
-
-            Assert.AreEqual(1.10f, HemomancyAbility.DrainMultiplier(5, perRank, 0.0), 1e-5f);
-            Assert.AreEqual(1.03f, HemomancyAbility.DrainMultiplier(1, perRank, 0.01), 1e-5f);
-            Assert.AreEqual(1.0f, HemomancyAbility.DrainMultiplier(0, perRank, 0.5), 1e-5f);
-        }
-
-        /// <summary>
-        /// The heal fraction stays FLAT across every rank (never per-rank, unlike the tick/Drain bonuses
-        /// above) and is zero only at rank 0 - pinning exactly the asymmetry HemomancyAbility's doc comment
-        /// describes.
-        /// </summary>
-        [TestMethod]
-        public void Hemomancy_HealFraction_IsFlatAcrossRanksAndZeroAtRankZero()
-        {
-            var healFraction = PropertyManager.GetDouble("class_ability_hemomancy_heal_fraction").Item;
-            Assert.AreEqual(0.01, healFraction, 1e-9);
-
-            Assert.AreEqual(0.01, HemomancyAbility.HealFraction(1, healFraction), 1e-9);
-            Assert.AreEqual(0.01, HemomancyAbility.HealFraction(5, healFraction), 1e-9);
-            Assert.AreEqual(0.0, HemomancyAbility.HealFraction(0, healFraction), 1e-9);
+            // inactive, or rank 0: bit-identical to no ability at all
+            Assert.AreEqual(1.0f, HemomancyMath.DamageMultiplier(5, perRank, 1.5, active: false));
+            Assert.AreEqual(1.0f, HemomancyMath.DamageMultiplier(0, perRank, 1.5, active: true));
         }
 
         // Heavy Draw's Run-rider stamina-surcharge test lived here until 2026-09-12, when the class ability
@@ -1600,21 +1617,33 @@ namespace ACE.Server.Tests
         // stay registered but unused, so an existing stage or prod config row does not orphan.
 
         [TestMethod]
-        public void Taunt_LoyaltyRider_ExtendsDuration_ClampedToCap()
+        public void Taunt_RadiusByRank_IsFifteenThirtySixtyFive_AndDurationIsFlat()
         {
+            // Taunt is three ranks at 1/1/1 with NO affinity (2026-10-17): rank buys radius, duration is flat
+            var def = new TauntAbility().Definition;
+            Assert.AreEqual(3, def.MaxRank);
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank);
+            Assert.IsNull(def.AffinitySkill, "Taunt carries no affinity since the Assess Person duration bonus was retired");
+
+            Assert.AreEqual(15.0, PropertyManager.GetDouble("class_ability_taunt_radius_r1").Item, 1e-9);
+            Assert.AreEqual(30.0, PropertyManager.GetDouble("class_ability_taunt_radius_r2").Item, 1e-9);
+            Assert.AreEqual(65.0, PropertyManager.GetDouble("class_ability_taunt_radius_r3").Item, 1e-9);
+
+            Assert.AreEqual(15.0, TauntAbility.RadiusForRank(1), 1e-9);
+            Assert.AreEqual(30.0, TauntAbility.RadiusForRank(2), 1e-9);
+            Assert.AreEqual(65.0, TauntAbility.RadiusForRank(3), 1e-9);
+
+            // a stray rank clamps to the ends of the ladder rather than reading past it
+            Assert.AreEqual(15.0, TauntAbility.RadiusForRank(0), 1e-9);
+            Assert.AreEqual(65.0, TauntAbility.RadiusForRank(9), 1e-9);
+
+            // Bellow is a plain summand on the rank radius
+            Assert.AreEqual(35.0, TauntAbility.EffectiveRadius(TauntAbility.RadiusForRank(2), 5.0), 1e-9);
+
             var baseDuration = PropertyManager.GetDouble("class_ability_taunt_duration").Item;
-            var cap = PropertyManager.GetDouble("class_ability_taunt_loyalty_bonus_cap_seconds").Item;
             Assert.AreEqual(11.0, baseDuration, 1e-9);
-            Assert.AreEqual(10.0, cap, 1e-9);
-
-            // rider = 0 reproduces today's duration exactly
-            Assert.AreEqual(11.0, TauntAbility.EffectiveDuration(baseDuration, 0.0, cap), 1e-9);
-
-            // a +4 second rider extends the hold duration
-            Assert.AreEqual(15.0, TauntAbility.EffectiveDuration(baseDuration, 4.0, cap), 1e-9);
-
-            // clamps at the cap: a +25 second rider still only adds 10 seconds, never past the cap
-            Assert.AreEqual(21.0, TauntAbility.EffectiveDuration(baseDuration, 25.0, cap), 1e-9);
+            Assert.AreEqual(11.0, TauntAbility.EffectiveDuration(baseDuration), 1e-9);
+            Assert.AreEqual(13.0, TauntAbility.EffectiveDuration(baseDuration, 2.0), 1e-9, "Provoke is the only duration term");
         }
 
         /// <summary>
@@ -1780,21 +1809,6 @@ namespace ACE.Server.Tests
             var perOpeningAtRank3 = KillerInstinctAbility.PerOpeningCritDamage(3, baseRate, step);
 
             Assert.AreEqual(0.30, perOpeningAtRank3 * maxStacks, 1e-9);
-        }
-
-        /// <summary>
-        /// REGRESSION, live bug 2026-08-04 - the Archmage half of the same defect. See
-        /// AcidProcChance_AffinityCap_BoundsAnAbsurdRider_ButNotTheGearMod.
-        /// </summary>
-        [TestMethod]
-        public void ElementalRendChance_AffinityCap_BoundsAnAbsurdRider_ButNotTheGearMod()
-        {
-            Assert.IsTrue(ElementalRendAbility.RendChance(3, 0.08, 0.06, 2.09) >= 1.0f);
-
-            Assert.AreEqual(0.40f, ElementalRendAbility.RendChance(3, 0.08, 0.06, 2.09, 0.0, 0.20), 1e-5f);
-            Assert.AreEqual(0.45f, ElementalRendAbility.RendChance(3, 0.08, 0.06, 2.09, 0.05, 0.20), 1e-5f);
-            Assert.AreEqual(0.36f, ElementalRendAbility.RendChance(3, 0.08, 0.06, 0.16, 0.0, 0.20), 1e-5f);
-            Assert.AreEqual(2.29f, ElementalRendAbility.RendChance(3, 0.08, 0.06, 2.09, 0.0, 0.0), 1e-5f);
         }
 
         [TestMethod]

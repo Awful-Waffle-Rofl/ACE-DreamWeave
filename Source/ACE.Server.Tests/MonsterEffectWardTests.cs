@@ -60,6 +60,28 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void Drain_PartlyAbsorbedByAWard_LosesTheRestAndHealsOnlyForIt()
+        {
+            // Pinnacle review F5: WorldObject.MonsterDrainAfterAbsorb (the HandleCastSpell_Transfer filter) on a ward
+            // that soaks PART of a drain: the victim loses what got through, and the caster gains only for that
+            var victim = TestCreatures.CreateDefender(maxHealth: 500);
+            victim.Health.Current = 500;
+            victim.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("amount=50 secs=300 on=spawn"))));
+            victim.MonsterEffectHeartbeat();
+
+            var caster = TestCreatures.CreateDefender(maxHealth: 500);
+            const uint loss = 200, priorGain = 130;
+            const float lossPercent = 0.35f, boostMod = 1.0f;
+
+            var (after, gain) = ACE.Server.WorldObjects.WorldObject.MonsterDrainAfterAbsorb(victim, caster, loss, priorGain, lossPercent, boostMod);
+
+            Assert.AreEqual(150u, after, "the 50-point ward soaks 50 of the 200 drained");
+            Assert.AreEqual(ACE.Server.Pvp.Rules.PvpRules.RecomputeDrainGain(after, priorGain, lossPercent, boostMod), gain, "the gain is the one the absorbed loss pays");
+            Assert.IsTrue(gain <= priorGain, "never raised");
+            Assert.IsTrue(gain < priorGain, "and here genuinely lowered: 150 x 0.65 = 98 < 130");
+        }
+
+        [TestMethod]
         public void Parse_AcceptsAValidRecordAndRejectsBadOnes()
         {
             Assert.IsTrue(Effect.Validate(Spec("amount=100 secs=15"), out _));
@@ -364,11 +386,13 @@ namespace ACE.Server.Tests
             var creature = TestCreatures.CreateDefender(maxHealth: 500);
             creature.Health.Current = 500;
 
-            creature.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("amount=50 secs=0.001 on=heartbeat"))));
+            creature.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("amount=50 secs=300 on=heartbeat"))));
 
             var captured = CaptureAnnouncements();
 
-            // UP
+            // UP. The lifetime is long on purpose: with a 1 ms lifetime the SHATTERED hit below raced the
+            // wall clock, and any cold-JIT stall over 1 ms made it announce FADED instead. Expiry is
+            // forced explicitly further down by moving WardExpire into the past.
             creature.MonsterEffectHeartbeat();
             StringAssert.Contains(captured[0].Message, "is surrounded by a shimmering ward!");
 
@@ -379,7 +403,9 @@ namespace ACE.Server.Tests
 
             // regrant, then let it lapse: FADED, then UP again from the same-tick regrant
             creature.MonsterEffectHeartbeat();
-            System.Threading.Thread.Sleep(50);
+
+            // force the lapse deterministically: a non-zero expiry far in the past (0 would mean "cleared")
+            creature.MonsterEffectStates[0].WardExpire = 1.0;
             creature.MonsterEffectHeartbeat();
 
             Assert.AreEqual(5, captured.Count);
@@ -536,13 +562,14 @@ namespace ACE.Server.Tests
             var creature = TestCreatures.CreateDefender(maxHealth: 500);
             creature.Health.Current = 500;
 
-            creature.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("amount=50 secs=0.001"))));
+            creature.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec("amount=50 secs=300"))));
             creature.MonsterEffectHeartbeat();
 
             Assert.IsTrue(creature.TryGetMonsterWardRemaining(out var beforeExpiry));
             Assert.AreEqual(50u, beforeExpiry);
 
-            System.Threading.Thread.Sleep(50);
+            // force the lapse deterministically (non-zero, far in the past) rather than racing a 1 ms lifetime
+            creature.MonsterEffectStates[0].WardExpire = 1.0;
 
             // still reports true (a ward entry is carried), but the lapsed pool must not count toward the sum
             Assert.IsTrue(creature.TryGetMonsterWardRemaining(out var afterExpiry), "the entry is still carried even though the pool has lapsed");

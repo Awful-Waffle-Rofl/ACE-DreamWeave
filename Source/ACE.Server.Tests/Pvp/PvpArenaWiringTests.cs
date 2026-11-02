@@ -290,7 +290,9 @@ namespace ACE.Server.Tests.Pvp
         {
             var body = MethodBody(Death, "public void ThreadSafeTeleportOnDeath()");
 
-            AssertContains(body, "|| ThreadDungeonDeathInProgress || PvpMatchDeathInProgress) { var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);", "death return");
+            // A match death takes the one PvP return resolver (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"), never the stamp directly.
+            AssertContains(body, "else if (PvpMatchDeathInProgress) { newPosition = ResolvePvpReturn(\"match death\") ?? Instantiation ?? Location; }", "death return");
+            AssertContains(body, "|| ThreadDungeonDeathInProgress) { var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);", "challenge and Thread death return");
             AssertContains(body, "pvpMatchDeathInProgress = false; pvpMatchDeathWaiver = null;", "latch clear");
             AssertNoLiveBindingRead(body, "ThreadSafeTeleportOnDeath");
         }
@@ -364,6 +366,30 @@ namespace ACE.Server.Tests.Pvp
                 "EnforceFacetPkStatus must return false for a player in a match before anything else");
         }
 
+        /// <summary>
+        /// Deserter lockout (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): the logout forfeit carries ServerCaused from the session's pending
+        /// termination reason OR the one-shot eviction flag, and the flag is consumed (reset) on every call.
+        /// </summary>
+        [TestMethod]
+        public void ReportPvpLogoutForfeit_CarriesServerCaused_FromTheTerminationReasonAndTheEvictionFlag()
+        {
+            var body = Squash(MethodBody("Source/ACE.Server/WorldObjects/Player_PvpArena.cs", "internal void ReportPvpLogoutForfeit()"));
+
+            Assert.IsTrue(body.StartsWith(Squash("{ var evicted = PvpServerLogoffPending; PvpServerLogoffPending = false;"), StringComparison.Ordinal),
+                "the eviction flag is read and reset first, before any early return");
+            Assert.IsTrue(body.Contains(Squash("serverCaused |= PvpDeserterRules.IsServerCausedTermination(Session?.PendingTermination?.Reason);"), StringComparison.Ordinal));
+            Assert.IsTrue(body.Contains(Squash("PvpMatchManager.LogoutForfeit(Guid.Full, binding.Match.MatchId, DateTime.UtcNow, serverCaused)"), StringComparison.Ordinal));
+        }
+
+        /// <summary>The two evictions that call LogOffPlayer(true) with no termination reason set the one-shot flag immediately before it.</summary>
+        [DataTestMethod]
+        [DataRow("Source/ACE.Server/Managers/IpLimitManager.cs", "player.PvpServerLogoffPending = true; player.Session?.LogOffPlayer(true);")]
+        [DataRow("Source/ACE.Server/Network/Handlers/CharacterHandler.cs", "evictee.PvpServerLogoffPending = true; evictee.Session.LogOffPlayer(true);")]
+        public void ServerEvictions_SetTheOneShotFlag_ImmediatelyBeforeTheLogoff(string file, string expected)
+        {
+            Assert.IsTrue(Squash(LiveSource(file)).Contains(Squash(expected), StringComparison.Ordinal), $"{file}: expected live code containing:\n  {expected}");
+        }
+
         [TestMethod]
         public void LogOut_ReportsTheForfeitBeforeThePkDeferral_AndLogOutInnerExits()
         {
@@ -380,7 +406,7 @@ namespace ACE.Server.Tests.Pvp
 
         /// <summary>
         /// PvP Template Facets: the death exit restores at the START of the arrival action, before the vitals reset,
-        /// so the 75% vitals are computed from the player's own restored maximums. Exactly one call, and it is told whether
+        /// so the arrival vitals (75%, or full for a still-Live pen death) are computed from the maximums at that moment. Exactly one call, and it is told whether
         /// the death went to a battleground pen (a respawn death, which does NOT end participation and so does not restore).
         /// </summary>
         [TestMethod]
@@ -390,7 +416,7 @@ namespace ACE.Server.Tests.Pvp
 
             var addAction = body.IndexOf(Squash("teleportChain.AddAction(this, () =>"), StringComparison.Ordinal);
             var restore = body.IndexOf(Squash("PvpTemplateDeathArrival(wentToPen);"), StringComparison.Ordinal);
-            var vitals = body.IndexOf(Squash("var newHealth = (uint)Math.Round(Health.MaxValue * 0.75f);"), StringComparison.Ordinal);
+            var vitals = body.IndexOf(Squash("var newHealth = PvpPlayerRules.DeathArrivalVital(Health.MaxValue, penStillLive);"), StringComparison.Ordinal);
 
             Assert.IsTrue(addAction >= 0 && restore > addAction && vitals > restore, "PvpTemplateDeathArrival must open the arrival action, ahead of the vitals reset");
             Assert.AreEqual(-1, body.IndexOf(Squash("PvpTemplateDeathArrival(wentToPen);"), restore + 1, StringComparison.Ordinal), "called exactly once");
@@ -523,7 +549,7 @@ namespace ACE.Server.Tests.Pvp
             var body = Squash(MethodBody(PetDevice, "public override void ActOnUse(WorldObject activator)"));
 
             var refusal = body.IndexOf(Squash("if (player.IsInPvpMatch)"), StringComparison.Ordinal);
-            var summon = body.IndexOf(Squash("SummonCreature(player, wcid"), StringComparison.Ordinal);
+            var summon = body.IndexOf(Squash("SummonCreature(player, sources[0]"), StringComparison.Ordinal);
 
             Assert.IsTrue(refusal >= 0 && summon > refusal, "the in-match refusal must come before the summon");
             AssertContains(body, "PvpArenaText.SummonRefused", "PetDevice");

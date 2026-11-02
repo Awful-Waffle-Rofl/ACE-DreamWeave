@@ -574,8 +574,76 @@ namespace ACE.Server.Tests
     /// row is a count against a wcid. RunSerialized records nesting depth so a test can assert the
     /// purchase path never holds two accounts' regions at once.
     /// </summary>
-    internal class FakeMarketItemStore : IMarketItemStore
+    internal class FakeMarketItemStore : IMarketItemStore, ISharedVaultSource
     {
+        // ---- ISharedVaultSource: the suit builder's shared mules ----
+
+        /// <summary>Every grant, as account_vault_grant would hold them. Access is decided from this list, like the real TryGetAccess.</summary>
+        public readonly List<ACE.Database.Models.Shard.AccountVaultGrant> Grants = new List<ACE.Database.Models.Shard.AccountVaultGrant>();
+
+        /// <summary>When set, the grantee-keyed read answers this instead of filtering <see cref="Grants"/> (a stale or lying read). Null result = read failure.</summary>
+        public Func<uint, List<ACE.Database.Models.Shard.AccountVaultGrant>> GranteeReadOverride;
+
+        public bool FailGranteeRead;
+
+        /// <summary>Owner accounts whose access read fails (TryGetAccess false).</summary>
+        public readonly HashSet<uint> FailAccessOwners = new HashSet<uint>();
+
+        /// <summary>Current character names by guid, for the granter-name lookup (PlayerManager.FindByGuid in production).</summary>
+        public readonly Dictionary<uint, string> CurrentNames = new Dictionary<uint, string>();
+
+        public List<ACE.Database.Models.Shard.AccountVaultGrant> GetGrantsForGrantee(uint granteeCharacterGuid)
+        {
+            if (FailGranteeRead)
+                return null;
+
+            if (GranteeReadOverride != null)
+                return GranteeReadOverride(granteeCharacterGuid);
+
+            return Grants.Where(g => g.GranteeCharacterGuid == granteeCharacterGuid).OrderBy(g => g.OwnerAccountId).ToList();
+        }
+
+        public bool TryGetAccess(uint ownerAccountId, VaultActor actor, out VaultAccess access)
+        {
+            access = VaultAccess.None;
+
+            if (FailAccessOwners.Contains(ownerAccountId))
+                return false;
+
+            // The real rule (AccountVaultStore.TryGetAccess): the owner account has full access; anyone else needs a
+            // grant naming THIS character on THIS owner's store.
+            if (actor.AccountId != 0 && actor.AccountId == ownerAccountId)
+            {
+                access = VaultAccess.DepositWithdraw;
+                return true;
+            }
+
+            var grant = Grants.FirstOrDefault(g => g.OwnerAccountId == ownerAccountId && g.GranteeCharacterGuid == actor.CharacterGuid);
+
+            if (grant != null)
+                access = grant.CanWithdraw ? VaultAccess.DepositWithdraw : VaultAccess.Deposit;
+
+            return true;
+        }
+
+        public string GranterName(ACE.Database.Models.Shard.AccountVaultGrant grant) =>
+            VaultGranterName.Resolve(grant, guid => CurrentNames.TryGetValue(guid, out var name) ? name : null);
+
+        /// <summary>A store is warm unless it is in <see cref="NotReadyAccounts"/> (cold) - answered from state, no load.</summary>
+        public bool IsWarm(uint ownerAccountId) => !NotReadyAccounts.Contains(ownerAccountId);
+
+        /// <summary>Accounts queued for a warm-up, in order.</summary>
+        public readonly List<uint> WarmRequests = new List<uint>();
+
+        /// <summary>False: the warm queue refuses (full).</summary>
+        public bool WarmQueueAccepts = true;
+
+        public bool RequestWarm(uint ownerAccountId)
+        {
+            WarmRequests.Add(ownerAccountId);
+            return WarmQueueAccepts;
+        }
+
         public readonly Dictionary<uint, List<WorldObject>> Items = new Dictionary<uint, List<WorldObject>>();
         public readonly Dictionary<(uint account, uint wcid), long> Ledger = new Dictionary<(uint, uint), long>();
 
@@ -852,8 +920,13 @@ namespace ACE.Server.Tests
         public long LedgerCount(uint accountId, uint wcid)
             => Ledger.TryGetValue((accountId, wcid), out var c) ? c : 0;
 
+        /// <summary>Every account IsReady was asked about, in order (IsReady stands for TryCheckReady, which loads a cold store).</summary>
+        public readonly List<uint> IsReadyAccounts = new List<uint>();
+
         public bool IsReady(uint accountId, out string failReason)
         {
+            IsReadyAccounts.Add(accountId);
+
             if (NotReadyAccounts.Contains(accountId))
             {
                 failReason = AccountVaultStore.UnavailableMessage;

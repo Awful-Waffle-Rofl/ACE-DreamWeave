@@ -388,7 +388,8 @@ namespace ACE.Server.Tests
 
             var branch = hook.IndexOf("if (kind == MlDigsiteDeathKind.Add)", StringComparison.Ordinal);
             var route = hook.IndexOf("MlDigsiteBossMechanics.OnAddDied(encounter, creature);", StringComparison.Ordinal);
-            var wave = hook.IndexOf("encounter.ScheduleNextWave(", StringComparison.Ordinal);
+            // The wave pacing (ScheduleNextWave) now lives in OnWaveCleared; the hook reaches it through this call.
+            var wave = hook.IndexOf("OnWaveCleared(encounter, now);", StringComparison.Ordinal);
 
             Assert.IsTrue(branch >= 0, "the death hook must recognise a mechanic add");
             Assert.IsTrue(route > branch);
@@ -532,6 +533,95 @@ namespace ACE.Server.Tests
 
             Assert.IsTrue(stamp >= 0, "the opt-in is the digsite stamp");
             Assert.IsTrue(live > stamp, "and the encounter lookup only happens for an object that carries it");
+        }
+
+        // ---- empty / vanished wave guards (Discord 1563056666600149042) -----------------------------------
+
+        [TestMethod]
+        public void DriveWaves_prunes_before_reading_the_schedule_and_stops_if_the_prune_requested_the_end()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(),
+                "private static void DriveWaves(MlDigsiteEncounter encounter, DateTime now)");
+
+            var prune = body.IndexOf("PruneVanishedWaveCreatures(encounter, now);", StringComparison.Ordinal);
+            var early = body.IndexOf("if (encounter.EndRequested)", StringComparison.Ordinal);
+            var due = body.IndexOf("encounter.NextWaveDueUtc", StringComparison.Ordinal);
+
+            Assert.IsTrue(prune >= 0, "DriveWaves must prune vanished creatures");
+            Assert.IsTrue(early > prune, "and return early when the prune requested the end");
+            Assert.IsTrue(due > early, "before the schedule is read or anything is placed");
+        }
+
+        [TestMethod]
+        public void SpawnNextWave_retries_an_empty_wave_once_and_skips_it_uncredited_when_still_empty()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(), "private static int SpawnNextWave(");
+
+            var retry = body.IndexOf("if (placed == 0 && count > 0 && encounter.RunValid)", StringComparison.Ordinal);
+            var note = body.IndexOf("encounter.NoteWaveSpawned(", StringComparison.Ordinal);
+            var skip = body.IndexOf("encounter.LiveWaveCount == 0 && encounter.RunValid)", StringComparison.Ordinal);
+            var skipCall = body.IndexOf("OnWaveSkipped(encounter, DateTime.UtcNow);", StringComparison.Ordinal);
+
+            Assert.IsTrue(retry >= 0 && retry < note, "the retry happens before the wave is recorded as spawned");
+            Assert.IsTrue(skip > note && skipCall > skip, "the empty-field skip runs after the spawn is recorded");
+            Assert.IsFalse(body.Contains("OnWaveCleared"), "an empty wave is never credited as cleared");
+        }
+
+        [TestMethod]
+        public void OnWaveSkipped_never_credits_the_wave_or_wins_the_run()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(),
+                "private static void OnWaveSkipped(MlDigsiteEncounter encounter, DateTime now)");
+
+            Assert.IsFalse(body.Contains("WaveWon"));
+            Assert.IsFalse(body.Contains("OnWaveCleared"));
+            Assert.IsFalse(body.Contains("HighestWaveCleared"));
+            Assert.IsTrue(body.Contains("MlDigsiteRules.EndReasons.Stalled, MlDigsiteResult.Scored"), "the last wave's end is the stall outcome");
+
+            var enc = PooledLootSourceText.MethodBody(
+                PooledLootSourceText.Read("Source/ACE.Server/MlDigsite/MlDigsiteEncounter.cs"),
+                "public List<Creature> PruneVanishedWaveCreatures(DateTime nowUtc, out bool waveNowEmpty, out bool realClear)");
+
+            Assert.IsTrue(enc.Contains("MlDigsiteRules.VanishCountsAsClear(killsThisWave, spawnedThisWave)"), "a clear is credited only through the half-killed rule");
+        }
+
+        [TestMethod]
+        public void DriveWaves_returns_after_SpawnNextWave_if_the_spawn_requested_the_end()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(),
+                "private static void DriveWaves(MlDigsiteEncounter encounter, DateTime now)");
+
+            var spawn = body.IndexOf("SpawnNextWave(encounter, NewRandom()", StringComparison.Ordinal);
+            var early = body.IndexOf("if (encounter.EndRequested)", spawn, StringComparison.Ordinal);
+            var forced = body.IndexOf("DriveForcedCheckpoint(encounter, now, tick);", StringComparison.Ordinal);
+
+            Assert.IsTrue(spawn >= 0 && early > spawn, "an end requested by the spawn stops the tick");
+            Assert.IsTrue(forced > early, "before any forced checkpoint is considered");
+        }
+
+        [TestMethod]
+        public void SpawnNextWave_numbers_and_records_a_respawn_of_the_last_wave_without_advancing_the_count()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(), "private static int SpawnNextWave(");
+
+            StringAssert.Contains(body, "respawnLastWave ? encounter.WavesSpawned : encounter.WavesSpawned + 1");
+            StringAssert.Contains(body, "encounter.NoteWaveRespawned(");
+            StringAssert.Contains(body, "encounter.NoteWaveSpawned(");
+        }
+
+        [TestMethod]
+        public void OnWaveSkipped_claims_the_respawn_through_the_pure_predicate_and_downgrades_a_win_after_a_vanish_skip()
+        {
+            var body = PooledLootSourceText.MethodBody(Manager(),
+                "private static void OnWaveSkipped(MlDigsiteEncounter encounter, DateTime now)");
+
+            StringAssert.Contains(body, "MlDigsiteRules.EmptyWaveAction(wave, encounter.LastWaveRespawnUsed, encounter.CheckpointAlive)");
+            StringAssert.Contains(body, "encounter.TryClaimLastWaveRespawn()");
+
+            var cleared = PooledLootSourceText.MethodBody(Manager(),
+                "private static void OnWaveCleared(MlDigsiteEncounter encounter, DateTime now)");
+
+            StringAssert.Contains(cleared, "encounter.VanishSkips > 0 ? MlDigsiteResult.Scored : MlDigsiteResult.FullClear");
         }
     }
 }

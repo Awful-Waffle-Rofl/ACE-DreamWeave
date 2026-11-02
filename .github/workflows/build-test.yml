@@ -215,7 +215,7 @@ jobs:
       - name: Cache the unzipped world database dump
         id: cache-world-dump
         if: steps.verified.outputs.verified != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.dump-name.outputs.sql-file }}
           key: world-db-dump-${{ env.WORLD_DB_RELEASE_TAG }}-${{ env.WORLD_DB_RELEASE_ASSET }}

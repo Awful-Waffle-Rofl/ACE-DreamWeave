@@ -228,6 +228,60 @@ namespace ACE.Server.ThreadDungeons
         public static int LiveRunCount => runs.Values.Count(r => r.State != ThreadDungeonRunState.Ended);
 
         /// <summary>
+        /// Live runs whose dungeon is an outdoor site, for the rotation filter (<see cref="OutdoorRotation.IsEligible"/>).
+        /// The same count TryStart re-checks under startLock (<see cref="CountOutdoorTowardCap"/>), because this read
+        /// happens at gem-use time and the run starts later.
+        /// </summary>
+        public static int LiveOutdoorRunCount()
+            => CountOutdoorTowardCap(runs.Values.Select(r => (r.State, r.Dungeon != null && r.Dungeon.IsOutdoor)));
+
+        /// <summary>
+        /// How many runs count toward dynamic_dungeons_outdoor_max_concurrent_runs: every non-Ended outdoor run. That
+        /// includes a run that has been ADMITTED (registered in Starting by TryStart's critical section) but not yet
+        /// populated, so two starts racing for the last slot cannot both pass: the second one's count, taken under the
+        /// same lock, already holds the first. Pure.
+        /// </summary>
+        internal static int CountOutdoorTowardCap(IEnumerable<(ThreadDungeonRunState State, bool IsOutdoor)> runStates)
+        {
+            var count = 0;
+
+            if (runStates == null)
+                return count;
+
+            foreach (var r in runStates)
+            {
+                if (r.IsOutdoor && r.State != ThreadDungeonRunState.Ended)
+                    count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>The refusal a start gets when its dungeon row is switched off (the row's own Enabled, or the outdoor kill switch).</summary>
+        public const string DungeonUnavailableReason = "That dungeon is not currently available.";
+
+        /// <summary>
+        /// The outdoor half of the start gates (Open World Threads R2, TryStart is the authority: rotation may have bound
+        /// a gem to an outdoor id between the offer and the start). A dungeon row always passes. An outdoor row is refused
+        /// with <see cref="DungeonUnavailableReason"/> while dynamic_dungeons_outdoor_enabled is off, and with
+        /// <see cref="ServerBusyReason"/> once <paramref name="liveOutdoorRuns"/> (<see cref="CountOutdoorTowardCap"/>,
+        /// pending runs included) has reached <paramref name="maxOutdoorRuns"/>. A cap of 0 or less is unlimited, as for
+        /// dynamic_dungeons_max_concurrent_runs. Pure.
+        /// </summary>
+        internal static bool PassesOutdoorGate(bool isOutdoor, bool outdoorEnabled, long maxOutdoorRuns, int liveOutdoorRuns, out string reason)
+        {
+            reason = null;
+
+            if (!isOutdoor)
+                return true;
+
+            if (!outdoorEnabled) { reason = DungeonUnavailableReason; return false; }
+            if (maxOutdoorRuns > 0 && liveOutdoorRuns >= maxOutdoorRuns) { reason = ServerBusyReason; return false; }
+
+            return true;
+        }
+
+        /// <summary>
         /// Validate into a LOCAL, then publish once. Both entry points do this identically, and the ordering
         /// is load-bearing rather than stylistic: <see cref="ValidateWorldWcids"/> can DROP a salvage_affinity
         /// modifier whose base wcid does not resolve, and that drop is a write to the plain Dictionary backing
@@ -336,6 +390,14 @@ namespace ACE.Server.ThreadDungeons
             => runs.TryGetValue(instance, out var run) && run.State != ThreadDungeonRunState.Ended ? run : null;
 
         /// <summary>
+        /// The run registered under <paramref name="instance"/> in ANY state, or null; 0 is never a run. Takes no run
+        /// lock, unlike <see cref="GetRun"/>, because its caller is the damage path (ThreadContributionHook), whose run
+        /// methods apply their own state gate.
+        /// </summary>
+        internal static ThreadDungeonRun GetRegisteredRun(uint instance)
+            => instance != 0 && runs.TryGetValue(instance, out var run) ? run : null;
+
+        /// <summary>
         /// The owner's non-Ended run, or null. Normally there is at most one. The exception is a Cleared GROUP run
         /// (see <see cref="IsHeldGroupRun"/>): it survives its owner's next start, so the owner can have more than
         /// one. The Starting or Active run is preferred, then the newest Cleared one, so the
@@ -391,8 +453,9 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// A Cleared GROUP run. Members may still be inside looting placed caches, so the owner's next start never
-        /// ends it (ruling R29 as amended in review): it ends only through the timed reap or its TTL. A solo run is
-        /// never held.
+        /// ends it (ruling R29 as amended in review): it ends only through the timed reap or its TTL. A Cleared solo
+        /// run may be on the loot hold too (owner ruling 2026-10-10), but it is not a "held group run" here: the
+        /// owner's next PASSING start supersedes it (<see cref="EndsAtOwnersNextStart"/>, PassesStartGatesAfterSweep).
         /// </summary>
         internal static bool IsHeldGroupRun(ThreadDungeonRunState state, bool isGroup)
             => state == ThreadDungeonRunState.Cleared && isGroup;
@@ -675,11 +738,25 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// The start gates as they will stand once <see cref="EndClearedRunsForOwner"/> has run: the owner's runs for
+        /// which <see cref="EndsAtOwnersNextStart"/> is true are left out, then <see cref="CountStartGates"/> and
+        /// <see cref="PassesStartGates"/> decide as usual. TryStart sweeps only when this passes, so a refused start
+        /// leaves a held cleared solo run (and its live gem and owed loot) alone (owner ruling 2026-10-10). Pure.
+        /// </summary>
+        internal static bool PassesStartGatesAfterSweep(IEnumerable<(uint OwnerGuid, uint AccountId, ThreadDungeonRunState State, bool IsGroup)> runStates,
+            uint ownerGuid, uint accountId, bool ownerOnLiveRoster, long maxRuns, long perAccount, out string reason)
+        {
+            var remaining = runStates?.Where(r => !(r.OwnerGuid == ownerGuid && EndsAtOwnersNextStart(r.State, r.IsGroup)));
+            return PassesStartGates(CountStartGates(remaining, ownerGuid, accountId), ownerOnLiveRoster, maxRuns, perAccount, out reason);
+        }
+
+        /// <summary>
         /// Starting a run implicitly ends the owner's own FINISHED one (owner ruling, 2026-09-06: "This
-        /// should not need to be manually managed by the player"). A Cleared run has already destroyed its
-        /// gem (AnnounceCleared -> GemDestroyer, ruling A1), so there is nothing left for the player to spend
-        /// or hand back and no way for them to re-enter it - but the copy itself lingers, and while it does
-        /// the start gate below refuses their next dungeon with "You already have a dungeon open".
+        /// should not need to be manually managed by the player"). A Cleared solo run's gem survives the clear
+        /// (owner ruling 2026-10-10, superseding ruling A1) so its owner can come back for loot after a death,
+        /// and the copy may be on the loot hold - but opening a DIFFERENT gem is the owner choosing to move on,
+        /// and while the cleared copy lingers the start gate below refuses their next dungeon with "You already
+        /// have a dungeon open". Ending it here also destroys its gem (EndRun -> OnRunEnded -> GemDestroyer).
         ///
         /// Reaping it AT THE MOMENT THEY ACT is strictly better than either alternative. Letting a Cleared
         /// run through the gate would leave a player free to chain-open copies faster than they reap and
@@ -754,8 +831,9 @@ namespace ACE.Server.ThreadDungeons
             droppedNames = Array.Empty<string>();
 
             if (!IsEnabled) { reason = "Threads are not enabled on this server."; return false; }
-            if (dungeon == null || !dungeon.Enabled) { reason = "That dungeon is not currently available."; return false; }
+            if (dungeon == null || !dungeon.Enabled) { reason = DungeonUnavailableReason; return false; }
             if (!TryParseEntry(dungeon.Entry, out var entry)) { reason = "That dungeon's entry point is misconfigured."; log.Error($"[DYNDUNGEON] dungeon {dungeon.Id} entry '{dungeon.Entry}' unparseable"); return false; }
+            if (dungeon.IsOutdoor && dungeon.Outdoor == null) { reason = "That dungeon's entry point is misconfigured."; log.Error($"[DYNDUNGEON] outdoor site {dungeon.Id} has no parsed site file"); return false; }
 
             var maxRuns = (int)PropertyManager.GetLong("dynamic_dungeons_max_concurrent_runs").Item;
             var perAccount = (int)PropertyManager.GetLong("dynamic_dungeons_max_runs_per_account").Item;
@@ -797,10 +875,15 @@ namespace ACE.Server.ThreadDungeons
             var candidates = ThreadDungeonRun.OrderRoster(candidateSeats);
 
             // Group tunables are read BEFORE startLock (a cache miss is a database read); the snapshot is computed
-            // inside it for the kept size (ruling R28). A roster of one reads nothing here: a solo run is never
-            // held for loot (owner ruling, 2026-09-27), so none of the nine group dials, loot hold included, are
-            // read for it.
+            // inside it for the kept size (ruling R28). A roster of one reads none of the nine group dials.
             var groupTunables = candidates.Count > 1 ? GroupTunables.Read() : default;
+
+            // The loot hold for a run that ends up SOLO (owner ruling 2026-10-10: a cleared solo copy still owing loot
+            // is held on the same tunable as a group run's). Read for every start, not just a roster of one, because a
+            // group start whose seats are all dropped at admission opens solo. A group run takes its hold from its
+            // GroupScaling snapshot instead (the same tunable, read by GroupTunables.Read). Explicit fallback for the
+            // same reason as the empty grace below.
+            var soloLootHoldMinutes = PropertyManager.GetLong("dynamic_dungeons_group_loot_hold_minutes", GroupScaling.DefaultLootHoldMinutes).Item;
 
             // Explicit fallback: an unseeded GetLong returns 0, which the clamp would silently turn into the
             // old 5 minutes rather than the intended 10.
@@ -831,11 +914,45 @@ namespace ACE.Server.ThreadDungeons
             var puzzleGatesPerRun = (int)Math.Clamp(PropertyManager.GetLong("dynamic_dungeons_puzzle_gates_per_run", 1).Item, 0, ThreadPuzzleSitePicker.MaxGatesPerRun);
             var puzzleRewardScene = PropertyManager.GetBool("dynamic_dungeons_puzzle_reward_scene_enabled", true).Item;
 
+            // Open World Threads (R2): the outdoor kill switch and cap, re-checked here because TryStart is the authority
+            // (the rotation read them at gem-use time). Read before startLock like every other dial, and only for an
+            // outdoor row, so a dungeon start reads nothing new. Explicit fallbacks equal to the shipped defaults.
+            var isOutdoor = dungeon.IsOutdoor;
+            var outdoorEnabled = isOutdoor && PropertyManager.GetBool(OutdoorSiteTunables.OutdoorEnabledKey, OutdoorSiteTunables.DefaultOutdoorEnabled).Item;
+            var outdoorMax = isOutdoor ? PropertyManager.GetLong(OutdoorSiteTunables.MaxConcurrentRunsKey, OutdoorSiteTunables.DefaultMaxConcurrentRuns).Item : 0L;
+
+            // Read once here and recorded on the run (ThreadDungeonRun.LazyBufferRing), so a flip mid-run changes only
+            // runs started after it. Outdoor rows only; a dungeon run never has a ring and reads nothing new.
+            var lazyBufferRing = isOutdoor && PropertyManager.GetBool(OutdoorSiteTunables.LazyBufferRingKey, OutdoorSiteTunables.DefaultLazyBufferRing).Item;
+
             uint instance;
 
             // Retire this owner's finished run before the gates below look at it. See EndClearedRunsForOwner.
             //
-            // OUTSIDE startLock, deliberately. EndRun is not registry arithmetic: it evicts players, reaches
+            // But ONLY when the start will pass (owner ruling 2026-10-10): a cleared solo run may now be on the loot
+            // hold with a live gem and loot still owed, and a REFUSED start (the per-account cap, a live roster, the
+            // server cap) must not destroy them. So the gates are first evaluated as they will stand AFTER the sweep
+            // (PassesStartGatesAfterSweep: the owner's sweepable runs left out), and a refusal returns here with
+            // nothing ended. This pre-check takes startLock only for its read and releases it before the sweep, so
+            // the lock is still never held across EndRun. The authoritative check below re-runs the same gates under
+            // the lock; a start that races past the pre-check and is refused there has already swept, which is the
+            // pre-ruling behaviour and needs another start landing in that window.
+            lock (startLock)
+            {
+                var preGate = runs.Values.Select(r => (r.OwnerGuid, r.AccountId, r.State, r.IsGroup)).ToList();
+                if (!PassesStartGatesAfterSweep(preGate, owner.Guid.Full, owner.Account.AccountId, IsOnLiveRoster(owner.Guid.Full), maxRuns, perAccount, out reason))
+                    return false;
+
+                // The outdoor gate is part of the pre-check too, so a start it refuses ends nothing (the 2026-10-10 ruling
+                // above). Counted over the runs that will remain after the sweep, the same exclusion the gates use.
+                var preOutdoor = CountOutdoorTowardCap(runs.Values
+                    .Where(r => !(r.OwnerGuid == owner.Guid.Full && EndsAtOwnersNextStart(r.State, r.IsGroup)))
+                    .Select(r => (r.State, r.Dungeon != null && r.Dungeon.IsOutdoor)));
+                if (!PassesOutdoorGate(isOutdoor, outdoorEnabled, outdoorMax, preOutdoor, out reason))
+                    return false;
+            }
+
+            // The sweep itself runs OUTSIDE startLock, deliberately. EndRun is not registry arithmetic: it evicts players, reaches
             // into LandblockManager to queue a copy for destruction and enqueues gem destruction onto the
             // owner's action queue. startLock is documented to cover only the cheap admission sequence and is
             // never held across a landblock lifecycle call (GetNewThreadDungeonLandblock is kept out of it
@@ -869,6 +986,12 @@ namespace ACE.Server.ThreadDungeons
                 if (!PassesStartGates(gateCounts, IsOnLiveRoster(owner.Guid.Full), maxRuns, perAccount, out reason))
                     return false;
 
+                // The authoritative outdoor gate (R2), in the same critical section as the TryAdd below: the count includes
+                // every outdoor run already admitted (Starting) by an earlier start, so two starts racing for the last
+                // outdoor slot cannot both pass.
+                if (!PassesOutdoorGate(isOutdoor, outdoorEnabled, outdoorMax, CountOutdoorTowardCap(runs.Values.Select(r => (r.State, r.Dungeon != null && r.Dungeon.IsOutdoor))), out reason))
+                    return false;
+
                 // Non-owner seats already on a live roster are dropped, not refused: the rest of the group still
                 // opens. Decided under the lock, so two simultaneous starts cannot both admit the same character.
                 var (kept, dropped) = AdmitSeats(candidates, IsOnLiveRoster);
@@ -887,6 +1010,7 @@ namespace ACE.Server.ThreadDungeons
                     BossWeight = bossWeight,
                     FellowshipAtLock = owner.Fellowship,
                     EmptyGrace = emptyGrace,
+                    LootHold = ResolveRunLootHold(group, soloLootHoldMinutes),
                     CacheRollBatchSize = cacheRollBatch,
                     CacheStepBudgetMs = cacheStepBudgetMs,
                     LootTrickleBudgetMs = lootTrickleBudgetMs,
@@ -894,6 +1018,7 @@ namespace ACE.Server.ThreadDungeons
                     PuzzleGatesEnabled = puzzleGatesEnabled,
                     PuzzleGatesPerRun = puzzleGatesPerRun,
                     PuzzleRewardSceneEnabled = puzzleRewardScene,
+                    LazyBufferRing = lazyBufferRing,
                 };
 
                 droppedNames = dropped;
@@ -908,19 +1033,51 @@ namespace ACE.Server.ThreadDungeons
             // included, with the lock wait also reported on its own (LandblockManager.LastLockWaitMs is per thread and
             // describes the call that just returned on this one).
             var lbCreateStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            var landblock = RealmManager.GetNewThreadDungeonLandblock(new LandblockId((uint)dungeon.Landblock << 16), owner, run, instance);
+
+            // Open World Threads (R22): an outdoor row opens a multi-landblock ephemeral group (its site's primary and
+            // footprint, every member loaded up front); a dungeon row opens its single-landblock copy, as before. For the
+            // outdoor path LastLockWaitMs describes the last member load, not the whole group.
+            var landblock = isOutdoor
+                ? RealmManager.GetNewThreadOutdoorLandblock(dungeon.Outdoor, owner, run, instance)
+                : RealmManager.GetNewThreadDungeonLandblock(new LandblockId((uint)dungeon.Landblock << 16), owner, run, instance);
             ServerMetrics.RecordThreadsLandblockCreate(System.Diagnostics.Stopwatch.GetElapsedTime(lbCreateStart).TotalMilliseconds, LandblockManager.LastLockWaitMs);
 
-            // TECH-DESIGN section 6 step 3d. A landblock with a traversable overworld is not a dungeon and must
-            // never be instanced: the copy would be a private slice of the open world. Mirrors the guard
-            // Portal.cs:569-573 applies to PortalInstancing. Curation should make this unreachable, so it is an
-            // error rather than a warning, and the half-built copy is disposed of rather than left loaded.
-            if (landblock == null || !landblock.IsDungeon)
+            // TECH-DESIGN section 6 step 3d, made kind-aware (ThreadRunGeometry.LoadedKindMatches). A DUNGEON row's
+            // landblock must be a dungeon: one with a traversable overworld must never be instanced by accident, the
+            // copy would be a private slice of the open world. Mirrors the guard Portal.cs applies to
+            // PortalInstancing. An OUTDOOR row is exactly that slice, on purpose, so it must NOT be a dungeon landblock.
+            // Curation should make either refusal unreachable, so it is an error rather than a warning, and the
+            // half-built copy is disposed of rather than left loaded (for an outdoor group the primary's unload drains
+            // the members first, EphemeralInstanceGroup.DecidePrimaryUnload).
+            // An outdoor group whose primary did not register this run's realm (GetNewThreadOutdoorLandblock then loads no
+            // member) is refused the same way: its members could never inherit the run.
+            if (landblock == null || !ThreadRunGeometry.LoadedKindMatches(isOutdoor, landblock.IsDungeon)
+                || (isOutdoor && !ReferenceEquals(landblock.InnerRealmInfo?.Run, run)))
             {
-                log.Error($"[DYNDUNGEON] dungeon {dungeon.Id} landblock 0x{dungeon.Landblock:X4} is not a dungeon (or failed to load) - refusing to open a run");
+                log.Error(isOutdoor
+                    ? $"[DYNDUNGEON] outdoor site {dungeon.Id} primary 0x{dungeon.Landblock:X4} is a dungeon landblock (or failed to load or register) - refusing to open a run"
+                    : $"[DYNDUNGEON] dungeon {dungeon.Id} landblock 0x{dungeon.Landblock:X4} is not a dungeon (or failed to load) - refusing to open a run");
 
-                if (landblock != null)
-                    LandblockManager.AddToDestructionQueue(landblock);
+                // The refused run is Ended BEFORE its copy is let go: an outdoor group's members are held for as long as the
+                // run is not Ended (EphemeralRealm.HoldsFootprintMembers), so they must be released first.
+                run.MarkEnded(DungeonRunTelemetry.EndReasons.LoadFailed);
+
+                // An outdoor group may have registered its primary and then failed a member load (GetNewThreadOutdoorLandblock
+                // returns null then): find the registered primary by instance, so it is cleaned up too.
+                var copy = landblock ?? (isOutdoor ? LandblockManager.GetEphemeralLandblock(instance) : null);
+
+                switch (DecideRefusedCopy(isOutdoor, copy != null, copy != null && ReferenceEquals(copy.InnerRealmInfo?.Run, run)))
+                {
+                    case RefusedCopyAction.QueueNow:
+                        LandblockManager.AddToDestructionQueue(copy);
+                        break;
+
+                    case RefusedCopyAction.Watch:
+                        // An outdoor primary's first claim only drains its members; the ended-copy watcher re-queues it
+                        // until the instance is gone (the same path EndRun uses).
+                        QueueCopyForDestructionWhenEmpty(copy, true);
+                        break;
+                }
 
                 runs.TryRemove(instance, out _);
                 reason = "The dungeon could not be opened.";
@@ -934,6 +1091,34 @@ namespace ACE.Server.ThreadDungeons
                 : $"[DYNDUNGEON] started {run} spec={spec.Serialize()}");
             return true;
         }
+
+        /// <summary>What TryStart's kind/load refusal does with the copy it loaded (<see cref="DecideRefusedCopy"/>).</summary>
+        internal enum RefusedCopyAction { None, QueueNow, Watch }
+
+        /// <summary>
+        /// Open World Threads (F2): the cleanup for a refused start's copy. Nothing when there is no copy. A dungeon copy is queued
+        /// once, exactly as before. An outdoor copy is cleaned up only when it is THIS run's (an id collision's landblock belongs
+        /// to someone else), and then it is watched (QueueCopyForDestructionWhenEmpty with occupied true), because its first unload
+        /// claim only drains its members and a single queue would leave the primary loaded. Pure.
+        /// </summary>
+        internal static RefusedCopyAction DecideRefusedCopy(bool isOutdoor, bool copyPresent, bool copyIsThisRuns)
+        {
+            if (!copyPresent)
+                return RefusedCopyAction.None;
+
+            if (!isOutdoor)
+                return RefusedCopyAction.QueueNow;
+
+            return copyIsThisRuns ? RefusedCopyAction.Watch : RefusedCopyAction.None;
+        }
+
+        /// <summary>
+        /// The loot hold TryStart stamps on a new run (ThreadDungeonRun.LootHold): a group run's lock-time
+        /// <see cref="GroupScaling.LootHold"/>, or for a solo run the same tunable read on its own and sanitised the
+        /// same way (GroupScaling.SanitiseLootHold). Pure; GroupScaling.Solo deliberately carries no hold.
+        /// </summary>
+        internal static TimeSpan ResolveRunLootHold(GroupScaling group, long soloLootHoldMinutes)
+            => group != null && group.IsGroup ? group.LootHold : TimeSpan.FromMinutes(GroupScaling.SanitiseLootHold(soloLootHoldMinutes));
 
         /// <summary>
         /// "0x0150018A 30 0 0.005 1 0 0 0" -> Position (instance 0; the caller stamps it).
@@ -965,8 +1150,8 @@ namespace ACE.Server.ThreadDungeons
             // The boss death, BEFORE the clear announcement. A pooled run only marks the boss bonus here
             // (MarkPooledBonus); the pooled delivery below forms the cache. The OFF path spawns the boss-death
             // cache (TrySpawnBossCache) at the boss's AUTHORED anchor, not at the corpse, so on the kill that does
-            // both the player reads "A Thread Cache has formed where the boss fell." above "... is cleared and
-            // your gem crumbles to dust." rather than below it. That cache's exactly-once is the run's (TryClaimBossChest).
+            // both the player reads "A Thread Cache has formed where the boss fell." above the clear line
+            // rather than below it. That cache's exactly-once is the run's (TryClaimBossChest).
             if (creature.DungeonRole == DungeonRole.Boss)
                 DispatchBossDeath(run);
 
@@ -1077,12 +1262,12 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>Test seam: the online-player lookup the clearing-player chain uses. Production is PlayerManager.</summary>
         internal static Func<uint, Player> ClearingPlayerLookup = PlayerManager.GetOnlinePlayer;
 
-        /// <summary>Stands in the run's copy: its instance and the dungeon's landblock (ThreadRunPresence's location clause).</summary>
+        /// <summary>Stands in the run's copy: its instance and a landblock the copy owns (ThreadRunPresence's location clause).</summary>
         private static bool IsInRunCopy(ThreadDungeonRun run, Player player)
             => player?.Location != null
                && run.Dungeon != null
                && player.Location.Instance == run.Instance
-               && player.Location.LandblockId.Landblock == run.Dungeon.Landblock;
+               && ThreadRunGeometry.IsOnRunLandblock(run, player.Location);
 
         /// <summary>
         /// ThreadRunPresence.IsMemberInside over a guid, with the online check in front: the damage history holds
@@ -1144,7 +1329,12 @@ namespace ACE.Server.ThreadDungeons
         /// (ThreadRunPresence.MessageRecipients: online members inside, in roster order), owner included, and
         /// runs the clear rewards once per recipient (ruling R26). Its owner gem and member keys are NOT destroyed
         /// here (ruling R29 as amended): members who died or stepped out still need them to return for their
-        /// piles, so they die at run end through OnRunEnded. The solo path is unchanged.
+        /// piles, so they die at run end through OnRunEnded.
+        ///
+        /// A SOLO run's gem is not destroyed here either (owner ruling 2026-10-10, superseding ruling A1): an owner
+        /// who dies to the monsters left behind must still be able to come back for their loot. It crumbles on the
+        /// owner's willing exit from the cleared copy (ThreadWillingExit, consumed in Player.Teleport) or at run end
+        /// (OnRunEnded), whichever comes first. <see cref="SoloClearedMessage"/> tells the owner exactly that.
         /// </summary>
         private static void AnnounceCleared(ThreadDungeonRun run)
         {
@@ -1166,24 +1356,40 @@ namespace ACE.Server.ThreadDungeons
                     member.Session?.Network.EnqueueSend(new GameMessageSystemChat(line, ACE.Entity.Enum.ChatMessageType.Broadcast));
                     ClearRewardHandler(run, member);
                 }
+
+                // The per-member damage summary, AFTER the clear lines so they read first. Behind the clear latch
+                // above, so exactly once per run; group only, a solo run gets nothing. Guarded: a throw here must not skip
+                // the Knot rolls, the survey or the guide and clear-count bookkeeping below.
+                try
+                {
+                    ContributionSummarySender(run);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DYNDUNGEON] contribution summary failed for {run}", ex);
+                }
             }
             else
             {
                 var owner = PlayerManager.GetOnlinePlayer(run.OwnerGuid);
-                owner?.Session?.Network.EnqueueSend(new GameMessageSystemChat($"{run.Dungeon.Name} is cleared and your gem crumbles to dust. Take the exit portal when you are ready; the dungeon stands for a while yet.", ACE.Entity.Enum.ChatMessageType.Broadcast));
+                owner?.Session?.Network.EnqueueSend(new GameMessageSystemChat(SoloClearedMessage(run.Dungeon.Name), ACE.Entity.Enum.ChatMessageType.Broadcast));
                 log.Info($"[DYNDUNGEON] cleared {run}");
 
                 // The completion visual and the summoned exit, owner-only. AFTER the clear line, so the effect
-                // lands on a message the player has already read, and BEFORE the gem/survey bookkeeping, which is
+                // lands on a message the player has already read, and BEFORE the survey bookkeeping, which is
                 // invisible to them. Owner may be null (offline); the handler returns on that before it reads a
                 // single tunable, which is what keeps AnnounceCleared callable from the unit tests.
                 ClearRewardHandler(run, owner);
             }
 
-            // Solo: the gem dies at the clear (owner ruling A1). Group: the gem and keys survive to run end (R29).
-            if (!run.IsGroup)
-                GemDestroyer(run);
+            // Knots (Docs/Knots/KNOTS-DESIGN.md sections 3.1 and 5): one Fiber roll and one Pattern roll per eligible seat
+            // (KnotDrops.RollSeats), each into that seat's own held pile, behind the clear latch above so it runs exactly
+            // once per run. Before the survey and before the caller's PooledLootTrigger, so a drop is already in its
+            // seat's held pile when the first delivery pass picks the cache weenie. Its own seam, same pattern as
+            // SurveyRecorder below.
+            KnotDropRoller(run);
 
+            // No gem is destroyed here, solo or group: see the summary (owner ruling 2026-10-10 for solo, R29 for group).
             SurveyRecorder(run);
 
             // Thread-Guide seams, beside the survey and on the same pattern (swappable delegates, each player's
@@ -1192,6 +1398,66 @@ namespace ACE.Server.ThreadDungeons
             GuideRecorder(run);
             ClearCounter(run);
         }
+
+        /// <summary>
+        /// Test seam for the group clear's contribution summary, same pattern as <see cref="ClearRewardHandler"/>.
+        /// Production is <see cref="SendContributionSummary"/>.
+        /// </summary>
+        internal static Action<ThreadDungeonRun> ContributionSummarySender = SendContributionSummary;
+
+        /// <summary>
+        /// Sends ThreadDungeonRun.FormatContributionSummary over the run's roster to every roster member ONLINE ANYWHERE
+        /// (deliberately wider than ThreadRunPresence.MessageRecipients, which is inside-only: a member who stepped out
+        /// or died still sees how the run went). The lines are built once and shared; every member gets a row,
+        /// including a member who is offline or left before the clear.
+        /// </summary>
+        internal static void SendContributionSummary(ThreadDungeonRun run)
+            => DeliverContributionSummary(run, ContributionRecipient);
+
+        /// <summary>
+        /// Production recipient resolution for <see cref="DeliverContributionSummary"/>: the member's session if they are
+        /// online anywhere, else null (skipped).
+        /// </summary>
+        private static Action<string, ACE.Entity.Enum.ChatMessageType> ContributionRecipient(uint guid)
+        {
+            var session = PlayerManager.GetOnlinePlayer(guid)?.Session;
+            if (session == null)
+                return null;
+
+            return (text, type) => session.Network.EnqueueSend(new GameMessageSystemChat(text, type));
+        }
+
+        /// <summary>
+        /// The body of <see cref="SendContributionSummary"/> with recipient resolution passed in (the test seam):
+        /// <paramref name="recipientFor"/> maps a roster guid to a send action, or null for a member who is offline. Every
+        /// line goes to every resolved member as Broadcast system chat, in order. Returns how many members were sent to.
+        /// </summary>
+        internal static int DeliverContributionSummary(ThreadDungeonRun run, Func<uint, Action<string, ACE.Entity.Enum.ChatMessageType>> recipientFor)
+        {
+            var lines = ThreadDungeonRun.FormatContributionSummary(run.SnapshotContributions());
+            if (lines.Count == 0 || recipientFor == null)
+                return 0;
+
+            var sent = 0;
+
+            foreach (var member in run.Roster)
+            {
+                var send = recipientFor(member.Guid);
+                if (send == null)
+                    continue;
+
+                foreach (var line in lines)
+                    send(line, ACE.Entity.Enum.ChatMessageType.Broadcast);
+
+                sent++;
+            }
+
+            return sent;
+        }
+
+        /// <summary>The solo clear line (owner ruling 2026-10-10): the gem survives the clear and names the exits that end it.</summary>
+        internal static string SoloClearedMessage(string dungeonName)
+            => $"{dungeonName} is cleared. Your gem will bring you back if you fall; it crumbles when you leave by recall or the exit portal.";
 
         /// <summary>
         /// The group clear line. S7 (a key) for a non-owner member; the owner, who holds the gem rather than a key,
@@ -1318,6 +1584,13 @@ namespace ACE.Server.ThreadDungeons
         /// delegate (and restore it in a finally) to observe the trigger without a live player.
         /// </summary>
         internal static Action<ThreadDungeonRun> SurveyRecorder = RecordSurvey;
+
+        /// <summary>
+        /// Knots drop seam, same swappable-delegate pattern as <see cref="SurveyRecorder"/>. Production target
+        /// KnotDrops.OnRunCleared, which never throws and returns before reading any tunable for a run with no stamped
+        /// Fiber level (every run a unit test builds without populating).
+        /// </summary>
+        internal static Action<ThreadDungeonRun> KnotDropRoller = ACE.Server.Knots.KnotDrops.OnRunCleared;
 
         /// <summary>
         /// Thread-Guide clear seam, same swappable-delegate pattern as <see cref="SurveyRecorder"/>. Production
@@ -1500,6 +1773,11 @@ namespace ACE.Server.ThreadDungeons
             run.MarkPlayerObserved();
 
             var guid = player.Guid.Full;
+
+            // Thread return (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): a player back in the very run they were pulled from is
+            // no longer away; their entry, and with it the copy's PvP hold, is released.
+            ThreadPvpAway.Release(guid, run);
+
             if (!run.IsRosterMember(guid))
                 return;
 
@@ -1513,6 +1791,35 @@ namespace ACE.Server.ThreadDungeons
                 // member hands the delivery to the Tick's group retry, which serves a flagged member who is inside.
                 if (ArrivalNeedsTickRetry(outcome))
                     run.MarkMemberDeliveryWanted(guid);
+            }
+        }
+
+        /// <summary>
+        /// The death half of the share-waits notice, called from Player.Die beside the Threads death latch. A seated
+        /// member who dies in a CLEARED group run with a share still waiting (DungeonGemRules.IsClearedReturnFor) is
+        /// told that re-entering to collect it is free. Every other death says nothing new. The latch is taken so the
+        /// deal-time line (ThreadGroupCacheDelivery.TellShareWaits) does not repeat it. Never throws into the death
+        /// sequence.
+        /// </summary>
+        public static void OnMemberDied(Player player, uint instance)
+        {
+            try
+            {
+                if (player == null || instance == 0)
+                    return;
+
+                var run = GetRun(instance);
+                var guid = player.Guid.Full;
+
+                if (run == null || !run.IsGroup || !DungeonGemRules.IsClearedReturnFor(run, guid))
+                    return;
+
+                run.TryMarkShareWaitsNotice(guid);
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(GroupRosterRules.ShareWaitsInsideText(guid == run.OwnerGuid), ACE.Entity.Enum.ChatMessageType.Broadcast));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DYNDUNGEON] share-waits death notice threw for {player?.Name}", ex);
             }
         }
 
@@ -1544,11 +1851,10 @@ namespace ACE.Server.ThreadDungeons
         /// 1. TTL. Checked first, so an expired run reports "expired" whatever else is wrong with it.
         /// 2. Its landblock is gone. A copy unloads by itself once it has stood empty for its idle window -
         ///    the run's EmptyGrace (dynamic_dungeons_empty_grace_minutes, default 10) while Starting or
-        ///    Active, a held GROUP run's lock-time loot hold (dynamic_dungeons_group_loot_hold_minutes, see
+        ///    Active, a held run's lock-time loot hold (ThreadDungeonRun.LootHold, from
+        ///    dynamic_dungeons_group_loot_hold_minutes for solo and group runs alike, see
         ///    ThreadDungeonRun.ResolveUnloadInterval) while Cleared and owing loot, Landblock.UnloadInterval
-        ///    (five minutes) otherwise - a solo run is never held (owner ruling, 2026-09-27), so it always
-        ///    takes this last case while Cleared - and
-        ///    once it is gone the run has nowhere to happen. This is deliberately NOT gated on the state:
+        ///    (five minutes) otherwise - and once it is gone the run has nowhere to happen. This is deliberately NOT gated on the state:
         ///    GetLandblock registers the instance in LandblockManager's ephemeral instance registry
         ///    (EphemeralInstanceRegistry, reached through LandblockManager.GetEphemeralLandblock)
         ///    synchronously, inside the write lock and before Init() runs, so a healthy Starting run always
@@ -1561,8 +1867,8 @@ namespace ACE.Server.ThreadDungeons
         ///    never materialises (Player_Location.cs:906-917). Only meaningful while Starting, since the flag
         ///    is set once and never cleared.
         /// 4. It is Cleared, someone HAS been inside it, nobody is now, and it is past
-        ///    <see cref="ClearedGrace"/>. A finished run has nothing left to do: its gem was destroyed at the
-        ///    clear, so nobody can re-enter it, and the last player has left. Before this branch existed such
+        ///    <see cref="ClearedGrace"/>, and it is not on the loot hold. A finished run owing nothing has
+        ///    nothing left to do, and the last player has left. Before this branch existed such
         ///    a run idled to its TTL - hours - which is what made a player who had finished and walked out
         ///    wait to open their next dungeon.
         ///
@@ -1575,33 +1881,49 @@ namespace ACE.Server.ThreadDungeons
         ///    the copy up indefinitely, exactly as before. The grace is then a second line rather than the
         ///    only protection, for the entry race described on ClearedGrace.
         ///
-        ///    Group Threads: a GROUP run's gem and keys survive the clear (ruling R29), so its members CAN
-        ///    re-enter it; branch 4 therefore stands down while the run is on the group loot hold (see the
-        ///    overload taking groupLootHeld). "Nobody inside" needs no group change (ruling R23): only roster
-        ///    members can be in a Thread copy, and the probe counts any player in the landblock.
-        ///
-        ///    A SOLO run is never put on the hold (owner ruling, 2026-09-27): its gem is destroyed at the clear
-        ///    same as a group run's owner-gem exception does not apply to it, and with nobody able to re-enter,
-        ///    branch 4 fires for it exactly as it did before Group Threads - undelivered loot left behind is
-        ///    forfeit at run end. Tick always passes false for a solo run's groupLootHeld (GroupLootHoldActive
-        ///    requires isGroup), so the overload below never stands branch 4 down for one.
+        ///    The loot hold: a GROUP run's gem and keys survive the clear (ruling R29), and so does a SOLO run's
+        ///    gem (owner ruling 2026-10-10, superseding ruling A1, which destroyed it at the clear), so the
+        ///    owner and members CAN re-enter; branch 4 therefore stands down while the run is on the loot hold
+        ///    (see the overload taking lootHeld). A solo run leaves the hold once its owner leaves willingly
+        ///    (the gem is retired, ThreadRunPresence.LootOwed turns false) or its loot is all collected, and
+        ///    branch 4 then fires for it as before. "Nobody inside" needs no group change (ruling R23): only
+        ///    roster members can be in a Thread copy, and the probe counts any player in the landblock.
         /// </summary>
         internal static bool ShouldEnd(ThreadDungeonRunState state, bool landblockPresent, bool createCompleted, bool playerEverObserved, bool playerPresent, TimeSpan sinceStart, TimeSpan sinceCleared, DateTime now, DateTime expiresUtc, out string reason)
-            => ShouldEnd(state, landblockPresent, createCompleted, playerEverObserved, playerPresent, groupLootHeld: false, sinceStart, sinceCleared, now, expiresUtc, out reason);
+            => ShouldEnd(state, landblockPresent, createCompleted, playerEverObserved, playerPresent, lootHeld: false, sinceStart, sinceCleared, now, expiresUtc, out reason);
 
         /// <summary>
         /// <see cref="ShouldEnd(ThreadDungeonRunState, bool, bool, bool, bool, TimeSpan, TimeSpan, DateTime, DateTime, out string)"/>
-        /// plus the loot hold (ruling R29, unified with the empty grace). <paramref name="groupLootHeld"/> is
-        /// ThreadDungeonRun.GroupLootHoldActive, which is always false for a solo run (never held for loot, owner
-        /// ruling 2026-09-27) and true only for a Cleared group run that still owes loot with a positive lock-time
-        /// hold: while it is true, branch 4 (cleared and empty) does not fire, so a member who died or stepped out
-        /// can still come back for their pile. The hold is bounded by the empty-copy mechanism, not here: the
-        /// copy's idle window is the lock-time hold (ThreadDungeonRun.ResolveUnloadInterval / Group.LootHold), so
+        /// plus the loot hold (ruling R29, unified with the empty grace, extended to solo runs by owner ruling
+        /// 2026-10-10). <paramref name="lootHeld"/> is ThreadDungeonRun.LootHoldActive, true only for a Cleared run
+        /// that still owes loot (ThreadRunPresence.LootOwed) with a positive lock-time hold: while it is true, branch
+        /// 4 (cleared and empty) does not fire, so an owner or member who died or stepped out can still come back for
+        /// their loot. The hold is bounded by the empty-copy mechanism, not here: the copy's idle window is the
+        /// lock-time hold (ThreadDungeonRun.ResolveUnloadInterval / ThreadDungeonRun.LootHold), so
         /// once no member has been inside for it the copy unloads and branch 2 ends the run (end_state stays
         /// "cleared", DungeonRunTelemetry.EndStateFor keys on the prior state), and the piles still held are
         /// forfeited at run end. Branches 1-3 are unaffected.
         /// </summary>
-        internal static bool ShouldEnd(ThreadDungeonRunState state, bool landblockPresent, bool createCompleted, bool playerEverObserved, bool playerPresent, bool groupLootHeld, TimeSpan sinceStart, TimeSpan sinceCleared, DateTime now, DateTime expiresUtc, out string reason)
+        internal static bool ShouldEnd(ThreadDungeonRunState state, bool landblockPresent, bool createCompleted, bool playerEverObserved, bool playerPresent, bool lootHeld, TimeSpan sinceStart, TimeSpan sinceCleared, DateTime now, DateTime expiresUtc, out string reason)
+            => ShouldEnd(state, landblockPresent, createCompleted, playerEverObserved, playerPresent, lootHeld, pvpHeld: false, sinceStart, sinceCleared, now, expiresUtc, out reason);
+
+        /// <summary>
+        /// The loot-hold overload plus the PvP hold (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): <paramref name="pvpHeld"/> is
+        /// ThreadDungeonRun.IsPvpHeld, true while a member pulled into a PvP match is away and their hold has not run out. Branch 4
+        /// (cleared and empty) stands down for it exactly as for the loot hold, so a member who left a cleared copy for a match can
+        /// still come back to it; the copy's idle window is the hold (ThreadDungeonRun.ResolveUnloadInterval), so once nobody has been
+        /// inside for it the copy unloads and branch 2 ends the run. Branches 1 (TTL) to 3 are unaffected.
+        /// </summary>
+        internal static bool ShouldEnd(ThreadDungeonRunState state, bool landblockPresent, bool createCompleted, bool playerEverObserved, bool playerPresent, bool lootHeld, bool pvpHeld, TimeSpan sinceStart, TimeSpan sinceCleared, DateTime now, DateTime expiresUtc, out string reason)
+            => ShouldEnd(state, landblockPresent, createCompleted, createFaulted: false, playerEverObserved, playerPresent, lootHeld, pvpHeld, sinceStart, sinceCleared, now, expiresUtc, out reason);
+
+        /// <summary>
+        /// The full decision. <paramref name="createFaulted"/> is true when the copy's population task faulted before it could
+        /// ever set CreateWorldObjectsCompleted (Landblock.CreateWorldObjectsFaulted, on the primary or any outdoor footprint
+        /// member): branch 3 then ends a Starting run at once with LoadFailed rather than after <see cref="LoadTimeout"/>.
+        /// Such a copy can never complete, so this changes only WHEN the same LoadFailed end happens, never whether.
+        /// </summary>
+        internal static bool ShouldEnd(ThreadDungeonRunState state, bool landblockPresent, bool createCompleted, bool createFaulted, bool playerEverObserved, bool playerPresent, bool lootHeld, bool pvpHeld, TimeSpan sinceStart, TimeSpan sinceCleared, DateTime now, DateTime expiresUtc, out string reason)
         {
             reason = null;
 
@@ -1623,19 +1945,65 @@ namespace ACE.Server.ThreadDungeons
                 return true;
             }
 
-            if (state == ThreadDungeonRunState.Starting && !createCompleted && sinceStart > LoadTimeout)
+            if (state == ThreadDungeonRunState.Starting && !createCompleted && (createFaulted || sinceStart > LoadTimeout))
             {
                 reason = DungeonRunTelemetry.EndReasons.LoadFailed;
                 return true;
             }
 
-            if (state == ThreadDungeonRunState.Cleared && playerEverObserved && !playerPresent && sinceCleared >= ClearedGrace && !groupLootHeld)
+            if (state == ThreadDungeonRunState.Cleared && playerEverObserved && !playerPresent && sinceCleared >= ClearedGrace && !lootHeld && !pvpHeld)
             {
                 reason = DungeonRunTelemetry.EndReasons.ClearedAndEmpty;
                 return true;
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Open World Threads (F2): is the run's copy gone? Always when its primary is gone (the old rule, so a dungeon run is
+        /// unchanged). An Active or Cleared OUTDOOR run is gone as well when any footprint member is no longer loaded
+        /// (<paramref name="allMembersLoaded"/> false): members are held for the run's lifetime
+        /// (EphemeralRealm.HoldsFootprintMembers), so a missing one means the primary has started draining the group.
+        /// A Starting outdoor run is not judged on its members here: they may still be loading, and the population gate
+        /// plus ShouldEnd's load timeout cover a member that never comes up. Pure.
+        /// </summary>
+        internal static bool RunGroupGone(bool primaryPresent, bool isOutdoor, ThreadDungeonRunState state, bool allMembersLoaded)
+        {
+            if (!primaryPresent)
+                return true;
+
+            return isOutdoor && !allMembersLoaded
+                && (state == ThreadDungeonRunState.Active || state == ThreadDungeonRunState.Cleared);
+        }
+
+        /// <summary>
+        /// Open World Threads (F2): does EndRun hand the run's primary to the ended-copy watcher (QueueEmptiedEndedCopies) rather
+        /// than queueing it once? An occupied copy, as before, and ALWAYS an outdoor primary: its first unload claim only drains
+        /// its members (EphemeralInstanceGroup.DecidePrimaryUnload) and refuses, and the watcher re-queues it every tick until the
+        /// instance is gone. Pure.
+        /// </summary>
+        internal static bool EndedCopyNeedsWatch(bool isOutdoor, int playersOnCopy) => isOutdoor || playersOnCopy > 0;
+
+        /// <summary>
+        /// Open World Threads (F4): the idle clock the empty-grace warning counts from: the latest LastActiveUtc across the run
+        /// copy's loaded landblocks (a player on a member keeps the group active, not just one on the primary). A dungeon copy
+        /// passes its primary alone, so the answer is unchanged. DateTime.MinValue for an empty set. Pure.
+        /// </summary>
+        internal static DateTime GroupLastActiveUtc(IEnumerable<DateTime> lastActive)
+        {
+            var latest = DateTime.MinValue;
+
+            if (lastActive == null)
+                return latest;
+
+            foreach (var t in lastActive)
+            {
+                if (t > latest)
+                    latest = t;
+            }
+
+            return latest;
         }
 
         public static void Tick()
@@ -1648,6 +2016,12 @@ namespace ACE.Server.ThreadDungeons
             if (reap) nextReap = now + ReapInterval;
 
             TickPuzzleFailPolicy(now, reap);
+
+            OutdoorPerimeterTicker.Tick(runs.Values); // Open World Threads WP4b: Unraveling perimeter + wisp ring for live outdoor runs
+
+            // Thread return: away entries whose run has ended or been replaced are dropped (ThreadPvpAway.Prune), on the reap cadence.
+            if (reap)
+                ThreadPvpAway.Prune(GetRun);
 
             // Before the run loop: an EndRun in that loop has just issued eviction teleports, so its copy is still
             // occupied now and is picked up on a later tick, never this one.
@@ -1669,7 +2043,11 @@ namespace ACE.Server.ThreadDungeons
                 }
 
                 var landblock = LandblockManager.GetEphemeralLandblock(run.Instance);
-                var createCompleted = landblock != null && landblock.CreateWorldObjectsCompleted;
+
+                // The population gate (Open World Threads R22): an outdoor copy is populated only once its primary AND
+                // every footprint member have finished CreateWorldObjects. A dungeon copy's answer is its one landblock's
+                // flag, exactly as before.
+                var createCompleted = RunCopyCreateCompleted(run, landblock);
 
                 if (reap)
                 {
@@ -1680,9 +2058,10 @@ namespace ACE.Server.ThreadDungeons
                     // Sampled only for a Cleared run, and only on a reap pass: this copies the copy's whole
                     // object dictionary (the same call EndRun's eviction uses), and ShouldEnd's Cleared branch
                     // is the only one that reads it. Everything else short-circuits to false without paying
-                    // for the scan.
+                    // for the scan. An outdoor copy scans every loaded footprint landblock (R23); a dungeon copy
+                    // scans its primary alone.
                     var playerPresent = state == ThreadDungeonRunState.Cleared && landblock != null
-                        && landblock.GetAllWorldObjectsForDiagnostics().OfType<Player>().Any();
+                        && LoadedRunLandblocks(run, landblock).Any(copy => copy.GetAllWorldObjectsForDiagnostics().OfType<Player>().Any());
 
                     // Second, free source for the entry latch. The primary one is Player.OnTeleportComplete;
                     // this catches a player who reached the copy by some path that never runs it (an admin
@@ -1693,23 +2072,32 @@ namespace ACE.Server.ThreadDungeons
 
                     var sinceCleared = run.ClearedUtc is DateTime clearedUtc ? now - clearedUtc : TimeSpan.Zero;
 
-                    // Ruling R29 on the unified empty-copy mechanism: a Cleared GROUP run that still owes loot is
-                    // on the loot hold - GroupLootOwed, reading placed caches, asked only for a Cleared group run,
-                    // and only here on the world thread. The answer is stored on the run for the landblock
-                    // heartbeat (ThreadDungeonRun.UnloadIntervalOverride), which then holds the empty copy for the
-                    // lock-time hold (run.Group.LootHold) instead of Landblock.UnloadInterval; once no member has
-                    // been inside for that long the copy unloads and ShouldEnd's landblock-gone branch ends the run.
+                    // Ruling R29 on the unified empty-copy mechanism, extended to solo runs (owner ruling 2026-10-10):
+                    // a Cleared run that still owes loot is on the loot hold - LootOwed, reading placed caches, asked
+                    // only for a Cleared run, and only here on the world thread. The answer is stored on the run for
+                    // the landblock heartbeat (ThreadDungeonRun.UnloadIntervalOverride), which then holds the empty
+                    // copy for the lock-time hold (run.LootHold) instead of Landblock.UnloadInterval; once no member
+                    // has been inside for that long the copy unloads and ShouldEnd's landblock-gone branch ends the run.
                     //
-                    // A SOLO run is never held (owner ruling, 2026-09-27): GroupLootHoldActive requires isGroup, so
-                    // groupLootHeld is always false for one. Its gem is destroyed at the clear (AnnounceCleared ->
-                    // GemDestroyer, ruling A1), so nobody can re-enter it, and undelivered loot left behind is
-                    // forfeit at run end - a Cleared solo run falls straight to ShouldEnd's cleared-and-empty branch
-                    // once it is empty and past ClearedGrace, exactly as before Group Threads.
-                    var groupLootOwed = state == ThreadDungeonRunState.Cleared && run.IsGroup && ThreadRunPresence.GroupLootOwed(run);
-                    var groupLootHeld = ThreadDungeonRun.GroupLootHoldActive(state, run.IsGroup, groupLootOwed, run.Group.LootHold);
-                    run.SetGroupLootHeld(groupLootHeld);
+                    // A SOLO run owes loot only until its owner leaves willingly (the gem is retired,
+                    // ThreadWillingExit); after that it falls to ShouldEnd's cleared-and-empty branch as before.
+                    var lootOwed = state == ThreadDungeonRunState.Cleared && ThreadRunPresence.LootOwed(run);
+                    var lootHeld = ThreadDungeonRun.LootHoldActive(state, lootOwed, run.LootHold);
+                    run.SetLootHeld(lootHeld);
 
-                    if (ShouldEnd(state, landblock != null, createCompleted, run.PlayerEverObserved, playerPresent, groupLootHeld, now - run.StartedUtc, sinceCleared, now, run.ExpiresUtc, out var why))
+                    // Thread return (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): a member pulled into a PvP match holds the copy
+                    // for their hold window, the same shape as the loot hold just above and stored on the run for the same reason.
+                    var pvpHeldWindow = ThreadPvpAway.HeldWindow(run, now);
+                    run.SetPvpHeld(pvpHeldWindow);
+
+                    // Open World Threads (F2): an outdoor group whose primary drained a member is coming down; once a live
+                    // run is missing a member it reads as gone (ShouldEnd's landblock branch), rather than lingering on half
+                    // a site. Starting is left to the population gate and the load timeout.
+                    var allMembersLoaded = run.Dungeon?.IsOutdoor != true
+                        || LoadedRunLandblocks(run, landblock).Count == ThreadRunGeometry.RunLandblocks(run.Dungeon).Count;
+
+                    if (ShouldEnd(state, !RunGroupGone(landblock != null, run.Dungeon?.IsOutdoor == true, state, allMembersLoaded), createCompleted,
+                        state == ThreadDungeonRunState.Starting && !createCompleted && RunCopyCreateFaulted(run, landblock), run.PlayerEverObserved, playerPresent, lootHeld, pvpHeldWindow.HasValue, now - run.StartedUtc, sinceCleared, now, run.ExpiresUtc, out var why))
                     {
                         EndRun(run, why);
                         continue;
@@ -1718,11 +2106,12 @@ namespace ACE.Server.ThreadDungeons
 
                 // Empty-grace countdown. Every tick rather than every reap: the last warning is 30 seconds out, and
                 // a 15 s cadence could skip past it entirely. The window is whatever the landblock heartbeat is
-                // measuring against right now - the grace while Starting or Active, the loot hold for a held group
-                // run - and null (no countdown) otherwise, so a solo run warns exactly as before.
-                var emptyWindow = ThreadDungeonRun.ResolveUnloadInterval(state, run.EmptyGrace, run.IsGroupLootHeld, run.Group.LootHold);
+                // measuring against right now - the grace while Starting or Active, the loot hold for a held run,
+                // solo or group - and null (no countdown) otherwise.
+                var pvpWindow = run.PvpHeldWindow;
+                var emptyWindow = ThreadDungeonRun.ResolveUnloadInterval(state, run.EmptyGrace, run.IsLootHeld, run.LootHold, pvpWindow.HasValue, pvpWindow ?? TimeSpan.Zero);
                 if (emptyWindow != null && landblock != null)
-                    WarnIfEmptyGraceRunningOut(run, landblock.LastActiveUtc, emptyWindow.Value, now);
+                    WarnIfEmptyGraceRunningOut(run, GroupLastActiveUtc(LoadedRunLandblocks(run, landblock).Select(copy => copy.LastActiveUtc)), emptyWindow.Value, now);
 
                 // Pooled loot: a delivery that found the owner outside the copy waits for them (spec section 4).
                 // The flag is read first so the owner lookup runs only for a run that is actually waiting.
@@ -1809,6 +2198,74 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// The run copy's loaded landblocks: the primary first, then (outdoor runs only) every footprint member that is
+        /// loaded under the run's instance, in footprint order. A dungeon copy is its primary alone. Empty when the
+        /// primary is null. Never loads anything. Safe from the world thread AND from landblock threads (the placement chain,
+        /// the cache placer and RelocateExit call it there): each member lookup is LandblockManager.GetLoadedLandblock, which
+        /// reads under landblockLock's read lock, and the returned list is the caller's own.
+        /// </summary>
+        internal static List<ACE.Server.Entity.Landblock> LoadedRunLandblocks(ThreadDungeonRun run, ACE.Server.Entity.Landblock primary)
+        {
+            var result = new List<ACE.Server.Entity.Landblock>();
+
+            if (primary == null)
+                return result;
+
+            result.Add(primary);
+
+            if (run?.Dungeon?.IsOutdoor != true)
+                return result;
+
+            foreach (var id in ThreadRunGeometry.RunLandblocks(run.Dungeon))
+            {
+                if (id == primary.Id.Landblock)
+                    continue;
+
+                var member = LandblockManager.GetLoadedLandblock(new LandblockId((uint)id << 16), run.Instance);
+                if (member != null)
+                    result.Add(member);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Did the run's copy fault before its completion action was queued (Landblock.CreateWorldObjectsFaulted)?
+        /// The primary, plus every loaded footprint member for an outdoor copy. Such a copy can never complete, so the
+        /// reap ends the run at once with LoadFailed instead of waiting out the load timeout.
+        /// </summary>
+        private static bool RunCopyCreateFaulted(ThreadDungeonRun run, ACE.Server.Entity.Landblock primary)
+        {
+            if (primary == null)
+                return false;
+
+            if (primary.CreateWorldObjectsFaulted)
+                return true;
+
+            return run?.Dungeon?.IsOutdoor == true && LoadedRunLandblocks(run, primary).Any(copy => copy.CreateWorldObjectsFaulted);
+        }
+
+        /// <summary>
+        /// Has the run's copy finished loading (R22)? A dungeon copy: its primary's CreateWorldObjectsCompleted, exactly
+        /// as before. An outdoor copy: the primary and EVERY footprint member are loaded and completed
+        /// (ThreadRunGeometry.AllCreateCompleted); a member that is not loaded reads as not complete, so a copy whose
+        /// member never came up falls to ShouldEnd's load-timeout branch instead of populating half a site.
+        /// </summary>
+        private static bool RunCopyCreateCompleted(ThreadDungeonRun run, ACE.Server.Entity.Landblock primary)
+        {
+            if (primary == null)
+                return false;
+
+            if (run?.Dungeon?.IsOutdoor != true)
+                return primary.CreateWorldObjectsCompleted;
+
+            return ThreadRunGeometry.AllCreateCompleted(ThreadRunGeometry.RunLandblocks(run.Dungeon), id =>
+                id == primary.Id.Landblock
+                    ? primary.CreateWorldObjectsCompleted
+                    : LandblockManager.GetLoadedLandblock(new LandblockId((uint)id << 16), run.Instance)?.CreateWorldObjectsCompleted);
+        }
+
+        /// <summary>
         /// One presence sample on the reap cadence (ruling R24). Every roster member inside the copy right now
         /// (ThreadRunPresence.IsMemberInside over the online player) is credited one reap interval of
         /// seconds_inside and latched Entered. In a GROUP run, an inside member for whom
@@ -1871,7 +2328,7 @@ namespace ACE.Server.ThreadDungeons
         /// Warns the run's relevant players who are online and OUTSIDE its copy as the copy's empty window runs out
         /// (owner ruling 2026-09-17: 5m, 2m, 1m, 30s). Called from Tick on the world thread whenever
         /// ThreadDungeonRun.ResolveUnloadInterval gives the copy a window: <paramref name="window"/> is the empty
-        /// grace for a Starting/Active run, or the loot hold for a Cleared group run on the hold.
+        /// grace for a Starting/Active run, or the loot hold for a Cleared run (solo or group) on the hold.
         ///
         /// Recipients come from ThreadDungeonRun.GraceWarningRecipients: a SOLO run's owner (exactly the recipient
         /// this had before Group Threads), or a GROUP run's owner and every keyed member. A recipient who is offline
@@ -1890,8 +2347,10 @@ namespace ACE.Server.ThreadDungeons
             var recipients = ThreadDungeonRun.GraceWarningRecipients(run.IsGroup, run.OwnerGuid, run.GemGuid, run.Roster, run.MemberKeyGem,
                 guid =>
                 {
+                    // A member away in a PvP match (ThreadPvpAway) is not told the copy is collapsing: their hold keeps it, and they
+                    // are brought back by the match's return, not by stepping in with their gem.
                     var player = PlayerManager.GetOnlinePlayer(guid);
-                    return player?.Session != null && !ThreadCachePlacer.IsOwnerInside(run, player);
+                    return player?.Session != null && !ThreadCachePlacer.IsOwnerInside(run, player) && !ThreadPvpAway.IsAwayFrom(run, guid);
                 });
 
             if (recipients.Count == 0)
@@ -1912,6 +2371,11 @@ namespace ACE.Server.ThreadDungeons
                 if (recipient == null)
                     continue;
 
+                // A cleared SOLO run is re-entered for free (owner ruling 2026-10-10), and so is a cleared GROUP run by a
+                // seated recipient whose share still waits (DungeonGemRules.IsClearedReturn), so the gem sentence stays
+                // even at 0 entries. Per recipient, because the group half depends on the recipient's seat and share.
+                var clearedReturn = DungeonGemRules.IsClearedReturnFor(run, guid);
+
                 // The solo log line is master's, character for character; a group line names the recipient.
                 var to = isGroup ? $" to 0x{guid:X8}" : "";
 
@@ -1922,7 +2386,7 @@ namespace ACE.Server.ThreadDungeons
                 recipient.EnqueueAction(new ActionEventDelegate(() =>
                 {
                     var gem = recipient.GetInventoryItem(gemGuid);
-                    var canReEnter = ThreadDungeonRun.GemCanReEnter(gem != null, gem?.Structure ?? 0);
+                    var canReEnter = ThreadDungeonRun.GemCanReEnter(gem != null, gem?.Structure ?? 0, clearedReturn);
 
                     recipient.Session?.Network.EnqueueSend(new GameMessageSystemChat(ThreadDungeonRun.BuildGraceWarning(dungeonName, remaining, canReEnter, isKeyHolder), ACE.Entity.Enum.ChatMessageType.Broadcast));
                     log.Info($"[DYNDUNGEON] empty-grace warning ({ThreadDungeonRun.FormatRemaining(remaining)} left, gem_sentence={canReEnter}){to} for {runText}");
@@ -1931,16 +2395,16 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
-        /// The login reroute line for a player whose saved instance is their OWN run that is still Starting or
-        /// Active with its copy loaded, or null when that is not the case (every other reroute keeps
-        /// WorldManager's generic "expired" line). Such a player is rerouted only because EphemeralRealm.Accepts
-        /// compares the owner by Player reference and a login builds a new Player; the run itself is fine, and
-        /// telling them it expired would send them to the Fragment Press with a gem that still works.
+        /// The login reroute line for a player whose saved instance is their OWN run that is still open to them
+        /// (<see cref="StillOpenOnLogin"/>) with its copy loaded, or null when that is not the case (every other
+        /// reroute keeps WorldManager's generic "expired" line). Such a player is rerouted only because
+        /// EphemeralRealm.Accepts compares the owner by Player reference and a login builds a new Player; the run
+        /// itself is fine, and telling them it expired would send them to the Fragment Press with a gem that still
+        /// works.
         ///
-        /// A Cleared run returns null on purpose. For a solo run that is the gem-is-gone case: the gem is already
-        /// destroyed, so there is nothing to step back in with. A held GROUP run's owner gem and keys survive the
-        /// clear until the run ends (ruling R29), but the owner still gets no login line here, by ruling: this
-        /// method only ever answers for a Starting or Active run.
+        /// A Cleared SOLO run whose owner gem is still live counts too (owner ruling 2026-10-10): its gem survives the
+        /// clear, a logout and a relog, and stepping back in is free (DungeonGemRules.IsClearedSoloReturn), so the
+        /// gem sentence always stays. A Cleared GROUP run still returns null, as before.
         /// </summary>
         public static string GetStillOpenLoginMessage(Player player, uint savedInstance)
         {
@@ -1952,15 +2416,26 @@ namespace ACE.Server.ThreadDungeons
                 return null;
 
             var state = run.State;
-            if (state != ThreadDungeonRunState.Starting && state != ThreadDungeonRunState.Active)
+            if (!StillOpenOnLogin(state, run.IsGroup, run.IsRunGem(run.GemGuid)))
                 return null;
 
             if (LandblockManager.GetEphemeralLandblock(run.Instance) == null)
                 return null;
 
             var gem = player.GetInventoryItem(run.GemGuid);
-            return ThreadDungeonRun.BuildStillOpenLoginMessage(run.Dungeon?.Name, ThreadDungeonRun.GemCanReEnter(gem != null, gem?.Structure ?? 0));
+            var clearedSoloReturn = DungeonGemRules.IsClearedSoloReturn(run.IsGroup, state);
+            return ThreadDungeonRun.BuildStillOpenLoginMessage(run.Dungeon?.Name, ThreadDungeonRun.GemCanReEnter(gem != null, gem?.Structure ?? 0, clearedSoloReturn));
         }
+
+        /// <summary>
+        /// The state half of <see cref="GetStillOpenLoginMessage"/>, pure: a Starting or Active run, or a Cleared SOLO
+        /// run whose owner gem is still live (not retired by a willing exit). A Cleared group run and an Ended run are
+        /// not.
+        /// </summary>
+        internal static bool StillOpenOnLogin(ThreadDungeonRunState state, bool isGroup, bool ownerGemLive)
+            => state == ThreadDungeonRunState.Starting
+               || state == ThreadDungeonRunState.Active
+               || (state == ThreadDungeonRunState.Cleared && !isGroup && ownerGemLive);
 
         /// <summary>
         /// The run's one Info summary line, written once by <see cref="EndRun"/>: what the run cost and where the
@@ -2009,6 +2484,12 @@ namespace ACE.Server.ThreadDungeons
                    $"pooledRolls={drained.PooledBonusRolls} buffered={drained.Buffered.Count} prebuilt={drained.Prebuilt.Count} trickleDroppedOnEnd={run.Perf.TrickleDroppedItems}/{run.Perf.TrickleDroppedRares} overflow={drained.Overflow.Count} " +
                    $"rares={drained.HeldRares.Count} caches={drained.PlacedCaches}";
         }
+
+        /// <summary>The line every player evicted by EndRun is told: the dungeon wording, or the outdoor one (WP3a orchestrator default, 2026-10-20).</summary>
+        internal const string DungeonEvictionLine = "The dungeon collapses around you.";
+        internal const string OutdoorEvictionLine = "The Thread unravels and the land around you fades.";
+
+        internal static string EvictionLine(bool isOutdoor) => isOutdoor ? OutdoorEvictionLine : DungeonEvictionLine;
 
         /// <summary>
         /// Where a player leaving a run's copy is sent: EndRun's eviction, and the puzzle fail policy's removal of one
@@ -2104,11 +2585,17 @@ namespace ACE.Server.ThreadDungeons
             var landblock = LandblockManager.GetEphemeralLandblock(run.Instance);
             if (landblock != null)
             {
-                var players = landblock.GetAllWorldObjectsForDiagnostics().OfType<Player>().ToList();
+                // Open World Threads (R23): an outdoor copy is several landblocks, so the eviction scans every landblock
+                // loaded under the run's instance (the footprint members and any bare buffer a player walked onto), not
+                // just the primary. A dungeon copy's set is its primary alone, exactly as before (ThreadRunGeometry.EvictionSet).
+                var copies = ThreadRunGeometry.EvictionSet(run.Dungeon?.IsOutdoor == true, landblock,
+                    run.Dungeon?.IsOutdoor == true ? LandblockManager.GetLoadedLandblocksUnder(run.Instance) : null, run.Instance, lb => lb.Instance);
+
+                var players = copies.SelectMany(copy => copy.GetAllWorldObjectsForDiagnostics().OfType<Player>()).Distinct().ToList();
 
                 foreach (var player in players)
                 {
-                    player.Session?.Network.EnqueueSend(new GameMessageSystemChat("The dungeon collapses around you.", ACE.Entity.Enum.ChatMessageType.Broadcast));
+                    player.Session?.Network.EnqueueSend(new GameMessageSystemChat(EvictionLine(run.Dungeon?.IsOutdoor == true), ACE.Entity.Enum.ChatMessageType.Broadcast));
                     var exit = EvictionExit(player, run);
                     if (exit != null)
                         WorldManager.ThreadSafeTeleport(player, new Position(exit));
@@ -2128,7 +2615,7 @@ namespace ACE.Server.ThreadDungeons
                 //
                 // Rather than leave an occupied copy to that five-minute idle window, it is watched: the first 1 s
                 // tick that finds it empty - the evictions landed - queues it (QueueEmptiedEndedCopies).
-                QueueCopyForDestructionWhenEmpty(landblock, occupied: players.Count > 0);
+                QueueCopyForDestructionWhenEmpty(landblock, occupied: EndedCopyNeedsWatch(run.Dungeon?.IsOutdoor == true, players.Count));
             }
 
             OnRunEnded(run);
@@ -2205,12 +2692,11 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
-        /// The end-of-run trigger: destroys the gem, whatever ended the run (Cleared already destroyed it
-        /// via AnnounceCleared -> GemDestroyer, and DestroyGem's own re-resolution makes a second call here
-        /// a harmless no-op).
-        ///
-        /// For a GROUP run this is the ONLY destroy call: AnnounceCleared skips it (ruling R29), so the owner gem
-        /// and every member key are destroyed here, at run end.
+        /// The end-of-run trigger: destroys the gem and every member key, whatever ended the run. This is the
+        /// ONLY GemDestroyer call: AnnounceCleared destroys nothing, for a group run (ruling R29) or a solo run
+        /// (owner ruling 2026-10-10, superseding ruling A1). A solo owner's willing exit from the cleared copy may
+        /// already have consumed the gem (ThreadWillingExit); DestroyGem's own re-resolution makes this a harmless
+        /// no-op then.
         /// </summary>
         public static void OnRunEnded(ThreadDungeonRun run)
         {
@@ -2229,16 +2715,15 @@ namespace ACE.Server.ThreadDungeons
         /// to do here and ThreadDungeonSweeper catches it on login, on vault withdraw, or on next use
         /// (layers b and c).
         ///
-        /// Idempotent by re-resolution, deliberately not latched: called from both AnnounceCleared (owner
-        /// ruling A1, the gem dies the moment the run is Cleared) and OnRunEnded (so a run that ends without
-        /// ever clearing still destroys it). If the owner is offline when the run clears, this call is a
-        /// no-op and OnRunEnded's later call is what actually reaches the gem; if the owner is online for
-        /// both, the second call simply finds no gem left to consume.
+        /// Idempotent by re-resolution, deliberately not latched: OnRunEnded is the one caller, and a gem a solo
+        /// owner's willing exit already consumed (ThreadDungeonManager.ConsumeRetiredOwnerGem) is simply not found.
+        /// If the owner is offline when the run ends, this call is a no-op and the gem falls to the lazy use and
+        /// login paths.
         ///
         /// Group Threads: after the owner's gem, every member key (run.MemberKeys()) whose holder is online gets
         /// the same consume, on THAT member's queue. An offline member's key falls to the lazy use and login
-        /// paths, like an offline owner's gem. A solo run has no keys, so its behaviour is unchanged. Call sites:
-        /// a solo run at the clear and at the end; a group run only at the end (ruling R29).
+        /// paths, like an offline owner's gem. A solo run has no keys, so its behaviour is unchanged. Call site:
+        /// run end only, for every run.
         /// </summary>
         public static void DestroyGem(ThreadDungeonRun run)
         {
@@ -2262,17 +2747,41 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         private static void EnqueueGemConsume(Player holder, uint gemGuid, string runText)
         {
-            holder.EnqueueAction(new ActionEventDelegate(() =>
-            {
-                var gem = holder.FindObject(gemGuid, Player.SearchLocations.MyInventory);
-                if (gem == null)
-                    return;
+            holder.EnqueueAction(new ActionEventDelegate(() => ConsumeGemNow(holder, gemGuid, runText)));
+        }
 
-                var gemName = gem.Name;
-                holder.TryConsumeFromInventoryWithNetworking(gem);
-                holder.Session?.Network.EnqueueSend(new GameMessageSystemChat($"Your {gemName} crumbles to dust.", ACE.Entity.Enum.ChatMessageType.Broadcast));
-                log.Info($"[DYNDUNGEON] destroyed gem 0x{gemGuid:X8} for {runText}");
-            }));
+        /// <summary>
+        /// The consume itself, on the caller's thread, which MUST be the holder's own context (their action queue,
+        /// or code already running on it). Re-resolves the gem, so a gem already gone is a no-op.
+        /// </summary>
+        private static void ConsumeGemNow(Player holder, uint gemGuid, string runText)
+        {
+            var gem = holder.FindObject(gemGuid, Player.SearchLocations.MyInventory);
+            if (gem == null)
+                return;
+
+            var gemName = gem.Name;
+            holder.TryConsumeFromInventoryWithNetworking(gem);
+            holder.Session?.Network.EnqueueSend(new GameMessageSystemChat($"Your {gemName} crumbles to dust.", ACE.Entity.Enum.ChatMessageType.Broadcast));
+            log.Info($"[DYNDUNGEON] destroyed gem 0x{gemGuid:X8} for {runText}");
+        }
+
+        /// <summary>
+        /// A solo owner's willing exit from their cleared copy (ThreadWillingExit, owner ruling 2026-10-10): retires
+        /// the owner gem on the run - the authoritative step, after which every dead-gem path treats it as dead and
+        /// the copy owes nothing more - and then consumes it inline. Called from Player.Teleport, which runs in the
+        /// owner's own context, so the consume does not go through EnqueueGemConsume: that targets the owner's
+        /// CurrentLandblock, which is the copy being left. The consume is cleanup only; run end (OnRunEnded) and the
+        /// sweeper still catch a gem it could not reach (banked, dropped).
+        /// </summary>
+        internal static void ConsumeRetiredOwnerGem(Player owner, ThreadDungeonRun run)
+        {
+            if (owner == null || run == null)
+                return;
+
+            run.RetireOwnerGem();
+            log.Info($"[DYNDUNGEON] owner gem 0x{run.GemGuid:X8} retired by a willing exit from {run}");
+            ConsumeGemNow(owner, run.GemGuid, run.ToString());
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 
 using ACE.Server.ThreadDungeons;
 
@@ -238,7 +239,10 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             StringAssert.Contains(perSeat, "AddBonusTradeNotes(run, items, rewardBonus);");
             StringAssert.Contains(perSeat, "AddBonusTradeNotes(run, items);");
+            StringAssert.Contains(perSeat, "AddBonusLegendaryKey(run, items);");
             StringAssert.Contains(perSeat, "AddBonusSalvageBags(run, items);");
+            Assert.IsTrue(perSeat.IndexOf("AddBonusLegendaryKey(run, items);", StringComparison.Ordinal) < perSeat.IndexOf("AddBonusSalvageBags(run, items);", StringComparison.Ordinal), "key before salvage");
+            Assert.IsFalse(perSeat.Contains("AddBonusLegendaryKey(run, items, "), "the key is never scaled by B");
             Assert.IsFalse(perSeat.Contains("AddBonusLegendaryItems"), "the item rolls are not duplicated per seat any more");
 
             StringAssert.Contains(src,
@@ -248,6 +252,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             // The solo path is unchanged: all three steps, in order.
             var solo = PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)");
             StringAssert.Contains(solo, "AddBonusTradeNotes(run, items);");
+            StringAssert.Contains(solo, "AddBonusLegendaryKey(run, items);");
             StringAssert.Contains(solo, "AddBonusSalvageBags(run, items);");
             StringAssert.Contains(solo, "AddBonusLegendaryItems(run, items);");
 
@@ -286,10 +291,11 @@ namespace ACE.Server.Tests.ThreadDungeons
             var body = PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)");
 
             var note = body.IndexOf("AddBonusTradeNotes(run, items);", StringComparison.Ordinal);
+            var key = body.IndexOf("AddBonusLegendaryKey(run, items);", StringComparison.Ordinal);
             var bags = body.IndexOf("AddBonusSalvageBags(run, items);", StringComparison.Ordinal);
             var loot = body.IndexOf("AddBonusLegendaryItems(run, items);", StringComparison.Ordinal);
 
-            Assert.IsTrue(note >= 0 && note < bags && bags < loot, "MMD slot 1, bags next, Legendary-table items last (#1118)");
+            Assert.IsTrue(note >= 0 && note < key && key < bags && bags < loot, "MMD slot 1, Durable Legendary Key next, bags after, Legendary-table items last (#1118)");
             Assert.IsFalse(body.Contains("PropertyManager"), "user ruling 2026-09-14: the pooled bonus reads no switch");
 
             StringAssert.Contains(PooledLootSourceText.MethodBody(src, "private static void AddBonusTradeNotes(ThreadDungeonRun run, List<WorldObject> items)"), "BuildMmdNote(run, out _)");
@@ -306,11 +312,12 @@ namespace ACE.Server.Tests.ThreadDungeons
             var latch = body.IndexOf("run.TryClaimBossChest()", StringComparison.Ordinal);
             var create = body.IndexOf("CreateCacheChest(run, \"boss cache\")", StringComparison.Ordinal);
             var mmd = body.IndexOf("FillMmd(run, chest, ref nextPlacement)", StringComparison.Ordinal);
+            var key = body.IndexOf("FillLegendaryKey(run, chest, ref nextPlacement)", StringComparison.Ordinal);
             var salvage = body.IndexOf("FillSalvage(run, chest, ref nextPlacement)", StringComparison.Ordinal);
             var loot = body.IndexOf("FillLoot(run, chest, ref nextPlacement)", StringComparison.Ordinal);
             var enter = body.IndexOf("chest.EnterWorld()", StringComparison.Ordinal);
 
-            Assert.IsTrue(enabled >= 0 && enabled < latch && latch < create && create < mmd && mmd < salvage && salvage < loot && loot < enter);
+            Assert.IsTrue(enabled >= 0 && enabled < latch && latch < create && create < mmd && mmd < key && key < salvage && salvage < loot && loot < enter);
             StringAssert.Contains(body, "A Thread Cache has formed where the boss fell.");
             Assert.IsFalse(body.Contains("Ethereal"), "user ruling 2026-09-14: only pooled caches are ethereal; the boss-death cache stays solid");
         }
@@ -318,17 +325,23 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void Cache_chest_factory_carries_every_stamp()
         {
-            var body = PooledLootSourceText.MethodBody(Src(), "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose)");
+            // Knots (2026-10-12): every cache weenie (the plain Thread Cache and the Knotted Thread Cache) goes through the
+            // one wcid-taking factory, so the stamps below are pinned there and the boss path forwards to it.
+            var src = Src();
+            StringAssert.Contains(src, "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose)\n"
+                + "            => CreateCacheChest(run, purpose, run.OwnerGuid, BossCacheWcid);");
 
-            // The boss path passes "boss cache", so its error line reads exactly as it did before the extraction.
-            StringAssert.Contains(body, "log.Error($\"[DYNDUNGEON] {run} {purpose} wcid {BossCacheWcid} did not resolve to a Chest; no cache spawned\");");
+            var body = PooledLootSourceText.MethodBody(src, "internal static Chest CreateCacheChest(uint ownerGuid, string ownerName, uint wcid, uint? runId, string purpose)");
+
+            // The boss path passes "boss cache" and wcid 1003603, so its error line renders exactly as it did before.
+            StringAssert.Contains(body, "log.Error($\"[DYNDUNGEON] {purpose} wcid {wcid} did not resolve to a Chest; no cache spawned\");");
             Assert.IsFalse(body.Contains("Written BEFORE EnterWorld"), "the factory has no EnterWorld of its own; the moved comment names the caller's");
-            StringAssert.Contains(body, "WorldObjectFactory.CreateNewWorldObject(BossCacheWcid)");
-            StringAssert.Contains(body, "SetProperty(PropertyInt.ThreadDungeonRunId, (int)run.RunId)");
-            StringAssert.Contains(body, "P_DungeonCacheOwnerGuid = run.OwnerGuid");
+            StringAssert.Contains(body, "WorldObjectFactory.CreateNewWorldObject(wcid)");
+            StringAssert.Contains(body, "SetProperty(PropertyInt.ThreadDungeonRunId, (int)runId.Value)");
+            StringAssert.Contains(body, "P_DungeonCacheOwnerGuid = ownerGuid");
             StringAssert.Contains(body, "TimeToRot = -1");
             StringAssert.Contains(body, "SetProperty(PropertyFloat.ResetInterval, double.PositiveInfinity)");
-            StringAssert.Contains(body, "ApplyCacheName(chest, run.OwnerName);");
+            StringAssert.Contains(body, "ApplyCacheName(chest, ownerName, CacheBaseNameFor(wcid));");
             Assert.IsFalse(body.Contains("Ethereal"), "the shared factory also builds the OFF-path boss cache, so ethereal is set by the pooled placer, not here");
         }
 
@@ -387,14 +400,21 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var src = Src();
 
+            // Knots (2026-10-12): the base name is the weenie's (CacheBaseNameFor), still a constant, never the instance's.
             StringAssert.Contains(src,
-                "private static void ApplyCacheName(Chest chest, string holderName)\n"
-                + "            => chest.SetProperty(PropertyString.Name, ComposeCacheName(holderName, CacheBaseName));");
+                "private static void ApplyCacheName(Chest chest, string holderName, string baseName)\n"
+                + "            => chest.SetProperty(PropertyString.Name, ComposeCacheName(holderName, baseName));");
 
-            var member = PooledLootSourceText.MethodBody(src, "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid)");
+            var factory = PooledLootSourceText.MethodBody(src, "internal static Chest CreateCacheChest(uint ownerGuid, string ownerName, uint wcid, uint? runId, string purpose)");
 
-            StringAssert.Contains(member, "chest.P_DungeonCacheOwnerGuid = ownerGuid;");
-            StringAssert.Contains(member, "ApplyCacheName(chest, run.GetMember(ownerGuid)?.Name);");
+            StringAssert.Contains(factory, "chest.P_DungeonCacheOwnerGuid = ownerGuid;");
+            var runSig = "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid, uint wcid)";
+            var runStart = src.IndexOf(runSig, StringComparison.Ordinal);
+            var runOverload = src.Substring(runStart, src.IndexOf(';', runStart) - runStart);
+
+            // a member's cache is labelled by the roster: the lookup now lives in the run overload, which feeds the factory
+            StringAssert.Contains(runOverload, "run.GetMember(ownerGuid)?.Name");
+            StringAssert.Contains(runOverload, "CreateCacheChest(ownerGuid, ");
         }
 
         /// <summary>
@@ -441,6 +461,31 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
+        public void BuildSalvageBags_names_each_bag_like_a_player_made_one_after_setting_structure()
+        {
+            // BuildSalvageBags touches Player's static constructor, so it is pinned by source: the Name
+            // assignment must sit INSIDE the method body, after Structure is set and in the same form
+            // every other bag path uses, so the vault stacks these bags with player-made ones.
+            var raw = PooledLootSourceText.MethodBody(Src(), "internal static List<WorldObject> BuildSalvageBags(ThreadDungeonRun run)");
+
+            // MethodBody keeps comments, so a commented-out assignment would still match: drop comment lines.
+            var body = string.Join("\n", raw.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+            const string structureLine = "bag.Structure = bag.MaxStructure ?? 100;";
+            const string nameLine = "bag.Name = $\"Salvage ({bag.Structure})\";";
+
+            var loop = body.IndexOf("foreach (var material in materials)", StringComparison.Ordinal);
+            var structureAt = body.IndexOf(structureLine, StringComparison.Ordinal);
+            var nameAt = body.IndexOf(nameLine, StringComparison.Ordinal);
+            var addAt = body.IndexOf("bags.Add(bag);", StringComparison.Ordinal);
+
+            Assert.IsTrue(loop >= 0, "the per-material loop");
+            Assert.IsTrue(structureAt > loop, "structure is set inside the loop");
+            Assert.IsTrue(nameAt > structureAt, "the name is built from the structure, so it must be assigned after it");
+            Assert.IsTrue(addAt > nameAt, "the name must be set before the bag is added");
+        }
+
+        [TestMethod]
         public void Fill_methods_add_builder_output_at_increasing_positions()
         {
             var src = Src();
@@ -456,6 +501,34 @@ namespace ACE.Server.Tests.ThreadDungeons
             var loot = PooledLootSourceText.MethodBody(src, "private static int FillLoot(ThreadDungeonRun run, Chest chest, ref int nextPlacement)");
             StringAssert.Contains(loot, "BuildCacheLoot(run)");
             StringAssert.Contains(loot, "chest.TryAddToInventory(item, nextPlacement)");
+        }
+
+        /// <summary>
+        /// Owner ruling 2026-10-30: every player's fixed bonus carries ONE Durable Legendary Key between the notes and the
+        /// salvage. One step, one definition, no scaled overload - so a group's reward bonus B can never multiply it.
+        /// </summary>
+        [TestMethod]
+        public void The_durable_legendary_key_is_one_unscaled_step_and_one_fill()
+        {
+            var src = Src();
+
+            Assert.AreEqual(1, src.Split(new[] { "void AddBonusLegendaryKey(" }, StringSplitOptions.None).Length - 1, "one key step, no scaled overload beside it");
+
+            var step = PooledLootSourceText.MethodBody(src, "private static void AddBonusLegendaryKey(ThreadDungeonRun run, List<WorldObject> items)");
+            StringAssert.Contains(step, "BuildLegendaryKey(run)");
+            StringAssert.Contains(step, "items.Add(key)");
+
+            StringAssert.Contains(PooledLootSourceText.MethodBody(src, "internal static WorldObject BuildLegendaryKey(ThreadDungeonRun run)"),
+                "CreateNewWorldObject(BankLegendaryKeyTable.DurableWcid)");
+            Assert.AreEqual(51954u, ACE.Server.WorldObjects.BankLegendaryKeyTable.DurableWcid, "the Durable Legendary Key weenie");
+            Assert.AreEqual(10, ACE.Server.WorldObjects.BankLegendaryKeyTable.DurableUses, "ten uses");
+
+            var fill = PooledLootSourceText.MethodBody(src, "private static int FillLegendaryKey(ThreadDungeonRun run, Chest chest, ref int nextPlacement)");
+            StringAssert.Contains(fill, "BuildLegendaryKey(run)");
+            StringAssert.Contains(fill, "chest.TryAddToInventory(key, nextPlacement)");
+            StringAssert.Contains(fill, "nextPlacement++");
+
+            Assert.AreEqual(0, ThreadDungeonRewardSpawner.BuildBossBonusFixedItems(null).Count, "a null run still builds nothing");
         }
     }
 }

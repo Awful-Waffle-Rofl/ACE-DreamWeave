@@ -14,6 +14,8 @@ using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
+using ACE.Server.KnotLoot;
+using ACE.Server.Knots;
 using ACE.Server.Managers;
 using ACE.Server.Managers.Analytics;
 using ACE.Server.Network;
@@ -156,9 +158,9 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// If enough burden is available, this will try to add (via create) an item to the main pack. If the main pack is full, it will try to add it to the first side pack with room.
         /// </summary>
-        public bool TryCreateInInventoryWithNetworking(WorldObject item, out Container container)
+        public bool TryCreateInInventoryWithNetworking(WorldObject item, out Container container, bool burdenCheck = true)
         {
-            if (!TryAddToInventory(item, out container)) // We don't have enough burden available or no empty pack slot.
+            if (!TryAddToInventory(item, out container, burdenCheck: burdenCheck)) // We do not have enough burden available (when checked) or no empty pack slot.
                 return false;
 
             Session.Network.EnqueueSend(new GameMessageCreateObject(item));
@@ -440,7 +442,8 @@ namespace ACE.Server.WorldObjects
                 new GameEventWieldItem(Session, item.Guid.Full, wieldedLocation),
                 new GameMessageSound(Guid, Sound.WieldObject));
 
-            if (item.GearMaxHealth != null)
+            // Knot loot: a Shield of the Rose moves max health without any GearMaxHealth of its own
+            if (item.GearMaxHealth != null || KnotTraitCombat.AffectsMaxHealth(item))
                 HandleMaxHealthUpdate();
 
             // Equipping is where an item first becomes DRAWN for its owner - in a pack it is known to
@@ -476,21 +479,26 @@ namespace ACE.Server.WorldObjects
         /// does any extra check a subclass override adds around its own base.CheckUseRequirements call -
         /// virtual dispatch is untouched by this waiver, only two of the base method's own branches are.
         ///
-        /// Player_Facets.RestoreFacetEquip (and its vault withdrawal helper) is the only writer: it adds
+        /// Player_Facets.RestoreFacetEquip (and its vault withdrawal helper) and the PvP template restore
+        /// (Player_PvpTemplate.RestorePvpTemplateOwnEquip, the same rule for gear worn at match entry) are the only writers: each adds
         /// the item's CURRENT guid immediately before the equip call that can reach here and removes it in
         /// a finally immediately after, because that equip call can throw. Empty outside a restore, so no
         /// other equip path can ever observe a waived guid here.
+        ///
+        /// Created on first use rather than by a field initializer, so the set also exists on the seeded
+        /// Player ACE.Server.Tests builds with GetUninitializedObject (which skips initializers, and whose
+        /// reflection writes to a Player-declared field run Player's World-database type initializer).
         /// </summary>
-        private readonly HashSet<uint> facetSpellActivationWaiver = new HashSet<uint>();
+        private HashSet<uint> facetSpellActivationWaiver;
 
         /// <summary>See <see cref="facetSpellActivationWaiver"/>.</summary>
-        internal void BeginFacetSpellActivationWaiver(uint guid) => facetSpellActivationWaiver.Add(guid);
+        internal void BeginFacetSpellActivationWaiver(uint guid) => (facetSpellActivationWaiver ??= new HashSet<uint>()).Add(guid);
 
         /// <summary>See <see cref="facetSpellActivationWaiver"/>.</summary>
-        internal void EndFacetSpellActivationWaiver(uint guid) => facetSpellActivationWaiver.Remove(guid);
+        internal void EndFacetSpellActivationWaiver(uint guid) => facetSpellActivationWaiver?.Remove(guid);
 
         /// <summary>See <see cref="facetSpellActivationWaiver"/>. Read by WorldObject.CheckUseRequirements.</summary>
-        internal bool IsFacetSpellActivationWaived(uint guid) => facetSpellActivationWaiver.Contains(guid);
+        internal bool IsFacetSpellActivationWaived(uint guid) => facetSpellActivationWaiver != null && facetSpellActivationWaiver.Contains(guid);
 
         private bool TryActivateSpells(WorldObject item)
         {
@@ -586,7 +594,8 @@ namespace ACE.Server.WorldObjects
             if (item.HasItemSet)
                 DequipItemFromSet(item);
 
-            if (item.GearMaxHealth != null)
+            // Knot loot: a Shield of the Rose moves max health without any GearMaxHealth of its own
+            if (item.GearMaxHealth != null || KnotTraitCombat.AffectsMaxHealth(item))
                 HandleMaxHealthUpdate();
 
             if (dequipObjectAction == DequipObjectAction.ToCorpseOnDeath || dequipObjectAction == DequipObjectAction.TradeItem)
@@ -1044,6 +1053,16 @@ namespace ACE.Server.WorldObjects
             if (container is Corpse)
             {
                 Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, $"You cannot put {item.Name} in that.")); // Custom error message
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
+                return false;
+            }
+
+            // Knots: a Knotting Pouch takes Fibers only, so never another Pouch. Refused here, before anything moves,
+            // with the same transient-line plus save-failed pair as the corpse refusal above, so the client puts the
+            // item back where it was.
+            if (!KnotWeaving.AcceptsExplicitMove(KnotItems.KindOf(container), KnotItems.KindOf(item)))
+            {
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, KnotItems.PouchAcceptsFibersOnly));
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, itemGuid));
                 return false;
             }
@@ -1957,6 +1976,24 @@ namespace ACE.Server.WorldObjects
         {
             // Console.WriteLine($"-> DoHandleActionGetAndWieldItem({item.Name}, {itemRootOwner?.Name}, {wasEquipped}, {wieldedLocation})");
 
+            // PvP match rule (pvp_match_block_dual_wield, Docs/Pvp/TEMPLATES.md "Dual wield"): no weapon in the off-hand while in a match.
+            // THE choke point of every player-driven equip (inventory, ground, an equipped weapon moved between hands, the swap
+            // recursion, a stack split to wield), so the check sits first, before any wield check or side effect. Shields are exempt.
+            if (PvpDualWieldRefuses(wieldedLocation, item.IsShield))
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full, WeenieError.ConflictingInventoryLocation));
+                Session.Network.EnqueueSend(new GameMessageSystemChat(ACE.Server.Pvp.PvpArenaText.DualWieldDisabled, ChatMessageType.Broadcast));
+                return false;
+            }
+
+            // PvE-only items (PropertyBool.PveOnly, PvpPveOnlyRule): never wielded while in a match. Same choke point, same refusal error.
+            if (PveOnlyEquipRefuses(item))
+            {
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, item.Guid.Full, WeenieError.ConflictingInventoryLocation));
+                Session.Network.EnqueueSend(new GameMessageSystemChat(ACE.Server.Pvp.PvpArenaText.PveOnlyWillNotBeRaised(item.Name), ChatMessageType.Broadcast));
+                return false;
+            }
+
             // PvP template: the issued kit is equipped without wield checks (TEMPLATES.md power-source table, "Level"),
             // so an issued item the player took off must go back on the same way, or a kit item above the player's own
             // level, heritage or skills could never be re-equipped (and, being issued, never dropped either).
@@ -2396,7 +2433,8 @@ namespace ACE.Server.WorldObjects
         /// use_wield_requirements master switch, heritage checks and AllowedWielder above, stays strict.
         ///
         /// Used exclusively by the facet restore path (Player_Facets.RestoreFacetEquip and its vault
-        /// withdrawal helper), for gear the character was provably wearing when it was captured
+        /// withdrawal helper) and the PvP template restore (Player_PvpTemplate.RestorePvpTemplateOwnEquip),
+        /// for gear the character was provably wearing when it was captured
         /// (CaptureFacetEquip reads EquippedObjects) - ACE never re-checks worn gear once equipped, so a
         /// player who geared up buffed, swapped away and lost the buff should not be refused re-equipping
         /// what they were already wearing. The ordinary player-facing wield path,
@@ -2661,6 +2699,15 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Knots: nothing is ever split into a Knotting Pouch, whatever the item. A non-Fiber is refused by the
+            // Fibers-only rule, and a split builds a fresh instance from the weenie, which would not carry a Fiber's
+            // per-instance KnotLevel. Checked before every item-shape check below so the refusal is the same for all.
+            if (container != null && !KnotWeaving.AcceptsSplitInto(KnotItems.KindOf(container)))
+            {
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, KnotItems.PouchRefusesSplit));
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, stackId));
+                return;
+            }
             var isStackable = stack is Stackable;
             if (!isStackable)
             {
@@ -3385,6 +3432,16 @@ namespace ACE.Server.WorldObjects
             if (targetStackRootOwner is Corpse)
             {
                 Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, $"You cannot put {sourceStack.Name} in that.")); // Custom error message
+                Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, mergeFromGuid));
+                return;
+            }
+
+            // Knots: nothing merges into a stack held in a Knotting Pouch. The Pouch holds only Fibers, which are not
+            // stackable, so this is closed today by the full-target check below; it is refused here by name so the
+            // Pouch rule does not rest on a check that exists for a different reason.
+            if (targetStack.Container is Container targetStackContainer && !KnotWeaving.AcceptsMergeInto(KnotItems.KindOf(targetStackContainer)))
+            {
+                Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, KnotItems.PouchRefusesMerge));
                 Session.Network.EnqueueSend(new GameEventInventoryServerSaveFailed(Session, mergeFromGuid));
                 return;
             }

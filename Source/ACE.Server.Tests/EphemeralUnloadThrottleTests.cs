@@ -256,6 +256,83 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, m.Throttle.CarriedCount);
         }
 
+        /// <summary>
+        /// Instance groups (Open World Threads P0): a group primary's unload refuses and, in the same call, queues the
+        /// rest of its group into the SAME destruction queue (LandblockManager.TryClaimGroupPrimaryForDestruction,
+        /// DrainGroupFirst). Those members must drain in that same Drain call up to the cap, the overflow must be
+        /// carried, nothing may unload twice even if a member is queued twice, and the refused primary must be neither
+        /// carried nor dropped from the registry - its own heartbeat re-queues it.
+        /// </summary>
+        [TestMethod]
+        public void PrimaryRefusalThatQueuesItsGroup_DrainsTheGroupInTheSameCall_UpToTheCap()
+        {
+            const int cap = 2;
+            const int k = 3;
+
+            var m = new FakeManager();
+            var primary = m.AddEphemeral("primary", 0x0100);
+            var members = Enumerable.Range(1, k)
+                .Select(i => new FakeLandblock { Name = $"member{i}", Ephemeral = true, Instance = primary.Instance })
+                .ToList();
+
+            var unloadCalls = new Dictionary<FakeLandblock, int>();
+            var primaryRefusals = 0;
+
+            bool Unload(FakeLandblock lb)
+            {
+                unloadCalls[lb] = unloadCalls.TryGetValue(lb, out var n) ? n + 1 : 1;
+
+                if (ReferenceEquals(lb, primary))
+                {
+                    primaryRefusals++;
+
+                    // the group drain: every member once, and the first member a second time, as a heartbeat would
+                    foreach (var member in members)
+                        m.Queue.Enqueue(member);
+                    m.Queue.Enqueue(members[0]);
+
+                    return false;
+                }
+
+                m.Unloaded.Add(lb);
+                return true;
+            }
+
+            var carriedCount = m.Throttle.Drain(m.Queue.TryDequeue, lb => lb.Ephemeral, Unload, cap, uncapped: false);
+
+            Assert.AreEqual(1, primaryRefusals, "the primary is offered once");
+            Assert.AreEqual(cap, m.Unloaded.Count, "members queued by the refusal drain in the same call, up to the cap");
+            CollectionAssert.AreEqual(members.Take(cap).ToList(), m.Unloaded, "in queue order");
+            Assert.AreEqual(k - cap, carriedCount, "the overflow is carried");
+            Assert.IsTrue(m.Throttle.IsCarried(members[k - 1]));
+
+            foreach (var pair in unloadCalls)
+                Assert.AreEqual(1, pair.Value, $"{pair.Key} was offered more than once in one drain");
+
+            Assert.IsFalse(m.Throttle.IsCarried(primary), "a refusal is not carried");
+            Assert.AreSame(primary, m.Registry.Get(primary.Instance), "the refused primary stays registered");
+
+            // Next tick: the carried member goes first, and the primary's heartbeat re-queue now finds an empty group.
+            m.Queue.Enqueue(primary);
+            var secondCalls = new List<FakeLandblock>();
+            m.Throttle.Drain(m.Queue.TryDequeue, lb => lb.Ephemeral, lb =>
+            {
+                secondCalls.Add(lb);
+
+                // a member's unload never unregisters (EphemeralInstanceGroup.MayUnregister); only the primary's does
+                if (!ReferenceEquals(lb, primary))
+                {
+                    Assert.AreSame(primary, m.Registry.Get(primary.Instance), "still registered while a member unloads");
+                    return true;
+                }
+
+                return m.Unload(lb);
+            }, cap, uncapped: false);
+
+            CollectionAssert.AreEqual(new[] { members[k - 1], primary }, secondCalls, "carried member first, then the primary");
+            Assert.IsNull(m.Registry.Get(primary.Instance), "the primary unregisters once it finally unloads");
+        }
+
         [TestMethod]
         public void Clamp_BoundsTheTunable()
         {

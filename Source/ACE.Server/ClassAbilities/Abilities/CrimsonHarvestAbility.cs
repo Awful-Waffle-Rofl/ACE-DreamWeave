@@ -1,12 +1,14 @@
+using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Blood Mage T2: Drain spells strike up to 4 creatures within 8m of the primary target instead of one.
-    /// Each secondary drain resolves independently against its own target (its own transfer_Cap, its own
-    /// resistance roll) and the healing from all of them returns to the caster. Single rank, no scaling - the
-    /// target count IS the effect, which is why it compounds with nothing: Drain sits outside both caster
+    /// Blood Mage T2: Drain spells also strike 2/3/4 EXTRA creatures by rank within 8m of the primary target
+    /// (3/4/5 in all; rank 3 is the old single rank's power). Each secondary drain resolves independently
+    /// against its own target (its own transfer_Cap, its own resistance roll) and the healing from all of
+    /// them returns to the caster. Rank buys target count and nothing else - the target count IS the
+    /// effect, which is why it compounds with nothing: Drain sits outside both caster
     /// levers and the vulnerability axis, so improving it by target count adds no multiplier to the
     /// single-target product. Grants at most ONE Blood Charge per cast regardless of how many targets it
     /// strikes, and applies Weakened Blood to every target it lands on. PvE only.
@@ -48,18 +50,46 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "crimson_harvest",
             DisplayName = "Crimson Harvest",
-            Description = "Your Drain spells strike up to 4 creatures within 8 metres of the primary target " +
-                          "instead of one. Each secondary drain resolves on its own and all of the healing " +
-                          "returns to you. Grants at most one Blood Charge per cast. Against monsters only.",
-            MaxRank = 1,
-            CostPerRank = new[] { 3 },
+            Description = "Your Drain spells also strike up to 2/3/4 more creatures by rank within 8 metres of " +
+                          "the primary target (3/4/5 creatures in all). Each extra drain resolves on its own " +
+                          "and all of the healing returns to you. Grants at most one Blood Charge per cast. " +
+                          "Against monsters only.",
+            MaxRank = 3,
+            // Blood Mage buff pass: one rank at 3 -> three ranks at 1/1/1. Rank 3 is the old single rank's
+            // power (4 extras), and existing owners are raised to rank 3 by ClassAbilityRepricing wave 1.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
         };
 
         /// <summary>
-        /// Single rank, and its effect is a target COUNT plus a radius - no single scalable magnitude on
-        /// one axis worth printing, matching WhirlwindAbility's shape.
+        /// Reports the number of EXTRA creatures a Drain strikes beyond the primary target at this rank:
+        /// CrimsonHarvestMath.SecondaryTargetCap over the class_ability_crimsonharvest_extra_targets_rN
+        /// tunables (2/3/4) - the same helper and keys WorldObject_Magic.TryCrimsonHarvest uses for its cap.
+        /// A flat count, so Unit is "" with a "+" prefix. No affinity, no gear on the count (Bloodletting
+        /// widens the RADIUS, never the count), and no clamp, so CapNote is always null.
+        ///
+        /// Reads only rank and tunables, never the player, so it is null-player safe.
         /// </summary>
-        public ClassAbilityReadout GetReadout(Player player, int rank) => new ClassAbilityReadout { HasValue = false };
+        public ClassAbilityReadout GetReadout(Player player, int rank)
+        {
+            var extras = CrimsonHarvestMath.SecondaryTargetCap(rank,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item);
+
+            return new ClassAbilityReadout
+            {
+                HasValue = true,
+                Skill = extras,
+                Affinity = 0.0,
+                Gear = 0.0,
+                Effective = extras,
+                Unit = "",
+                Prefix = "+",
+                Label = "drain targets",
+                Per = null,
+                CapNote = null,
+            };
+        }
     }
 }

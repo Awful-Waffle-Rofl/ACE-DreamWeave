@@ -370,9 +370,9 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(F(1.45) * F(2.0), plan.LumMultiplier, 1e-12, "hollow 1.45, radiant 2.0");
 
             // The boss: the gem's hardy and boss_guarded AND the curated row's own boss_guarded (at its
-            // MinMagnitude 1.5) are all scaled.
+            // MinMagnitude 1.5) are all scaled, then the greatest wins (F is monotonic, so that is F(2.0)).
             Assert.AreEqual(10981u, plan.BossWcid);
-            Assert.AreEqual(F(1.6) * F(2.0) * F(1.5), plan.BossHealthMultiplier, 1e-12);
+            Assert.AreEqual(F(2.0), plan.BossHealthMultiplier, 1e-12);
             Assert.AreEqual((int)Math.Round((30 + 40) * s), plan.BossDamageRating, "savage + boss_enraged, scaled");
             Assert.AreEqual(2, plan.BossDamageResistRating);
         }
@@ -433,7 +433,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual(30, NonBoss(plan));
             Assert.AreEqual(15, Elites(plan));
             Assert.AreEqual(1.4 * 1.3 * 1.1 * 1.45 * 1.5, plan.XpMultiplier, 1e-12);
-            Assert.AreEqual(1.6 * 2.0 * 1.5, plan.BossHealthMultiplier, 1e-12);
+            Assert.AreEqual(2.0, plan.BossHealthMultiplier, 1e-12, "the greatest of hardy 1.6, gem boss_guarded 2.0 and the row's boss_guarded 1.5");
         }
 
         [TestMethod]
@@ -570,8 +570,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void TryPopulate_passes_the_live_exponent_into_the_limits()
         {
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs");
-            var body = PooledLootSourceText.MethodBody(src, "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)");
+            var populate = PooledLootSourceText.MethodBody(src, "public static void TryPopulate(ThreadDungeonRun run, Landblock landblock)");
 
+            // The limits construction moved out of TryPopulate into ReadLimits (archetype-uplift extraction): the
+            // argument now lives there, and TryPopulate must still build its limits through it.
+            var body = PooledLootSourceText.MethodBody(src, "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+
+            StringAssert.Contains(populate, "var limits = ReadLimits(run.Group);");
             StringAssert.Contains(body, "modifierLevelExponent: ResolveModifierLevelExponent()");
         }
 

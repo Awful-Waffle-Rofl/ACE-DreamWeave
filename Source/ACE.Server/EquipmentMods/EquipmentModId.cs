@@ -47,6 +47,12 @@ namespace ACE.Server.EquipmentMods
         // Berserker
         FrenziedPace     = 15,
         LingeringFury    = 16,
+        // 17 links HEAVY BLOWS since 2026-10-24. Savage Blows (the class ability) was retired (Berserker pass) and
+        // the mod was REPURPOSED IN PLACE for Heavy Blows, which took its T2 slot: same id, same PropertyFloat
+        // (8116, renamed GearModHeavyBlows), same flat melee-percent meaning and 0.027 ceiling, so every
+        // already-rolled item keeps a live mod and re-labels via DisplayName. THE MEMBER NAME STAYS SavageBlows ON
+        // PURPOSE: MarketItemMods.Token derives the market's Browse-URL token from this member name and its contract
+        // is never to rename an existing member (saved URLs carry "Savage Blows").
         SavageBlows      = 17,
         // 18 was Blood Fury until 2026-08-17. The class ability it amplified was retired in the same change
         // and the mod was REPURPOSED IN PLACE rather than retired with it: the id and its PropertyFloat (8117)

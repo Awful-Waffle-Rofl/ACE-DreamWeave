@@ -977,6 +977,7 @@ namespace ACE.Server.WorldObjects
                 case Skill.WarMagic:
                 case Skill.VoidMagic:
                 case Skill.LifeMagic:   // Martyr's Hecatomb
+                case Skill.ItemEnchantment:   // Spellsword class-ability procs (SpellProjectile.CasterSkillOverride)
 
                     return ImbuedSkillType.Magic;
 

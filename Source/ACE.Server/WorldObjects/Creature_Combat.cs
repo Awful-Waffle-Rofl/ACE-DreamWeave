@@ -5,8 +5,10 @@ using ACE.Common;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -19,7 +21,8 @@ namespace ACE.Server.WorldObjects
 {
     /// <summary>
     /// DIVERGES FROM UPSTREAM 08471633e (2026-08-17), for the first time: the weapon mods v4 catalog added the
-    /// Arcane Defender branch to <see cref="GetShieldMod"/>, and <see cref="GetAnimSpeed"/> now asks
+    /// Arcane Defender branch to <see cref="GetShieldMod"/> (renamed Defensive Weapon 2026-10-25, which also adds
+    /// its level to the equipped-shield path after the Shield-skill cap), and <see cref="GetAnimSpeed"/> now asks
     /// ApplyClassAbilityAttackSpeed for the conditional (positional) attack-speed terms. See PR #493 for the
     /// flagged maintenance cost at the next upstream merge.
     /// </summary>
@@ -570,10 +573,21 @@ namespace ACE.Server.WorldObjects
             if (this is Player player)
                 animSpeed = player.ApplyClassAbilityAttackSpeed(animSpeed, includeConditional: true);
             else
+            {
                 // monster combat effects: the monster half of the same ceiling, composed and clamped by
                 // monster_effect_speed_cap in Creature_MonsterEffects. No-op unless this monster's weenie
                 // authored a speed effect.
                 animSpeed = ApplyMonsterEffectAttackSpeed(animSpeed);
+
+                // Weakened Blood slow (Blood Mage T2): AFTER the monster-effect multiplier and its cap, so the
+                // slow's floor is relative to this monster's own effect-adjusted speed and an authored-slow
+                // monster is still slowed. Applies whether or not the monster carries effects. 1.0 (an exact
+                // no-op) unless a Weakened Blood slow is live on this creature.
+                var weakenedBloodFactor = GetWeakenedBloodSpeedFactor();
+
+                if (weakenedBloodFactor < 1.0)
+                    animSpeed = (float)(animSpeed * weakenedBloodFactor);
+            }
 
             return animSpeed;
         }
@@ -702,9 +716,17 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Return the scalar damage absorbed by a shield
+        ///
+        /// <paramref name="angleSource"/>: what the shield's frontal cone is measured against, when that is not
+        /// the attacker - null (every caller but one) means the attacker, exactly as before. Only a Reflect
+        /// bounce passes it: the bounce is the FIRER's own shot (so every attacker stat read below stays the
+        /// firer's), but it arrives from the reflecting player's direction, and an angle from a creature to
+        /// itself is meaningless.
         /// </summary>
-        public float GetShieldMod(WorldObject attacker, DamageType damageType, WorldObject weapon)
+        public float GetShieldMod(WorldObject attacker, DamageType damageType, WorldObject weapon, WorldObject angleSource = null)
         {
+            var facing = angleSource ?? attacker;
+
             // ensure combat stance, unless shield_applies_in_noncombat lets an equipped peace-mode shield count.
             if (CombatMode == CombatMode.NonCombat && !ShieldAppliesInNonCombat)
                 return 1.0f;
@@ -713,22 +735,25 @@ namespace ACE.Server.WorldObjects
             var shield = GetEquippedShield();
             if (shield == null)
             {
-                // shield_applies_in_noncombat lets an equipped SHIELD count in peace mode; Arcane Defender stays
-                // stance-bound, so a NonCombat defender with no shield is unchanged.
-                if (CombatMode == CombatMode.NonCombat)
-                    return 1.0f;
+                // Ward shield (Runic Ward / Sanguine Ward, owner ruling 2026-10-24): a standing ward pool
+                // acts as a REAL shield of a flat armor level against a PvE attacker, so it follows the
+                // equipped-shield stance rule already applied above (shield_applies_in_noncombat) rather than
+                // Defensive Weapon's stance-bound one. 0 for a non-player defender, a PvP or dead attacker, or
+                // no ward up - see Player.GetWardShieldLevel.
+                var wardShieldLevel = this is Player wardPlayer ? wardPlayer.GetWardShieldLevel(attacker, facing) : 0.0;
 
-                // Arcane Defender (weapon mods v4): a caster with no shield deflects frontal blows as though
-                // the wand were one. Player-only - weapon mods are a player crafting system, and this file is
-                // Creature-level.
-                //
-                // EVERYTHING BELOW THIS BRANCH IS UNTOUCHED. A shield-carrying defender never enters here, so
-                // the equipped-shield result is byte-for-byte what it was.
-                var arcaneDefender = this is Player arcanePlayer
-                    ? arcanePlayer.GetCasterOnlyModValue(WeaponModId.ArcaneDefender)
-                    : 0.0;
+                // Defensive Weapon (weapon mods v4, renamed from Arcane Defender and widened to every weapon
+                // class 2026-10-25): with no shield, the weapon (or wand) deflects frontal blows as though it
+                // were one. Player-only - weapon mods are a player crafting system, and this file is
+                // Creature-level. shield_applies_in_noncombat lets an equipped SHIELD count in peace mode;
+                // Defensive Weapon stays stance-bound, so it reads nothing for a NonCombat defender (see
+                // Player.GetDefensiveWeaponShieldLevel, which also resolves the ONE carrier and sanitizes).
+                var defensiveWeapon = this is Player defensivePlayer ? defensivePlayer.GetDefensiveWeaponShieldLevel() : 0.0;
 
-                if (arcaneDefender <= 0.0)
+                // the two flat levels ride ONE virtual shield; neither present means no shield at all
+                var virtualShieldLevel = defensiveWeapon + wardShieldLevel;
+
+                if (virtualShieldLevel <= 0.0)
                     return 1.0f;
 
                 // phantom weapons ignore all armor and shields
@@ -738,19 +763,21 @@ namespace ACE.Server.WorldObjects
                 // is monster in front of player,
                 // within shield effectiveness area? (the same 180 degree frontal cone as a real shield)
                 var arcaneEffectiveAngle = 180.0f;
-                var arcaneAngle = GetAngle(attacker);
+                var arcaneAngle = GetAngle(facing);
                 if (Math.Abs(arcaneAngle) > arcaneEffectiveAngle / 2.0f)
                     return 1.0f;
 
                 // NO SHIELD-SKILL CAP HERE, unlike the equipped-shield path below: that cap is half the
-                // Shield skill (full when specialized), and a caster's Shield skill is untrained, so applying
-                // it would zero the row on exactly the build it exists for.
+                // Shield skill (full when specialized), and a shieldless build's Shield skill is usually
+                // untrained, so applying it would zero the row on exactly the build it exists for. The ward
+                // shield rides this uncapped path for the same reason (WardShieldMath).
                 //
                 // THIS DOES NOT ENABLE SHIELD BLOCK OR THORNS, and cannot: both gate on
-                // GetEquippedShield() != null directly (Player_ClassAbilityCombat.cs:42 and :257-259) and
-                // neither reads GetShieldMod, so a wand-only Arcane Defender player still blocks nothing and
-                // reflects nothing.
-                return WeaponModCombat.ArcaneShieldMod(arcaneDefender, attacker.GetIgnoreShieldMod(weapon));
+                // GetEquippedShield() != null directly (Player_ClassAbilityCombat.cs) and neither reads
+                // GetShieldMod, so a shieldless Defensive Weapon player or a shieldless warded player still
+                // blocks nothing and reflects nothing. (With a shield, Thorns does add the Defensive Weapon
+                // level - see ApplyThornsReflect.)
+                return WeaponModCombat.ArcaneShieldMod(virtualShieldLevel, attacker.GetIgnoreShieldMod(weapon));
             }
 
             // phantom weapons ignore all armor and shields
@@ -760,12 +787,13 @@ namespace ACE.Server.WorldObjects
             // is monster in front of player,
             // within shield effectiveness area?
             var effectiveAngle = 180.0f;
-            var angle = GetAngle(attacker);
+            var angle = GetAngle(facing);
             if (Math.Abs(angle) > effectiveAngle / 2.0f)
                 return 1.0f;
 
             // get base shield AL
-            var baseSL = shield.GetProperty(PropertyInt.ArmorLevel) ?? 0.0f;
+            // Knot loot: Shield of the Rose's armor bonus joins the base term, as if it were stored ArmorLevel (Hollow scales modSL only).
+            var baseSL = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0.0f) + KnotTraitCombat.ShieldArmorBonus(shield, this);
 
             // shield AL item enchantment additives:
             // impenetrability, brittlemail
@@ -812,6 +840,14 @@ namespace ACE.Server.WorldObjects
                 shieldCap = (uint)Math.Round(shieldCap / 2.0f);
 
             effectiveLevel = Math.Min(effectiveLevel, shieldCap);
+
+            // Ward shield (Runic Ward / Sanguine Ward, owner ruling 2026-10-24) and Defensive Weapon (owner
+            // ruling 2026-10-25): both added AFTER the Shield-skill cap, so the cap bounds only the shield's own
+            // level, and BEFORE the ignore-shield term, so a shield-cleaving weapon cleaves them too. The two
+            // SUM, as on the no-shield path. The ward is 0 unless a ward is up against a PvE attacker; Defensive
+            // Weapon is 0 in NonCombat (stance-bound) or without the record.
+            if (this is Player wardShieldPlayer)
+                effectiveLevel = (float)DefensiveWeaponMath.AfterShieldCap(effectiveLevel, wardShieldPlayer.GetDefensiveWeaponShieldLevel(), wardShieldPlayer.GetWardShieldLevel(attacker, facing));
 
             var ignoreShieldMod = attacker.GetIgnoreShieldMod(weapon);
             //Console.WriteLine($"IgnoreShieldMod: {ignoreShieldMod}");
@@ -1073,7 +1109,8 @@ namespace ACE.Server.WorldObjects
             var spell = new Spell(spellID);
             if (spell.NotFound) return;  // TODO: friendly message to install DF patch
 
-            var addResult = target.EnchantmentManager.Add(spell, this, weapon);
+            // FORK: a melee bleed is not a "casted damage spell", so it is excluded from the Focus DoT bonus (ProcDotMarks).
+            var addResult = target.EnchantmentManager.Add(spell, this, weapon, procSourced: true);
 
             if (target is Player playerTarget)
                 playerTarget.Session.Network.EnqueueSend(new GameEventMagicUpdateEnchantment(playerTarget.Session, new Enchantment(playerTarget, addResult.Enchantment)));
@@ -1197,6 +1234,11 @@ namespace ACE.Server.WorldObjects
                 var sourcePet = this is CombatPet;
                 var targetPet = target is CombatPet;
 
+                // WaffleACE fork, World Events Hold: a knight is damaged by its own run's monsters and by nothing else that
+                // reaches this override (players have their own CanDamage). One field read for every other target.
+                if (ACE.Server.WorldEvents.WorldEventHooks.TryHoldCanDamage(this, target, out var holdCanDamage))
+                    return holdCanDamage;
+
                 if (sourcePet || targetPet)
                 {
                     if (sourcePet && targetPet)     // combat pets can't damage other pets
@@ -1281,11 +1323,21 @@ namespace ACE.Server.WorldObjects
             if (monster.MonsterState != State.Idle || (monster.Tolerance & tolerance) != 0)
                 return false;
 
+            // Open World Threads (R11b/R13): an outdoor run creature is not woken by a player outside the circle, and an
+            // interior-spawned one only by a target in direct line of sight, ray-cast at most every 0.5 s. True for every
+            // other monster.
+            if (monster.P_OutdoorPerimeter != null && !monster.AcceptsOutdoorPerimeterAlert(this))
+                return false;
+
             // for faction mobs, ensure alerter doesn't belong to same faction
             if (SameFaction(monster) && !PotentialFoe(monster))
                 return false;
 
             // add to retaliate targets?
+
+            // WaffleACE fork, World Events Hold: a seeker woken by someone walking past goes for its knight instead.
+            if (ACE.Server.WorldEvents.WorldEventHooks.KeepsHoldSeekerLock(monster, this))
+                return true;
 
             //Console.WriteLine($"[{Timers.RunningTime}] - {monster.Name} ({monster.Guid}) - waking up");
             monster.AttackTarget = this;
@@ -1310,9 +1362,18 @@ namespace ACE.Server.WorldObjects
             if (combatType == null)
                 combatType = GetCombatType();
 
+            // a melee hit from a creature that only holds an ammo launcher is an unarmed strike: the launcher
+            // itself carries no damage type (GetEquippedWeapon falls back to it), so reading it yields Undef
+            if (combatType == CombatType.Melee && weapon.IsAmmoLauncher)
+                return DamageType.Bludgeon;
+
             var damageSource = combatType == CombatType.Melee || ammo == null || !weapon.IsAmmoLauncher ? weapon : ammo;
 
             var damageTypes = damageSource.W_DamageType;
+
+            // never hand back Undef: it bypasses all armor and protection
+            if (damageTypes == DamageType.Undef)
+                return DamageType.Bludgeon;
 
             // returning multiple damage types
             if (multiple) return damageTypes;
@@ -1452,6 +1513,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void MonsterOnAttackMonster(Creature monster)
         {
+            // WaffleACE fork, World Events Hold: a knight never retaliates or wakes - it is a stationary thing the players
+            // defend. One field read for every other creature.
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(monster))
+                return;
+
             /*Console.WriteLine($"{Name}.MonsterOnAttackMonster({monster.Name})");
             Console.WriteLine($"Attackable: {monster.Attackable}");
             Console.WriteLine($"Tolerance: {monster.Tolerance}");*/
@@ -1463,6 +1529,10 @@ namespace ACE.Server.WorldObjects
             // when a monster with a FoeType attacks a foe, the foe will retaliate
             if (FoeType != null && (monster.FoeType == null || monster.FoeType != CreatureType))
                 monster.AddRetaliateTarget(this);
+
+            // WaffleACE fork, World Events Hold: a seeker hit by a pet or another creature keeps its knight.
+            if (ACE.Server.WorldEvents.WorldEventHooks.KeepsHoldSeekerLock(monster, this))
+                return;
 
             if (monster.MonsterState == State.Idle && !monster.Tolerance.HasFlag(Tolerance.NoAttack))
             {

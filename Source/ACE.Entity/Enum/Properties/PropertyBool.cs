@@ -313,8 +313,10 @@ namespace ACE.Entity.Enum.Properties
         // object more than ObjectMaint.InitialClamp_Dist (112.5 m, 2D) from the player, and a spawning static
         // only notifies players inside that radius. An object with this flag skips both clamps, so it is
         // announced as soon as its landblock is in the player's 3x3 (the outdoor visibility window).
-        // Cached onto PhysicsObj.IgnoreInitialClamp at InitPhysicsObj. For inert decor only - never on
-        // creatures, players or anything that moves or broadcasts often.
+        // Cached onto PhysicsObj.IgnoreInitialClamp at InitPhysicsObj (WorldObject.cs:216; never honoured on a
+        // Creature). The cost is bandwidth, not safety: the object is announced to every player whose 3x3 holds its
+        // landblock (ObjectMaint.cs:497, PhysicsObj.cs:2860), so avoid it on objects the server moves or broadcasts
+        // often. Acceptable on inert decor and on server-parked hazard bodies (the World Event wisps and balls).
         IgnoreInitialClamp                  = 9039,
 
         // Marketplace Salvage Forge (WaffleACE, DreamWeave, 2026-08-23): on the Salvage Forge NPC (wcid
@@ -534,5 +536,69 @@ namespace ACE.Entity.Enum.Properties
         // Thread-Guide (WaffleACE): per-character latch for the one-time level-50 eligibility notice
         // (Player.SendThreadGuideNoticeIfDue). Set and saved BEFORE the notice is sent. Absent means not shown.
         ThreadGuideNoticeShown                = 9073,
+
+        // Threads: marks the Fragment Mold, a Gem that records a Raw Fragment's component load and re-applies it
+        // to blank fragments. Read by Gem.HandleActionUseOnTarget -> FragmentMold.UseObjectOnTarget.
+        FragmentMold                          = 9074,
+
+        // PvP Arena repeat-pairing (Docs/Pvp/DESIGN.md "Repeat-pairing cap"): on a player, the /arena norematch opt-in to
+        // refuse an arena match that would be an unpaid rematch. Absent means OFF (accept the match). Read by
+        // Player.PvpArenaRefuseUnpaidRematch.
+        PvpArenaRefuseUnpaidRematch           = 9075,
+
+        // PvP prestige purchase gate (ACE.Server.Pvp.PvpPrestigeGate): on a vendor-sold weenie, TRUE means a buyer needs a peak rating of
+        // pvp_prestige_min_peak_rating on any ladder or pvp_prestige_min_bg_wins battleground wins. Checked by
+        // Vendor.BuyItems_ValidateTransaction before pricing. Absent means ungated.
+        PvpPrestigeGated                      = 9076,
+
+        // PvP Arena and Battleground eligibility (owner ruling 2026-10-15: one Thread clear replaces the level and PK facet
+        // requirements): per-character latch for the one-time "you can now join PvP Arenas and Battlegrounds" notice
+        // (Player.SendPvpEligibleNoticeIfDue). Set and saved BEFORE the notice is sent. Absent means not shown.
+        PvpEligibleNoticeShown                = 9077,
+
+        // World Events presence payout: marks the event reward crate (wcid 1002600) as code-handled. Gem.UseGem hands a crate
+        // carrying it to WorldEvents code, which rolls the pool named by WorldEventRewardProfile (PropertyString 9028) scaled by
+        // WorldEventRewardMultiplier (PropertyFloat 9014). Absent means an ordinary gem.
+        WorldEventRewardCrate                 = 9078,
+        // Sky decor player opt-out: on a player, TRUE means the server never sends this client the server-generated sky decor
+        // objects (WorldObject.IsSkyDecor). Absent means SHOWN. Read and written by Player.HideSkyDecor (/sky-decor enable|disable).
+        HideSkyDecor                          = 9079,
+
+        // Drift Atlan weapon (WaffleACE, 2026-10-20): on a target, restricts what may be used on it. Only a
+        // WeenieType.ManaStone, a source with an exact cook_book row keyed on (source wcid, target wcid) (the
+        // three Atlan Drift infusions), or - while weapon_mods_enabled is on - the fork's two weapon-mod salvage
+        // bags (Tourmaline and Amethyst, WeaponModManager.IsModMaterial) may be used on it. Every other
+        // use-on-target tinker source is refused, and refire/give-target stations refuse the weapon outright.
+        // See ACE.Server.Entity.TinkerLock. Read from the item's OWN biota only. Absent or false leaves an
+        // item unaffected.
+        DriftAtlanWeapon                      = 9080,
+
+        // PvE-only item (WaffleACE, 2026-10-27): an item that is never used against another player. Equipping it is refused while
+        // the wielder is in a PvP match (a worn one is moved to the pack at match entry), and any hit it produces on a player
+        // (melee, missile, or a spell projectile it launches) deals nothing. Read from the item's OWN biota only. Absent or false
+        // leaves an item unaffected. See ACE.Server.Pvp.Rules.PvpPveOnlyRule.
+        PveOnly                               = 9081,
+
+        // Custom Summons (Docs/Summons/2026-11-01-custom-summons-design.md). Each flag is read from the item's OWN biota only; absent or false leaves an item unaffected.
+        // Sacrificial Dagger: marks the dagger item that imprints a destroyed summon's ratings and applies them to another summon.
+        SacrificialDagger                     = 9082,
+
+        // Marks a Sacrificial Dagger that currently holds an imprint of a destroyed summon's ratings (spent on use).
+        SummonImprinted                       = 9083,
+
+        // Marks a Duo Summon Gem, which absorbs two summon items and becomes one usable item with a combined charge pool.
+        DuoSummonGem                          = 9084,
+
+        // Marks a Summon Gem Hammer, which breaks a bound Duo Gem and restores the two absorbed summon items.
+        SummonGemHammer                       = 9085,
+
+        // Marks a caster summon device that binds scroll spells into its bound-spell slots (see SummonBoundSpell1/2).
+        SummonSpellBinder                     = 9086,
+
+        // Marks a pet that runs the caster-pet spell selection behaviour.
+        SummonCasterBrain                     = 9087,
+
+        // Marks a pet that never initiates aggro: it only targets monsters already engaged with its owner or the owner's pets.
+        SummonNeverInitiates                  = 9088,
     }
 }

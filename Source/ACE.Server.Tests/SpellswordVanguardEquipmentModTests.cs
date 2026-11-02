@@ -26,11 +26,12 @@ namespace ACE.Server.Tests
     ///     explicitly reproduces the no-gear overload's value bit-for-bit, and every pre-existing call site
     ///     and test keeps compiling untouched.
     ///  3. THE GEAR TERM SURVIVES A FULLY CAPPED RIDER. Spellblade, Runeblade and Sundermark clamp their
-    ///     affinity rider to class_ability_affinity_chance_cap, and Taunt clamps its Loyalty rider to
-    ///     class_ability_taunt_loyalty_bonus_cap_seconds. The gear term is added OUTSIDE all four clamps, so
-    ///     each of those four carries a control that drives the rider far past its cap and asserts the mod is
-    ///     still worth its full magnitude. Folding gear inside a cap is exactly the Resonance failure
-    ///     recorded in DESIGN.md 2.2, where a saturating rider silently ate a mod.
+    ///     affinity rider to class_ability_affinity_chance_cap. The gear term is added OUTSIDE all three
+    ///     clamps, so each of those three carries a control that drives the rider far past its cap and asserts
+    ///     the mod is still worth its full magnitude. Folding gear inside a cap is exactly the Resonance
+    ///     failure recorded in DESIGN.md 2.2, where a saturating rider silently ate a mod. (Taunt had a
+    ///     fourth such clamp until 2026-10-17, when its Assess Person bonus and cap were retired: its
+    ///     duration is now the flat base plus the Provoke gear term and nothing else.)
     ///
     /// Every helper under test is a pure static, so nothing here needs a live Player - which is why the
     /// arithmetic lives in them at all (Player's static initializer cannot run under this test host).
@@ -39,10 +40,11 @@ namespace ACE.Server.Tests
     ///  - BELLOW has no pure helper. Its gear term is an inline addition to the taunt radius read in
     ///    TauntAbility.Activate, which needs a live player, a landblock and visible creatures. Its unit -
     ///    metres of radius - and its machinery gating are asserted structurally below instead.
-    ///  - The /abilities readouts for Spellblade, Runeblade, Sundermark, Dispelling Edge and Taunt. All five
+    ///  - The /abilities readouts for Spellblade, Runeblade, Sundermark and Dispelling Edge. All four
     ///    call player.GetClassAbilityScaling on the live Player before reaching the gear read, so they cannot
     ///    be invoked from this host at all. The four that CAN (Resonance, Spellsurge, Spellstorm, Cascade)
-    ///    are covered in SpellswordReadoutTests.
+    ///    are covered in SpellswordReadoutTests. Taunt's readout lost its affinity call on 2026-10-17 and is
+    ///    null-Player safe now; it is covered in ClassAbilityMultiScalarReadoutTests.
     ///  - That Player.GetMachineryEquipmentModValue actually returns 0 for a non-owner running /testskill
     ///    taunt. The gate itself is a Player method; what is asserted here is that Activate routes through
     ///    it rather than through the ungated read.
@@ -511,82 +513,64 @@ namespace ACE.Server.Tests
 
         // ---- 47: Provoke -> TauntAbility.EffectiveDuration -------------------------------------------
         //
-        // Shape: baseDuration + clamp(affinityBonus) + gear. The gear term is OUTSIDE the clamp.
-        // EffectiveDuration itself is UNCHANGED by the 2026-09-12 affinity-primitive migration (Loyalty ->
-        // Assess Person, additive quotient -> multiplicative factor): it only ever clamps whatever bonus its
-        // caller (Activate/GetReadout in TauntAbility.cs) hands it, so these tests still exercise the same
-        // pure clamp arithmetic regardless of how that bonus is computed upstream.
+        // Shape: baseDuration + gear. Since 2026-10-17 Taunt has no affinity (the Assess Person duration bonus
+        // and its cap tunable were retired), so the gear term is the only thing beside the flat base.
 
         [TestMethod]
         public void Provoke_ZeroGear_ReproducesTheUngearedDurationExactly()
         {
-            foreach (var rider in new[] { 0.0, 4.0, 25.0 })
-            {
-                Assert.AreEqual(TauntAbility.EffectiveDuration(10.0, rider, 10.0),
-                                TauntAbility.EffectiveDuration(10.0, rider, 10.0, 0.0),
-                                0.0, $"rider {rider}: an explicit 0.0 gear term must be bit-identical");
-            }
+            Assert.AreEqual(TauntAbility.EffectiveDuration(10.0), TauntAbility.EffectiveDuration(10.0, 0.0), 0.0,
+                "an explicit 0.0 gear term must be bit-identical");
 
-            // and still the shipped numbers
-            Assert.AreEqual(10.0, TauntAbility.EffectiveDuration(10.0, 0.0, 10.0, 0.0), 1e-9);
-            Assert.AreEqual(20.0, TauntAbility.EffectiveDuration(10.0, 25.0, 10.0, 0.0), 1e-9);
+            // and still the shipped number
+            Assert.AreEqual(10.0, TauntAbility.EffectiveDuration(10.0, 0.0), 1e-9);
         }
 
         [TestMethod]
-        public void Provoke_Gear_IsAFurtherSummandOnTheDuration()
+        public void Provoke_Gear_IsAFlatSummandOnTheDuration()
         {
             var gear = Max(EquipmentModId.Provoke); // 2.0 seconds
 
-            Assert.AreEqual(12.0, TauntAbility.EffectiveDuration(10.0, 0.0, 10.0, gear), 1e-9);
-            Assert.AreEqual(16.0, TauntAbility.EffectiveDuration(10.0, 4.0, 10.0, gear), 1e-9);
+            Assert.AreEqual(12.0, TauntAbility.EffectiveDuration(10.0, gear), 1e-9);
 
-            // CONTROL - a separate multiplier of the same size would be 14.0 * 1.2 = 16.8 seconds. The mod is
-            // 2 SECONDS, not 2 percent of anything.
-            Assert.AreNotEqual(14.0 * 1.2, TauntAbility.EffectiveDuration(10.0, 4.0, 10.0, gear), 1e-4,
+            // CONTROL - a multiplier of the same size would coincide at base 10, so check a second base:
+            // 2 seconds is 2 seconds, not 2 percent of anything.
+            Assert.AreEqual(22.0, TauntAbility.EffectiveDuration(20.0, gear), 1e-9);
+            Assert.AreNotEqual(20.0 * 1.2, TauntAbility.EffectiveDuration(20.0, gear), 1e-4,
                 "Provoke adds seconds to the hold; it does not scale it");
         }
 
         [TestMethod]
-        public void Provoke_Gear_StillAppliesWhenTheLoyaltyRiderIsFullyCapped()
+        public void Provoke_NegativeGear_IsFlooredAtZero()
         {
-            var gear = Max(EquipmentModId.Provoke);
-
-            // control: the rider really is saturating - 25 seconds of raw bonus against a 10 second cap
-            Assert.AreEqual(35.0, TauntAbility.EffectiveDuration(10.0, 25.0, 25.0, 0.0), 1e-9,
-                "control: with the cap raised out of the way the rider alone is worth 25 seconds");
-
-            var cappedNoGear = TauntAbility.EffectiveDuration(10.0, 25.0, 10.0);
-            var cappedWithGear = TauntAbility.EffectiveDuration(10.0, 25.0, 10.0, gear);
-
-            Assert.AreEqual(20.0, cappedNoGear, 1e-9, "base 10 plus the rider clamped to 10");
-
-            // THE REGRESSION: only the RIDER is clamped. Feeding gear into the clamp would have returned
-            // 20.0 here and the mod would be worth exactly nothing to any developed Vanguard.
-            Assert.AreEqual(22.0, cappedWithGear, 1e-9);
-            Assert.AreEqual(gear, cappedWithGear - cappedNoGear, 1e-9,
-                "a fully capped Loyalty rider must not eat one second of the gear term");
+            Assert.AreEqual(10.0, TauntAbility.EffectiveDuration(10.0, -3.0), 1e-9,
+                "a negative gear value must never shorten the hold");
         }
-
         // ---- 48: Bellow -> the Taunt radius ----------------------------------------------------------
         //
-        // No pure helper carries this one: the gear term is an inline addition to the radius read in
-        // TauntAbility.Activate, which needs a live player and landblock. What is asserted here is the unit
-        // and the bound, since a radius mod priced in the wrong unit is the failure mode that matters.
+        // The gear term is an inline addition to the rank radius read in TauntAbility.Activate, which needs a
+        // live player and landblock. What is asserted here is the unit and the bound, since a radius mod
+        // priced in the wrong unit is the failure mode that matters. EffectiveRadius is the pure summand.
 
         [TestMethod]
         public void Bellow_WidensTheTauntRadiusInMetres_AndIsBoundedByItsRegistryMaximum()
         {
-            var baseRadius = D("class_ability_taunt_radius"); // 15.0
+            var baseRadius = D("class_ability_taunt_radius_r1"); // 15.0
             var gear = Max(EquipmentModId.Bellow);            // 1.0 metre
 
             Assert.AreEqual(15.0, baseRadius, 1e-12);
             Assert.AreEqual(16.0, baseRadius + gear, 1e-12, "one perfect roll is worth one metre, not one percent");
+            Assert.AreEqual(16.0, TauntAbility.EffectiveRadius(baseRadius, gear), 1e-12);
 
             // CONTROL - read as a percentage the same number would be 15.0 * 2.0 = 30 metres, doubling the
             // reach of the catalog's largest outlier's attacker count. This is the unit confusion the
             // registry row's DisplayScale of 1.0 encodes.
             Assert.AreNotEqual(baseRadius * (1.0 + gear), baseRadius + gear, 1e-4,
                 "Bellow adds metres to the radius; it is not a percentage of it");
+
+            // and it rides every rank's radius as the same flat summand
+            Assert.AreEqual(31.0, TauntAbility.EffectiveRadius(TauntAbility.RadiusForRank(2), gear), 1e-12);
+            Assert.AreEqual(66.0, TauntAbility.EffectiveRadius(TauntAbility.RadiusForRank(3), gear), 1e-12);
         }
 
         // ---- 49: Shield Wall -> ShieldBlockAbility.BlockChance ---------------------------------------

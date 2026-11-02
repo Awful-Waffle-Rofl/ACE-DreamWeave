@@ -53,6 +53,16 @@ namespace ACE.Server.CombatSimulator
         /// </summary>
         public float MagicCritDamageMod { get; init; } = 1.0f;
 
+        /// <summary>
+        /// MAGIC ONLY. The war/void magic skill bonus a PLAYER caster adds to every landed projectile:
+        /// spellMinDamage * (magicSkill - spell.Power) / 1000 when the skill exceeds the spell's power, else 0
+        /// (WorldObjects\SpellProjectile.cs, CalculateDamage, the "War Magic skill-based damage bonus" block). It
+        /// is ADDED to the rolled base before any multiplier - "finalDamage = baseDamage + critDamageBonus +
+        /// skillBonus" - so PreMitigationMod scales it and the crit bonus does not include it. A monster caster
+        /// never gets it: that block is gated on the source being a Player. 0 is the neutral value.
+        /// </summary>
+        public float MagicSkillBonus { get; init; }
+
         /// <summary>Composed multiplicative pre-mitigation modifiers: power, attribute, slayer, damage rating.</summary>
         public float PreMitigationMod { get; init; } = 1.0f;
 
@@ -63,7 +73,7 @@ namespace ACE.Server.CombatSimulator
         /// This is the COMPOSED MINIMUM of the rending mod and the armor cleaving mod, because
         /// that is how the engine composes them: Entity\DamageEvent.cs:340-346 takes
         /// Math.Min(armorRendingMod, armorCleavingMod) and hands the single result to the armor
-        /// curve. DeveloperCommands.BuildSpecFromCreature builds the same minimum before assigning
+        /// curve. AttackerTerms.ArmorIgnoreMod builds the same minimum before every builder assigns
         /// it here.
         ///
         /// So do NOT add a separate cleaving field and multiply it in - cleaving is already inside

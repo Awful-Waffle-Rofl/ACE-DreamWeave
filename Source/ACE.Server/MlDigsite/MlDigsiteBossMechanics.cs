@@ -643,7 +643,10 @@ namespace ACE.Server.MlDigsite
                     if (amount == 0)
                         return;
 
-                    player.TakeDamage(source, damageType, amount, BodyPart.Foot);
+                    // isHazard (owner ruling 2026-10-24, Berserker pass): the digsite boss mechanics are hazards, so
+                    // Berserk Rage never triggers on them and its immunity does not block them. The flag also makes
+                    // every ward skip these hits (PreWriteDamageContext.IsHazard lists the readers).
+                    player.TakeDamage(source, damageType, amount, BodyPart.Foot, isHazard: true);
                 }
                 catch (Exception ex)
                 {

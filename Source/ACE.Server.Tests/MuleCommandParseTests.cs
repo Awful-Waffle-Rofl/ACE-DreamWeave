@@ -484,6 +484,67 @@ namespace ACE.Server.Tests
         /// subcommand added without a help line fails here rather than shipping undiscoverable.
         /// </summary>
         [TestMethod]
+        public void AutoSalvage_OnAndOff_AreSetsRegardlessOfCase()
+        {
+            var on = MuleCommandParser.Parse(new[] { "autosalvage", "on" });
+            Assert.AreEqual(MuleCommandKind.AutoSalvageSet, on.Kind);
+            Assert.AreEqual(true, on.Enabled);
+
+            var off = MuleCommandParser.Parse(new[] { "autosalvage", "off" });
+            Assert.AreEqual(MuleCommandKind.AutoSalvageSet, off.Kind);
+            Assert.AreEqual(false, off.Enabled);
+
+            var mixed = MuleCommandParser.Parse(new[] { "AUTOSALVAGE", "On" });
+            Assert.AreEqual(MuleCommandKind.AutoSalvageSet, mixed.Kind);
+            Assert.AreEqual(true, mixed.Enabled);
+        }
+
+        [TestMethod]
+        public void AutoSalvage_Bare_IsStatus()
+        {
+            var result = MuleCommandParser.Parse(new[] { "autosalvage" });
+
+            Assert.AreEqual(MuleCommandKind.AutoSalvageStatus, result.Kind);
+            Assert.IsNull(result.Enabled);
+        }
+
+        [TestMethod]
+        public void AutoSalvage_BadArguments_AreAUsageError_AndNeverASummon()
+        {
+            foreach (var args in new[] { new[] { "autosalvage", "maybe" }, new[] { "autosalvage", "on", "extra" }, new[] { "Autosalvage", "off", "off" } })
+            {
+                var result = MuleCommandParser.Parse(args);
+
+                Assert.AreEqual(MuleCommandKind.UsageError, result.Kind);
+                Assert.AreEqual("Usage: /mule autosalvage [on|off]", result.UsageError);
+                Assert.AreNotEqual(MuleCommandKind.SummonOther, result.Kind, "the head is a reserved word, not a character name");
+            }
+        }
+
+        [TestMethod]
+        public void AutoSalvage_ReplyText_IsVerbatim_AndNotesAServerWideOff()
+        {
+            Assert.AreEqual("Auto-combine of partial salvage is now ON for your vault. Partial bags sold to your mule will be combined into full bags.",
+                ACE.Server.WorldObjects.Player.FormatMuleAutoSalvageReply(true, true, true));
+            Assert.AreEqual("Auto-combine of partial salvage is now OFF for your vault. Partial bags will be stored as they are.",
+                ACE.Server.WorldObjects.Player.FormatMuleAutoSalvageReply(true, false, true));
+            Assert.AreEqual("Auto-combine of partial salvage is ON for your vault.",
+                ACE.Server.WorldObjects.Player.FormatMuleAutoSalvageReply(false, true, true));
+            Assert.AreEqual("Auto-combine of partial salvage is OFF for your vault. (Currently disabled server-wide.)",
+                ACE.Server.WorldObjects.Player.FormatMuleAutoSalvageReply(false, false, false));
+            Assert.AreEqual("Auto-combine of partial salvage is now OFF for your vault. Partial bags will be stored as they are. (Currently disabled server-wide.)",
+                ACE.Server.WorldObjects.Player.FormatMuleAutoSalvageReply(true, false, false));
+        }
+
+        [TestMethod]
+        public void AutoSalvage_IsInTheUsageMessageAndHelpText()
+        {
+            StringAssert.Contains(MuleCommandParser.UsageMessage, "autosalvage");
+            StringAssert.Contains(MuleCommandParser.HelpText, "autosalvage");
+            Assert.IsTrue(MuleCommandParser.UsageMessage.IndexOf("autosalvage") < MuleCommandParser.UsageMessage.IndexOf("help"));
+        }
+
+        [TestMethod]
         public void HelpText_MentionsEverySubcommand()
         {
             foreach (var subcommand in new[] { "/mule grant", "/mule revoke", "/mule access", "/mule log", "/mule search", "/mule help" })

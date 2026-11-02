@@ -2,6 +2,7 @@ using System;
 
 using ACE.Common;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
@@ -105,11 +106,13 @@ namespace ACE.Server.Entity
         /// Rolls for a chance at procing a cloak spell
         /// If successful, casts the spell
         ///
-        /// THE SINGLE ENTRY POINT FOR A CLOAK SPELL PROC, and deliberately so. All four call sites (the
+        /// THE SINGLE ENTRY POINT FOR A CLOAK SPELL PROC, and deliberately so. All six call sites (the
         /// melee/missile/hotspot path in Player.TakeDamage, the spell-projectile path in
-        /// SpellProjectile.DamageTarget, and the Harm and Drain Health paths in WorldObject_Magic) reach
+        /// SpellProjectile.DamageTarget, the Harm and Drain Health paths in WorldObject_Magic, the Reflect
+        /// bounce in Player.TryReflectProjectile, and the Shield Block in Player.OnClassAbilityAttackAvoided,
+        /// which passes 0f because a block has no damage figure) reach
         /// HandleProcSpell only through here, so the two class-ability integrations below - Cloaked in Power's
-        /// chance floor and the Taunt hook - are applied once, for every site, and a FIFTH site added later
+        /// chance floor and the Taunt hook - are applied once, for every site, and a SEVENTH site added later
         /// inherits both without having to remember anything. CloakProcWiringSourceScanTests pins that as a source scan.
         ///
         /// <paramref name="defender"/> is the cloak's WEARER at every call site (each one reads
@@ -298,7 +301,62 @@ namespace ACE.Server.Entity
         /// </summary>
         public static int GetDamageReductionAmount(WorldObject source, Creature defender)
         {
-            return Pvp.Rules.PvpRules.ApplyCloakDamageReduction(source, defender, DamageReductionAmount);
+            return Pvp.Rules.PvpRules.ApplyCloakDamageReduction(source, defender, DamageReductionBase(WornCloak(defender)));
+        }
+
+        /// <summary>
+        /// The defender's equipped cloak, or null when there is no defender or it has no equipped-object list (a
+        /// creature built outside the normal load path), so the base falls back to the retail 200 instead of throwing.
+        /// </summary>
+        private static WorldObject WornCloak(Creature defender)
+        {
+            return defender?.EquippedObjects == null ? null : defender.EquippedCloak;
+        }
+
+        /// <summary>
+        /// The base flat mitigation of a damage-reduction cloak, before the PvP and player-source adjustments in
+        /// <see cref="GetDamageReductionAmount"/>. A cloak stamped with PropertyInt.CloakDamageReductionAmount (the
+        /// upgraded Knot cloak, ACE.Server.KnotLoot.UpgradedCloak) uses that value; a null cloak or an unstamped one
+        /// returns <see cref="DamageReductionAmount"/>, so every retail cloak is unchanged.
+        /// </summary>
+        public static int DamageReductionBase(WorldObject cloak)
+        {
+            return cloak?.GetProperty(PropertyInt.CloakDamageReductionAmount) ?? DamageReductionAmount;
+        }
+
+        /// <summary>
+        /// The StatModValue a cloak's own proc spell lands with. Returns PropertyFloat.CloakProcStatModValue only when
+        /// <paramref name="weapon"/> is a cloak, <paramref name="spellId"/> is that cloak's ProcSpell, and the property
+        /// is stamped (the upgraded Knot cloak's Cloaked in Skill); otherwise <paramref name="baseValue"/> unchanged,
+        /// so a retail cloak, a non-cloak carrying the property, and any other spell are all untouched.
+        /// </summary>
+        public static float ProcStatModValue(WorldObject weapon, uint spellId, float baseValue)
+        {
+            if (weapon == null || !IsCloak(weapon) || weapon.ProcSpell != spellId)
+                return baseValue;
+
+            var stamped = weapon.GetProperty(PropertyFloat.CloakProcStatModValue);
+
+            return stamped.HasValue ? (float)stamped.Value : baseValue;
+        }
+
+        /// <summary>
+        /// The StatModValue a REFRESHED enchantment should carry. A refresh keys only on the caster guid, which is the
+        /// wearer for every cloak proc, so without this a +40 Cloaked in Skill built by an upgraded cloak would be
+        /// refreshed forever at +40 by a retail cloak (or a +20 one kept at +20 by an upgraded cloak).
+        ///
+        /// Narrow on purpose: only Cloaked in Skill (SpellId.CloakAllSkill), cast by a cloak whose ProcSpell it is, is
+        /// recomputed - it is the only spell a cloak can stamp a magnitude for, and BuildEntry applies no other value
+        /// transform to it (it is neither a DoT nor a Malediction target). Every other refresh, including a retail
+        /// cloak's other procs, keeps <paramref name="existingValue"/>, so a value BuildEntry transformed (the DoT
+        /// recompute, the Malediction boost) is never overwritten by the raw spell value.
+        /// </summary>
+        public static float RefreshedProcStatModValue(WorldObject weapon, uint spellId, float existingValue, float spellValue)
+        {
+            if (spellId != (uint)SpellId.CloakAllSkill || weapon == null || !IsCloak(weapon) || weapon.ProcSpell != spellId)
+                return existingValue;
+
+            return ProcStatModValue(weapon, spellId, spellValue);
         }
 
         /// <summary>

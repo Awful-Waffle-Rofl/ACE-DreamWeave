@@ -6,7 +6,7 @@ namespace ACE.Server.Managers
     /// <summary>
     /// The leaf phases one player-to-vendor sell handler is split into, in the order the handler runs them.
     /// Every phase is a LEAF and the phases are DISJOINT: a phase that encloses another (Validate encloses
-    /// Access and Accept; Purchase encloses Deposit and Panel) is closed with
+    /// Access and Accept; Purchase encloses Deposit, Combine and Panel) is closed with
     /// <see cref="SellPhaseProfile.EndExclusive"/>, which subtracts whatever the inner phases charged while it
     /// was open. So the phases never double-count, they sum to at most the handler's own measured total, and
     /// the difference is reported as one explicit remainder rather than being spread over the phases.
@@ -54,7 +54,7 @@ namespace ACE.Server.Managers
         Flush,
 
         /// <summary>
-        /// Vendor.ProcessItemsForPurchase, EXCLUDING <see cref="Deposit"/> and <see cref="Panel"/>. For a
+        /// Vendor.ProcessItemsForPurchase, EXCLUDING <see cref="Deposit"/>, <see cref="Combine"/> and <see cref="Panel"/>. For a
         /// plain vendor that is the resell-or-destroy decision and RemoveBiotaFromDatabase per item; for a
         /// PersonalVendor it is DepositItems minus the deposits themselves - the per-item
         /// AccountVaultStore.Enqueue/Drain overhead, trade-note banking and any hand-back.
@@ -84,6 +84,14 @@ namespace ACE.Server.Managers
         /// restamp and the full GameEventApproachVendor serialization) is inside it.
         /// </summary>
         Panel,
+
+        /// <summary>
+        /// The mule partial-salvage combine a PersonalVendor runs after a deposit that stored a partial salvage
+        /// bag: PersonalVendor.RunPartialSalvageCombine, its second queued vault work item included. Inside
+        /// <see cref="Purchase"/>, which is closed exclusive of it. Zero calls for every sale that deposited no
+        /// partial bag, and for every vendor that is not a PersonalVendor.
+        /// </summary>
+        Combine,
     }
 
     /// <summary>
@@ -93,7 +101,7 @@ namespace ACE.Server.Managers
     /// </summary>
     public static class SellPhases
     {
-        public const int Count = 10;
+        public const int Count = 11;
 
         public static readonly string[] TagNames =
         {
@@ -107,6 +115,7 @@ namespace ACE.Server.Managers
             "deposit",
             "payout",
             "panel",
+            "combine",
         };
     }
 
@@ -278,7 +287,7 @@ namespace ACE.Server.Managers
         /// <summary>
         /// Clears the per-tick aggregate. Called from WorldManager.UpdateWorld immediately before the
         /// InboundMessageQueue.RunActions() that WorldTickPhase.InboundMessages times, next to
-        /// <see cref="InboundOpcodeProfile.BeginPhase"/>. Unconditional (two 10-element clears and five
+        /// <see cref="InboundOpcodeProfile.BeginPhase"/>. Unconditional (two SellPhases.Count-element clears and five
         /// scalar stores) for the same reason that one is: a tick that ran with the capture off must not
         /// leave stale numbers behind for the next emit to read. Also disarms the handler scope, so a scope
         /// somehow left open by an escaping exception cannot leak into the next tick.

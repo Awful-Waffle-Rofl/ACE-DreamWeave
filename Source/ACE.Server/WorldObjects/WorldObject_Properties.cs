@@ -1243,7 +1243,7 @@ namespace ACE.Server.WorldObjects
         /// prices and gates on. Identical to Value for anything worth at least 1 pyreal and for every
         /// object that can never sit in a pack (creatures, corpses, and anything Stuck: doors, portals,
         /// lifestones, hooks, chests). For a pickable item whose real Value is null, zero or negative
-        /// it is 1 - see <see cref="IsClientValueSpoofed"/>.
+        /// it is 1 PER UNIT, so its StackSize (1 for a non-stack) - see <see cref="IsClientValueSpoofed"/>.
         ///
         /// Why: the AC client refuses to drag an item into ANY vendor's sell pane when the item's
         /// Value it holds locally is 0, and it learns that Value from three server messages - the
@@ -1254,6 +1254,15 @@ namespace ACE.Server.WorldObjects
         /// opened; an item created after the open, or appraised after it, was back at 0 and refused
         /// again (live test 2026-09-02). Feeding 1 through every channel the client reads makes the
         /// spoof independent of ordering.
+        ///
+        /// PER UNIT, NOT PER STACK. The client's sell-pane check divides before it tests:
+        /// VendorProfile::InqAcceptability (decompiled acclient, AC/acshop/VendorProfile.c) computes
+        /// _value / _stackSize in unsigned integer arithmetic and refuses the drag with "That item has
+        /// no value and cannot be sold" when the quotient is 0. A spoofed 1 on a stack of 5 is
+        /// 1 / 5 = 0, so a single Value-0 rare went into a mule while a stack of them was refused
+        /// (Discord bug 1559583372206936125, Converter's Crystal, wcid 30226). Reporting StackSize
+        /// makes the quotient exactly 1 at every stack size, and the client's own split arithmetic
+        /// (VendorSubUI::SetObjectStackSize, newStack * (value / oldStack)) keeps it at 1 per unit.
         ///
         /// Server-side nothing changes: Player_Commerce.IsAcceptableToSell reads the real Value and
         /// still refuses a Value-0 item at every non-mule vendor with "has no value and cannot be
@@ -1267,7 +1276,13 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         internal static int GetClientValue(WorldObject wo)
         {
-            return IsClientValueSpoofed(wo) ? 1 : (wo.Value ?? 0);
+            if (!IsClientValueSpoofed(wo))
+                return wo.Value ?? 0;
+
+            // 1 per unit: see ClientValue for why the client needs Value / StackSize >= 1.
+            var stackSize = wo.StackSize ?? 1;
+
+            return stackSize > 1 ? stackSize : 1;
         }
 
         /// <summary>

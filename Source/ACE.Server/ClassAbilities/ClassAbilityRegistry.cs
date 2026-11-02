@@ -51,7 +51,12 @@ namespace ACE.Server.ClassAbilities
             // ClassAbilityDefinition, its token catalog slot stays reserved, and
             // RetiredClassAbilities["heavydraw"] refunds held ranks. Pinning Shot takes the Archer T2 slot.
             new LongDrawAbility(),
-            new SavageBlowsAbility(),
+            // Berserker pass 2026-10-24: Heavy Blows takes the slot Savage Blows held, AHEAD of Break Armor and
+            // Bloodlust, so Bloodlust's lifesteal heals from the stretched hit exactly as it did from Savage Blows'.
+            // Berserk Rage sits here too, also ahead of Bloodlust: owner ruling 2026-10-24, the rage x1.5 FEEDS
+            // lifesteal. Its pre-write half is unaffected by this position (that bucket sorts by MitigationOrder).
+            new HeavyBlowsAbility(),
+            new BerserkRageAbility(),
             // Blood Fury RETIRED 2026-08-17 (Berserker/Rogue balance pass): the Berserker T2 slot it held
             // is taken by Break Armor below. Blood Fury's id (35) stays reserved in ClassAbilityDefinition,
             // its token catalog slot stays reserved, and RetiredClassAbilities["bloodfury"] refunds held
@@ -60,9 +65,11 @@ namespace ACE.Server.ClassAbilities
             new ExecutionerAbility(),
             new BloodlustAbility(),
 
-            // Phase 4 - bespoke speed skills (compose with Frenzy / Nether Rush)
+            // Phase 4 - bespoke speed skills (compose with Frenzy / Mana Rush). Flat Cast Speed RETIRED
+            // 2026-10-24 (Archmage pass): its id (39) stays reserved in ClassAbilityDefinition, its token catalog
+            // slot stays reserved, and RetiredClassAbilities["flatcastspeed"] refunds held ranks. Arcane Hollow
+            // takes the Archmage T2 slot.
             new AttackSpeedAbility(),
-            new FlatCastSpeedAbility(),
             new OverchannelAbility(),
 
             // Phase 5 - avoidance tier (rolled before evade; markers, mechanics in Player_ClassAbilityCombat)
@@ -170,8 +177,8 @@ namespace ACE.Server.ClassAbilities
             // ClassAbilityRegistryTests.EverySkillHasAHandlerAndImplementedSkillsHookSomething together pin
             // that nothing was left half-wired in either direction.
             //
-            // Every one now declares an AffinitySkill backed by a real affinity call, EXCEPT Quickened
-            // Casting, whose null is FINAL by design rather than pending. See
+            // Every one still registered declares an AffinitySkill backed by a real affinity call (Quickened
+            // Casting, the one with a deliberate null, was retired 2026-10-24). See
             // ClassAbilityAffinityDeclarationTests, which fails a declaration with no backing call and a
             // call with no declaration alike, and has no Implemented exemption.
             //
@@ -191,8 +198,8 @@ namespace ACE.Server.ClassAbilities
             new KineticChargeAbility(),
             new ReflectMagicAbility(),
             new AdrenalineAbility(),
-            new VengeanceAbility(),
-            new QuickenedCastingAbility(),
+            // Quickened Casting RETIRED 2026-10-24 (Archmage pass): id 83 reserved, token slot reserved,
+            // RetiredClassAbilities["quickened_casting"] refunds held ranks. Elemental Inversion takes the slot.
             new UmbralSiphonAbility(),
             new SoulJumpAbility(),
             new HemomancyAbility(),
@@ -201,6 +208,21 @@ namespace ACE.Server.ClassAbilities
             // Appended 2026-09-29. IPassiveStatAbility only, so it joins no hook bucket at all and its
             // position here has no effect on any dispatch order.
             new CloakedInPowerAbility(),
+            // Berserker pass 2026-10-24 (Savage Blows and Vengeance retired). Heavy Blows and Berserk Rage are
+            // registered further up, ahead of Bloodlust; Berserk Rage's companion immunity handler is NOT listed
+            // anywhere here - see the PreWriteDamageAbilities build below.
+            new IntimidateAbility(),
+            // Archmage pass 2026-10-24 (Quickened Casting and Flat Cast Speed retired). All three are bespoke
+            // integrations carrying IPassiveStatAbility: Elemental Inversion and Arcane Hollow replace the
+            // innate resist term at the resistance lookups (SpellProjectile.CalculateDamage war/void branch,
+            // DamageEvent.ResolveDefenderHalf) through Player.GetArchmageInnateOverride, Volatile
+            // Wall in the war/void branch of CalculateDamage. They join no hook bucket.
+            new ElementalInversionAbility(),
+            new ArcaneHollowAbility(),
+            new VolatileWallAbility(),
+            // Spellsword T2, 2026-10-30. Bespoke integration carrying IPassiveStatAbility: it re-types the hit in
+            // DamageEvent.DoCalculateDamage through Player.RollVolatileElement and joins no hook bucket.
+            new VolatileElementsAbility(),
         };
 
         public static readonly IReadOnlyDictionary<ClassAbilityId, ClassAbilityDefinition> Abilities;
@@ -253,7 +275,12 @@ namespace ACE.Server.ClassAbilities
 
             OutgoingDamageAbilities = Handlers.OfType<IOutgoingDamageAbility>().OrderBy(h => h.DispatchOrder).ToArray();
             IncomingDamageAbilities = Handlers.OfType<IIncomingDamageAbility>().ToArray();
-            PreWriteDamageAbilities = Handlers.OfType<IPreWriteDamageAbility>().OrderBy(h => h.MitigationOrder).ToArray();
+            // Berserk Rage's immunity window is a SECOND pre-write handler sharing BerserkRageAbility's Definition (it
+            // must sit in the Immunity band while the trigger sits after Soul Jump). It joins this bucket only: it is
+            // not in Handlers, whose id-keyed maps would reject a duplicate id.
+            PreWriteDamageAbilities = Handlers.OfType<IPreWriteDamageAbility>()
+                .Append(BerserkRageAbility.Immunity)
+                .OrderBy(h => h.MitigationOrder).ToArray();
             MissileVolleyAbilities  = Handlers.OfType<IMissileVolleyAbility>().ToArray();
             ItemProcAbilities       = Handlers.OfType<IItemProcAbility>().ToArray();
             SpellHitAbilities       = Handlers.OfType<ISpellHitAbility>().ToArray();

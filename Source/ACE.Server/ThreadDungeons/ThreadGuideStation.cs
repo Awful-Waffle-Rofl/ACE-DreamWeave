@@ -187,7 +187,13 @@ namespace ACE.Server.ThreadDungeons
         public static void IncrementClears(Player player)
         {
             player?.EnqueueAction(new ACE.Server.Entity.Actions.ActionEventDelegate(() =>
-                player.ThreadClearsLifetime = player.ThreadClearsLifetime + 1));
+            {
+                player.ThreadClearsLifetime = player.ThreadClearsLifetime + 1;
+
+                // Owner ruling 2026-10-15: one Thread clear makes a character eligible for PvP Arenas and Battlegrounds.
+                // Told here, on the player's own queue, right after the count that made them eligible.
+                player.SendPvpEligibleNoticeIfDue();
+            }));
         }
 
         /// <summary>The exact shape EmoteType.Tell sends, as SurveyArchivistStation.Tell does.</summary>
@@ -236,8 +242,13 @@ namespace ACE.Server.ThreadDungeons
                 set => player.ThreadGuideGrantSerial = value;
             }
 
+            /// <summary>
+            /// A guide gem bound to a Cleared run does not count (owner ruling 2026-10-10: the solo gem survives the
+            /// clear for a loot return, but the rung is won), so the next grant is not held until that run ends.
+            /// </summary>
             public bool HasOutstandingGuideItem()
-                => ThreadGuideFlow.HasOutstandingGuideItem(player.Inventory.Values, player.Guid.Full, player.ThreadGuideGrantSerial);
+                => ThreadGuideFlow.HasOutstandingGuideItem(player.Inventory.Values, player.Guid.Full, player.ThreadGuideGrantSerial,
+                    runId => ThreadDungeonManager.GetRun(runId)?.State);
 
             /// <summary>
             /// The pre-flight, the same shape FragmentPressStation.HasRoomFor uses. Fails OPEN for a weenie missing

@@ -15,9 +15,9 @@ namespace ACE.Server.Tests
     [TestClass]
     public class IpLimitConfinementTests
     {
-        private static IpLimitZoneDials Dials(bool arena = true, bool proving = true, bool speed = true, int tailSeconds = 15)
+        private static IpLimitZoneDials Dials(bool arena = true, bool proving = true, bool speed = true, int tailSeconds = 15, bool housing = true)
         {
-            return new IpLimitZoneDials(arena, proving, speed, tailSeconds);
+            return new IpLimitZoneDials(arena, proving, speed, housing, tailSeconds);
         }
 
         // ==================================================================================
@@ -27,10 +27,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void AllDialsOff_TeleportingOnly_IsConfined()
         {
-            var dials = Dials(arena: false, proving: false, speed: false);
+            var dials = Dials(arena: false, proving: false, speed: false, housing: false);
 
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: true, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: true, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: dials);
 
             Assert.AreEqual(IpLimitConfinementReason.Teleporting, reason);
@@ -39,10 +39,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void AllDialsOff_MuleLandblockOnly_IsConfined()
         {
-            var dials = Dials(arena: false, proving: false, speed: false);
+            var dials = Dials(arena: false, proving: false, speed: false, housing: false);
 
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: true, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: true, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: dials);
 
             Assert.AreEqual(IpLimitConfinementReason.MuleLandblock, reason);
@@ -57,10 +57,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void AllDialsOff_EveryActivityTermTrue_IsNotConfined()
         {
-            var dials = Dials(arena: false, proving: false, speed: false);
+            var dials = Dials(arena: false, proving: false, speed: false, housing: false);
 
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: false, dials: dials);
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -76,7 +76,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void AllDialsOff_TailStampedWhileOn_IsNotConfined()
         {
-            var allOff = Dials(arena: false, proving: false, speed: false);
+            var allOff = Dials(arena: false, proving: false, speed: false, housing: false);
 
             var inActivityTail = IpLimitManager.IsWithinActivityTail(
                 seenAt: StampedAt, stampedInstance: StampedInstance, stampedReason: IpLimitConfinementReason.PvpArena,
@@ -85,7 +85,7 @@ namespace ACE.Server.Tests
             Assert.IsFalse(inActivityTail, "sanity: the dial-off gate inside IsWithinActivityTail itself");
 
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: inActivityTail, dials: allOff);
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -95,7 +95,7 @@ namespace ACE.Server.Tests
         public void NothingTrue_IsNotConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -109,7 +109,7 @@ namespace ACE.Server.Tests
         public void ArenaMatchSpace_DialOn_IsConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.PvpArena, reason);
@@ -119,7 +119,7 @@ namespace ACE.Server.Tests
         public void ArenaMatchSpace_DialOff_IsNotConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials(arena: false));
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -129,7 +129,7 @@ namespace ACE.Server.Tests
         public void SpeedRun_DialOn_IsConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: true, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.SpeedRun, reason);
@@ -144,7 +144,7 @@ namespace ACE.Server.Tests
         public void SpeedRun_SpeedDialOff_ProvingDialOn_IsNotConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: true, inProvingGroundsRun: false, inActivityTail: false, dials: Dials(speed: false));
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -154,7 +154,7 @@ namespace ACE.Server.Tests
         public void SpeedRun_ProvingDialOff_SpeedDialOn_IsStillConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: true, inProvingGroundsRun: false, inActivityTail: false, dials: Dials(proving: false));
 
             Assert.AreEqual(IpLimitConfinementReason.SpeedRun, reason);
@@ -164,7 +164,7 @@ namespace ACE.Server.Tests
         public void ProvingGroundsRun_DialOn_IsConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: true, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.ProvingGrounds, reason);
@@ -174,7 +174,7 @@ namespace ACE.Server.Tests
         public void ProvingGroundsRun_DialOff_IsNotConfined()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: true, inActivityTail: false, dials: Dials(proving: false));
 
             Assert.AreEqual(IpLimitConfinementReason.None, reason);
@@ -187,8 +187,8 @@ namespace ACE.Server.Tests
             // caller (RefreshActivityStamp) only ever produces inActivityTail=true when a dial was on at the
             // time of the stamp, but IsConfinedCore does not re-derive that, it trusts the fact it is given.
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
-                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: true, dials: Dials(arena: false, proving: false, speed: false));
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: true, dials: Dials(arena: false, proving: false, speed: false, housing: false));
 
             Assert.AreEqual(IpLimitConfinementReason.ActivityTail, reason);
         }
@@ -201,7 +201,7 @@ namespace ACE.Server.Tests
         public void Teleporting_TakesPriorityOverEverythingElse()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: true, inMuleLandblock: true, inArenaMatchSpace: true,
+                teleporting: true, inMuleLandblock: true, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: true, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.Teleporting, reason);
@@ -211,7 +211,7 @@ namespace ACE.Server.Tests
         public void MuleLandblock_TakesPriorityOverActivityTermsAndTail()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: true, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: true, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: true, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.MuleLandblock, reason);
@@ -221,7 +221,7 @@ namespace ACE.Server.Tests
         public void ActivityTail_TakesPriorityOverLiveActivityTerms()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: true, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.ActivityTail, reason);
@@ -231,7 +231,7 @@ namespace ACE.Server.Tests
         public void ArenaMatchSpace_TakesPriorityOverSpeedAndProving()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.PvpArena, reason);
@@ -241,7 +241,7 @@ namespace ACE.Server.Tests
         public void SpeedRun_TakesPriorityOverProvingGrounds()
         {
             var reason = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: false, dials: Dials());
 
             Assert.AreEqual(IpLimitConfinementReason.SpeedRun, reason);
@@ -395,6 +395,7 @@ namespace ACE.Server.Tests
             Assert.IsTrue(d.ConfineArena);
             Assert.IsTrue(d.ConfineProving);
             Assert.IsTrue(d.ConfineSpeed);
+            Assert.IsTrue(d.ConfineHousing);
             Assert.AreEqual(15, d.TailSeconds);
         }
 
@@ -409,11 +410,11 @@ namespace ACE.Server.Tests
         public void ArenaConfinedAlt_DoesNotCountAgainstTheOutsideCap()
         {
             var mainConfined = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: false,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials()) != IpLimitConfinementReason.None;
 
             var altConfined = IpLimitManager.IsConfinedCore(
-                teleporting: false, inMuleLandblock: false, inArenaMatchSpace: true,
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: true,
                 inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials()) != IpLimitConfinementReason.None;
 
             Assert.IsFalse(mainConfined, "sanity: the main, out fighting, is not confined");
@@ -485,6 +486,165 @@ namespace ACE.Server.Tests
             Assert.AreEqual("01F5@1", IpLimitManager.NormalizeLandblockToken("0x01f5@1"));
             Assert.AreEqual("016C", IpLimitManager.NormalizeLandblockToken("016c"));
             Assert.IsNull(IpLimitManager.NormalizeLandblockToken("01F5@"));
+        }
+
+        // ==================================================================================
+        // Housing: ANY character (mule or not) standing in a housing landblock is confined,
+        // while ip_limit_confine_housing is on.
+        // ==================================================================================
+
+        [TestMethod]
+        public void Housing_Alone_IsConfinedAsHousing()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
+
+            Assert.AreEqual(IpLimitConfinementReason.Housing, reason);
+        }
+
+        [TestMethod]
+        public void Housing_DialOff_IsNotConfined()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials(housing: false));
+
+            Assert.AreEqual(IpLimitConfinementReason.None, reason);
+        }
+
+        [TestMethod]
+        public void NotInHousing_DialOn_IsNotConfined()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: false, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
+
+            Assert.AreEqual(IpLimitConfinementReason.None, reason);
+        }
+
+        [TestMethod]
+        public void MuleLandblock_BeatsHousing()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: true, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
+
+            Assert.AreEqual(IpLimitConfinementReason.MuleLandblock, reason);
+        }
+
+        [TestMethod]
+        public void Teleporting_BeatsHousing()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: true, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false, dials: Dials());
+
+            Assert.AreEqual(IpLimitConfinementReason.Teleporting, reason);
+        }
+
+        [TestMethod]
+        public void Housing_BeatsActivityTailAndArena()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: true,
+                inSpeedRun: true, inProvingGroundsRun: true, inActivityTail: true, dials: Dials());
+
+            Assert.AreEqual(IpLimitConfinementReason.Housing, reason);
+        }
+
+        [TestMethod]
+        public void Housing_WithActivityDialsOff_StillConfined()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false,
+                dials: Dials(arena: false, proving: false, speed: false));
+
+            Assert.AreEqual(IpLimitConfinementReason.Housing, reason);
+        }
+
+        [TestMethod]
+        public void AllDialsOff_InHousing_IsNotConfined()
+        {
+            var reason = IpLimitManager.IsConfinedCore(
+                teleporting: false, inMuleLandblock: false, inHousing: true, inArenaMatchSpace: false,
+                inSpeedRun: false, inProvingGroundsRun: false, inActivityTail: false,
+                dials: Dials(arena: false, proving: false, speed: false, housing: false));
+
+            Assert.AreEqual(IpLimitConfinementReason.None, reason);
+        }
+
+        // ----------------------------------------------------------------------------------
+        // IsInHousingCore: the login-gate decision, with the housing set / dial injected.
+        // ----------------------------------------------------------------------------------
+
+        private const ushort HouseLb = 0x0123;
+        private const ushort OtherLb = 0x0456;
+
+        private static bool InHousing(ushort landblock, bool dialOn = true, bool ephemeral = false)
+        {
+            return IpLimitManager.IsInHousingCore(ephemeral, landblock, lb => lb == HouseLb, () => dialOn);
+        }
+
+        [TestMethod]
+        public void IsInHousing_AtHousing_DialOn_IsTrue()
+        {
+            Assert.IsTrue(InHousing(HouseLb));
+        }
+
+        [TestMethod]
+        public void IsInHousing_DialOff_IsFalse()
+        {
+            Assert.IsFalse(InHousing(HouseLb, dialOn: false));
+        }
+
+        [TestMethod]
+        public void IsInHousing_EphemeralInstanceOfHousingLandblock_IsFalse()
+        {
+            Assert.IsFalse(InHousing(HouseLb, ephemeral: true));
+        }
+
+        [TestMethod]
+        public void IsInHousing_EphemeralInstance_NeverReadsSetOrDial()
+        {
+            var reads = 0;
+
+            var result = IpLimitManager.IsInHousingCore(true, HouseLb, lb => { reads++; return true; }, () => { reads++; return true; });
+
+            Assert.IsFalse(result);
+            Assert.AreEqual(0, reads, "the ephemeral check must run before the set and the dial");
+        }
+
+        [TestMethod]
+        public void IsHousingPlacement_PersistedEphemeralInstanceValue_IsNotHousing()
+        {
+            // The login gate derives ephemeral from the raw persisted instance via Position.ParseInstanceID.
+            var ephemeral = ACE.Entity.Position.InstanceIDFromVars(5, 7, true);
+            var permanent = ACE.Entity.Position.InstanceIDFromVars(1, 0, false);
+
+            ACE.Entity.Position.ParseInstanceID(ephemeral, out var e1, out _, out _);
+            ACE.Entity.Position.ParseInstanceID(permanent, out var e2, out _, out _);
+
+            Assert.IsFalse(IpLimitManager.IsHousingPlacement(e1, HouseLb, lb => true));
+            Assert.IsTrue(IpLimitManager.IsHousingPlacement(e2, HouseLb, lb => true));
+        }
+
+        [TestMethod]
+        public void IsInHousing_NonHousingLandblock_IsFalse()
+        {
+            Assert.IsFalse(InHousing(OtherLb));
+        }
+
+        [TestMethod]
+        public void IsInHousing_NonHousingLandblock_NeverReadsDial()
+        {
+            var dialReads = 0;
+
+            var result = IpLimitManager.IsInHousingCore(false, OtherLb, lb => false, () => { dialReads++; return true; });
+
+            Assert.IsFalse(result);
+            Assert.AreEqual(0, dialReads, "the set check must run before the dial read");
         }
     }
 }

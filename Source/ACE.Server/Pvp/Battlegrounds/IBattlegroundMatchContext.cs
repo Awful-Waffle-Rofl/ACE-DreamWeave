@@ -1,10 +1,13 @@
+using System;
 using System.Collections.Generic;
 
 namespace ACE.Server.Pvp.Battlegrounds
 {
     /// <summary>
     /// One seat's position as sampled for the control-zone check. X, Y and Z are landblock-local metres, the same
-    /// frame as <see cref="PvpSpawnPoint"/>. IpKey is the seat's snapshotted same-IP key, for the per-team dedupe.
+    /// frame as <see cref="PvpSpawnPoint"/>. IpKey is the seat's snapshotted same-IP key, for the per-team dedupe. LastActivityUtc and
+    /// ActivityMatchId are the player's conduct activity stamp (<see cref="PvpActivityStamp"/>), null when they have none; only the
+    /// coordinator's conduct sampler reads them (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals").
     /// </summary>
     public sealed record BattlegroundZoneSample(
         uint CharacterId,
@@ -15,7 +18,9 @@ namespace ACE.Server.Pvp.Battlegrounds
         bool IsTeleporting,
         double X,
         double Y,
-        double Z);
+        double Z,
+        DateTime? LastActivityUtc = null,
+        Guid? ActivityMatchId = null);
 
     /// <summary>
     /// What an objective-mode tick handler may read and ask of a battleground match
@@ -50,5 +55,11 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// (the old ring is removed, the new one placed through the same fixture seam). A no-op for a match with no markers.
         /// </summary>
         void ReplaceZoneMarkers(KothZone zone);
+
+        /// <summary>
+        /// Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): credits <paramref name="seconds"/> of objective time (King of
+        /// the Hill hill seconds) to <paramref name="characterId"/>. Collection only; it changes no score. A no-op for a match with no ledger.
+        /// </summary>
+        void CreditObjectiveTime(uint characterId, int seconds);
     }
 }

@@ -43,10 +43,12 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "acidproc",
             DisplayName = "Acid Proc",
             Description = "Your poisoned hits have a flat 30% chance to leave a caustic wound: a 3-tick acid " +
-                          "damage-over-time equal to your Poison Weapon damage (needs Poison Weapon). Ranks " +
-                          "raise all your poison damage by +25/50/75% (Poison Weapon hits and the acid ticks " +
-                          "alike); higher Alchemy raises it further. Each wound keeps the scaling of the hit " +
-                          "that opened it: damage ratings, the target's resistance, and critical bonuses.",
+                          "damage-over-time equal to your Poison Weapon damage (needs Poison Weapon). Another " +
+                          "proc on an open wound refreshes it to 3 full ticks rather than dealing an extra tick. " +
+                          "Ranks raise all your poison damage by +25/50/75% (Poison Weapon hits and the acid " +
+                          "ticks alike); higher Alchemy raises it further. Each wound takes the scaling of the " +
+                          "hit that last opened or refreshed it: damage ratings, the target's resistance, " +
+                          "critical bonuses, and the reduced damage of Multishot extra arrows and Riposte counters.",
             MaxRank = 3,
             CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
             Implemented = true,
@@ -114,9 +116,9 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// Pure for testability - <paramref name="poisonWeaponFlat"/> is
         /// <see cref="PoisonWeaponAbility.FlatBonus"/>'s already-computed result, not recomputed here.
         ///
-        /// SNAPSHOTTED WHEN THE WOUND OPENS: the result is what ApplyAcidProcDot stores as TickAmount, so
-        /// every tick of that wound carries the multiplier of the strike that opened it, even if the target's
-        /// resistance or the attacker's rating changes mid-wound.
+        /// SNAPSHOTTED WHEN THE WOUND OPENS OR IS REFRESHED: the result is what ApplyAcidProcDot stores as
+        /// TickAmount, so every tick of that wound carries the multiplier of the strike that last opened or
+        /// refreshed it, even if the target's resistance or the attacker's rating changes mid-wound.
         ///
         /// <paramref name="strikeMultiplier"/> may be below 1.0 (a resistant target) and that reduction is
         /// intended, so it is floored at 0 only, to keep a negative input from wrapping the uint. It used to

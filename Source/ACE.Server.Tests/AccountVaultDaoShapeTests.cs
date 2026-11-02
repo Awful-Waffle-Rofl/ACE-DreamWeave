@@ -79,7 +79,7 @@ namespace ACE.Server.Tests
                 "GetAccountVaultStacks", "TryAdjustAccountVaultStack", "TryAdjustAccountVaultStackBatch", "DeleteEmptyAccountVaultStacks",
                 "GetAccountVaultGrants", "GetAccountVaultGrantsForGrantee", "UpsertAccountVaultGrant", "DeleteAccountVaultGrant",
                 "AddAccountVaultLog", "GetAccountVaultLog",
-                "GetAccountVaultClasses", "TryAdjustAccountVaultClass", "TryAdjustAccountVaultClassBatch", "DeleteEmptyAccountVaultClasses",
+                "GetAccountVaultClasses", "TryAdjustAccountVaultClass", "TryAdjustAccountVaultClassBatch", "TryExchangeAccountVaultClasses", "DeleteEmptyAccountVaultClasses",
             };
 
             foreach (var name in expected)
@@ -240,11 +240,184 @@ namespace ACE.Server.Tests
             return File.ReadAllText(Path.Combine(dir.FullName, "Source", "ACE.Database", "ShardDatabase_AccountVaultClass.cs")).Replace("\r\n", "\n");
         }
 
+        /// <summary>
+        /// The class DAO with every // and /// comment line removed, so prose that NAMES a forbidden
+        /// call (the header explains why a bare BeginTransaction throws) cannot fail or satisfy a code
+        /// check.
+        /// </summary>
+        private static string ClassDaoCode()
+            => string.Join("\n", ClassDaoSource().Split('\n').Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+        private const string ExchangeSignature =
+            "public AccountVaultStackAdjustResult TryExchangeAccountVaultClasses(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps)";
+
+        /// <summary>
+        /// DELIBERATELY CHANGED from "the class DAO never opens a user-initiated transaction" when the
+        /// atomic exchange landed. The exchange is the file's ONE sanctioned exception (see the
+        /// header): a multi-row trade cannot be atomic without a transaction. What this pins instead is
+        /// the shape that makes that exception safe - exactly one BeginTransaction in the whole file,
+        /// it lives in the exchange, and it is opened only after CreateExecutionStrategy, inside
+        /// strategy.Execute(...), because a bare one throws under the retrying execution strategy this
+        /// context enables.
+        /// </summary>
         [TestMethod]
-        public void ClassDao_NeverOpensAUserInitiatedTransaction()
+        public void ClassDao_OpensItsOneTransactionOnlyInsideTheExchangeStrategy()
         {
-            Assert.IsFalse(ClassDaoSource().Contains("BeginTransaction"),
-                "BeginTransaction throws under the retrying execution strategy this context enables");
+            AssertOneTransactionInsideTheExchangeStrategy(ClassDaoCode());
+        }
+
+        /// <summary>
+        /// The guard, separated from the file read so <see cref="TransactionGuard_Discriminates"/> can
+        /// run it over mutated copies of the source and prove each way of breaking the rule trips it.
+        ///
+        /// "BeginTransaction" is counted WITHOUT its parenthesis so BeginTransactionAsync counts too.
+        /// UseTransaction and TransactionScope are the other two ways to put statements under a
+        /// user-initiated transaction, so neither may appear at all. And the one BeginTransaction must
+        /// sit INSIDE the strategy.Execute lambda - between its opening brace and the brace that closes
+        /// it - not merely after the call text somewhere in the method.
+        /// </summary>
+        private static void AssertOneTransactionInsideTheExchangeStrategy(string code)
+        {
+            Assert.AreEqual(1, code.Split(new[] { "BeginTransaction" }, StringSplitOptions.None).Length - 1,
+                "the class DAO may open exactly ONE user-initiated transaction (sync or async), in TryExchangeAccountVaultClasses");
+
+            Assert.IsFalse(code.Contains("UseTransaction"), "no UseTransaction: it enlists statements in a user-initiated transaction");
+            Assert.IsFalse(code.Contains("TransactionScope"), "no TransactionScope: it opens an ambient user-initiated transaction");
+
+            var body = MemberBody(code, ExchangeSignature);
+
+            var strategy = body.IndexOf("CreateExecutionStrategy()", StringComparison.Ordinal);
+            var execute = body.IndexOf("strategy.Execute(", StringComparison.Ordinal);
+            var begin = body.IndexOf("BeginTransaction", StringComparison.Ordinal);
+
+            Assert.IsTrue(begin >= 0, "the one BeginTransaction must be inside TryExchangeAccountVaultClasses");
+            Assert.IsTrue(strategy >= 0 && execute > strategy, "the exchange must create the execution strategy and call strategy.Execute");
+
+            // The lambda's body: from the first '{' after strategy.Execute( to its matching '}'. Brace
+            // counting is sound over this code because every brace inside a string literal here (SQL
+            // placeholders, interpolation holes) is itself balanced.
+            var lambdaStart = body.IndexOf('{', execute);
+            Assert.IsTrue(lambdaStart > execute, "strategy.Execute must take a block-bodied lambda");
+
+            var depth = 0;
+            var lambdaEnd = -1;
+
+            for (var i = lambdaStart; i < body.Length; i++)
+            {
+                if (body[i] == '{')
+                    depth++;
+                else if (body[i] == '}' && --depth == 0)
+                {
+                    lambdaEnd = i;
+                    break;
+                }
+            }
+
+            Assert.IsTrue(lambdaEnd > lambdaStart, "could not find the end of the strategy.Execute lambda");
+            Assert.IsTrue(begin > lambdaStart && begin < lambdaEnd,
+                "BeginTransaction must be opened INSIDE the strategy.Execute lambda, never bare and never after it");
+        }
+
+        /// <summary>
+        /// Proves the guard above is not vacuous: each mutation of an in-memory COPY of the real source
+        /// breaks the rule in a different way, and each must fail the guard.
+        /// </summary>
+        [TestMethod]
+        public void TransactionGuard_Discriminates()
+        {
+            var code = ClassDaoCode();
+
+            // Control: the unmodified source passes.
+            AssertOneTransactionInsideTheExchangeStrategy(code);
+
+            const string deleteSignature = "public int DeleteEmptyAccountVaultClasses(uint accountId)\n        {";
+            Assert.IsTrue(code.Contains(deleteSignature), "the mutation anchor moved; update this test");
+
+            var mutations = new System.Collections.Generic.Dictionary<string, string>
+            {
+                ["BeginTransactionAsync in another method"] =
+                    code.Replace(deleteSignature, deleteSignature + "\n            using var t = new ShardDbContext().Database.BeginTransactionAsync().Result;"),
+                ["UseTransaction in another method"] =
+                    code.Replace(deleteSignature, deleteSignature + "\n            new ShardDbContext().Database.UseTransaction(null);"),
+                ["TransactionScope in another method"] =
+                    code.Replace(deleteSignature, deleteSignature + "\n            using var scope = new System.Transactions.TransactionScope();"),
+                ["BeginTransaction hoisted out of the lambda"] =
+                    code.Replace("var strategy = context.Database.CreateExecutionStrategy();",
+                                 "var strategy = context.Database.CreateExecutionStrategy();\n                    var hoisted = context.Database.BeginTransaction();")
+                        .Replace("using (var transaction = context.Database.BeginTransaction())", "using (var transaction = hoisted)"),
+            };
+
+            foreach (var mutation in mutations)
+            {
+                Assert.AreNotEqual(code, mutation.Value, $"mutation '{mutation.Key}' did not change the source; its anchor moved");
+
+                var tripped = false;
+
+                try
+                {
+                    AssertOneTransactionInsideTheExchangeStrategy(mutation.Value);
+                }
+                catch (AssertFailedException)
+                {
+                    tripped = true;
+                }
+
+                Assert.IsTrue(tripped, $"the transaction guard did not catch: {mutation.Key}");
+            }
+        }
+
+        /// <summary>
+        /// F1 of the exchange review: the Failed log must name every step, because a Failed exchange is
+        /// exactly the case an operator reconciles by hand and "carrying N step(s)" names none of them.
+        /// </summary>
+        [TestMethod]
+        public void ClassExchange_FailedLogNamesEveryStep()
+        {
+            var body = MemberBody(ClassDaoCode(), ExchangeSignature);
+
+            var summary = body.IndexOf("var stepSummary = string.Join(", StringComparison.Ordinal);
+            var tryStart = body.IndexOf("try\n", StringComparison.Ordinal);
+
+            Assert.IsTrue(summary >= 0 && tryStart > summary, "the per-step summary must be built before the try, so the catch can always reach it");
+
+            var failedCatch = body.LastIndexOf("catch (Exception ex)", StringComparison.Ordinal);
+            Assert.IsTrue(failedCatch > tryStart, "the exchange must end in a catch-all that reports Failed");
+
+            var catchBlock = body.Substring(failedCatch);
+
+            StringAssert.Contains(catchBlock, "AccountVaultStackAdjustResult.Failed", "the catch-all must report Failed");
+            StringAssert.Contains(catchBlock, "{stepSummary}", "the Failed log must carry the per-step summary");
+        }
+
+        /// <summary>
+        /// The exchange's idempotency rests on step order inside the delegate: every row is locked and
+        /// observed BEFORE any write, so a strategy re-run after a lost commit acknowledgement sees the
+        /// post-state and writes nothing. A write moved above the lock would apply the trade twice.
+        /// </summary>
+        [TestMethod]
+        public void ClassExchange_LocksAndObservesEveryRowBeforeAnyWrite()
+        {
+            var body = MemberBody(ClassDaoCode(), ExchangeSignature);
+
+            var lockRead = body.IndexOf("LockAccountVaultClassRowSql", StringComparison.Ordinal);
+            var update = body.IndexOf("ExchangeAccountVaultClassUpdateSql", StringComparison.Ordinal);
+            var insert = body.IndexOf("ExchangeAccountVaultClassInsertSql", StringComparison.Ordinal);
+
+            Assert.IsTrue(lockRead >= 0 && update > lockRead && insert > lockRead,
+                "the FOR UPDATE lock-and-read must precede both the UPDATE and the INSERT");
+
+            StringAssert.Contains(ClassDaoSource(), "WHERE `account_Id` = {0} AND `class_Key` = {1} FOR UPDATE",
+                "every exchange row must be read under a row lock");
+
+            StringAssert.Contains(ClassDaoSource(), "AND `count` = {4} AND `total_Value` = {5}",
+                "the exchange UPDATE must be guarded on the exact pre-state it verified");
+
+            // The exchange creates rows with a PLAIN insert: an ON DUPLICATE KEY UPDATE branch would add
+            // deltas to a row this exchange never verified.
+            var insertSql = ClassDaoSource().Substring(ClassDaoSource().IndexOf("private const string ExchangeAccountVaultClassInsertSql", StringComparison.Ordinal));
+            insertSql = insertSql.Substring(0, insertSql.IndexOf(";", StringComparison.Ordinal));
+
+            Assert.IsFalse(insertSql.Contains("ON DUPLICATE KEY"), "the exchange INSERT must be a plain INSERT");
         }
 
         /// <summary>
@@ -290,7 +463,12 @@ namespace ACE.Server.Tests
             StringAssert.Contains(src, "ON DUPLICATE KEY UPDATE `count` = `count` + VALUES(`count`), `total_Value` = `total_Value` + VALUES(`total_Value`)",
                 "the batched upsert must add BOTH deltas at the database, in one statement, so the two columns cannot diverge");
 
-            Assert.IsFalse(src.Contains("BeginTransaction"),
+            // Scoped to the batch method since the exchange landed: the file now holds exactly one
+            // sanctioned transaction (ClassDao_OpensItsOneTransactionOnlyInsideTheExchangeStrategy), and
+            // it is not this method's.
+            var batchBody = MemberBody(ClassDaoCode(), "public bool TryAdjustAccountVaultClassBatch(uint accountId,");
+
+            Assert.IsFalse(batchBody.Contains("BeginTransaction"),
                 "the batched form must not open a user-initiated transaction either; each statement is its own implicit one");
 
             var readModifyWrite = Regex.Matches(src, @"\.(Count|TotalValue)\s*(\+=|-=|=(?!=))");

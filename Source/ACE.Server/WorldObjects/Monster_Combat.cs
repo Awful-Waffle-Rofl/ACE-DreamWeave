@@ -59,8 +59,10 @@ namespace ACE.Server.WorldObjects
         {
             get
             {
-                // defaults to most common value found in py16 db
-                var magicDelay = AiUseMagicDelay ?? 3.0f;
+                // AiUseMagicDelay (3.0 when unset - the most common value found in py16 db), stretched by
+                // the Weakened Blood slow. Every site that aligns PrevAttackTime against this gate reads the
+                // same helper, so the two sides of that arithmetic cannot disagree.
+                var magicDelay = GetWeakenedBloodScaledMagicDelay();
 
                 return PrevAttackTime + magicDelay;
             }
@@ -130,6 +132,12 @@ namespace ACE.Server.WorldObjects
         {
             var combatMode = IsRanged ? CombatMode.Missile : CombatMode.Melee;
 
+            // a caster pet (CombatPet.ApplySummonStats) is summoned into Magic and must stay there: with no
+            // wand its motion stance never leaves NonCombat, so this runs on its first tick and would
+            // otherwise drop it into Melee
+            if (this is CombatPet && CombatMode == CombatMode.Magic)
+                combatMode = CombatMode.Magic;
+
             var stanceTime = SetCombatMode(combatMode);
 
             var nextTime = Timers.RunningTime + stanceTime;
@@ -144,16 +152,22 @@ namespace ACE.Server.WorldObjects
             else
                 NextAttackTime = nextTime;
 
+            // Weakened Blood slow: MissileDelay and the magic delay are both durations, so both stretch by
+            // the slow's factor; read once so the alignment (magic gate opens with the first missile shot)
+            // holds exactly as it did unslowed
+            var missileDelay = ScaleWeakenedBloodSlowDuration(MissileDelay);
+            var magicDelay = GetWeakenedBloodScaledMagicDelay();
+
             if (IsRanged)
             {
-                PrevAttackTime = NextAttackTime + MissileDelay - (AiUseMagicDelay ?? 3.0f);
+                PrevAttackTime = NextAttackTime + missileDelay - magicDelay;
 
-                NextAttackTime += MissileDelay;
+                NextAttackTime += missileDelay;
             }
 
             if (NeverAttack)
             {
-                PrevAttackTime = NextAttackTime = double.MaxValue - (AiUseMagicDelay ?? 3.0f);
+                PrevAttackTime = NextAttackTime = double.MaxValue - magicDelay;
             }
 
             if (DebugMove)
@@ -161,6 +175,14 @@ namespace ACE.Server.WorldObjects
 
             PhysicsObj.StartTimer();
         }
+
+        /// <summary>
+        /// The attack type a monster falls back to after 10 re-rolls all hit a projectile spell with no line of sight:
+        /// Magic only for exactly <see cref="CombatStyle.StubbornMagic"/> (an equality gate, mirroring StubbornMissile
+        /// in TrySwitchToMeleeAttack), Melee for every other style.
+        /// </summary>
+        internal static CombatType NoLineOfSightFallbackAttack(CombatStyle allowedStyle)
+            => allowedStyle == CombatStyle.StubbornMagic ? CombatType.Magic : CombatType.Melee;
 
         public float GetMaxRange()
         {
@@ -188,7 +210,11 @@ namespace ACE.Server.WorldObjects
                         if (it >= 10)
                         {
                             //log.Warn($"{Name} ({Guid}) reached max iterations");
-                            CurrentAttack = CombatType.Melee;
+                            CurrentAttack = NoLineOfSightFallbackAttack(AiAllowedCombatStyle);
+
+                            // StubbornMagic casts anyway: it keeps the projectile spell it holds instead of falling to melee
+                            if (CurrentAttack == CombatType.Magic)
+                                return GetSpellMaxRange();
 
                             var powerupTime = (float)(PowerupTime ?? 1.0f);
                             var failDelay = ThreadSafeRandom.Next(0.0f, powerupTime);
@@ -225,6 +251,11 @@ namespace ACE.Server.WorldObjects
             // NextMagicAttackTime and never consults this, which is exactly why "a pinned creature still
             // attacks and casts" needs no code of its own.
             if (Timers.RunningTime < ClassAbilityPinnedUntil)
+                return false;
+
+            // Elemental Proficiency Bludgeon stun: same reasoning as the pin above - checked directly rather
+            // than trusted to the NextMoveTime hold, which other paths rewrite
+            if (Timers.RunningTime < ClassAbilityStunnedUntil)
                 return false;
 
             if (Timers.RunningTime < NextMoveTime)
@@ -299,7 +330,10 @@ namespace ACE.Server.WorldObjects
         {
             var weapon = GetEquippedWeapon();
 
-            if (weapon != null)
+            // a melee hit with no melee weapon (bare-handed, or wielding only an ammo launcher) uses the body part
+            var isMelee = (combatType ?? GetCombatType()) == CombatType.Melee;
+
+            if (weapon != null && !(isMelee && GetEquippedMeleeWeapon() == null))
                 return GetDamageType(false, combatType);
             else
             {
@@ -307,6 +341,10 @@ namespace ACE.Server.WorldObjects
 
                 if (damageType.IsMultiDamage())
                     damageType = damageType.SelectDamageType();
+
+                // an Undef body part would bypass all armor and protection
+                if (damageType == DamageType.Undef)
+                    return DamageType.Bludgeon;
 
                 return damageType;
             }
@@ -389,11 +427,22 @@ namespace ACE.Server.WorldObjects
         /// sites pass DirectHit. See IncomingDamageOrigin.</param>
         public virtual uint TakeDamage(WorldObject source, DamageType damageType, float amount, bool crit = false, IncomingDamageOrigin origin = IncomingDamageOrigin.Secondary)
         {
+            // Open World Threads R12, the damage-intake choke point: melee, missile, cleave, class-ability procs (acid and
+            // poison ticks included), thorns and reflect, and pet melee and missile all land here. A player, or a player's
+            // pet, standing past an outdoor run's circle deals nothing. One null check for every other creature.
+            if (P_OutdoorPerimeter != null && amount > 0 && RefusesOutdoorPerimeterDamage(source))
+                return 0;
+
             // Attack/Defend engaged defenders (Docs/Pvp/ATTACK-DEFEND.md "Engaged defenders"): an attacker's hit on a match crystal shrinks
             // by the engaged-defender reduction BEFORE it is rounded and written. Melee, missile, cleave, class-ability procs and DoT ticks
             // all land on a crystal here; spell projectiles land in SpellProjectile.DamageTarget, which calls the same method. The kill chip
             // also comes through here and is exempted inside. A no-op (one field read) for every creature that is not a crystal.
             amount = ApplyBattlegroundDefenderReduction(source, amount);
+
+            // World Events Hold: a run monster's hit on a knight is re-sized to the run's pacing (undefended_seconds,
+            // min_death_seconds, the corrupted and role multipliers). Melee and monster missile land here. Unchanged after one
+            // field read for every creature that is not a knight.
+            amount = ACE.Server.WorldEvents.WorldEventHooks.ScaleHoldKnightHit(this, source, amount);
 
             var tryDamage = (int)Math.Round(amount);
 
@@ -431,6 +480,13 @@ namespace ACE.Server.WorldObjects
                     damagingPet.ApplyUmbralSiphonLeech(damage);
                     damagingPet.ApplyEmpoweredSummonsLeech(damage);
                 }
+            }
+            else if (P_PendingThreadDotTick != null)
+            {
+                // Group Thread contribution summary: a staged DoT tick on a run creature (EnchantmentManager.ApplyDamageTick)
+                // is credited here, with the health this write actually removed - after the ward above, BEFORE the death
+                // check below, so the clearing tick still counts. One field read for every other source-less write.
+                ACE.Server.ThreadDungeons.ThreadContributionHook.OnDotTickApplied(this, damage);
             }
 
             if (Health.Current <= 0)

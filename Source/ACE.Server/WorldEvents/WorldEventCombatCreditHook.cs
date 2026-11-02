@@ -53,6 +53,9 @@ namespace ACE.Server.WorldEvents
             if (amount == 0)
                 return;
 
+            // World Events Hold: player damage on the finale boss feeds its pull (one field read for every other victim).
+            WorldEventHooks.NoteHoldBossDamage(victim, attacker, amount);
+
             OnCombatContact(victim, attacker);
         }
 

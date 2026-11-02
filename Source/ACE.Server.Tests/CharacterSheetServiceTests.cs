@@ -821,5 +821,301 @@ namespace ACE.Server.Tests
             Assert.AreEqual("https://char.example.com/" + Slug, Service(new FakeCharacterSheetWorld(), links, host: "  char.example.com/  ").GetLink(Guid).Link.Url);
             Assert.AreEqual("https://char.example.com/" + Slug, Service(new FakeCharacterSheetWorld(), links, host: "char.example.com//").GetLink(Guid).Link.Url);
         }
+
+        // ---- ListPublished (the published-sheets directory) ---------------------------------------
+
+        private static SheetPlayerInfo Info(string name, int level, string heritage) =>
+            new SheetPlayerInfo { Name = name, Level = level, Heritage = heritage };
+
+        [TestMethod]
+        public void ListPublished_Disabled_ReturnsDisabled()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+
+            var result = Service(world, links, enabled: false).ListPublished();
+
+            Assert.AreEqual(SheetOutcome.Disabled, result.Outcome);
+            Assert.IsNull(result.Directory);
+            Assert.AreEqual(0, links.ListCalls, "a disabled directory must not even read the link table");
+        }
+
+        [TestMethod]
+        public void ListPublished_RepoFails_ReturnsFailed()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            links.FailReads = true;
+
+            var result = Service(new FakeCharacterSheetWorld(), links).ListPublished();
+
+            Assert.AreEqual(SheetOutcome.Failed, result.Outcome);
+            Assert.IsNull(result.Directory);
+        }
+
+        [TestMethod]
+        public void ListPublished_DropsMissingPlayer()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug).With(Guid2, Slug2);
+            links.Names[Guid] = "DbName";
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("LiveName", 187, "Gharu'ndim");   // Guid2 is unknown to PlayerManager
+
+            var result = Service(world, links).ListPublished();
+
+            Assert.AreEqual(SheetOutcome.Ok, result.Outcome);
+            Assert.IsFalse(result.Directory.Truncated);
+            Assert.AreEqual(now, result.Directory.GeneratedAt);
+            Assert.AreEqual(1, result.Directory.Sheets.Count);
+
+            var entry = result.Directory.Sheets[0];
+            Assert.AreEqual(Slug, entry.Slug);
+            Assert.AreEqual("DbName", entry.Name, "the DB name (no admin + prefix) wins over the live name");
+            Assert.AreEqual(187, entry.Level);
+            Assert.AreEqual("Gharu'ndim", entry.Heritage);
+        }
+
+        [TestMethod]
+        public void ListPublished_UrlMatchesGetLinkShape()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            var svc = Service(world, links, host: "  char.example.com/  ");
+
+            var listed = svc.ListPublished().Directory.Sheets[0].Url;
+
+            Assert.AreEqual(svc.GetLink(Guid).Link.Url, listed);
+            Assert.AreEqual("https://char.example.com/" + Slug, listed);
+        }
+
+        [TestMethod]
+        public void ListPublished_CapsAt5000_SetsTruncated()
+        {
+            var links = new FakeCharacterSheetLinkRepository();
+            var world = new FakeCharacterSheetWorld();
+            var total = CharacterSheetService.MaxDirectoryEntries + 1;
+
+            for (uint i = 1; i <= total; i++)
+            {
+                links.With(0x50000000 + i, "s" + i.ToString("D9"));
+                world.InfoOf[0x50000000 + i] = Info("P" + i, 1, "Sho");
+            }
+
+            var over = Service(world, links).ListPublished().Directory;
+
+            Assert.AreEqual(5000, CharacterSheetService.MaxDirectoryEntries);
+            Assert.AreEqual(CharacterSheetService.MaxDirectoryEntries, over.Sheets.Count);
+            Assert.IsTrue(over.Truncated);
+
+            // exactly at the cap is NOT truncated: nothing was left out
+            var exact = new FakeCharacterSheetLinkRepository();
+            for (uint i = 1; i <= CharacterSheetService.MaxDirectoryEntries; i++)
+                exact.With(0x50000000 + i, "s" + i.ToString("D9"));
+
+            var atCap = Service(world, exact).ListPublished().Directory;
+
+            Assert.AreEqual(CharacterSheetService.MaxDirectoryEntries, atCap.Sheets.Count);
+            Assert.IsFalse(atCap.Truncated);
+        }
+        [TestMethod]
+        public void ListPublished_NameIsTheDbName_NotTheLivePlusPrefixedOne()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            links.Names[Guid] = "X";
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("+X", 10, "Sho");
+
+            Assert.AreEqual("X", Service(world, links).ListPublished().Directory.Sheets[0].Name);
+        }
+
+        [TestMethod]
+        public void ListPublished_EmptyDbName_FallsBackToTheLiveName()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            links.Names[Guid] = "";
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("LiveName", 10, "Sho");
+
+            Assert.AreEqual("LiveName", Service(world, links).ListPublished().Directory.Sheets[0].Name);
+        }
+
+        [TestMethod]
+        public void ListPublished_OrderIsAscendingByCharacterId_SoTheCapKeepsAStableSet()
+        {
+            var links = new FakeCharacterSheetLinkRepository { ListDescending = true };
+            var world = new FakeCharacterSheetWorld();
+            var total = CharacterSheetService.MaxDirectoryEntries + 1;
+
+            for (uint i = 1; i <= total; i++)
+            {
+                links.With(0x50000000 + i, "s" + i.ToString("D9"));
+                world.InfoOf[0x50000000 + i] = Info("P" + i, 1, "Sho");
+            }
+
+            var dir = Service(world, links).ListPublished().Directory;
+
+            Assert.IsTrue(dir.Truncated);
+            Assert.AreEqual("s" + 1.ToString("D9"), dir.Sheets[0].Slug);
+            Assert.AreEqual("s" + CharacterSheetService.MaxDirectoryEntries.ToString("D9"), dir.Sheets[^1].Slug,
+                "the LOWEST 5000 ids are kept even though the repository handed rows back highest first");
+        }
+
+        [TestMethod]
+        public void ListPublished_WithinTtl_ReadsTheLinksOnce_ThenAgainAfterTtl()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            var svc = Service(world, links, cacheSeconds: 60);
+
+            var first = svc.ListPublished();
+            now = now.AddSeconds(59);
+            var second = svc.ListPublished();
+
+            Assert.AreEqual(1, links.ListCalls);
+            Assert.AreSame(first.Directory, second.Directory);
+
+            now = now.AddSeconds(1);
+            svc.ListPublished();
+
+            Assert.AreEqual(2, links.ListCalls);
+        }
+
+        [TestMethod]
+        public void ListPublished_CacheSecondsZero_NeverCaches()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            var svc = Service(world, links, cacheSeconds: 0);
+
+            svc.ListPublished();
+            svc.ListPublished();
+
+            Assert.AreEqual(2, links.ListCalls);
+        }
+
+        [TestMethod]
+        public void ListPublished_EnableRotateOrDisableBetweenCalls_EvictsTheCache()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            world.InfoOf[Guid2] = Info("Other", 100, "Sho");
+            var svc = Service(world, links, cacheSeconds: 600);
+
+            Assert.AreEqual(1, svc.ListPublished().Directory.Sheets.Count);
+
+            svc.EnableOrRotate(Guid2, rotate: false);
+            var afterEnable = svc.ListPublished().Directory;
+            Assert.AreEqual(2, links.ListCalls, "an enable must evict");
+            Assert.AreEqual(2, afterEnable.Sheets.Count);
+
+            svc.EnableOrRotate(Guid2, rotate: true);
+            svc.ListPublished();
+            Assert.AreEqual(3, links.ListCalls, "a rotate must evict");
+
+            svc.Disable(Guid2);
+            var afterDisable = svc.ListPublished().Directory;
+            Assert.AreEqual(4, links.ListCalls, "a disable must evict");
+            Assert.AreEqual(1, afterDisable.Sheets.Count);
+        }
+
+        [TestMethod]
+        public void ListPublished_LinkWriteDuringTheBuild_IsNotCachedStale()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            world.InfoOf[Guid2] = Info("Other", 100, "Sho");
+            var svc = Service(world, links, cacheSeconds: 600);
+            var fired = false;
+
+            // the first directory read is already past by the time the enable lands, so its snapshot predates it
+            links.AfterList = () =>
+            {
+                if (!fired)
+                {
+                    fired = true;
+                    svc.EnableOrRotate(Guid2, rotate: false);
+                }
+            };
+
+            Assert.AreEqual(1, svc.ListPublished().Directory.Sheets.Count);
+            Assert.AreEqual(2, svc.ListPublished().Directory.Sheets.Count, "the stale snapshot must not have been stored");
+            Assert.AreEqual(2, links.ListCalls);
+        }
+
+        [TestMethod]
+        public void ListPublished_FailedAndDisabled_AreNeverCached()
+        {
+            var links = new FakeCharacterSheetLinkRepository().With(Guid, Slug);
+            var world = new FakeCharacterSheetWorld();
+            world.InfoOf[Guid] = Info("Weft", 200, "Aluvian");
+            var on = true;
+            var svc = Service(world, links, cacheSeconds: 600, enabledFunc: () => on);
+
+            links.FailReads = true;
+            Assert.AreEqual(SheetOutcome.Failed, svc.ListPublished().Outcome);
+            links.FailReads = false;
+            Assert.AreEqual(SheetOutcome.Ok, svc.ListPublished().Outcome, "a failure must not stick for the TTL");
+
+            svc.ListPublished();
+            Assert.AreEqual(2, links.ListCalls, "the Ok after the failure IS cached");
+
+            on = false;
+            Assert.AreEqual(SheetOutcome.Disabled, svc.ListPublished().Outcome, "disabled is answered even with a warm cache");
+        }
+
+        // ---- HeritageText ---------------------------------------------------------------------------
+
+        [TestMethod]
+        public void HeritageText_IntOnly_UsesToSentence()
+        {
+            Assert.AreEqual("Gharu'ndim", LiveCharacterSheetWorld.HeritageText(2, null));
+            Assert.AreEqual("Olthoi", LiveCharacterSheetWorld.HeritageText(13, null));
+        }
+
+        [TestMethod]
+        public void HeritageText_IntWinsOverTheStoredString()
+        {
+            Assert.AreEqual("Sho", LiveCharacterSheetWorld.HeritageText(3, "Something Else"));
+        }
+
+        [TestMethod]
+        public void HeritageText_StringOnly_UsesTheStoredString()
+        {
+            Assert.AreEqual("Aluvian", LiveCharacterSheetWorld.HeritageText(null, "Aluvian"));
+            Assert.AreEqual("Aluvian", LiveCharacterSheetWorld.HeritageText(0, "Aluvian"));
+            Assert.AreEqual("Aluvian", LiveCharacterSheetWorld.HeritageText(99, "Aluvian"), "an undefined id is treated as absent");
+        }
+
+        [TestMethod]
+        public void HeritageText_Neither_IsEmptyNeverNull()
+        {
+            Assert.AreEqual("", LiveCharacterSheetWorld.HeritageText(null, null));
+            Assert.AreEqual("", LiveCharacterSheetWorld.HeritageText(0, ""));
+            Assert.AreEqual("", LiveCharacterSheetWorld.HeritageText(99, null));
+        }
+
+        /// <summary>
+        /// The class ability import block rides on the owner view's OwnerProfile through the offline build, so a
+        /// joiner on a shared offline load gets it too (the block is never gated on a per-request flag).
+        /// </summary>
+        [TestMethod]
+        public void GetOwnerProfile_OfflineOwnerBuild_CarriesTheClassAbilityImportBlock()
+        {
+            var world = new FakeCharacterSheetWorld();
+            world.PresenceOf[Guid] = CharacterPresence.Offline;
+            world.OwnerClassAbilityImport = ClassAbilityImportProjection.Project(null, 4, 2, 30, 9, false);
+
+            var result = Service(world, new FakeCharacterSheetLinkRepository()).GetOwnerProfile(Guid);
+
+            Assert.AreEqual(SheetOutcome.Ok, result.Outcome);
+            Assert.AreEqual(1, world.OfflineBuildCount);
+            Assert.AreSame(world.OwnerClassAbilityImport, result.Profile.ClassAbilityImport);
+            Assert.AreEqual(4, result.Profile.ClassAbilityImport.LumPointsBought);
+        }
     }
 }

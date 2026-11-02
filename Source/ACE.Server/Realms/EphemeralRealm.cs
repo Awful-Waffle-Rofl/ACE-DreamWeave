@@ -7,9 +7,10 @@ namespace ACE.Server.Realms
 {
     /// <summary>
     /// ACRealms port (rulesets stubbed): a temporary, on-demand copy of a single
-    /// landblock - an 'instance' in the traditional MMO sense. Created via
-    /// RealmManager.GetNewEphemeralLandblock; lives until it empties out and the
-    /// landblock unloads. Nothing inside is persisted.
+    /// landblock - an 'instance' in the traditional MMO sense - or, with a
+    /// <see cref="Footprint"/>, of a group of outdoor landblocks. Created via
+    /// RealmManager.GetNewEphemeralLandblock; lives until it empties out and its
+    /// primary landblock unloads. Nothing inside is persisted.
     /// </summary>
     public class EphemeralRealm
     {
@@ -46,12 +47,48 @@ namespace ACE.Server.Realms
         public uint? ThreadCopyExitPortalWcid => Run?.ExitPortalWcid ?? RunlessThreadCopyExitPortalWcid;
 
         /// <summary>
-        /// The idle window the landblock heartbeat should use for this copy instead of
-        /// Landblock.UnloadInterval, or null for the default. Only a Thread run supplies one: its empty grace
-        /// while it is Starting or Active, or a Cleared group run's loot hold while loot is still owed (see
-        /// ThreadDungeonRun.UnloadIntervalOverride).
+        /// A non-Thread keeper of this copy: a Pinnacle fight (PinnacleFightManager.AttachHold sets it when the copy is
+        /// created and clears it to null when the fight ends). Never set together with <see cref="Run"/>.
         /// </summary>
-        public TimeSpan? UnloadIntervalOverride => Run?.UnloadIntervalOverride;
+        public IEphemeralHold Hold { get; set; }
+
+        /// <summary>
+        /// The idle window the landblock heartbeat should use for this copy instead of
+        /// Landblock.UnloadInterval, or null for the default. A Thread run supplies one (its empty grace while it is
+        /// Starting or Active, or a Cleared group run's loot hold while loot is still owed; see
+        /// ThreadDungeonRun.UnloadIntervalOverride); otherwise a <see cref="Hold"/> may (a held Pinnacle fight).
+        /// Pulled on every landblock heartbeat, so a hold attached after the copy loaded, or cleared at release, takes
+        /// effect on the next heartbeat.
+        /// </summary>
+        public TimeSpan? UnloadIntervalOverride => Run?.UnloadIntervalOverride ?? Hold?.UnloadIntervalOverride;
+
+        /// <summary>
+        /// Open World Threads (R22): true for the run's WHOLE lifetime - this instance hosts a Thread run that has not
+        /// Ended (Starting, Active or Cleared, held or not). While true, an outdoor group's footprint MEMBERS never unload
+        /// on their own idle timer (EphemeralInstanceGroup.MemberIdleUnloadHeld, consulted by the landblock heartbeat), so
+        /// a run's creatures, caches or players' loot on a member cannot vanish while the run lives. The group still
+        /// empties out through the primary: its own window measures the grace, and its unload drains the members first
+        /// (#1753's primary-last rule); ThreadDungeonManager.RunGroupGone then ends a run whose member is gone. False for
+        /// every non-run instance (a Pinnacle hold, the /enter-instance-group seam), which keep #1753's per-member idle
+        /// unload unchanged, and false the moment the run is marked Ended, which releases the members. Pulled on every
+        /// heartbeat.
+        /// </summary>
+        public bool HoldsFootprintMembers => Run != null && Run.State != ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended;
+
+        /// <summary>
+        /// The landblocks this instance owns, or null for the default: the one landblock the creator loads, which
+        /// is every ephemeral instance that existed before outdoor instance groups. Read once, by
+        /// LandblockManager.GetLandblock when it registers the instance; its <see cref="EphemeralFootprint.Primary"/>
+        /// must be the landblock that call loads. Set it before that call and never change it afterwards.
+        /// </summary>
+        public EphemeralFootprint Footprint { get; init; }
+
+        /// <summary>
+        /// landblock_instance rows this copy does not load, or null to load every row. Landblock.CreateWorldObjects
+        /// applies it after the Thread content filter and before the factory, so it must be set before the copy's
+        /// landblock is constructed (RealmManager.GetNewEphemeralLandblock's excludedRows) and never changed afterwards.
+        /// </summary>
+        public EphemeralRowExclusion ExcludedRows { get; init; }
 
         public EphemeralRealm(Player owner)
         {

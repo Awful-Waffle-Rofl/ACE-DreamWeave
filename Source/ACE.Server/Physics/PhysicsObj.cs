@@ -2801,6 +2801,10 @@ namespace ACE.Server.Physics
 
             // remove any objects that have been in the destruction queue > 25s
             var expiredObjs = ObjMaint.DestroyObjects();
+
+            // teleport_flush_scope 0/2: a culled object's effects must be re-sent when it returns (scope 1 unchanged)
+            if (expiredObjs.Count > 0 && WeenieObj?.WorldObject is Player cullingPlayer)
+                cullingPlayer.OnClientObjectsCulled(expiredObjs);
             //Console.WriteLine("Destroyed objects: " + expiredObjs.Count);
             //foreach (var expiredObj in expiredObjs)
                 //Console.WriteLine(expiredObj.Name);

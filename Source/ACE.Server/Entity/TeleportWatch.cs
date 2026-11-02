@@ -85,6 +85,30 @@ namespace ACE.Server.Entity
 
         /// <summary>Sent packets still held for retransmit (pruned on client ack). Only read when a line is written.</summary>
         public int RetainedPackets;
+
+        /// <summary>CreateObject messages enqueued to this client (cumulative; lines print the delta since start).</summary>
+        public long CreateObjectsEnqueued;
+
+        /// <summary>UDP payload bytes sent to this client (NetworkSession.TotalBytesSent; lines print the delta).</summary>
+        public long BytesSent;
+
+        /// <summary>
+        /// Largest sent-minus-acked packet count sampled after a flush since the window opened (the window's open step
+        /// zeroes it). A peak, not a counter, so lines print it as is.
+        /// </summary>
+        public long PeakInflight;
+
+        /// <summary>Whether network_pacing_enabled was on at the session's last flush.</summary>
+        public bool PacingEnabled;
+
+        /// <summary>Packets held by the send pacer right now. Only read when a line is written.</summary>
+        public int PacerHeld;
+
+        /// <summary>Wire bytes of the packets the send pacer holds right now. Only read when a line is written.</summary>
+        public long PacerHeldBytes;
+
+        /// <summary>Largest pacer held-queue depth since the window opened. Only read when a line is written.</summary>
+        public int PacerPeakHeld;
     }
 
     /// <summary>
@@ -95,6 +119,23 @@ namespace ACE.Server.Entity
     {
         public const double FirstThresholdSeconds = 10.0;
         public const double SecondThresholdSeconds = 30.0;
+
+        /// <summary>
+        /// A completed teleport writes [TELEPORT_ARRIVAL_COST] when at least this many CreateObjects were enqueued in
+        /// its window. High enough to keep ordinary arrivals out of the log, low enough that a crowded landblock (the
+        /// Marketplace sends several hundred) always qualifies, so completed and abandoned arrivals can be compared.
+        /// </summary>
+        public const long ArrivalCostMinCreates = 100;
+
+        /// <summary>True when a completed window's CreateObject count since its start reached <see cref="ArrivalCostMinCreates"/>.</summary>
+        public static bool ShouldLogArrivalCost(TeleportWatch watch, TeleportNetSnapshot now)
+        {
+            var start = watch.NetAtStart;
+            if (!now.Available || !start.Available)
+                return false;
+
+            return now.CreateObjectsEnqueued - start.CreateObjectsEnqueued >= ArrivalCostMinCreates;
+        }
 
         /// <summary>
         /// Classifies the pending window from the stamps the teleport and login paths already write. Portal: Teleport()
@@ -232,6 +273,16 @@ namespace ACE.Server.Entity
                 sb.Append(" serverNaks=").Append(Delta(now.ServerRetransmitRequests, start.ServerRetransmitRequests)).Append('/').Append(now.ServerRetransmitRequests);
                 sb.Append(" outQueue=").Append(now.OutboundQueueDepth);
                 sb.Append(" retained=").Append(now.RetainedPackets);
+
+                // arrival cost (the volume theory): how much the server pushed at the client in this window, and how
+                // far ahead of the client's acks it got. peakInflight is a peak since the window opened, not a delta.
+                sb.Append(" creates=").Append(Delta(now.CreateObjectsEnqueued, start.CreateObjectsEnqueued));
+                sb.Append(" bytesOut=").Append(Delta(now.BytesSent, start.BytesSent));
+                sb.Append(" peakInflight=").Append(now.PeakInflight);
+
+                if (now.PacingEnabled)
+                    sb.Append(" paced=true pacerHeld=").Append(now.PacerHeld).Append(" pacerHeldBytes=").Append(now.PacerHeldBytes)
+                      .Append(" pacerPeakHeld=").Append(now.PacerPeakHeld);
             }
             else
                 sb.Append(" net=unavailable");

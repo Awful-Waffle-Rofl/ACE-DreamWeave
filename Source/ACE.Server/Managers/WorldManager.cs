@@ -246,6 +246,7 @@ namespace ACE.Server.Managers
             if (offlinePlayer == null)
             {
                 log.Error($"PlayerEnterWorld requested for character.Id 0x{character.Id:X8} not found in PlayerManager OfflinePlayers.");
+                ACE.Server.Entity.AccountVault.SuitHolderMoveGuard.EndEnterWorld(character.Id);
                 return;
             }
 
@@ -254,7 +255,20 @@ namespace ACE.Server.Managers
             {
                 log.DebugFormat("GetPossessedBiotasInParallel for {0} took {1:N0} ms", character.Name, (DateTime.UtcNow - start).TotalMilliseconds);
 
-                ActionQueue.EnqueueAction(new ActionEventDelegate(() => DoPlayerEnterWorld(session, character, offlinePlayer.Biota, biotas)));
+                ActionQueue.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    // The suit builder's entering mark (CharacterHandler.CharacterEnterWorld) ends here, on every path,
+                    // AFTER DoPlayerEnterWorld has switched the character online (Player.PlayerEnterWorld), so the
+                    // character is never seen as neither entering nor online by SuitHolderMoveGuard.
+                    try
+                    {
+                        DoPlayerEnterWorld(session, character, offlinePlayer.Biota, biotas);
+                    }
+                    finally
+                    {
+                        ACE.Server.Entity.AccountVault.SuitHolderMoveGuard.EndEnterWorld(character.Id);
+                    }
+                }));
             });
         }
 
@@ -558,16 +572,24 @@ namespace ACE.Server.Managers
             var validatedLocation = session.Player.Location.ValidateInstanceDestination(session.Player);
             if (validatedLocation.Instance != session.Player.Location.Instance)
             {
-                var exitTo = session.Player.GetPosition(PositionType.EphemeralRealmExitTo);
+                // The one PvP return resolver (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): a player pulled into a match from a
+                // Thread goes back inside it when the run still takes them; otherwise the stamped exit, never a dead instance. A player
+                // whose battleground seat is held for a rejoin keeps any Thread entry for after the match (the rejoin puts them back in
+                // the match from the stamped exit). With neither a Thread return nor a stamp this is null and the home realm below holds.
+                var heldForRejoin = ACE.Server.Pvp.PvpMatchManager.GracedMatchOf(session.Player.Guid.Full).HasValue;
+                var savedInstance = session.Player.Location.Instance;
+                var exitTo = session.Player.ResolvePvpReturn("login relocation", keepAwayEntry: heldForRejoin, homeFallback: false);
                 if (exitTo != null)
                 {
                     // Threads: an owner rerouted out of their OWN live run is told it is still open, not that it
                     // expired - see ThreadDungeonManager.GetStillOpenLoginMessage. Read before Location moves.
-                    var instanceLine = ACE.Server.ThreadDungeons.ThreadDungeonManager.GetStillOpenLoginMessage(session.Player, session.Player.Location.Instance)
+                    // A PvP return straight back into the Thread the player was pulled from says so.
+                    var instanceLine = exitTo.IsEphemeralRealm && ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(exitTo.Instance) != null ? "The match is over for you; you have been returned to your Thread."
+                        : ACE.Server.ThreadDungeons.ThreadDungeonManager.GetStillOpenLoginMessage(session.Player, savedInstance)
+                        ?? ACE.Server.Pinnacles.PinnacleFightManager.GetStillOpenLoginMessage(session.Player, savedInstance)
                         ?? "The instance you were in has expired and you have been transported outside!";
                     session.Network.EnqueueSend(new GameMessageSystemChat(instanceLine, ChatMessageType.System));
-                    session.Player.Location = new Position(exitTo);
-                    session.Player.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                    session.Player.Location = exitTo;
                 }
                 else
                 {
@@ -582,6 +604,12 @@ namespace ACE.Server.Managers
             session.Player.PlayerEnterWorld();
 
             var success = LandblockManager.AddObject(session.Player, true);
+
+            // Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): a player whose seat is held is back in the world;
+            // the coordinator admits this new Player object to the match and places them on its next tick.
+            if (success && ACE.Server.Pvp.PvpMatchManager.GracedMatchOf(session.Player.Guid.Full) is Guid rejoinMatch)
+                ACE.Server.Pvp.PvpMatchManager.Report(ACE.Server.Pvp.PvpMatchManager.Reconnected(session.Player.Guid.Full, rejoinMatch, DateTime.UtcNow));
+
             if (!success)
             {
                 // send to lifestone, or fallback location
@@ -650,6 +678,12 @@ namespace ACE.Server.Managers
             // offline is delivered a few seconds into the session. No-op when nothing is owed.
             session.Player.ScheduleOwedArenaBloodDelivery();
 
+            // PvP dailies: a Live 1v1 forfeit while offline or logging out left a pending GladiatorsStreak reset. No-op when none is pending.
+            session.Player.ScheduleApplyPendingPvpStreakReset();
+
+            // Knots: a refund, loss or kill report a pinnacle attempt could not deliver while this character was offline. No-op when none is pending.
+            ACE.Server.Knots.KnotPendingEvents.ScheduleApplyOnLogin(session.Player);
+
             // Let an under-leveled alt know it is receiving the catch-up bonus. No-op when the feature is
             // disabled or this is already the furthest-along character on the account.
             if (session.Player.IsAltCharacterBonusActive)
@@ -708,11 +742,12 @@ namespace ACE.Server.Managers
         /// Note that this work will be done on the next tick, not immediately, so be careful about your order of operations.
         /// If you must ensure order, pass your follow up work in with the argument actionToFollowUpWith. That work will be enqueued onto the Player.
         /// </summary>
-        public static void ThreadSafeTeleport(Player player, Position newPosition, IAction actionToFollowUpWith = null, bool fromPortal = false)
+        /// <param name="source">the [TELEPORT] line's src= label, one of TeleportSource; logging only</param>
+        public static void ThreadSafeTeleport(Player player, Position newPosition, IAction actionToFollowUpWith = null, bool fromPortal = false, string source = null)
         {
             EnqueueAction(new ActionEventDelegate(() =>
             {
-                player.Teleport(newPosition, fromPortal);
+                player.Teleport(newPosition, fromPortal, source);
 
                 if (actionToFollowUpWith != null)
                     EnqueueAction(actionToFollowUpWith);
@@ -787,7 +822,8 @@ namespace ACE.Server.Managers
 
                 // WaffleACE: IP active-player limit re-check sweep. Self-rate-limited to ip_limit_sweep_seconds
                 // and returns immediately when the feature is off, so calling it every tick is cheap. This is
-                // the ONLY reaction site for the limit after login - see IpLimitManager.Tick.
+                // the reaction site for characters that walk into violation; teleport arrival is enforced
+                // separately by IpLimitManager.CheckOnArrival - see IpLimitManager.Tick.
                 IpLimitManager.Tick();
                 WorldTickProfile.Lap(WorldTickPhase.PlayerManager);
 
@@ -855,7 +891,7 @@ namespace ACE.Server.Managers
 
             // Any world event still running dies with the world thread, not with the process: its spawned
             // objects are transient and must be destroyed while the landblocks are still up.
-            WorldEventManager.OnShutdown();
+            WorldEventHooks.OnShutdown();
 
             // World has finished operations and concedes the thread to garbage collection
             WorldActive = false;
@@ -898,7 +934,7 @@ namespace ACE.Server.Managers
 
             try
             {
-                WorldEventManager.Tick();
+                WorldEventHooks.Tick();
             }
             catch (Exception ex)
             {
@@ -921,6 +957,17 @@ namespace ACE.Server.Managers
             finally
             {
                 ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.ThreadDungeonManager_Tick);
+            }
+
+            try
+            {
+                // Speed courses: ends runs whose instance went away and enqueues each live run's tick onto its own
+                // landblock. Self-rate-limited to a half-second sweep and returns immediately otherwise.
+                ACE.Server.SpeedCourses.SpeedCourseManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): SpeedCourseManager.Tick() threw; skipping it this heartbeat", ex);
             }
             WorldTickProfile.Lap(WorldTickPhase.ThreadDungeons);
 
@@ -976,6 +1023,19 @@ namespace ACE.Server.Managers
             catch (Exception ex)
             {
                 log.Error("WorldManager.UpdateGameWorld(): AccountVaultManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // WaffleACE suit builder: the transfer watchdog, so a stalled transfer (its character logged out mid-unit)
+                // is closed and its holder claim released without waiting for a web request. The world heartbeat
+                // because it runs whether or not anyone is online or polling; beside AccountVaultManager.Tick because
+                // that is the vault feature's own heartbeat hook. Self-rate-limited to one sweep per 5 s.
+                ACE.Server.Entity.AccountVault.SuitTransferService.SweepLive();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): SuitTransferService.SweepLive() threw; skipping it this heartbeat", ex);
             }
 
             ServerPerformanceMonitor.RegisterEventEnd(ServerPerformanceMonitor.MonitorType.UpdateGameWorld_Entire);

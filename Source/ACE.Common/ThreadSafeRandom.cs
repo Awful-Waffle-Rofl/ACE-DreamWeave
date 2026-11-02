@@ -10,6 +10,16 @@ namespace ACE.Common
         static readonly ThreadLocal<Random> random = new ThreadLocal<Random>(() => new Random());
 
         /// <summary>
+        /// Replaces the CALLING thread's generator with one seeded by <paramref name="seed"/>, so the draws that follow on
+        /// this thread are reproducible. Offline tools only (ACE.Content.Tools uplift-matchup seeds each prepared
+        /// creature's wielded-treasure rolls with it); the server never calls it, and other threads are unaffected.
+        /// </summary>
+        public static void Reseed(int seed)
+        {
+            random.Value = new Random(seed);
+        }
+
+        /// <summary>
         /// Returns a random floating-point number that is greater than or equal to 'min', and less than 'max'.
         /// </summary>
         /// <param name="min">The value returned will be greater than or equal to 'min'</param>

@@ -503,9 +503,16 @@ namespace ACE.Server.ThreadDungeons
             return widest;
         }
 
+        /// <param name="themedOnly">
+        /// Open World Threads (F11), true for an OUTDOOR site only: when at least one eligible table is preferred (its id in
+        /// <paramref name="dungeonFamilies"/>, or its CreatureType in <paramref name="dungeonCreatureTypes"/>), the draw is
+        /// over the preferred tables ALONE, so a themed site fields its theme instead of winning it about one time in seven.
+        /// With no preferred table eligible, the ordinary weighted draw runs unchanged. False (every dungeon) leaves the
+        /// draw byte-for-byte as it was: the same candidates, the same weights, the same single rng.Next.
+        /// </param>
         public static SpeciesTableDef PickFamily(IReadOnlyDictionary<string, SpeciesTableDef> tables, string requestedFamily,
             IReadOnlyList<string> dungeonFamilies, IReadOnlyList<string> dungeonCreatureTypes, int level, Func<uint, int> levelOf, Random rng,
-            DungeonRosterBand? band = null)
+            DungeonRosterBand? band = null, bool themedOnly = false)
         {
             if (!string.IsNullOrEmpty(requestedFamily) && requestedFamily != DungeonGemSpec.Any)
             {
@@ -516,15 +523,19 @@ namespace ACE.Server.ThreadDungeons
                 return forced;
             }
 
-            var eligible = tables.Values.Where(t => IsEligible(t, level, levelOf, band)).OrderBy(t => t.Id, StringComparer.Ordinal).ToList();
+            var eligible = EligibleFamiliesOrdered(tables, level, levelOf, band);
             if (eligible.Count == 0)
                 return null;
 
-            int WeightOf(SpeciesTableDef t)
+            bool IsPreferred(SpeciesTableDef t) => IsPreferredFamily(t, dungeonFamilies, dungeonCreatureTypes);
+
+            int WeightOf(SpeciesTableDef t) => PreferenceWeightOf(t, dungeonFamilies, dungeonCreatureTypes);
+
+            if (themedOnly)
             {
-                var preferred = dungeonFamilies.Contains(t.Id)
-                    || (!string.IsNullOrEmpty(t.CreatureType) && dungeonCreatureTypes.Any(c => string.Equals(c, t.CreatureType, StringComparison.OrdinalIgnoreCase)));
-                return preferred ? PreferredFamilyWeight : 1;
+                var themed = eligible.Where(IsPreferred).ToList();
+                if (themed.Count > 0)
+                    eligible = themed;
             }
 
             var total = eligible.Sum(WeightOf);
@@ -535,6 +546,61 @@ namespace ACE.Server.ThreadDungeons
                 if (roll < 0) return t;
             }
             return eligible[eligible.Count - 1];
+        }
+
+        /// <summary>The tables <see cref="PickFamily"/> draws from (every one with an in-band trash member), in Id-ordinal order.</summary>
+        public static List<SpeciesTableDef> EligibleFamiliesOrdered(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level, Func<uint, int> levelOf,
+            DungeonRosterBand? band = null)
+            => tables.Values.Where(t => IsEligible(t, level, levelOf, band)).OrderBy(t => t.Id, StringComparer.Ordinal).ToList();
+
+        /// <summary>A table the dungeon prefers: its id in the dungeon's families, or its CreatureType in the dungeon's creature types.</summary>
+        public static bool IsPreferredFamily(SpeciesTableDef t, IReadOnlyList<string> dungeonFamilies, IReadOnlyList<string> dungeonCreatureTypes)
+            => (dungeonFamilies != null && dungeonFamilies.Contains(t.Id))
+               || (!string.IsNullOrEmpty(t.CreatureType) && dungeonCreatureTypes != null
+                   && dungeonCreatureTypes.Any(c => string.Equals(c, t.CreatureType, StringComparison.OrdinalIgnoreCase)));
+
+        /// <summary><see cref="PickFamily"/>'s weight for one table: <see cref="PreferredFamilyWeight"/> when preferred, else 1.</summary>
+        public static int PreferenceWeightOf(SpeciesTableDef t, IReadOnlyList<string> dungeonFamilies, IReadOnlyList<string> dungeonCreatureTypes)
+            => IsPreferredFamily(t, dungeonFamilies, dungeonCreatureTypes) ? PreferredFamilyWeight : 1;
+
+        /// <summary>
+        /// The ARCHETYPE-WEIGHTED family draw (dynamic_dungeons_family_archetype_weighting, 2026-10-27): ONE
+        /// <c>rng.NextDouble()</c> scaled to the weights' total, walked over <paramref name="families"/> in the order given
+        /// (the caller passes Id-ordinal order, <see cref="EligibleFamiliesOrdered"/>). A non-positive or non-finite weight
+        /// never wins; floating-point residue lands on the last family with a positive weight. Null for no candidate.
+        /// </summary>
+        public static SpeciesTableDef PickFamilyWeighted(IReadOnlyList<SpeciesTableDef> families, IReadOnlyList<double> weights, Random rng)
+        {
+            if (families == null || weights == null || families.Count == 0 || families.Count != weights.Count)
+                return null;
+
+            double W(int i) => double.IsNaN(weights[i]) || double.IsInfinity(weights[i]) || weights[i] <= 0 ? 0.0 : weights[i];
+
+            var total = 0.0;
+            var last = -1;
+
+            for (var i = 0; i < families.Count; i++)
+            {
+                total += W(i);
+
+                if (W(i) > 0)
+                    last = i;
+            }
+
+            if (last < 0)
+                return null;
+
+            var roll = rng.NextDouble() * total;
+
+            for (var i = 0; i < families.Count; i++)
+            {
+                roll -= W(i);
+
+                if (W(i) > 0 && roll < 0)
+                    return families[i];
+            }
+
+            return families[last];
         }
 
         /// <summary>

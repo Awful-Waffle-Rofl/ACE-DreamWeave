@@ -95,6 +95,11 @@ namespace ACE.Server.WorldObjects
         {
             if (IsWeaponSlot(wieldedLocation))
             {
+                // The off-hand occupies one slot but holds its item at one of three parent locations (shield 3,
+                // sword 8, unarmed 9), so occupancy is decided by the wielded location, not the parent location.
+                if (wieldedLocation == EquipMask.Shield)
+                    return EquippedObjects.Values.Where(i => i.CurrentWieldedLocation == EquipMask.Shield).ToList();
+
                 // TODO: change to coalesced CurrentWieldedLocation
                 GetPlacementLocation(item, wieldedLocation, out var placement, out var parentLocation);
                 return EquippedObjects.Values.Where(i => i.ParentLocation != null && i.ParentLocation == parentLocation && i.CurrentWieldedLocation != EquipMask.MissileAmmo).ToList();
@@ -512,7 +517,29 @@ namespace ACE.Server.WorldObjects
             return true;
         }
 
-        private static void GetPlacementLocation(WorldObject item, EquipMask wieldedLocation, out Placement placement, out ParentLocation parentLocation)
+        /// <summary>
+        /// True for an off-hand unarmed weapon that must hold at ParentLocation.LeftUnarmed (claws, katars, cestus).
+        /// Nekodes are the exception: they are WeaponType.Unarmed too, but their models are authored for the
+        /// LeftWeapon hold and render backwards at LeftUnarmed. Nothing in the weenie data tells the two families
+        /// apart (WeaponType, AttackType, CombatStyle and WieldSkill are identical), so the discriminator is the
+        /// name or long description containing "nekode" (the long description catches Steel Butterfly, which is
+        /// a nekode without the word in its name).
+        /// </summary>
+        internal static bool UsesLeftUnarmedHold(WorldObject item)
+        {
+            if (item.W_WeaponType != WeaponType.Unarmed)
+                return false;
+
+            return !IsNekode(item);
+        }
+
+        internal static bool IsNekode(WorldObject item)
+        {
+            return (item.Name != null && item.Name.Contains("nekode", StringComparison.OrdinalIgnoreCase))
+                || (item.LongDesc != null && item.LongDesc.Contains("nekode", StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static void GetPlacementLocation(WorldObject item, EquipMask wieldedLocation, out Placement placement, out ParentLocation parentLocation)
         {
             switch (wieldedLocation)
             {
@@ -528,6 +555,14 @@ namespace ACE.Server.WorldObjects
                     {
                         placement = ACE.Entity.Enum.Placement.Shield;
                         parentLocation = ACE.Entity.Enum.ParentLocation.Shield;
+                    }
+                    else if (UsesLeftUnarmedHold(item))
+                    {
+                        // The unarmed holding location (9) is the left hand's 180 degree flip of 8, so a claw
+                        // or katar-style blade curves the right way. Placement stays RightHandNonCombat: no
+                        // unarmed model has a frame for placement 8, and sending it falls back to Default.
+                        placement = ACE.Entity.Enum.Placement.RightHandNonCombat;
+                        parentLocation = ACE.Entity.Enum.ParentLocation.LeftUnarmed;
                     }
                     else
                     {

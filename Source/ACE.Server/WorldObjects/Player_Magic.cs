@@ -8,6 +8,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -233,12 +234,17 @@ namespace ACE.Server.WorldObjects
 
             if (!checkAngle || IsWithinAngle(target))
             {
+                // facing resolved: the windup starts, so this phase is no longer waiting on a turn
+                MagicState.EndTurnWait();
+
                 if (!CreatePlayerSpell(target, targetCategory, windupParams.SpellId, windupParams.CasterItem))
                     MagicState.OnCastDone();
             }
             else
             {
-                // restart turn if required
+                // restart turn if required. The turn-wait clock keeps running across the re-issue (CastTurnTimeout).
+                MagicState.BeginTurnWait(DateTime.UtcNow);
+
                 if (PhysicsObj.MovementManager.MotionInterpreter.InterpretedState.TurnCommand == 0)
                     TurnTo_Magic(target);
                 else
@@ -492,6 +498,11 @@ namespace ACE.Server.WorldObjects
             if (spell.School != MagicSchool.ItemEnchantment && targetCreature == null)
                 return true;
 
+            // World Events Hold: on a knight the one valid spell is a health heal while it accepts player heals, decided here
+            // (ahead of the beneficial-on-creature and CanDamage rules below). One field read for every other target.
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsInvalidHoldSpellTarget(targetCreature, spell, out var holdInvalid))
+                return holdInvalid;
+
             // Invalidate beneficial spells against Creature/Non-player targets
             if (targetCreature != null && targetPlayer == null && spell.IsBeneficial)
                 return true;
@@ -635,7 +646,8 @@ namespace ACE.Server.WorldObjects
                     // are separate.
                     var preEfficiency = manaUsed;
 
-                    manaUsed = (uint)Math.Round(manaUsed * WeaponModCombat.CostMultiplier(GetCasterOnlyModValue(WeaponModId.Efficiency)));
+                    // Knot loot: Frugal Hand (summed over equipped items) adds to Efficiency before the single cost multiplier.
+                    manaUsed = (uint)Math.Round(manaUsed * WeaponModCombat.CostMultiplier(KnotTraitCombat.CostFraction(GetCasterOnlyModValue(WeaponModId.Efficiency), GetKnotFrugalFraction())));
 
                     if (preEfficiency >= 1 && manaUsed < 1)
                         manaUsed = 1;
@@ -676,9 +688,10 @@ namespace ACE.Server.WorldObjects
         public static float CastSpeed = 2.0f;       // from retail pcaps, player animation speed for windup / first half of cast gesture
 
         // Per-cast multiplier on CastSpeed for the cast currently being enqueued. 1.0 normally; the
-        // Nether Rush class ability sets it &gt; 1.0 for void spells at the two cast entry points, just
-        // before DoWindupGestures/DoCastGesture. Reset each cast (ApplyNetherRushCastSpeed returns
-        // 1.0 for non-void / unlearned), so it never leaks into a later cast.
+        // Mana Rush class ability (internal name netherrush) sets it above 1.0 at the two cast entry points, just
+        // before DoWindupGestures/DoCastGesture. Reset each cast (ApplyNetherRushCastSpeed returns 1.0 when
+        // unlearned, with no stacks, or for a harmful spell aimed at another player - every school counts), so it
+        // never leaks into a later cast.
         private float castSpeedMultiplier = 1.0f;
 
         private float EffectiveCastSpeed => CastSpeed * castSpeedMultiplier;
@@ -853,6 +866,9 @@ namespace ACE.Server.WorldObjects
                     }
                     else
                     {
+                        // the turn-wait clock keeps running across the re-issue (CastTurnTimeout)
+                        MagicState.BeginTurnWait(DateTime.UtcNow);
+
                         if (PhysicsObj.MovementManager.MotionInterpreter.InterpretedState.TurnCommand == 0)
                             TurnTo_Magic(target);
                         else
@@ -876,6 +892,9 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // facing resolved: the spell releases now, so this phase is no longer waiting on a turn
+            MagicState.EndTurnWait();
+
             DoCastSpell_Inner(spell, casterItem, manaUsed, target, castingPreCheckStatus);
         }
 
@@ -891,6 +910,10 @@ namespace ACE.Server.WorldObjects
 
             if (FastTick)
             {
+                // the cast now waits on this turn; bounded by spellcast_turn_timeout_seconds (CheckCastTurnTimeout).
+                // A no-op when the clock is already running, so a re-issued turn does not restart it.
+                MagicState.BeginTurnWait(DateTime.UtcNow);
+
                 if (PropertyManager.GetDouble("spellcast_max_angle").Item > 5.0f && IsWithinAngle(target))
                 {
                     // emulate current gdle TurnTo - doesn't match retail, but some players may prefer this
@@ -1122,10 +1145,10 @@ namespace ACE.Server.WorldObjects
             var spellChain = new ActionChain();
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
 
-            // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
-            // Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
+            // class abilities: Mana Rush (every school, PvE only - hence the target) scales cast speed; once per
+            // committed cast. Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
             // Player_WeaponMods_Casting.cs.
-            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, target);
+            castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell, target) * GetWeaponModCastSpeedMod(spell, target);
 
             // do wind-up gestures: fastcast has no windup (creature enchantments)
             DoWindupGestures(spell, isWeaponSpell, spellChain);
@@ -1253,7 +1276,7 @@ namespace ACE.Server.WorldObjects
 
             //StartPos = new Physics.Common.Position(PhysicsObj.Position);
 
-            // class abilities: Nether Rush (void) + Flat Cast Speed (war) scale cast speed; once per committed cast
+            // class abilities: Mana Rush (every school) scales cast speed; once per committed cast
             // Quick Refresh (WeaponModId.QuickRefresh) composes multiplicatively here, see
             // Player_WeaponMods_Casting.cs. This is an untargeted (self) cast, so target is null.
             castSpeedMultiplier = ApplyClassAbilityCastSpeed(spell) * GetWeaponModCastSpeedMod(spell, null);
@@ -1277,7 +1300,7 @@ namespace ACE.Server.WorldObjects
 
         public void TryBurnComponents(Spell spell)
         {
-            if (SafeSpellComponents || PropertyManager.GetBool("safe_spell_comps").Item)
+            if (PvpMatchComponentsWaived || SafeSpellComponents || PropertyManager.GetBool("safe_spell_comps").Item)
                 return;
 
             var burned = spell.TryBurnComponents(this);
@@ -1326,7 +1349,7 @@ namespace ACE.Server.WorldObjects
         {
             spell.Formula.GetPlayerFormula(this);
 
-            if (!SpellComponentsRequired || !PropertyManager.GetBool("require_spell_comps").Item)
+            if (PvpMatchComponentsWaived || !SpellComponentsRequired || !PropertyManager.GetBool("require_spell_comps").Item)
                 return true;
 
             var requiredComps = spell.Formula.GetRequiredComps();
@@ -1358,12 +1381,16 @@ namespace ACE.Server.WorldObjects
 
                 MagicState.CastMotionDone = true;
 
+                // bind the follow-up to THIS cast: a forced drain (motion-stall clear, cast_timeout Fail, a jump) can
+                // complete the gesture of a cast that then ends in the same call; if a new cast starts within the
+                // tick, the stale follow-up must not cast the new spell before its own gesture
+                var castNum = MagicState.CastNum;
+
                 var actionChain = new ActionChain();
                 actionChain.AddDelayForOneTick();
                 actionChain.AddAction(this, () =>
                 {
-                    if (!MagicState.IsCasting)
-                        return;
+                    if (!MagicState.IsCasting || MagicState.CastNum != castNum) return;
 
                     MagicState.AlwaysTurn = true;
 
@@ -1391,11 +1418,15 @@ namespace ACE.Server.WorldObjects
 
             var checkAngle = status != WeenieError.None;
 
+            // bind the follow-up to THIS cast: if it ends (timeout, FailCast) and a new one starts within the tick,
+            // the stale continuation must not drive the new cast
+            var castNum = MagicState.CastNum;
+
             var actionChain = new ActionChain();
             actionChain.AddDelayForOneTick();
             actionChain.AddAction(this, () =>
             {
-                if (!MagicState.IsCasting) return;
+                if (!MagicState.IsCasting || MagicState.CastNum != castNum) return;
 
                 if (!MagicState.CastMotionDone)
                     DoWindup(MagicState.WindupParams, checkAngle);
@@ -1461,6 +1492,149 @@ namespace ACE.Server.WorldObjects
                     PhysicsObj.StopCompletely(false);
             }
         }
+
+        private readonly MotionStallWatchdog.LogGate castTurnTimeoutLogGate = new MotionStallWatchdog.LogGate();
+
+        /// <summary>
+        /// WaffleACE: per-tick bound on a FastTick cast waiting to face its target (see CastTurnTimeout). Called from
+        /// UpdateObjectPhysics only while MagicState.TurnWaitStart is set. Time the turn spends held behind a healthy
+        /// (not yet stale) animation queue is not counted. On expiry (CastTurnTimeout.Decide):
+        /// - before the windup the cast fails (FailCast: a bare UseDone, nothing spent yet);
+        /// - after the launch gesture the spell is released (one tick later, in an action chain bound to the cast by
+        ///   CastNum) without the angle check, the way the non-FastTick path
+        ///   releases after its timed Rotate (DoCastSpell(..., checkAngle: false)), after VerifyCastRadius, so a PK who
+        ///   moved too far still fails.
+        /// A turn blocked behind a stale queue has that queue cleared first (ClearMotionStall, the cast clock having
+        /// served as the watchdog's dwell), and the leftover turn-to is dropped. No timer is scheduled, so nothing can
+        /// fire after the cast ends. UpdateObjectPhysics has no catch of its own, so this method never throws: on an
+        /// exception the cast is ended and released with a UseDone.
+        /// </summary>
+        public void CheckCastTurnTimeout()
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+
+                var physicsObj = PhysicsObj;
+                var moveToManager = physicsObj?.MovementManager?.MoveToManager;
+                var minterp = physicsObj?.MovementManager?.MotionInterpreter;
+
+                var turnBlockedOnAnimation = physicsObj != null && physicsObj.IsAnimating && MotionStallWatchdog.IsTurnBlockedOnAnimation(moveToManager);
+
+                // staleness exactly as the motion-stall watchdog judges it; only read while the turn is blocked
+                var queueStaleSeconds = 0.0;
+                var staleThresholdSeconds = MotionStallWatchdog.DefaultThresholdSeconds;
+                if (turnBlockedOnAnimation && minterp?.PendingMotions != null)
+                {
+                    queueStaleSeconds = MotionStallWatchdog.StaleSeconds(minterp.PendingMotions.Count, ACE.Server.Physics.Common.PhysicsTimer.CurrentTime, minterp.PendingMotionsNonEmptySince);
+                    staleThresholdSeconds = MotionStallWatchdog.ThresholdSeconds();
+                }
+
+                var timeoutSeconds = CastTurnTimeout.TimeoutSeconds();
+                var maxPauseSeconds = CastTurnTimeout.MaxPauseSeconds(timeoutSeconds, staleThresholdSeconds);
+
+                var held = CastTurnTimeout.IsHeldByHealthyAnimation(turnBlockedOnAnimation, queueStaleSeconds, staleThresholdSeconds);
+                MagicState.TickTurnWait(now, held, maxPauseSeconds);
+
+                var pauseExhausted = MagicState.TurnWaitPausedSeconds >= maxPauseSeconds;
+
+                var decision = CastTurnTimeout.Decide(FastTick, MagicState.IsCasting, MagicState.TurnWaitStart, now, timeoutSeconds,
+                    MagicState.CastMotionDone, turnBlockedOnAnimation, queueStaleSeconds, staleThresholdSeconds, MotionStallWatchdog.Enabled(),
+                    pauseExhausted);
+
+                if (decision.Outcome == CastTurnTimeout.Outcome.Wait)
+                    return;
+
+                if (castTurnTimeoutLogGate.TryPass(now, out var suppressed))
+                {
+                    var interpretedTurn = minterp?.InterpretedState?.TurnCommand ?? 0;
+
+                    log.Warn($"[CAST_TURN_TIMEOUT] {Name} (0x{Guid.Full:X8}) cast waited {(now - MagicState.TurnWaitStart).TotalSeconds:0.0}s on its turn (limit {timeoutSeconds:0.0}s), outcome={decision.Outcome} clearQueue={decision.ClearQueue}: " +
+                        $"phase={(MagicState.CastMotionDone ? "post-gesture" : "pre-windup")} pendingTurnRelease={MagicState.PendingTurnRelease} isPlayerMovingTo2={IsPlayerMovingTo2} " +
+                        $"moveToType={moveToManager?.MovementType} isAnimating={physicsObj?.IsAnimating} turnBlockedOnAnimation={turnBlockedOnAnimation} queueStale={queueStaleSeconds:0.0}s " +
+                        $"interpretedTurn={(ACE.Entity.Enum.MotionCommand)interpretedTurn} turnTarget={TurnTarget?.Guid.Full:X8}" +
+                        (suppressed > 0 ? $" suppressedSinceLast={suppressed}" : ""));
+                }
+
+                // a dead queue is cleared deterministically here, not left to CheckMotionStall's gates. On Fail the twin
+                // queue is drained too: FailCast below clears IsCasting before the one-tick DoCastSpell chain that a
+                // drained cast gesture schedules (HandleMotionDone_Magic), and that chain re-checks IsCasting and CastNum. Release
+                // keeps the MotionInterp-only clear, because its own deferred DoCastSpell is what resolves the cast.
+                if (decision.ClearQueue)
+                    ClearMotionStall("cast_timeout", allowTwinDrainWhileCasting: decision.Outcome == CastTurnTimeout.Outcome.Fail);
+
+                if (decision.Outcome == CastTurnTimeout.Outcome.Fail)
+                {
+                    FailCast();
+
+                    // drop the leftover turn-to. IsCasting is already false, so its OnMoveComplete_Magic returns at once.
+                    if (IsPlayerMovingTo2)
+                        StopExistingMoveToChains2();
+
+                    return;
+                }
+
+                // Outcome.Release: drop the leftover turn-to first. TurnStarted false makes its OnMoveComplete_Magic
+                // return at once, so the cancel cannot schedule a second release.
+                MagicState.TurnStarted = false;
+                MagicState.PendingTurnRelease = false;
+
+                if (IsPlayerMovingTo2)
+                    StopExistingMoveToChains2();
+
+                // Resolve the spell one tick later in an action chain, like every other release path, not here inside
+                // UpdateObjectPhysics (InUpdate == true, see Player_Tick). EndTurnWait stops this check firing again in
+                // the meantime; CastNum binds the release to this cast.
+                var castNum = MagicState.CastNum;
+                MagicState.EndTurnWait();
+
+                var releaseChain = new ActionChain();
+                releaseChain.AddDelayForOneTick();
+                releaseChain.AddAction(this, () =>
+                {
+                    if (!MagicState.IsCasting || MagicState.CastNum != castNum) return;
+
+                    // PK move-distance check still applies (FailCast inside on failure)
+                    if (!VerifyCastRadius())
+                        return;
+
+                    DoCastSpell(MagicState, false);
+
+                    // every DoCastSpell path ends the cast (DoCastSpell_Inner -> FinishCast, or FinishCast on a lost
+                    // target or range). The one that does not is a null CastSpellParams, which has already sent its
+                    // UseDone; close that one here, after the release ran, never before.
+                    if (MagicState.IsCasting && MagicState.CastNum == castNum)
+                        MagicState.OnCastDone();
+                });
+                releaseChain.EnqueueChain();
+            }
+            catch (Exception ex)
+            {
+                // Known residual, not recovered here: this catch covers the check and the FailCast path only. The
+                // deferred release runs in its own action chain, and an exception thrown inside FinishCast after it set
+                // IsBusy = true (before its recoil chain clears it) would leave the player busy; that path is not
+                // reached from this catch.
+                if (castTurnTimeoutErrorGate.TryPass(DateTime.UtcNow, out var suppressed))
+                    log.Error($"[CAST_TURN_TIMEOUT] {Name} (0x{Guid.Full:X8}) check failed, ending the cast (suppressedSinceLast={suppressed})", ex);
+
+                try
+                {
+                    if (MagicState.IsCasting)
+                    {
+                        MagicState.OnCastDone();
+                        SendUseDoneEvent();
+                    }
+                    else
+                        MagicState.EndTurnWait();
+                }
+                catch (Exception)
+                {
+                    // never let the physics tick throw from here
+                }
+            }
+        }
+
+        private readonly MotionStallWatchdog.LogGate castTurnTimeoutErrorGate = new MotionStallWatchdog.LogGate();
 
         public void HandleCastQueue()
         {

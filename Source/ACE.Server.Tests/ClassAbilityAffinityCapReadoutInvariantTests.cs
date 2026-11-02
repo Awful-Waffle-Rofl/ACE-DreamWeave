@@ -8,13 +8,13 @@ namespace ACE.Server.Tests
     /// <summary>
     /// Pins the readout invariant this pass (2026-09-12 "make the readout panel consistent") exists to
     /// establish: for every capped-affinity ability, Skill + Affinity + Gear == Effective EXACTLY, whether or
-    /// not the cap is biting. Before this pass BreakArmor, Elemental Rend, Shield Block and Pocket Sand
+    /// not the cap is biting. Before this pass BreakArmor, Elemental Rend (now Elemental Proficiency), Shield Block and Pocket Sand
     /// reported the RAW (pre-clamp) added amount in Affinity while Effective used the clamped one, so the
     /// three displayed terms visibly did not sum to the total whenever the cap actually bit; Spellblade,
     /// Runeblade, Sundermark and Dispelling Edge already reported the clamped amount and are pinned here as
     /// controls so a future change cannot silently regress them back to the RAW shape.
     ///
-    /// EXERCISED THROUGH THE PURE STATIC HELPERS (Chance/BlockChance/RendChance), not through GetReadout:
+    /// EXERCISED THROUGH THE PURE STATIC HELPERS (Chance/BlockChance; Elemental Proficiency through its pure BuildReadout), not through GetReadout:
     /// GetReadout on every one of these eight abilities reads a live Player's affinity skill, and Player's
     /// static initializer cannot run under this test host (see SpellswordReadoutTests/
     /// SpellswordVanguardEquipmentModTests for the same constraint and the same workaround). Each assertion
@@ -98,33 +98,37 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void ElementalRend_CappedAffinity_SkillPlusAffinityPlusGearEqualsEffective()
+        public void ElementalProficiency_CappedAffinity_SkillPlusAffinityPlusGearEqualsEffective()
         {
-            const double chanceBase = 0.08;
-            const double chanceStep = 0.06;
-            const int rank = 3;
-            const double cap = 0.10;
-            const double gear = 0.02;
+            // a saturating War Magic multiplier (far past 1 + cap) and a real gear amplifier, at every rank
+            var cap = PropertyManager.GetDouble("class_ability_elementalproficiency_affinity_cap").Item;
+            const double multiplier = 3.09;
+            const double gear = 0.10;
+            Assert.IsTrue(multiplier > 1.0 + cap, "control: the multiplier must actually exceed the cap");
 
-            var rankBonus = chanceBase + (rank - 1) * chanceStep;
-            var multiplier = Multiplier(rankBonus);
+            for (var rank = 1; rank <= 3; rank++)
+            {
+                var primary = ElementalRendAbility.BuildReadout(rank, multiplier, gear);
+                var lines = new System.Collections.Generic.List<ACE.Server.ClassAbilities.ClassAbilityReadout> { primary };
+                lines.AddRange(primary.Secondary);
 
-            var rawRider = rankBonus * multiplier - rankBonus;
-            Assert.IsTrue(rawRider > cap, "control: the rider must actually exceed the cap");
+                Assert.AreEqual(7, lines.Count, "fire + lightning + frost + acid + pierce + slash + bludgeon");
 
-            var clampedRider = System.Math.Min(rawRider, cap);
+                foreach (var line in lines)
+                    AssertTermsSumToEffective(line.Skill, line.Affinity, line.Gear, line.Effective, $"Elemental Proficiency rank {rank} {line.Label}");
 
-            var skill = rankBonus * 100.0;
-            var affinity = clampedRider * 100.0;
-            var gearPct = gear * 100.0;
-            var effective = ElementalRendAbility.RendChance(rank, chanceBase, chanceStep, rawRider, gear, cap) * 100.0;
-
-            AssertTermsSumToEffective(skill, affinity, gearPct, effective, "Elemental Rend");
-
-            Assert.AreNotEqual(effective, skill + rawRider * 100.0 + gearPct, 1e-6,
-                "control: reporting the raw pre-clamp rider must break the sum once the cap bites");
+                // fire (affinity-scaled): the cap bites, the note says so
+                Assert.AreEqual("affinity cap", primary.CapNote);
+                // frost / slash / bludgeon are never scaled: no affinity, no gear, no note
+                foreach (var label in new[] { "slow", "crit chance", "stun" })
+                {
+                    var line = lines.Find(x => x.Label == label);
+                    Assert.AreEqual(0.0, line.Affinity, 1e-9, label);
+                    Assert.AreEqual(0.0, line.Gear, 1e-9, label);
+                    Assert.IsNull(line.CapNote, label);
+                }
+            }
         }
-
         [TestMethod]
         public void ShieldBlock_CappedAffinity_SkillPlusAffinityPlusGearEqualsEffective()
         {

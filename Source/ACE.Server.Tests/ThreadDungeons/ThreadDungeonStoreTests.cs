@@ -255,7 +255,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var store = LoadShipped();
 
-            var enabled = store.Dungeons.Values.Where(d => d.Enabled).ToList();
+            var enabled = store.Dungeons.Values.Where(d => d.Enabled && !d.IsOutdoor).ToList(); // outdoor sites carry their own level range (R3)
             Assert.IsTrue(enabled.Count > 0, "the shipped index parsed to zero enabled dungeons");
 
             var stranding = enabled

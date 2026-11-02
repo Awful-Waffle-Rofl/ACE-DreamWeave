@@ -818,10 +818,21 @@ namespace ACE.Server.WorldEvents
         public static WavePick PickWave(FamilyDef family, AudienceEstimate est, SourceThemeDef theme,
             int waveIndex, int currentAlive, int quantityBonus, int championsAlive, Random rng)
         {
+            return PickWave(family, est, theme, waveIndex, currentAlive, quantityBonus, championsAlive, rng, 1.0);
+        }
+
+        /// <summary>
+        /// The full pick with the boss-phase trash scale (world_events_boss_phase_trash_multiplier). A
+        /// <paramref name="trashScale"/> of 1.0 is the unscaled pick exactly; see
+        /// <see cref="SizeWave(SourceThemeDef, int, int, int, int, double)"/> for what the scale touches.
+        /// </summary>
+        public static WavePick PickWave(FamilyDef family, AudienceEstimate est, SourceThemeDef theme,
+            int waveIndex, int currentAlive, int quantityBonus, int championsAlive, Random rng, double trashScale)
+        {
             if (theme == null || family?.Members == null || family.Members.Count == 0)
                 return WavePick.Empty;
 
-            var sizing = SizeWave(theme, est.Count, currentAlive, quantityBonus, championsAlive);
+            var sizing = SizeWave(theme, est.Count, currentAlive, quantityBonus, championsAlive, trashScale);
 
             if (sizing.TrashSize <= 0 && sizing.ChampionCount <= 0)
                 return new WavePick(null, null, sizing, TrashBand(est.MedianLevel));
@@ -1016,14 +1027,131 @@ namespace ACE.Server.WorldEvents
         public static WaveSizing SizeWave(SourceThemeDef theme, int participantCount, int currentAlive,
             int quantityBonus, int championsAlive)
         {
+            return SizeWave(theme, participantCount, currentAlive, quantityBonus, championsAlive, 1.0);
+        }
+
+        /// <summary>
+        /// Whether the boss-phase trash cut is in play: only on a kill_boss run (the boss is the objective,
+        /// so focus fire is the point) and only while the boss stands. A champion on a kill_count /
+        /// destroy_source run does not qualify - trash deaths feed those objectives. Pure.
+        /// </summary>
+        public static bool BossPhaseApplies(GoalType? goal, bool bossAlive)
+        {
+            return bossAlive && goal == GoalType.KillBoss;
+        }
+
+        /// <summary>
+        /// Whether the pace controller is held for this pick: only when the cut applies AND actually cuts
+        /// (scale below 1.0), so a multiplier of 1.0 leaves pace exactly as before the feature. Pure.
+        /// </summary>
+        public static bool ShouldHoldPace(bool bossPhaseApplies, double scale)
+        {
+            return bossPhaseApplies && scale < 1.0;
+        }
+
+        /// <summary>Built-in world_events_boss_phase_trash_multiplier default: a third of the normal pressure.</summary>
+        public const double DefaultBossPhaseTrashMultiplier = 0.33;
+
+        /// <summary>Lowest boss-phase trash scale; below this a "reduced" wave would be a rounding artifact.</summary>
+        public const double MinBossPhaseTrashMultiplier = 0.05;
+
+        /// <summary>
+        /// The tunable's value as the sizing arithmetic may use it: clamped to
+        /// [<see cref="MinBossPhaseTrashMultiplier"/>, 1.0]; a non-finite value reads as
+        /// <see cref="DefaultBossPhaseTrashMultiplier"/>. 1.0 is "off". Pure.
+        /// </summary>
+        public static double ResolveBossPhaseTrashMultiplier(double configured)
+        {
+            if (double.IsNaN(configured) || double.IsInfinity(configured))
+                return DefaultBossPhaseTrashMultiplier;
+
+            return Math.Min(1.0, Math.Max(MinBossPhaseTrashMultiplier, configured));
+        }
+
+        /// <summary>
+        /// world_events_boss_phase_trash_multiplier through PropertyManager, resolved. A read that throws
+        /// (a unit test has no shard config) reads as the default.
+        /// </summary>
+        public static double ReadBossPhaseTrashMultiplier()
+        {
+            return ReadBossPhaseTrashMultiplier(
+                () => PropertyManager.GetDouble("world_events_boss_phase_trash_multiplier", DefaultBossPhaseTrashMultiplier).Item);
+        }
+
+        /// <summary>
+        /// <see cref="ReadBossPhaseTrashMultiplier()"/> with the property read injected: a delegate that
+        /// throws reads as the default, anything else is resolved (clamped / non-finite -> default).
+        /// </summary>
+        public static double ReadBossPhaseTrashMultiplier(Func<double> read)
+        {
+            try
+            {
+                return ResolveBossPhaseTrashMultiplier(read());
+            }
+            catch (Exception ex)
+            {
+                log.Error("[WORLDEVENT] could not read world_events_boss_phase_trash_multiplier; falling back to the default", ex);
+
+                return DefaultBossPhaseTrashMultiplier;
+            }
+        }
+
+        /// <summary>
+        /// The MaxAlive ceiling under a boss-phase scale (what <see cref="SizeWave(SourceThemeDef, int, int, int, int, double)"/>
+        /// budgets against); 1.0 or a non-finite scale returns the theme's own EffectiveMaxAlive. Pure.
+        /// </summary>
+        public static int ScaledMaxAlive(SourceThemeDef theme, double trashScale)
+        {
+            if (theme == null)
+                return 0;
+
+            var scale = double.IsFinite(trashScale) ? ResolveBossPhaseTrashMultiplier(trashScale) : 1.0;
+
+            var maxAlive = Math.Max(0, theme.EffectiveMaxAlive);
+
+            return scale < 1.0 ? ScaleCount(maxAlive, scale) : maxAlive;
+        }
+
+        /// <summary>
+        /// Scales a non-negative count by <paramref name="scale"/>, rounding half away from zero and
+        /// keeping a positive count at 1 or more. Pure.
+        /// </summary>
+        private static int ScaleCount(int count, double scale)
+        {
+            if (count <= 0)
+                return count;
+
+            return Math.Max(1, (int)Math.Round(count * scale, MidpointRounding.AwayFromZero));
+        }
+
+        /// <summary>
+        /// <see cref="SizeWave(SourceThemeDef, int, int, int, int)"/> under a boss-phase
+        /// <paramref name="trashScale"/> (1.0 = unscaled, byte-identical to the five-argument overload; out
+        /// of range values are clamped by <see cref="ResolveBossPhaseTrashMultiplier"/>, a non-finite value reads as 1.0
+        /// here so a bad caller never shrinks a wave by accident). The scale applies to BOTH the uncapped
+        /// demand (pace bonus included, so the overflow shrinks with it) and the MaxAlive CEILING, i.e.
+        /// the room is max(0, scaled maxAlive - currentAlive): trash already standing is never culled, it
+        /// simply uses up the smaller allowance. A positive demand or ceiling never scales below 1; a
+        /// full (scaled) field still yields an empty wave, exactly as an unscaled full field does.
+        /// </summary>
+        public static WaveSizing SizeWave(SourceThemeDef theme, int participantCount, int currentAlive,
+            int quantityBonus, int championsAlive, double trashScale)
+        {
             if (theme == null)
                 return new WaveSizing(0, 0, 0, 0, 0);
 
-            var room = Math.Max(0, Math.Max(0, theme.EffectiveMaxAlive) - Math.Max(0, currentAlive));
+            var scale = double.IsFinite(trashScale) ? ResolveBossPhaseTrashMultiplier(trashScale) : 1.0;
+
+            var maxAlive = ScaledMaxAlive(theme, scale);
+
+            var room = Math.Max(0, maxAlive - Math.Max(0, currentAlive));
 
             var cap = theme.WaveCount != null ? theme.EffectiveWaveCountCap : 1;
 
             var raw = (theme.WaveCount != null ? theme.ResolveWaveCountRaw(Math.Max(0, participantCount)) : 1) + Math.Max(0, quantityBonus);
+
+            if (scale < 1.0)
+                raw = ScaleCount(raw, scale);
 
             var ceiling = Math.Max(0, Math.Min(cap, room));
 
@@ -1161,6 +1289,35 @@ namespace ACE.Server.WorldEvents
                 return WithUplift(HighestMember(promotion), true, est.P90Level);
 
             return ChampionPick.None;
+        }
+
+        /// <summary>
+        /// World Events Hold H5: the finale's last-resort boss, used only when <see cref="PickChampion"/> finds nothing - the
+        /// family member nearest the elite band's centre (<see cref="FinaleBossFallbackMember"/>), promoted as a synthetic
+        /// champion so the spawner names and buffs it. None only for a family with no eligible member at all. Reads the band
+        /// and uplift dials. Ported from DreamWeave #17.
+        /// </summary>
+        public static ChampionPick PickFinaleBossFallback(FamilyDef family, AudienceEstimate est)
+        {
+            var member = FinaleBossFallbackMember(family?.Members, EliteBand(est.P90Level).Centre);
+
+            return member == null ? ChampionPick.None : WithUplift(member, true, est.P90Level);
+        }
+
+        /// <summary>
+        /// The pure rule behind <see cref="PickFinaleBossFallback"/>: any member but a named boss, nearest
+        /// <paramref name="eliteCentre"/> by level, the highest level (then the lowest wcid) among equals. Null when none.
+        /// </summary>
+        public static FamilyMember FinaleBossFallbackMember(IEnumerable<FamilyMember> members, int eliteCentre)
+        {
+            var eligible = members?.Where(m => m != null && m.Wcid != 0 && m.Role != NamedBossRole).ToList();
+
+            if (eligible == null || eligible.Count == 0)
+                return null;
+
+            var nearest = eligible.Min(m => Math.Abs(m.Level - eliteCentre));
+
+            return HighestMember(eligible.Where(m => Math.Abs(m.Level - eliteCentre) == nearest).ToList());
         }
 
         /// <summary>

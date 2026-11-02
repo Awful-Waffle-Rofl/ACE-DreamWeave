@@ -14,9 +14,9 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.Tests.Pvp
 {
     /// <summary>
-    /// Issued Ammunition and SpellComponent kit items are weightless (Docs/Pvp/TEMPLATES.md "Issued kit"):
+    /// Every issued kit item is weightless (Docs/Pvp/TEMPLATES.md "Issued kit"):
     /// EncumbranceVal and StackUnitEncumbrance are both 0 on the issued biota, a stack split off an issued stack
-    /// stays 0 (it is built fresh from the weenie, which carries the real burden), and no other item type changes.
+    /// stays 0 (it is built fresh from the weenie, which carries the real burden), and a personal (unissued) stack is never made weightless.
     /// </summary>
     [TestClass]
     public class PvpTemplateWeightlessTests
@@ -36,7 +36,16 @@ namespace ACE.Server.Tests.Pvp
         [DataTestMethod]
         [DataRow(WeenieType.Ammunition)]
         [DataRow(WeenieType.SpellComponent)]
-        public void IssuedAmmoAndComponents_AreIssuedWeightless(WeenieType type)
+        [DataRow(WeenieType.Generic)]
+        [DataRow(WeenieType.MeleeWeapon)]
+        [DataRow(WeenieType.MissileLauncher)]
+        [DataRow(WeenieType.Caster)]
+        [DataRow(WeenieType.Clothing)]
+        [DataRow(WeenieType.Food)]
+        [DataRow(WeenieType.Stackable)]
+        // No Container row: this proves only the BIOTA that BuildIssuedBiota writes. A Container re-reads its weenie burden when it is built
+        // or reloaded (Container(Biota) ctor), which this does not exercise; captured kits skip containers (PvpTemplateKit.cs), so it cannot bite today.
+        public void EveryIssuedItemType_IsIssuedWeightless(WeenieType type)
         {
             var biota = PvpTemplateKit.BuildIssuedBiota(Item(type), 0x80000001, Owner);
 
@@ -45,32 +54,14 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(100, biota.PropertiesInt[PropertyInt.StackSize], "the stack size itself is untouched");
         }
 
-        [DataTestMethod]
-        [DataRow(WeenieType.Generic)]
-        [DataRow(WeenieType.MeleeWeapon)]
-        [DataRow(WeenieType.MissileLauncher)]
-        [DataRow(WeenieType.Caster)]
-        [DataRow(WeenieType.Clothing)]
-        [DataRow(WeenieType.Food)]
-        [DataRow(WeenieType.Stackable)]
-        public void OtherIssuedItems_KeepTheirCapturedBurden(WeenieType type)
-        {
-            var biota = PvpTemplateKit.BuildIssuedBiota(Item(type), 0x80000001, Owner);
-
-            Assert.AreEqual(300, biota.PropertiesInt[PropertyInt.EncumbranceVal]);
-            Assert.AreEqual(3, biota.PropertiesInt[PropertyInt.StackUnitEncumbrance]);
-        }
-
         [TestMethod]
-        public void IsWeightlessIssuedType_IsExactlyAmmunitionAndSpellComponent()
+        public void IssuedItemWithNoCapturedBurden_StillGetsTheZeroFigures()
         {
-            foreach (WeenieType type in Enum.GetValues(typeof(WeenieType)))
-            {
-                var expected = type == WeenieType.Ammunition || type == WeenieType.SpellComponent;
-                Assert.AreEqual(expected, PvpTemplateKit.IsWeightlessIssuedType(type), type.ToString());
-            }
-        }
+            var item = new PvpTemplateKitItem { WeenieClassId = 4242, WeenieType = (int)WeenieType.Clothing };
+            var biota = PvpTemplateKit.BuildIssuedBiota(item, 0x80000001, Owner);
 
+            Assert.AreEqual(0, biota.PropertiesInt[PropertyInt.EncumbranceVal]);
+        }
         private static Stackable Seed(WeenieType type, bool issued, int size, int unit)
         {
             var wo = (Stackable)RuntimeHelpers.GetUninitializedObject(typeof(Stackable));
@@ -104,6 +95,8 @@ namespace ACE.Server.Tests.Pvp
         [DataTestMethod]
         [DataRow(WeenieType.Ammunition)]
         [DataRow(WeenieType.SpellComponent)]
+        [DataRow(WeenieType.Food)]
+        [DataRow(WeenieType.Stackable)]
         public void SplitOffAnIssuedStack_IsWeightless_EvenThoughTheWeenieCarriesBurden(WeenieType type)
         {
             // The issued source (0 burden) and a fresh-from-the-weenie child (unit burden 3), exactly as the split paths build them.
@@ -123,16 +116,8 @@ namespace ACE.Server.Tests.Pvp
         }
 
         [TestMethod]
-        public void SplitOffAnIssuedStack_OfAnotherType_OrOfAPersonalStack_KeepsTheWeenieBurden()
+        public void SplitOffAPersonalStack_KeepsTheWeenieBurden()
         {
-            var issuedGeneric = Seed(WeenieType.Stackable, true, 100, 3);
-            var childOfGeneric = Seed(WeenieType.Stackable, false, 1, 3);
-            childOfGeneric.SetStackSize(10);
-
-            Player.StampPvpTemplateSplitStack(issuedGeneric, childOfGeneric);
-
-            Assert.AreEqual(30, childOfGeneric.EncumbranceVal, "an issued non-ammo stack keeps its burden");
-
             var personalAmmo = Seed(WeenieType.Ammunition, false, 100, 3);
             var childOfPersonal = Seed(WeenieType.Ammunition, false, 1, 3);
             childOfPersonal.SetStackSize(10);

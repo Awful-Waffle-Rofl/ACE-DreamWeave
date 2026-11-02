@@ -1,6 +1,15 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
+using ACE.Entity;
+
 using ACE.Server.WeaponMods;
+using ACE.Server.WorldObjects;
+using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.Tests
 {
@@ -46,6 +55,78 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(0.50, maxRoll, 1e-15);
             Assert.AreEqual(0.50, WeaponModCombat.CostMultiplier(maxRoll), 1e-15);
+        }
+
+        private static readonly ObjectGuid Caster = new ObjectGuid(0x50000001);
+        private static readonly ObjectGuid Armor = new ObjectGuid(0x80000abc);
+
+        private static Dictionary<ObjectGuid, WorldObject> Equipped(params ObjectGuid[] guids)
+        {
+            var d = new Dictionary<ObjectGuid, WorldObject>();
+            foreach (var g in guids)
+                d[g] = null;
+            return d;
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_CasterIsOwner()
+        {
+            Assert.IsTrue(EnchantmentManager.IsLongevitySelfTarget(Caster, Caster, Equipped()), "a self buff");
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_BaneOnCastersWornArmor()
+        {
+            // The owner is the armor (its own guid), present in the caster's EquippedObjects: first cast and re-cast both use this test.
+            Assert.IsTrue(EnchantmentManager.IsLongevitySelfTarget(Caster, Armor, Equipped(Armor)));
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_ItemInPackDoesNotCount()
+        {
+            Assert.IsFalse(EnchantmentManager.IsLongevitySelfTarget(Caster, Armor, Equipped()));
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_StaleWielderIdButNotEquippedDoesNotCount()
+        {
+            // The persisted WielderId can be stale (double-parented rows); only runtime equipment counts, and the
+            // helper takes no WielderId at all. An item that is not in EquippedObjects is not self, whatever its row says.
+            Assert.IsFalse(EnchantmentManager.IsLongevitySelfTarget(Caster, Armor, Equipped(new ObjectGuid(0x80000def))));
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_ArmorWornBySomeoneElseDoesNotCount()
+        {
+            // Another player's bane on armor worn by someone else: the CASTER is not the wearer, so the armor is
+            // absent from the caster's own EquippedObjects.
+            Assert.IsFalse(EnchantmentManager.IsLongevitySelfTarget(Caster, Armor, Equipped()));
+        }
+
+        [TestMethod]
+        public void LongevitySelfTarget_NullEquipmentIsSafe()
+        {
+            Assert.IsFalse(EnchantmentManager.IsLongevitySelfTarget(Caster, Armor, null));
+        }
+
+        [TestMethod]
+        public void EnchantmentManager_CallsLongevityHelperExactlyTwice_EachWithTheSpellGuards()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            string path = null;
+            while (dir != null)
+            {
+                var candidate = Path.Combine(dir.FullName, "Source", "ACE.Server", "WorldObjects", "Managers", "EnchantmentManager.cs");
+                if (File.Exists(candidate)) { path = candidate; break; }
+                dir = dir.Parent;
+            }
+            Assert.IsNotNull(path, "could not find EnchantmentManager.cs by walking up from the test directory");
+
+            var calls = File.ReadAllLines(path).Where(l => l.Contains("IsLongevitySelfTarget(") && l.Contains("if (")).ToList();
+
+            Assert.AreEqual(2, calls.Count, "Longevity is wired at exactly two sites (BuildEntry first cast, Add re-cast)");
+            foreach (var line in calls)
+                StringAssert.Contains(line, "&& !isWeaponSpell && spell.IsBeneficial", "each Longevity site keeps both spell guards");
         }
     }
 }

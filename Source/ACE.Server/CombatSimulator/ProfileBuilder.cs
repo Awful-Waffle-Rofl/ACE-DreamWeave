@@ -9,6 +9,7 @@ using ACE.Database;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
@@ -115,9 +116,12 @@ namespace ACE.Server.CombatSimulator
         /// at-most-once callback, the "TWO SHAPES YIELD NO CALLBACK AT ALL" failure modes, the
         /// three threads the callback can arrive on, and what a consumer must and must not do in
         /// it - belongs to LoadOfflinePlayerAsync and applies here unchanged. Read it there.
+        ///
+        /// The profile is taken with the character's primary loadout in hand and in its combat stance, not in the
+        /// NonCombat a hydrated Player comes back in. See BuildDefenderProfile.
         /// </summary>
         public static void BuildAsync(uint characterGuid, Action<DefenderProfile> callback)
-            => LoadOfflinePlayerAsync(characterGuid, Walk, callback);
+            => LoadOfflinePlayerAsync(characterGuid, player => BuildDefenderProfile(player), callback);
 
         /// <summary>
         /// Hydrates an OFFLINE character into a throwaway Player on a pool thread and hands
@@ -297,7 +301,7 @@ namespace ACE.Server.CombatSimulator
                     // ran: a projection that throws is a failed build and is answered with null
                     try
                     {
-                        result = project(HydrateOffline(entityBiota, character, possessions));
+                        result = project(HydrateOffline(entityBiota, character, possessions.Inventory, possessions.WieldedItems));
                     }
                     catch (Exception ex)
                     {
@@ -333,7 +337,8 @@ namespace ACE.Server.CombatSimulator
         private static Player HydrateOffline(
             ACE.Entity.Models.Biota entityBiota,
             ACE.Database.Models.Shard.Character character,
-            ACE.Database.Entity.PossessedBiotas possessions)
+            IEnumerable<ACE.Database.Models.Shard.Biota> inventory,
+            IEnumerable<ACE.Database.Models.Shard.Biota> wieldedItems)
         {
             // The real inventory is load-bearing even though no armor comes off it. Container's
             // SortWorldObjectsIntoInventory accumulates each item's burden into EncumbranceVal
@@ -353,10 +358,124 @@ namespace ACE.Server.CombatSimulator
             // that reason.
             return new Player(
                 entityBiota,
-                possessions.Inventory,
-                possessions.WieldedItems,
+                inventory,
+                wieldedItems,
                 character,
                 null);
+        }
+
+        /// <summary>
+        /// Hydrates a throwaway Player from a TSV snapshot (ACE.Database.Snapshot.ShardTsvSnapshotReader) instead
+        /// of from the shard database: the same conversion and the same Player restore constructor
+        /// LoadOfflinePlayerAsync uses, fed from memory. SYNCHRONOUS, and it runs on the caller's thread.
+        ///
+        /// NO SHARD ACCESS, BUT NOT DATABASE-FREE. The Player restore constructor still makes its one blocking AUTH
+        /// read, GetAccountById(Character.AccountId) (WorldObjects\Player.cs:184), so DatabaseManager.Authentication
+        /// must be configured; nothing is written anywhere. The snapshot's AccountId is overwritten with
+        /// <paramref name="accountId"/> (default 0, the value parked roster slots are seeded with - see
+        /// Docs/CombatSimulator/DESIGN.md "Default target set") so a prod account id is never looked up against
+        /// whatever auth database this runs beside. Account comes back null for 0, as it does for those slots.
+        ///
+        /// The two Biota types: the character's own biota is converted to the RUNTIME ACE.Entity.Models.Biota
+        /// here with BiotaConverter.ConvertToEntityBiota, exactly as LoadAndDispatch does; inventory and wielded
+        /// items stay EF ACE.Database.Models.Shard.Biota, because that is what the Player constructor takes for them
+        /// (it converts each through WorldObjectFactory.CreateWorldObject).
+        ///
+        /// No online check: a snapshot is not live state, and the hydrated Player is registered nowhere - not in
+        /// PlayerManager, not in a landblock - so it is never saved. The snapshot's Character is handed to the
+        /// Player by reference and the Player may mutate it, so hydrate at most one Player per loaded snapshot.
+        ///
+        /// NOT DAT-FREE EITHER. Player.SetEphemeralValues reads the CombatManeuverTable named by the biota's
+        /// CombatTableDID from client_portal.dat, so DatManager.PortalDat must be loaded (an offline tool calls
+        /// DatManager.Initialize(datDir, true, false) first; the server has it already).
+        /// GameTables must hold the REAL portal dat formula tables too (Program.cs does
+        /// GameTables.Initialize(DatManager.PortalDat.SkillTable, DatManager.PortalDat.SecondaryAttributeTable) at
+        /// boot): every skill's Base and Current, and so every wield requirement and attack skill, adds an
+        /// attribute formula read from them. The unit-test TestGameTables stub carries only a handful of skills, so
+        /// a real character hydrated under it reads its other skills about 200 points low.
+        ///
+        /// The Player comes back in CombatMode.NonCombat, as every hydrated Player does. BuildDefenderProfile and
+        /// PlayerAttackerSpecs.FromPlayer each put it in a combat stance for their own read and restore it after.
+        /// </summary>
+        public static Player HydrateFromSnapshot(ACE.Database.Snapshot.ShardSnapshot snapshot, uint accountId = 0)
+        {
+            if (snapshot == null)
+                throw new ArgumentNullException(nameof(snapshot));
+
+            var entityBiota = ACE.Database.Adapter.BiotaConverter.ConvertToEntityBiota(snapshot.CharacterBiota);
+
+            snapshot.Character.AccountId = accountId;
+
+            return HydrateOffline(entityBiota, snapshot.Character, snapshot.Inventory, snapshot.WieldedItems);
+        }
+
+        /// <summary>
+        /// The DefenderProfile walk BuildAsync projects, exposed for a Player the caller already holds (typically
+        /// one from HydrateFromSnapshot). Synchronous; reads only the Player and its possessions.
+        ///
+        /// LOADOUT AND STANCE (owner ruling 2026-10-23: the defender stance follows the primary loadout). With
+        /// <paramref name="stance"/> null the walk runs with the character's PRIMARY loadout in hand
+        /// (PlayerAttackerSpecs.PrimaryLoadout, put there by PlayerLoadout.With) and in that loadout's stance, so
+        /// a fencer who logged out holding a buffing wand is profiled with its sword's WeaponDefense, in Melee.
+        /// When dual wielding, the walk holds the BEST weapon in the main hand only (GetWeaponMeleeDefenseModifier
+        /// reads the main-hand weapon). Only when no primary loadout exists (no trained attack skill, or no
+        /// usable weapon for it) does it fall back to what is in hand and DefenderCombatStance(player). With
+        /// <paramref name="stance"/> given, the hands are left as they are and only the stance is set.
+        /// The stance is set with Creature.SetCombatModeForSimulator for the duration of the walk and the previous
+        /// mode is restored after; the loadout swap is restored likewise.
+        /// This matters because GetEffectiveDefenseSkill's weapon term, GetWeaponMeleeDefenseModifier, and the
+        /// missile and magic weapon defense modifiers all return 1.0 outright while CombatMode is NonCombat
+        /// (WorldObjects\WorldObject_Weapon.cs, the "creatures only receive defense bonus in combat mode" guards),
+        /// and a hydrated Player is NonCombat: profiled as it comes, the wielded weapon's WeaponDefense,
+        /// WeaponMissileDefense and WeaponMagicDefense, and the weapon's and wielder's defense enchantments
+        /// (Defender), were all dropped. Passing CombatMode.NonCombat explicitly still reproduces that old reading.
+        ///
+        /// A Player outside the world has no PhysicsObj; Player.IsJumping treats that as not jumping, which is
+        /// what lets GetDefenseStanceMod (and so this walk) run on a hydrated Player at all.
+        /// </summary>
+        public static DefenderProfile BuildDefenderProfile(Player player, CombatMode? stance = null)
+        {
+            if (player == null)
+                throw new ArgumentNullException(nameof(player));
+
+            if (stance != null)
+                return SimulatorStance.With(player, stance.Value, () => Walk(player));
+
+            var loadout = PlayerAttackerSpecs.PrimaryLoadout(player);
+
+            if (loadout == null)
+                return SimulatorStance.With(player, DefenderCombatStance(player), () => Walk(player));
+
+            return loadout.With(player, () => SimulatorStance.With(player, StanceFor(loadout.Mode), () => Walk(player)));
+        }
+
+        private static CombatMode StanceFor(PlayerAttackMode mode)
+        {
+            switch (mode)
+            {
+                case PlayerAttackMode.Magic: return CombatMode.Magic;
+                case PlayerAttackMode.Missile: return CombatMode.Missile;
+                default: return CombatMode.Melee;
+            }
+        }
+
+        /// <summary>
+        /// The combat stance a character fights from, read off what it wields the way the client picks a stance:
+        /// a caster in the Held slot means Magic, anything in the MissileWeapon slot (a launcher or thrown weapons)
+        /// means Missile, and otherwise Melee - a melee weapon, or none at all, which is unarmed combat.
+        /// </summary>
+        public static CombatMode DefenderCombatStance(Player player)
+        {
+            if (player == null)
+                throw new ArgumentNullException(nameof(player));
+
+            if (player.GetEquippedWand() != null)
+                return CombatMode.Magic;
+
+            if (player.GetEquippedMissileWeapon() != null)
+                return CombatMode.Missile;
+
+            return CombatMode.Melee;
         }
 
         private static DefenderProfile Walk(Player player)
@@ -614,12 +733,15 @@ namespace ACE.Server.CombatSimulator
         ///    NonCombat (Player.SetEphemeralValues calls SetStance(MotionStance.NonCombat)), so
         ///    honouring it would zero every shield row for every character profiled. The
         ///    profile describes a defender in combat.
-        /// 2. The no-shield Arcane Defender branch at :677-712 IS reproduced, and it factors
-        ///    exactly: WeaponModCombat.ArcaneShieldMod is CalcArmorMod(armorLevel *
-        ///    ignoreShieldMod) (WeaponMods\WeaponModCombat.cs:162-171), the same shape
-        ///    MitigationMath.ShieldMod runs, and that branch takes no shield-skill cap. A
-        ///    defender with neither a shield nor the modifier stores 0, and CalcArmorMod(0) is
-        ///    1.0 (SkillFormula.cs:29-37), which is the engine's early return.
+        /// 2. The no-shield Defensive Weapon branch (formerly Arcane Defender) IS reproduced, and
+        ///    it factors exactly: WeaponModCombat.ArcaneShieldMod is CalcArmorMod(armorLevel *
+        ///    ignoreShieldMod), the same shape MitigationMath.ShieldMod runs, and that branch
+        ///    takes no shield-skill cap. A defender with neither a shield nor the modifier stores
+        ///    0, and CalcArmorMod(0) is 1.0 (SkillFormula.CalcArmorMod), which is the engine's
+        ///    early return. Since 2026-10-25 the equipped-shield row ALSO carries the Defensive
+        ///    Weapon level, added after the Shield-skill cap exactly as GetShieldMod adds it
+        ///    (DefensiveWeaponMath.AfterShieldCap). The ward shield is NOT mirrored on either
+        ///    path: it is a transient pool, not gear.
         /// 3. ignoreMagicArmor is an attacker term (:730), so it is a KEY axis rather than
         ///    something resolvable here: the caller stores one row per value of it. Both the
         ///    shield's armor-level enchantment (:734-735) and its bane/lure enchantment
@@ -627,7 +749,7 @@ namespace ACE.Server.CombatSimulator
         ///    flat-zero arm of each of those two ternaries, matching the armor table and the
         ///    PvE-profile note on this class.
         ///
-        /// The Arcane Defender branch reads no enchantment, so its two rows are identical; the
+        /// The Defensive Weapon branch reads no enchantment, so its two rows are identical; the
         /// boolean is still honoured as a key so every damage type has both entries and
         /// MitigationMath.ShieldMod never has to fall back.
         /// </summary>
@@ -635,18 +757,22 @@ namespace ACE.Server.CombatSimulator
         {
             var shield = player.GetEquippedShield();
 
+            // Defensive Weapon: the ONE carrier's level (main-hand weapon first, then the wand), read
+            // stance-free because the profile describes a defender in combat (departure 1 above). Already
+            // sanitized to >= 0, and already at that carrier's own ceiling (100 one-handed melee, 200 else).
+            var defensiveWeapon = player.GetDefensiveWeaponModValue();
+
             if (shield == null)
             {
-                var arcaneDefender = player.GetCasterOnlyModValue(WeaponModId.ArcaneDefender);
-
-                if (double.IsNaN(arcaneDefender) || arcaneDefender <= 0.0)
+                if (defensiveWeapon <= 0.0)
                     return new ShieldRow(0.0f);
 
-                return new ShieldRow((float)arcaneDefender);
+                return new ShieldRow((float)defensiveWeapon);
             }
 
             // get base shield AL
-            var baseSL = shield.GetProperty(PropertyInt.ArmorLevel) ?? 0.0f;
+            // Knot loot: Shield of the Rose's armor bonus joins the base term, mirroring Creature.GetShieldMod.
+            var baseSL = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0.0f) + KnotTraitCombat.ShieldArmorBonus(shield, player);
 
             // shield AL item enchantment additives:
             // impenetrability, brittlemail
@@ -665,10 +791,15 @@ namespace ACE.Server.CombatSimulator
             // SL cap is applied *after* item enchantments
             var shieldSkill = player.GetCreatureSkill(Skill.Shield);
 
-            return new ShieldRow(ComposeShieldLevel(
+            var cappedShieldLevel = ComposeShieldLevel(
                 baseSL, modSL, baseRL, modRL, ignoreMagicArmor,
                 shieldSkill.Current,
-                shieldSkill.AdvancementClass == SkillAdvancementClass.Specialized));
+                shieldSkill.AdvancementClass == SkillAdvancementClass.Specialized);
+
+            // Defensive Weapon joins AFTER the Shield-skill cap, mirroring GetShieldMod's equipped-shield path
+            // (DefensiveWeaponMath.AfterShieldCap). The ward term is passed as 0: a ward is a transient pool,
+            // not gear, and the simulator profiles gear.
+            return new ShieldRow((float)DefensiveWeaponMath.AfterShieldCap(cappedShieldLevel, defensiveWeapon, 0.0));
         }
 
         /// <summary>

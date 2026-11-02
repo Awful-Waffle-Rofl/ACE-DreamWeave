@@ -271,8 +271,8 @@ namespace ACE.Server.Command.Handlers
             {
                 Case = "Tier B caster",
                 Wcid = 2472,
-                Expected = "EQUIP THIS AND CAST. Carries Longevity, Quick Refresh and Arcane Defender at their MAXIMUM roll - the three caster-only v4 rows (see the melee row above for why the record value is 1.0, not the modifier's MaxRoll).",
-                Note = "Longevity, Quick Refresh and Arcane Defender (WeaponModId.Longevity/QuickRefresh/ArcaneDefender, catalog v4, 2026-08-17) are REGISTERED BUT INERT this pass - no enchantment/combat hook reads any of them yet.",
+                Expected = "EQUIP THIS AND CAST. Carries Longevity, Quick Refresh and Defensive Weapon at their MAXIMUM roll (see the melee row above for why the record value is 1.0, not the modifier's MaxRoll). Defensive Weapon reads +200 shield armor level on a caster.",
+                Note = "Longevity and Quick Refresh are the two caster-only v4 rows. Defensive Weapon (WeaponModId.DefensiveWeapon, formerly Arcane Defender) rolls on every class since 2026-10-25; a caster reaches the full 200.",
                 Ints = new (PropertyInt, int?)[]
                 {
                     (PropertyInt.ItemWorkmanship, 8),
@@ -283,12 +283,55 @@ namespace ACE.Server.Command.Handlers
                 {
                     (PropertyFloat.WeaponModLongevity, 1.0),
                     (PropertyFloat.WeaponModQuickRefresh, 1.0),
-                    (PropertyFloat.WeaponModArcaneDefender, 1.0),
+                    (PropertyFloat.WeaponModDefensiveWeapon, 1.0),
                 },
                 Strings = new (PropertyString, string)[]
                 {
                     (PropertyString.TinkerLog, BuildLog((MaterialType.GreenGarnet, 7))),
                     (PropertyString.WeaponModTinkerLog, BuildLog((MaterialType.GreenGarnet, 7))),
+                },
+            },
+            new WeaponModKitEntry
+            {
+                Case = "Defensive Weapon one-handed melee",
+                Wcid = 352,
+                Expected = "EQUIP AND INSPECT. Carries Defensive Weapon at its MAXIMUM roll on a ONE-HANDED sword: the appraisal line must read +100 shield armor level [100%] - half the two-handed row below.",
+                Note = "Owner ruling 2026-10-25: a one-handed melee carrier reaches 100, every other class 200. Equip with and without a shield: with one, the level adds to the shield after the Shield-skill cap (and to Thorns); without one, it is a virtual shield. Both read 0 in peace mode.",
+                Ints = new (PropertyInt, int?)[]
+                {
+                    (PropertyInt.ItemWorkmanship, 10),
+                    (PropertyInt.NumTimesTinkered, 10),
+                    (PropertyInt.WeaponModTinkerCount, 9),
+                },
+                Floats = new (PropertyFloat, double?)[]
+                {
+                    (PropertyFloat.WeaponModDefensiveWeapon, 1.0),
+                },
+                Strings = new (PropertyString, string)[]
+                {
+                    (PropertyString.TinkerLog, BuildLog((MaterialType.Iron, 9))),
+                    (PropertyString.WeaponModTinkerLog, BuildLog((MaterialType.Iron, 9))),
+                },
+            },
+            new WeaponModKitEntry
+            {
+                Case = "Defensive Weapon two-handed melee",
+                Wcid = 53315,
+                Expected = "EQUIP AND INSPECT. Carries Defensive Weapon at its MAXIMUM roll on a TWO-HANDED sword: the appraisal line must read +200 shield armor level [100%] - double the one-handed row above.",
+                Note = "Two-handed is decided from the item (ValidLocations TwoHanded, WeaponSkill TwoHandedCombat or CombatUse TwoHanded - DefensiveWeaponMath.IsTwoHanded); this weenie carries the first two.",
+                Ints = new (PropertyInt, int?)[]
+                {
+                    (PropertyInt.NumTimesTinkered, 10),
+                    (PropertyInt.WeaponModTinkerCount, 9),
+                },
+                Floats = new (PropertyFloat, double?)[]
+                {
+                    (PropertyFloat.WeaponModDefensiveWeapon, 1.0),
+                },
+                Strings = new (PropertyString, string)[]
+                {
+                    (PropertyString.TinkerLog, BuildLog((MaterialType.Iron, 9))),
+                    (PropertyString.WeaponModTinkerLog, BuildLog((MaterialType.Iron, 9))),
                 },
             },
             new WeaponModKitEntry

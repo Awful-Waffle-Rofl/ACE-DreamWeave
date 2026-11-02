@@ -17,6 +17,11 @@ namespace ACE.Server.Network.GameAction.Actions
             if (session.Player.PKLogout) return;
 
             var moveToState = new MoveToState(session.Player, message.Payload);
+
+            // server-side arrival fallback: movement from the destination while still Teleporting completes the arrival,
+            // so the rest of this handler then treats the report as ordinary movement (Player_TeleportArrival)
+            session.Player.CheckArrivalOnMovementInput(moveToState);
+
             session.Player.CurrentMoveToState = moveToState;
 
             if (session.Player.IsPlayerMovingTo)

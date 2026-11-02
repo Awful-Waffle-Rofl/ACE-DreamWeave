@@ -224,7 +224,15 @@ namespace ACE.Server.Physics.Animation
                                 add_motion(sequence, motionData_, 1.0f);
                                 add_motion(sequence, cycles, currState.SubstateMod);
                                 re_modify(sequence, currState);
-                                numAnims = (uint)(motionData.Anims.Count + link.Anims.Count + (motionData_ == null ? 0 : motionData.Anims.Count));
+                                // WaffleACE fix (upstream bug): the third term counted motionData's anims again
+                                // instead of motionData_'s. Where the substate->default link is longer than the
+                                // default->substate link (Falling and the Aim* substates in the human table), the
+                                // MotionTableManager node then waits for an AnimDone that never comes, and every
+                                // later motion queues behind it (the motion stall). numAnims is the three link groups
+                                // appended above (substate->default, default->action, default->substate). Only the
+                                // last appended anim is cyclic (Sequence.append_animation), so a multi-anim cycle
+                                // fires extra AnimDone hooks beyond this count: a surplus, never a stall.
+                                numAnims = (uint)(motionData.Anims.Count + link.Anims.Count + (motionData_ == null ? 0 : motionData_.Anims.Count));
                                 return true;
                             }
                         }

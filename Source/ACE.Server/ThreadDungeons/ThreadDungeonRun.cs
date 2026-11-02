@@ -80,6 +80,13 @@ namespace ACE.Server.ThreadDungeons
         public string StartGroup { get; }
         public uint Instance => RunId;
         public uint OwnerGuid { get; }
+
+        /// <summary>
+        /// Guid of this run's live summoned exit portal, 0 when none was recorded. Written on the world thread when
+        /// the exit is created or relocated (ThreadDungeonRewardSpawner), so /spawncache can find it with
+        /// Landblock.GetObject, which sees objects still pending entry. Not persisted; a run is in-memory.
+        /// </summary>
+        public uint SummonedExitGuid { get; set; }
         public string OwnerName { get; }
         public uint AccountId { get; }
         public uint GemGuid { get; }
@@ -453,6 +460,38 @@ namespace ACE.Server.ThreadDungeons
             }
         }
 
+        private int ceilingLoweredCreatures;
+        private int ceilingLoweredSkills;
+        private uint ceilingLoweredMaxDelta;
+
+        /// <summary>
+        /// Records one archetype-uplifted creature whose authored attack skill the attack-skill ceiling LOWERED (the one
+        /// axis allowed to go down): how many skills and the largest drop. Summarised once per run at populate
+        /// (code review 2026-10-23: one aggregate Info line, not one per creature).
+        /// </summary>
+        public void RecordAttackCeilingLowered(int skills, uint maxDelta)
+        {
+            if (skills <= 0)
+                return;
+
+            lock (stateLock)
+            {
+                ceilingLoweredCreatures++;
+                ceilingLoweredSkills += skills;
+                ceilingLoweredMaxDelta = Math.Max(ceilingLoweredMaxDelta, maxDelta);
+            }
+        }
+
+        /// <summary>The run's attack-skill-ceiling lowerings so far: creatures, skills, and the largest single drop.</summary>
+        public (int Creatures, int Skills, uint MaxDelta) AttackCeilingLowered
+        {
+            get
+            {
+                lock (stateLock)
+                    return (ceilingLoweredCreatures, ceilingLoweredSkills, ceilingLoweredMaxDelta);
+            }
+        }
+
         /// <summary>
         /// Latches <see cref="SurveyFiled"/>. Called at the point the survey is actually written to the
         /// owner's ledger, never at the point filing is decided on: the two differ whenever the owner logs
@@ -561,6 +600,15 @@ namespace ACE.Server.ThreadDungeons
         /// as before. Stamped like <see cref="LootTrickleBudgetMs"/>.
         /// </summary>
         public int LootTrickleMaxPrebuilt { get; set; } = ThreadLootTrickle.DefaultMaxPrebuilt;
+
+        /// <summary>
+        /// Open World Threads: dynamic_dungeons_outdoor_lazy_buffer_ring as it stood when this run started. True means
+        /// the run's footprint landblocks do not eagerly load the one-landblock buffer ring around them; a ring
+        /// landblock loads only on demand (EphemeralInstanceGroup.LoadsAdjacents). Read once by
+        /// ThreadDungeonManager.TryStart, only for an outdoor row, and stamped before the run is published, so flipping
+        /// the setting mid-run cannot leave a run half eager and half lazy. Always false for a dungeon run.
+        /// </summary>
+        public bool LazyBufferRing { get; set; }
 
         /// <param name="ownerLevelAtStart">
         /// See <see cref="OwnerLevelAtStart"/>. Optional and defaulted so the existing callers and tests
@@ -845,6 +893,9 @@ namespace ACE.Server.ThreadDungeons
                 // run out from this timestamp, and the manager is a pure function that is handed the elapsed
                 // time - it never reads the clock itself.
                 clearedUtc = DateTime.UtcNow;
+
+                // The contribution ledger closes with the transition, so post-clear fights add nothing.
+                CloseContributionLocked();
             }
         }
 
@@ -874,6 +925,7 @@ namespace ACE.Server.ThreadDungeons
                 if (state == ThreadDungeonRunState.Ended) return false;
                 state = ThreadDungeonRunState.Ended;
                 endReason = reason;
+                CloseContributionLocked();
                 return true;
             }
         }

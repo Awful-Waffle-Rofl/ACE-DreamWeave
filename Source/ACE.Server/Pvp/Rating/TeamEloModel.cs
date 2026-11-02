@@ -11,7 +11,25 @@ namespace ACE.Server.Pvp.Rating
     /// </summary>
     public sealed class TeamEloModel : IRatingModel
     {
+        /// <summary>
+        /// Each player's delta rounded once, halves away from zero: exactly <see cref="EloRating.Delta"/> applied to
+        /// <see cref="UnroundedDeltas"/>, so the result is the same integer it always was.
+        /// </summary>
         public IReadOnlyDictionary<uint, int> Deltas(IReadOnlyList<RatedTeam> teams, MatchOutcome outcome)
+        {
+            var result = new Dictionary<uint, int>();
+
+            foreach (var kvp in UnroundedDeltas(teams, outcome))
+                result[kvp.Key] = Round(kvp.Value);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Each player's K_i * (S - E) before any rounding (the base the battleground performance modifier scales,
+        /// <see cref="PerformanceTeamEloModel"/>). Pure.
+        /// </summary>
+        public IReadOnlyDictionary<uint, double> UnroundedDeltas(IReadOnlyList<RatedTeam> teams, MatchOutcome outcome)
         {
             if (teams.Count != 2)
                 throw new ArgumentException("TeamEloModel supports exactly two teams.", nameof(teams));
@@ -25,7 +43,7 @@ namespace ACE.Server.Pvp.Rating
             var expectedA = EloRating.ExpectedScore(avgA, avgB);
             var expectedB = 1.0 - expectedA;
 
-            var result = new Dictionary<uint, int>();
+            var result = new Dictionary<uint, double>();
 
             ApplyTeam(teamA, expectedA, outcome, result);
             ApplyTeam(teamB, expectedB, outcome, result);
@@ -33,7 +51,10 @@ namespace ACE.Server.Pvp.Rating
             return result;
         }
 
-        private static void ApplyTeam(RatedTeam team, double expected, MatchOutcome outcome, Dictionary<uint, int> result)
+        /// <summary>The one rounding rule every Elo delta uses: nearest integer, halves away from zero (as <see cref="EloRating.Delta"/>).</summary>
+        public static int Round(double delta) => (int)Math.Round(delta, MidpointRounding.AwayFromZero);
+
+        private static void ApplyTeam(RatedTeam team, double expected, MatchOutcome outcome, Dictionary<uint, double> result)
         {
             foreach (var player in team.Players)
             {
@@ -46,7 +67,7 @@ namespace ACE.Server.Pvp.Rating
                 else
                     score = outcome.WinningTeams.Contains(team.TeamIndex) ? 1.0 : 0.0;
 
-                result[player.CharacterId] = EloRating.Delta(player.K, score, expected);
+                result[player.CharacterId] = player.K * (score - expected);
             }
         }
     }

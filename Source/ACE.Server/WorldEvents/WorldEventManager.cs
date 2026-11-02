@@ -74,6 +74,16 @@ namespace ACE.Server.WorldEvents
         /// <summary>The one running event, or null. Cleared as soon as a run reaches Done.</summary>
         public static WorldEvent Current { get; private set; }
 
+        /// <summary>
+        /// The run with id <paramref name="runId"/>, or null. Only the current run can match today: a finished
+        /// run is cleared from <see cref="Current"/> and nothing else is kept. Reads Current once.
+        /// </summary>
+        public static WorldEvent FindRun(uint runId) => FindRun(Current, runId);
+
+        /// <summary>Pure core of <see cref="FindRun(uint)"/>: <paramref name="current"/> when its RunId matches, else null.</summary>
+        internal static WorldEvent FindRun(WorldEvent current, uint runId) =>
+            current != null && current.RunId == runId ? current : null;
+
         /// <summary>Immutable axis store. Reload swaps the reference; a running event keeps its own snapshot.</summary>
         public static WorldEventAxisStore Store { get; private set; } = WorldEventAxisStore.Empty;
 
@@ -83,12 +93,18 @@ namespace ACE.Server.WorldEvents
         public static bool Enabled => PropertyManager.GetBool("world_events_enabled").Item;
 
         /// <summary>
+        /// The radius death protection covers around the anchor: the run's participant radius (WorldEvent.EffectiveParticipantRadius),
+        /// which is the source's rewardRadius exactly unless the objective sets its own. 0 without a run.
+        /// </summary>
+        internal static float DeathProtectionRadius(WorldEvent evt) => evt?.EffectiveParticipantRadius ?? 0f;
+
+        /// <summary>
         /// Whether a player death at <paramref name="loc"/> should waive vitae, item loss and enchantment
         /// purge (Asheron's Protection): the world_events master switch AND world_event_death_protection are
         /// both on, the current run is Announced OR Active (not yet Resolved), and <paramref name="loc"/> is
         /// in the SAME landblock instance as the event anchor and within the anchor's reward radius - the
         /// same containment rule <see cref="WorldEventAudienceSampler.Sample"/> uses for audience/reward
-        /// eligibility, and the same radius field (<c>Composition.Source.RewardRadius</c>) every other "is
+        /// eligibility, and the same radius (<see cref="DeathProtectionRadius"/>: the run's participant radius, the source's rewardRadius unless the objective sets its own) every other "is
         /// this player at the event" check in this system already reads (see
         /// <see cref="WorldEvent.SampleAudience"/> and <see cref="WorldEventRewardDelivery.SpawnCaches"/>).
         ///
@@ -122,12 +138,37 @@ namespace ACE.Server.WorldEvents
                 var evt = Current;
 
                 return ProtectsDeathAtCore(worldEventsEnabled, deathProtectionEnabled, evt?.State,
-                    loc, evt?.Composition?.AnchorPosition, evt?.Composition?.Source?.RewardRadius ?? 0f);
+                    loc, evt?.Composition?.AnchorPosition, DeathProtectionRadius(evt));
             }
             catch (Exception ex)
             {
                 log.Warn("[WORLDEVENT] ProtectsDeathAt threw; treating death protection as off", ex);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Presence payout: a player died. Forwards to the current run, which starts the death grace when the
+        /// death is inside its arena while the window is open (WorldEvent.OnPlayerDied). Called from Player.Die
+        /// beside <see cref="ProtectsDeathAt"/>, on a landblock thread.
+        ///
+        /// Costs one field read when no run exists, and never throws: a failure here must never touch the death
+        /// itself, and the worst it can cost is a missed grace.
+        /// </summary>
+        public static void OnPlayerDied(Player player)
+        {
+            var evt = Current;
+
+            if (evt == null || player == null)
+                return;
+
+            try
+            {
+                evt.OnPlayerDied(player.Guid.Full, player.Location);
+            }
+            catch (Exception ex)
+            {
+                log.Warn("[WORLDEVENT] OnPlayerDied threw; the death grace was not applied", ex);
             }
         }
 
@@ -442,6 +483,15 @@ namespace ACE.Server.WorldEvents
 
                 if (!TryCompose(request, out var composition, out error))
                 {
+                    refusal = WorldEventStartRefusal.CompositionFailed;
+                    return false;
+                }
+
+                // The goal's start-spot rule, before the candidate is built: it may move the composed anchor or
+                // refuse the start outright. Every goal's rule is the no-op today, so the composed spot stands.
+                if (!WorldEventObjectiveFactory.StartSpotRuleFor(composition.Goal).TryResolve(composition, request, out error))
+                {
+                    error ??= $"no start spot for goal '{composition.Goal?.Id}'";
                     refusal = WorldEventStartRefusal.CompositionFailed;
                     return false;
                 }
@@ -846,6 +896,10 @@ namespace ACE.Server.WorldEvents
                   $"observed {pending.Mean:F0} hits {pending.Hits}"
                 : "";
 
+            // HAZARDS-PLAN B2: "hazard=kind/element/liveCount", present only while a hazard run is live.
+            var hazardStatus = evt.HazardStatusText;
+            var hazardText = hazardStatus != null ? $", hazard={hazardStatus}" : "";
+
             var difficulty = $"target={(target == null ? "n/a" : target.Value.ToString())}, " +
                              $"minLeft={evt.MinDurationRemaining(Time.GetUnixTime()):F0}s, " +
                              $"crowd=x{evt.CrowdHealthMult:F2}, pace=x{(evt.Pace?.HealthMult ?? 1.0):F2}, " +
@@ -864,7 +918,7 @@ namespace ACE.Server.WorldEvents
             return $"World Events run {evt.RunId}: state {evt.State}, {evt.Composition?.ToAxisSummary()}, " +
                    $"wave {evt.WaveIndex}, alive {evt.Spawner.LiveCount} (total {evt.Spawner.LiveTotal}), " +
                    $"decor={evt.Spawner.DecorCount}, npcs={evt.Spawner.NpcCount}, " +
-                   $"adds={evt.Spawner.AddCount}{objectiveHealthText}, " +
+                   $"adds={evt.Spawner.AddCount}{hazardText}{objectiveHealthText}, " +
                    $"progress: {progress}, elapsed {elapsed:F0}s, " +
                    $"{difficulty}, " +
                    $"participants={evt.Participation?.Count ?? 0} topKiller={topKiller?.Name ?? "none"}. " +

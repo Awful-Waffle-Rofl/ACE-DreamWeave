@@ -182,16 +182,24 @@ namespace ACE.Server.Tests.ThreadDungeons
             // Source-text pin of the production call site: the helpers are unit-tested above, but nothing else
             // would notice the calls being dropped from the spawner.
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs");
+            //
+            // The strips moved into PrepareForPlacement (archetype-uplift extraction), which TryPlaceOnce calls before
+            // creature.EnterWorld(): pin both halves - the strips are in the prepared body, and the prepare call precedes
+            // EnterWorld in the placing body.
             var body = PooledLootSourceText.MethodBody(src, "private static PlaceOutcome TryPlaceOnce(ThreadDungeonRun run, Landblock landblock, DungeonSpawnPlan plan, DungeonSpawnPlanEntry entry,");
+            var prepared = PooledLootSourceText.MethodBody(src, "internal static void PrepareForPlacement(ThreadDungeonRun run, Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan,");
 
             var enterWorld = body.IndexOf("creature.EnterWorld()", System.StringComparison.Ordinal);
             Assert.IsTrue(enterWorld >= 0, "creature.EnterWorld() not found in TryPlaceOnce");
 
+            var prepare = body.IndexOf("PrepareForPlacement(run, creature, entry, plan, observedMaxNonBoss, out var ceilingLowered);", System.StringComparison.Ordinal);
+            Assert.IsTrue(prepare >= 0, "TryPlaceOnce no longer calls PrepareForPlacement");
+            Assert.IsTrue(prepare < enterWorld, "PrepareForPlacement must run before creature.EnterWorld()");
+
             foreach (var call in new[] { "StripGenerator(creature)", "StripDeathSpawn(creature)" })
             {
-                var at = body.IndexOf(call, System.StringComparison.Ordinal);
-                Assert.IsTrue(at >= 0, $"TryPlaceOnce no longer calls {call}");
-                Assert.IsTrue(at < enterWorld, $"{call} must run before creature.EnterWorld()");
+                Assert.IsTrue(prepared.IndexOf(call, System.StringComparison.Ordinal) >= 0, $"PrepareForPlacement no longer calls {call}");
+                Assert.IsTrue(body.IndexOf(call, System.StringComparison.Ordinal) < 0, $"{call} is back in TryPlaceOnce; the extraction pinned it in PrepareForPlacement");
             }
         }
         [TestMethod]

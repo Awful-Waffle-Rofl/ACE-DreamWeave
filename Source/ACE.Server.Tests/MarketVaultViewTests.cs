@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -8,6 +9,7 @@ using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.Managers;
 using ACE.Server.Managers.Market;
 using ACE.Server.WorldObjects;
 
@@ -296,6 +298,148 @@ namespace ACE.Server.Tests
                 "a reimported weenie must be reprojected, not served from the memo");
             Assert.IsTrue(weenieLookups > before,
                 "the world cache must be consulted on every view; it is the instance that decides a rebuild");
+        }
+
+        /// <summary>
+        /// fills_orders is the web's ONLY signal that a class line may be counted toward a Wanted fill, so
+        /// it must be on every class line and on nothing else - a stored item or ledger row carrying it
+        /// would be harmless, but its ABSENCE on a class line is what an older server looks like.
+        /// </summary>
+        [TestMethod]
+        public void VaultView_FillsOrders_IsTrueOnAClassLine_AndAbsentOnEveryOtherRow()
+        {
+            var lone = new Stackable(IconFixtureWeenie(StoredWcid, StoredName), new ObjectGuid((uint)nextGuid++));
+            store.SeedItem(VaultAccount, lone);
+            store.SeedGroup(VaultAccount, StoredWcid, 3);
+            store.SeedLedger(VaultAccount, LedgerWcid, 8993);
+            store.SeedClassLine(VaultAccount, new string('a', 32), 21082, 4);
+
+            Assert.IsTrue(MarketManager.TryGetVaultView(VaultAccount, out var entries, out var error), $"vault view refused: {error}");
+            Assert.AreEqual(4, entries.Count, "expected a lone item, a group, a ledger row and a class line");
+
+            var classRows = 0;
+
+            foreach (var entry in entries)
+            {
+                var row = Row(entry);
+                var isClass = row.TryGetProperty("is_class", out var flag) && flag.GetBoolean();
+
+                if (isClass)
+                {
+                    classRows++;
+                    Assert.IsTrue(row.TryGetProperty("fills_orders", out var fills), "a class line must say whether it fills orders");
+                    Assert.IsTrue(fills.GetBoolean(), "and this server fills from class lines");
+                }
+                else
+                {
+                    Assert.IsFalse(row.TryGetProperty("fills_orders", out _), "fills_orders is omitted on every non-class row");
+                }
+            }
+
+            Assert.AreEqual(1, classRows, "control: exactly one row is a class line");
+        }
+
+        /// <summary>
+        /// The web decides what a class line can fill from its vault-view snapshot, and the server decides
+        /// from the probe CountMatching materializes. The two must read the same object, field for field,
+        /// on every field an order predicate reads - Structure, MaxStructure, SalvageToolCharges and
+        /// MaterialType - or the web would offer fills the server refuses. Driven over a REAL
+        /// VaultMarketItemStore, because only that store materializes a class line at all.
+        /// </summary>
+        [TestMethod]
+        public void VaultView_ClassLineSnapshot_MatchesTheFillProbe_OnEveryFieldAnOrderReads()
+        {
+            const uint SellerAccount = 7151;
+            const uint HammerWcid = 1001910;
+
+            // MarketSalvageMaterials reaches Player's static initializer; see MarketBuyOrderTests.
+            MarketOrderFillTests.EnsurePlayerStaticFieldsSeeded();
+
+            var savedCap = PropertyManager.GetLong("account_vault_entry_cap").Item;
+            Assert.IsTrue(PropertyManager.ModifyLong("account_vault_entry_cap", 100000));
+            Assert.IsTrue(PropertyManager.ModifyLong("account_vault_landblock",
+                DefaultPropertyManager.DefaultLongProperties["account_vault_landblock"].Item));
+
+            try
+            {
+                var built = new List<WorldObject>();
+                var recording = false;
+
+                var backend = new FakeVaultBackend();
+                var world = new FakeVaultWorld
+                {
+                    PristineResult = false,
+                    ClassifyResult = true,
+                    MaterializeTransform = wo =>
+                    {
+                        wo.MaterialType = MaterialType.Tourmaline;
+                        wo.MaxStructure = 10;
+                        wo.SetProperty(PropertyInt.SalvageToolCharges, 10);
+
+                        if (recording)
+                            built.Add(wo);
+
+                        return wo;
+                    },
+                };
+
+                var container = FakeVaultWorld.MakeContainer(ACE.Server.Entity.AccountVault.AccountVaultStore.VaultItemCapacity);
+                world.Containers[container.Guid.Full] = container;
+                backend.Vaults.Add(new ACE.Database.Models.Shard.AccountVault
+                {
+                    Id = 9951, AccountId = SellerAccount, ContainerGuid = container.Guid.Full,
+                    CreatedAt = new System.DateTime(2026, 1, 1), Kind = ACE.Server.Entity.AccountVault.AccountVaultStore.VaultContainerKind,
+                });
+
+                var vault = new ACE.Server.Entity.AccountVault.AccountVaultStore(SellerAccount, backend, world);
+                Assert.IsTrue(vault.IsLoaded);
+
+                var actor = new ACE.Server.Entity.AccountVault.VaultActor(SellerAccount, 0x50000951, "Probeseller");
+
+                foreach (var value in new[] { 300, 301 })
+                {
+                    var hammer = FakeVaultWorld.MakeSalvageBag(HammerWcid, 10, 40, 10, value, "Tourmaline Hammer");
+                    hammer.MaterialType = MaterialType.Tourmaline;
+                    hammer.MaxStructure = 10;
+                    hammer.SetProperty(PropertyInt.SalvageToolCharges, 10);
+
+                    var ok = false;
+                    vault.Enqueue(() => ok = vault.TryDeposit(hammer, actor, out _));
+                    Assert.IsTrue(ok, "could not seed a class Hammer");
+                }
+
+                var realStore = new VaultMarketItemStore(account => account == SellerAccount ? vault : null);
+
+                MarketManager.Shutdown();
+                MarketManager.Initialize(realStore, wallet, repo);
+
+                // The probe CountMatching builds, captured as it is built.
+                recording = true;
+                var counted = realStore.CountMatching(SellerAccount,
+                    wo => MarketSalvageMaterials.MatchesOrder(wo, (int)MaterialType.Tourmaline, MarketBuyOrderKind.SalvageHammer));
+                recording = false;
+
+                Assert.AreEqual(2, counted, "control: the probe answered for both Hammers");
+                Assert.AreEqual(1, built.Count, "control: exactly one probe for the one line");
+                var probe = built[0];
+
+                Assert.IsTrue(MarketManager.TryGetVaultView(SellerAccount, out var entries, out var error), $"vault view refused: {error}");
+                var row = Row(entries.Single());
+
+                Assert.IsTrue(row.GetProperty("is_class").GetBoolean(), "control: the row is the class line");
+                Assert.IsTrue(row.GetProperty("fills_orders").GetBoolean());
+
+                var snapshot = row.GetProperty("snapshot");
+
+                Assert.AreEqual((int)probe.Structure, snapshot.GetProperty("structure").GetInt32(), "Structure");
+                Assert.AreEqual((int)probe.MaxStructure, snapshot.GetProperty("max_structure").GetInt32(), "MaxStructure");
+                Assert.AreEqual(probe.GetProperty(PropertyInt.SalvageToolCharges), snapshot.GetProperty("salvage_tool_charges").GetInt32(), "SalvageToolCharges");
+                Assert.AreEqual((int)probe.MaterialType, snapshot.GetProperty("material_type").GetInt32(), "MaterialType");
+            }
+            finally
+            {
+                PropertyManager.ModifyLong("account_vault_entry_cap", savedCap);
+            }
         }
 
         [TestMethod]

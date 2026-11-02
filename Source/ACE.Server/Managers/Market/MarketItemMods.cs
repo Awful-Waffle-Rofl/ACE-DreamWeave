@@ -80,7 +80,7 @@ namespace ACE.Server.Managers.Market
                 if (HasAnyWeaponMod(item) && IsOn(WeaponModsEnabledSource, true))
                 {
                     var weaponRows = WeaponModTinkerSet.ReadSpecials(item)
-                        .Select(s => WeaponRow(s.Definition, s.Magnitude))
+                        .Select(s => WeaponRow(s.Definition, s.Magnitude, item))
                         .ToList();
 
                     mods.AddRange(weaponRows);
@@ -127,10 +127,14 @@ namespace ACE.Server.Managers.Market
         private static bool HasAnyEquipmentMod(WorldObject item) =>
             EquipmentModRegistry.AllMods.Any(definition => item.GetProperty(definition.Property) != null);
 
-        /// <summary>One weapon row, from the same calls WeaponModDisplay.Describe(definition, magnitude) makes.</summary>
-        internal static ItemMod WeaponRow(WeaponModDefinition definition, double magnitude)
+        /// <summary>
+        /// One weapon row, from the same calls WeaponModDisplay.Describe(definition, magnitude, scale, item) makes.
+        /// <paramref name="item"/> is the carrier, so a per-item ceiling (Defensive Weapon) reads the same
+        /// intensity here as on the appraisal panel; null reads the row's full MaxRoll.
+        /// </summary>
+        internal static ItemMod WeaponRow(WeaponModDefinition definition, double magnitude, WorldObject item = null)
         {
-            var percent = WeaponModDisplay.IntensityPercent(definition, magnitude);
+            var percent = WeaponModDisplay.IntensityPercent(definition, magnitude, WeaponModValue.MagnitudeScale(), item);
 
             return new ItemMod
             {

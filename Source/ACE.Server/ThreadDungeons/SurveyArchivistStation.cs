@@ -102,6 +102,10 @@ namespace ACE.Server.ThreadDungeons
         public const string BandFiveMessage = "The ledger shows five or more surveys under your name today.";
         public const string BandLt5Message = "The ledger shows fewer than five surveys under your name today.";
 
+        /// <summary>The exact count line spoken beside the band line; see <see cref="CountMessage"/>.</summary>
+        public const string CountPluralFormat = "By my count you have filed {0} surveys today.";
+        public const string CountOneMessage = "By my count you have filed 1 survey today.";
+
         public const string PayTenMessage = "Ten. There is a page above mine for this, and I do not know who reads it.";
         public const string PayFiveMessage = "Five in a day. The column is filling faster than the founders said it could.";
         public const string PayOneMessage = "One survey filed. The ledger takes the page and pays for it.";
@@ -153,14 +157,12 @@ namespace ACE.Server.ThreadDungeons
             var ledger = new QuestManagerSurveyLedger(questManager);
             var plan = DungeonSurveyRules.Plan(ledger, clock);
 
-            if (plan.Band == SurveyBand.None)
-            {
-                Tell(npc, player, NothingFiledMessage);
-                return;
-            }
+            // The immediate lines are the first tells of the visit, so they go out with no delay.
+            foreach (var immediate in ImmediateLines(plan))
+                Tell(npc, player, immediate);
 
-            // The band line is the first tell of the visit, so it goes out with no delay.
-            Tell(npc, player, BandMessage(plan.Band));
+            if (plan.Band == SurveyBand.None)
+                return;
 
             var limits = BuildLimits();
             var ring = SurveyLevelRing.Parse(player.GetProperty(PropertyString.DungeonSurveyLevels));
@@ -363,6 +365,33 @@ namespace ACE.Server.ThreadDungeons
             var top = totals == null || totals.Count < 2 ? 1 : totals.Count - 1;
 
             return (int)Math.Clamp(PropertyManager.GetLong(ReferenceLevelProperty).Item, 1L, (long)top);
+        }
+
+        /// <summary>
+        /// The exact number of surveys filed in the current daily window. Takes <see cref="SurveyTurnIn.Count"/>,
+        /// which Plan reports as 0 when the window is dead.
+        /// </summary>
+        public static string CountMessage(int count)
+        {
+            if (count == 1)
+                return CountOneMessage;
+
+            return string.Format(System.Globalization.CultureInfo.InvariantCulture, CountPluralFormat, Math.Max(0, count));
+        }
+
+        /// <summary>
+        /// The synchronous lines of a visit, in order: the nothing-filed line plus the count on the None path,
+        /// otherwise the band line plus the count. The count is read from the same plan as the band, so the
+        /// two cannot disagree. HandleTurnIn Tells exactly these before any ActionChain exists.
+        /// </summary>
+        public static IReadOnlyList<string> ImmediateLines(SurveyTurnIn plan)
+        {
+            if (plan == null)
+                throw new ArgumentNullException(nameof(plan));
+
+            var first = plan.Band == SurveyBand.None ? NothingFiledMessage : BandMessage(plan.Band);
+
+            return new[] { first, CountMessage(plan.Count) };
         }
 
         private static string BandMessage(SurveyBand band)

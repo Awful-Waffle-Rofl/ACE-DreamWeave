@@ -414,7 +414,7 @@ namespace ACE.Server.Tests
         /// Loads the combined SQL text for all 8 trainers (six inline in the realm file, two standalone) plus
         /// the trainer wcid per class, shared by every test that needs to read committed trainer content.
         /// </summary>
-        private static (string sql, Dictionary<ClassAbilityClass, uint> trainerByClass) LoadTrainerContent()
+        internal static (string sql, Dictionary<ClassAbilityClass, uint> trainerByClass) LoadTrainerContent()
         {
             // Same repo-root walk-up the token-content tests use, retargeted at the Drift Network realm file.
             var repoRoot = new DirectoryInfo(FindTokenSqlDir()).Parent.Parent.Parent;
@@ -460,6 +460,28 @@ namespace ACE.Server.Tests
         /// outfit-equip create_list rows in the same file use destination_Type 2, not 4, so this shape is
         /// specific to token stock and does not collide with them.
         /// </summary>
+        /// <summary>
+        /// The same token rows as <see cref="ParseStockedTokensByTrainer"/>, but in FILE ORDER per trainer
+        /// (first appearance of each wcid). The planner catalog takes its within-tier ordering from this, so
+        /// the trainer's shop order and the planner's display order are one and the same list.
+        /// </summary>
+        internal static Dictionary<uint, List<uint>> ParseStockedTokenOrderByTrainer(string sql)
+        {
+            var tokenRow = new Regex(@"\((\d{7}),\s*(\d+),\s*4,\s*-1,\s*0,\s*0,\s*0\)");
+
+            var orderByTrainer = new Dictionary<uint, List<uint>>();
+            foreach (Match m in tokenRow.Matches(sql))
+            {
+                var trainerId = uint.Parse(m.Groups[1].Value);
+                var wcid = uint.Parse(m.Groups[2].Value);
+                if (!orderByTrainer.TryGetValue(trainerId, out var list))
+                    orderByTrainer[trainerId] = list = new List<uint>();
+                if (!list.Contains(wcid))
+                    list.Add(wcid);
+            }
+
+            return orderByTrainer;
+        }
         private static Dictionary<uint, HashSet<uint>> ParseStockedTokensByTrainer(string sql)
         {
             var tokenRow = new Regex(@"\((\d{7}),\s*(\d+),\s*4,\s*-1,\s*0,\s*0,\s*0\)");
@@ -876,9 +898,12 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Catalog_TryResolve_RejectsOutOfRangeTier()
         {
-            Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 1, out _));
-            // Taunt is a single-rank skill - there is no tier 2 token
-            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 2, out _));
+            Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 1, out _));
+            // Battle Hardened is a single-rank skill - there is no tier 2 token
+            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.BattleHardened, 2, out _));
+            // Taunt is three ranks (2026-10-17): a tier 3 token resolves, a tier 4 one does not
+            Assert.IsTrue(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 3, out _));
+            Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Taunt, 4, out _));
             Assert.IsFalse(ClassAbilityTokenCatalog.TryResolve(ClassAbilityId.Multishot, 0, out _));
         }
 

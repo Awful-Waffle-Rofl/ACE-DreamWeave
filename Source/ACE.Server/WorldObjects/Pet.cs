@@ -229,7 +229,11 @@ namespace ACE.Server.WorldObjects
         /// collide - this exists only so the player can see that two of them arrived. A rejected staggered spot
         /// falls back to the owner's own spot exactly like any other summon.
         /// </param>
-        public virtual bool? Init(Player player, PetDevice petDevice, bool spawnStagger = false)
+        /// <param name="source">
+        /// What this summon is made of (see PetSummonSource). A passive pet ignores it; CombatPet.Init feeds it to
+        /// ApplySummonStats.
+        /// </param>
+        public virtual bool? Init(Player player, PetDevice petDevice, PetSummonSource source, bool spawnStagger = false)
         {
             var result = HandleCurrentActivePet(player, spawnStagger);
 

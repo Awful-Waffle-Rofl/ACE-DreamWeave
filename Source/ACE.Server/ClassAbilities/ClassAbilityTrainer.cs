@@ -371,6 +371,15 @@ namespace ACE.Server.ClassAbilities
                 return;
             }
 
+            // Refused before the prompt as well as inside it: a pending reprice would make the quoted refund
+            // wrong, and UnlearnClassAbility refuses those abilities anyway (the in-callback check stays,
+            // because the state can change while the confirmation is up).
+            if (owned.Any(entry => player.ClassAbilityRepricePendingFor(entry.skill.Id)))
+            {
+                Send(player, ClassAbilityRepricing.PendingRefusal);
+                return;
+            }
+
             var totalRefund = owned.Sum(entry => entry.skill.CumulativeCost(entry.rank));
             var fee = FullRespecFee(player.Level ?? 1);
 
@@ -410,6 +419,15 @@ namespace ACE.Server.ClassAbilities
                 if (player.IsInPvpMatch)
                 {
                     Send(player, PvpArenaText.AbilitySpendRefused);
+                    return;
+                }
+
+                // Same reason as the PvP check: UnlearnClassAbility refuses an ability whose reprice wave is
+                // still pending, and the fee below is charged before that loop, so refuse the whole respec here
+                // rather than take the fee for a partial one.
+                if (current.Any(entry => player.ClassAbilityRepricePendingFor(entry.skill.Id)))
+                {
+                    Send(player, ClassAbilityRepricing.PendingRefusal);
                     return;
                 }
 

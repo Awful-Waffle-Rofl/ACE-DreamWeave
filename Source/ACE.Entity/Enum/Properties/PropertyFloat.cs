@@ -271,7 +271,7 @@ namespace ACE.Entity.Enum.Properties
          * taking the next free ids after the v3 expansion pair above (8027-8035). These are registered
          * but INERT in this pass - each is a hook site for a follow-up phase, not wired to any live
          * combat/vital/enchantment code yet. Like the v3 rows, each stores the applied magnitude as a
-         * plain FRACTION (or a flat armor-level value for ArcaneDefender), writes no native property,
+         * plain FRACTION (or a flat armor-level value for DefensiveWeapon, renamed from ArcaneDefender 2026-10-25 with its id unchanged), writes no native property,
          * and is read live at combat/tick time by a hand-wired hook once phase 2 lands - see
          * ACE.Server.WeaponMods.WeaponModRegistry's TierBV4BandStart/TierBV4BandEnd rows for the
          * one-row-per-modifier table and each row's HOOK comment for its intended call site.
@@ -288,7 +288,7 @@ namespace ACE.Entity.Enum.Properties
         WeaponModLongevity             = 8031,
         WeaponModSiphon                = 8032,
         WeaponModQuickRefresh          = 8033,
-        WeaponModArcaneDefender        = 8034,
+        WeaponModDefensiveWeapon        = 8034,
         WeaponModPanicReload           = 8035,
 
         /* Equipment mods (WaffleACE) - the band 8100-8199 is RESERVED WHOLESALE for equipment mods.
@@ -319,7 +319,10 @@ namespace ACE.Entity.Enum.Properties
         GearModBulwark                 = 8113,
         GearModFrenziedPace            = 8114,
         GearModLingeringFury           = 8115,
-        GearModSavageBlows             = 8116,
+        /* 8116 was GearModSavageBlows until 2026-10-24. Savage Blows (the class ability) was retired and the mod
+         * was repurposed in place for Heavy Blows - same id, same flat melee-percent meaning, same 0.027 ceiling -
+         * so items already carrying 8116 stay valid and simply re-label. */
+        GearModHeavyBlows              = 8116,
         /* 8117 was GearModBloodFury until 2026-08-17. Blood Fury (the class ability) was retired and the mod
          * was repurposed IN PLACE as Break Armor's proc-chance machinery mod - same id, same [0, 1] potency
          * scalar, same 0.03 magnitude ceiling - so items already carrying 8117 stay valid and simply re-label. */
@@ -512,5 +515,25 @@ namespace ACE.Entity.Enum.Properties
         // position. Absent, NaN or non-positive reads as DeathSpawnPlan.DefaultRadius; clamped to
         // DeathSpawnPlan.MaxRadius so a typo cannot scatter adds through a wall into the next room.
         DeathSpawnRadius                = 9013,
+
+        // World Events presence payout: on a reward crate (WorldEventRewardCrate, PropertyBool 9078), the claimant's presence
+        // multiplier stamped when the crate is created and read back at use time. Absent reads as no multiplier.
+        WorldEventRewardMultiplier      = 9014,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): one trait position u in [0,1] per rare item; behaviour keys on presence.
+        KnotTraitCastSpeed              = 9015,
+        KnotTraitShieldTrade            = 9016,
+        KnotTraitFrugalHand             = 9017,
+        KnotTraitWristTrade             = 9018,
+
+        // Upgraded Knot cloak (ACE.Server.KnotLoot.UpgradedCloak): on a cloak, the StatModValue its own ProcSpell lands with.
+        // Absent = the spell's value (retail). Read only by ACE.Server.Entity.Cloak.ProcStatModValue.
+        CloakProcStatModValue           = 9019,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): Overpowering Intent trait position u in [0,1] on the Matron hive batons.
+        KnotTraitOverpoweringIntent     = 9020,
+
+        // Custom Summons: on a Tank summon pet, the interval in seconds between its taunt pulses.
+        SummonTauntInterval             = 9021,
     }
 }

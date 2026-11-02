@@ -46,7 +46,8 @@ namespace ACE.Server.Tests
 
         private static bool playerStaticFieldsSeeded;
 
-        private static void EnsurePlayerStaticFieldsSeeded()
+        /// <summary>Internal so the class-line fill tests (MarketClassOrderFillTests, MarketPartialDeliveryTests) can place orders too.</summary>
+        internal static void EnsurePlayerStaticFieldsSeeded()
         {
             if (playerStaticFieldsSeeded)
                 return;

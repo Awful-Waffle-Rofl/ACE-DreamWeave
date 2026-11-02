@@ -255,7 +255,7 @@ namespace ACE.Server.Tests
                         classes.Add(flag.ToString());
                 }
 
-                array.Add(new JsonObject
+                var row = new JsonObject
                 {
                     ["id"] = mod.Id.ToString(),
                     ["displayName"] = mod.DisplayName,
@@ -268,10 +268,51 @@ namespace ACE.Server.Tests
                     ["classes"] = classes,
                     ["displayFormat"] = mod.DisplayFormat,
                     ["displayScale"] = mod.DisplayScale,
-                });
+                };
+
+                // OPTIONAL, and present only on a row with a per-item ceiling (today: Defensive Weapon).
+                if (mod.CeilingFactor != null)
+                    row["oneHandedMeleeCeilingFactor"] = OneHandedMeleeCeilingFactor(mod);
+
+                array.Add(row);
             }
 
             return array;
+        }
+
+        /// <summary>
+        /// A row's per-item ceiling, reduced to the one scalar the catalog can carry: the share of MaxRoll a
+        /// ONE-HANDED melee carrier reaches. Read off the live <see cref="WeaponModDefinition.MaxRollFor"/>
+        /// against probe items rather than typed in, and REFUSES a row whose factor is not 1.0 on every other
+        /// carrier shape - the catalog has no field for that, so exporting it would silently misstate it.
+        /// </summary>
+        private static double OneHandedMeleeCeilingFactor(WeaponModDefinition mod)
+        {
+            var melee = new Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>
+            {
+                { ACE.Entity.Enum.Properties.PropertyInt.ValidLocations, (int)ACE.Entity.Enum.EquipMask.MeleeWeapon },
+            };
+            var twoHanded = new Dictionary<ACE.Entity.Enum.Properties.PropertyInt, int>
+            {
+                { ACE.Entity.Enum.Properties.PropertyInt.ValidLocations, (int)ACE.Entity.Enum.EquipMask.TwoHanded },
+            };
+
+            var oneHand = mod.MaxRollFor(WeaponModTestKit.MakeWeapon(ACE.Entity.Enum.ItemType.MeleeWeapon, ACE.Entity.Enum.CombatUse.Melee, melee)) / mod.MaxRoll;
+
+            var others = new[]
+            {
+                ("two-handed melee", WeaponModTestKit.MakeWeapon(ACE.Entity.Enum.ItemType.MeleeWeapon, ACE.Entity.Enum.CombatUse.Melee, twoHanded)),
+                ("missile", WeaponModTestKit.MakeWeapon(ACE.Entity.Enum.ItemType.MissileWeapon, ACE.Entity.Enum.CombatUse.Missile)),
+                ("caster", WeaponModTestKit.MakeWeapon(ACE.Entity.Enum.ItemType.Caster, null)),
+            };
+
+            foreach (var (name, item) in others)
+            {
+                Assert.AreEqual(mod.MaxRoll, mod.MaxRollFor(item), 1e-12,
+                    $"{mod.Id}: the catalog can only carry a one-handed melee factor, but the {name} ceiling also differs from MaxRoll - extend CATALOG-CONTRACT.md first");
+            }
+
+            return oneHand;
         }
 
         private static JsonArray BuildEquipmentMods()

@@ -28,6 +28,7 @@ using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Structure;
+using ACE.Server.Realms;
 using ACE.Server.WorldObjects;
 using ACE.Server.WorldObjects.Entity;
 
@@ -839,10 +840,33 @@ namespace ACE.Server.Command.Handlers
             // Lookup the player in the world
             var player = PlayerManager.GetOnlinePlayer(playerName);
             // If the player is found, teleport the admin to the Player's location
-            if (player != null)
-                session.Player.Teleport(player.Location);
-            else
+            if (player == null)
+            {
                 session.Network.EnqueueSend(new GameMessageSystemChat($"Player {playerName} was not found.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            // A target inside a private instance (Thread, arena, dungeon copy): admit the admin first, or Teleport refuses it
+            // One snapshot, so the admit and the Teleport cannot target different instances
+            var dest = new Position(player.Location);
+            var instance = dest.Instance;
+            switch (InstanceRouting.TryAdmitStaffToInstance(dest, session.Player))
+            {
+                case InstanceRouting.StaffAdmitResult.Admitted:
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"Admitted to private instance 0x{instance:X8}.", ChatMessageType.Broadcast));
+                    break;
+                case InstanceRouting.StaffAdmitResult.Expired:
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s private instance 0x{instance:X8} has expired, so it cannot be entered.", ChatMessageType.Broadcast));
+                    return;
+                case InstanceRouting.StaffAdmitResult.RefusedByRunPolicy:
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s private instance 0x{instance:X8} refuses you (Thread puzzle fail policy).", ChatMessageType.Broadcast));
+                    return;
+                case InstanceRouting.StaffAdmitResult.OutsideFootprint:
+                    session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} is on a landblock outside private instance 0x{instance:X8}'s footprint, so you were not moved.", ChatMessageType.Broadcast));
+                    return;
+            }
+
+            session.Player.Teleport(dest);
         }
 
         /// <summary>
@@ -1968,6 +1992,13 @@ namespace ACE.Server.Command.Handlers
 
                     DatabaseManager.Shard.GetPossessedBiotasInParallel(existingCharId, existingPossessions =>
                     {
+                        // Null means the read itself failed (SerializedShardDatabase answers a throwing read with null).
+                        if (existingPossessions == null)
+                        {
+                            CommandHandlerHelper.WriteOutputInfo(session, $"Could not read {existingCharName}'s possessions, so nothing was {(isDeletedChar ? "restored" : "copied")}. Check the server log.", ChatMessageType.Broadcast);
+                            return;
+                        }
+
                         DatabaseManager.Shard.IsCharacterNameAvailable(newCharName, isAvailable =>
                         {
                             if (!isAvailable)

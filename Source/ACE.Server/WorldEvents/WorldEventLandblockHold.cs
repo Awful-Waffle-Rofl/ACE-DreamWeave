@@ -10,6 +10,28 @@ using log4net;
 namespace ACE.Server.WorldEvents
 {
     /// <summary>
+    /// Why a run holds the anchor's eight adjacent landblocks as well as the anchor itself. Any one reason is
+    /// enough; <see cref="None"/> holds the anchor alone.
+    /// </summary>
+    [System.Flags]
+    public enum WorldEventHoldReason
+    {
+        None = 0,
+
+        /// <summary>The source theme sets holdAdjacentLandblocks.</summary>
+        Source = 1,
+
+        /// <summary>The presence ring crosses the anchor block's edge.</summary>
+        Ring = 2,
+
+        /// <summary>The hazard region spans more than the anchor block.</summary>
+        Hazard = 4,
+
+        /// <summary>The run's objective asks for them (IWorldEventObjective.HoldsAdjacentLandblocks).</summary>
+        Objective = 8
+    }
+
+    /// <summary>
     /// The pure half of the landblock hold (TECH-DESIGN 2.11, 5.6, R6).
     ///
     /// There is no API in LandblockManager that releases a permaload - release means assigning
@@ -19,6 +41,55 @@ namespace ACE.Server.WorldEvents
     /// </summary>
     public static class WorldEventLandblockHold
     {
+        /// <summary>The reasons OR'd together, one flag per true input.</summary>
+        public static WorldEventHoldReason ComputeHoldReasons(bool source, bool ring, bool hazard, bool objective)
+        {
+            var reasons = WorldEventHoldReason.None;
+
+            if (source)
+                reasons |= WorldEventHoldReason.Source;
+
+            if (ring)
+                reasons |= WorldEventHoldReason.Ring;
+
+            if (hazard)
+                reasons |= WorldEventHoldReason.Hazard;
+
+            if (objective)
+                reasons |= WorldEventHoldReason.Objective;
+
+            return reasons;
+        }
+
+        /// <summary>Whether the adjacents are held: any reason at all.</summary>
+        public static bool HoldsAdjacents(WorldEventHoldReason reasons) => reasons != WorldEventHoldReason.None;
+
+        /// <summary>
+        /// The suffix the hold log line carries: " reasons=source+objective" (lowercase, '+'-joined, in flag
+        /// order) when <see cref="WorldEventHoldReason.Objective"/> is among the reasons, and the EMPTY string
+        /// otherwise, so the line for every run whose objective asks for nothing stays exactly as it was.
+        /// </summary>
+        public static string HoldReasonsLogSuffix(WorldEventHoldReason reasons)
+        {
+            if ((reasons & WorldEventHoldReason.Objective) == 0)
+                return "";
+
+            var parts = new List<string>();
+
+            if ((reasons & WorldEventHoldReason.Source) != 0)
+                parts.Add("source");
+
+            if ((reasons & WorldEventHoldReason.Ring) != 0)
+                parts.Add("ring");
+
+            if ((reasons & WorldEventHoldReason.Hazard) != 0)
+                parts.Add("hazard");
+
+            parts.Add("objective");
+
+            return " reasons=" + string.Join("+", parts);
+        }
+
         /// <summary>
         /// The subset of <paramref name="heldBlockKeys"/> an event may safely un-permaload when it ends:
         /// every key that was NOT already permaloaded when the hold was taken. A key absent from

@@ -170,6 +170,63 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(new[] { "lca_archive" }, check.DuplicateKeys);
         }
 
+        /// <summary>
+        /// Season 3, Cells of the Black Book: the start stub door (bb_stub, Required 1) and the Seal (bb_seal,
+        /// Required 9) are objective-gate Doors; the three permanent hub doors are plain locked doors with no
+        /// ObjectiveLockRequired. The boss and the Book carry no key.
+        /// </summary>
+        private static List<Player.SpeedGateSnapshot> BlackBook(bool stubLatched, bool sealLatched) => new List<Player.SpeedGateSnapshot>
+        {
+            Door(0x70089010, "Stub Door", "bb_stub", stubLatched, required: 1),
+            Door(0x70089011, "The Seal", "bb_seal", sealLatched, required: 9),
+            new Player.SpeedGateSnapshot(0x70089012, true, 0, null, false, "North Hub Door"),
+            new Player.SpeedGateSnapshot(0x70089013, true, 0, null, false, "East Hub Door"),
+            new Player.SpeedGateSnapshot(0x70089014, true, 0, null, false, "South Hub Door"),
+        };
+
+        [TestMethod]
+        public void BlackBook_UnlatchedSeal_RefusesTheFinish()
+        {
+            CollectionAssert.AreEqual(new[] { "The Seal" }, Player.FindUnopenedRequiredGates(BlackBook(stubLatched: true, sealLatched: false), null));
+            CollectionAssert.AreEquivalent(new[] { "Stub Door", "The Seal" }, Player.FindUnopenedRequiredGates(BlackBook(stubLatched: false, sealLatched: false), null));
+        }
+
+        [TestMethod]
+        public void BlackBook_StubAndSealLatched_AllowsTheFinish_PermanentHubDoorsAreNotGates()
+        {
+            // The permanent hub doors stay locked for the whole run and must never refuse it.
+            Assert.AreEqual(0, Player.FindUnopenedRequiredGates(BlackBook(stubLatched: true, sealLatched: true), null).Count);
+        }
+
+        /// <summary>
+        /// The wings rework (2026-10-25): the open-order route clears three of the four corner rooms, so the fourth
+        /// room's entry and exit doors (Required 1 each) stay unlatched at the Book. The course's optionalGateKeys
+        /// exempt them; without the exemption the finish is refused (and the run forfeited) for a legitimate clear.
+        /// </summary>
+        [TestMethod]
+        public void BlackBook_ASkippedCornerRoom_IsExemptByTheCoursesOptionalKeys_AndRefusedWithoutThem()
+        {
+            var gates = BlackBook(stubLatched: true, sealLatched: true);
+            var guid = 0x70089F0Eu;
+
+            foreach (var room in new[] { "nw", "sw", "ne", "se" })
+            {
+                var cleared = room != "se";
+                gates.Add(Door(guid++, "Cloister Door", $"bb_{room}_in", cleared));
+                gates.Add(Door(guid++, "Keeper's Door", $"bb_{room}_out", cleared));
+            }
+
+            var optional = new HashSet<string> { "bb_nw_in", "bb_nw_out", "bb_sw_in", "bb_sw_out", "bb_ne_in", "bb_ne_out", "bb_se_in", "bb_se_out" };
+
+            Assert.AreEqual(0, Player.FindUnopenedRequiredGates(gates, null, optional).Count, "the skipped room is optional");
+            CollectionAssert.AreEqual(new[] { "Cloister Door", "Keeper's Door" }, Player.FindUnopenedRequiredGates(gates, null), "control: without the exemption the skipped room refuses the finish");
+            CollectionAssert.AreEqual(new[] { "Cloister Door", "Keeper's Door" }, Player.FindUnopenedRequiredGates(gates, null, new HashSet<string>()));
+
+            // The exemption never covers a key it does not name: the Seal still refuses.
+            var sealShut = BlackBook(stubLatched: true, sealLatched: false);
+            CollectionAssert.AreEqual(new[] { "The Seal" }, Player.FindUnopenedRequiredGates(sealShut, null, optional));
+        }
+
         [TestMethod]
         public void NonDoorWinner_ShadowsADoorTwin()
         {

@@ -10,7 +10,7 @@ namespace ACE.Server.Tests
 {
     /// <summary>
     /// The v4 weapon-mod catalog expansion (2026-08-17, repo-owner directive): nine new Tier B utility rows -
-    /// Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender, Panic
+    /// Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender (now Defensive Weapon), Panic
     /// Reload - registered alongside the retirement of five older rows (Swift Flight, Life Leech, Mana Leech,
     /// Stamina Leech, Overload). Mirrors WeaponModCatalogV3Tests.cs's shape.
     ///
@@ -34,11 +34,14 @@ namespace ACE.Server.Tests
         /// The nine v4 rows, with the magnitude and class set each must carry. Pinned as a table rather than
         /// read off the registry, so a retune has to move this file deliberately.
         ///
-        /// MANA WELL AND ARCANE DEFENDER ARE FLAT, NOT PERCENTAGES - unlike every other row in this table, they
+        /// MANA WELL AND DEFENSIVE WEAPON ARE FLAT, NOT PERCENTAGES - unlike every other row in this table, they
         /// carry no DisplayScale. Mana Well's MaxRoll is mana POINTS restored per equipped item, not a fraction
         /// of that item's own mana pool (repo-owner correction, 2026-08-17: originally specced as a 10%
         /// fraction, revised to a flat 30, then revised again the same day to a flat 5). Arcane Defender's
-        /// MaxRoll is a flat armor level (revised from 50 to 40, then again to 25, same day).
+        /// MaxRoll is a flat armor level (revised from 50 to 40, then again to 25, same day), and on 2026-10-25
+        /// (owner ruling) the row was renamed Defensive Weapon, widened to every class and raised to 200 - the
+        /// LARGEST per-item ceiling; a one-handed melee carrier reaches 100 (see DefensiveWeaponTests). Panic
+        /// Reload went from 0.10 to 0.50 the same day.
         /// </summary>
         private static readonly (WeaponModId Id, string Name, PropertyFloat Record, double MaxRoll, WeaponClass Classes, bool DamageRelevant, bool HasDisplayScale)[] Expected =
         {
@@ -49,8 +52,8 @@ namespace ACE.Server.Tests
             (WeaponModId.Longevity,      "Longevity",        PropertyFloat.WeaponModLongevity,        0.25, WeaponClass.Caster, false, true),
             (WeaponModId.Siphon,         "Siphon",           PropertyFloat.WeaponModSiphon,           0.10, WeaponClass.All,    false, true),
             (WeaponModId.QuickRefresh,   "Quick Refresh",    PropertyFloat.WeaponModQuickRefresh,     1.00, WeaponClass.Caster, false, true),
-            (WeaponModId.ArcaneDefender, "Arcane Defender",  PropertyFloat.WeaponModArcaneDefender,  25,    WeaponClass.Caster, false, false),
-            (WeaponModId.PanicReload,    "Panic Reload",     PropertyFloat.WeaponModPanicReload,      0.10, WeaponClass.Missile, true, true),
+            (WeaponModId.DefensiveWeapon, "Defensive Weapon", PropertyFloat.WeaponModDefensiveWeapon,  200,   WeaponClass.All,    false, false),
+            (WeaponModId.PanicReload,    "Panic Reload",     PropertyFloat.WeaponModPanicReload,      0.50, WeaponClass.Missile, true, true),
         };
 
         [TestMethod]
@@ -108,9 +111,15 @@ namespace ACE.Server.Tests
                 var definition = WeaponModRegistry.Get(id);
                 var weapon = WeaponModTestKit.MakeWeapon();
 
-                WeaponModTinkerSet.ApplySpecial(weapon, definition, maxRoll);
+                // the ceiling ON THIS WEAPON - Defensive Weapon's depends on the carrier (100 on the
+                // one-handed test weapon), every other row's is its MaxRoll
+                var ceiling = definition.MaxRollFor(weapon);
 
-                Assert.AreEqual(maxRoll, WeaponModTinkerSet.ReadMagnitude(weapon, definition, 1.0), 1e-9,
+                Assert.IsTrue(ceiling > 0.0 && ceiling <= maxRoll, $"{id}: the per-item ceiling {ceiling} must be positive and never above MaxRoll {maxRoll}");
+
+                WeaponModTinkerSet.ApplySpecial(weapon, definition, ceiling);
+
+                Assert.AreEqual(ceiling, WeaponModTinkerSet.ReadMagnitude(weapon, definition, 1.0), 1e-9,
                     $"{id}: a full-strength roll must resolve back to MaxRoll through the standard Tier B read path");
             }
         }
@@ -131,7 +140,8 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void CatalogV4_ClassEligibilityMatchesTheTable()
         {
-            foreach (var id in new[] { WeaponModId.Efficiency, WeaponModId.Recovery, WeaponModId.ManaWell, WeaponModId.Cleanse, WeaponModId.Siphon })
+            // Defensive Weapon joined the all-class set on 2026-10-25 (owner ruling); it was caster-only before
+            foreach (var id in new[] { WeaponModId.Efficiency, WeaponModId.Recovery, WeaponModId.ManaWell, WeaponModId.Cleanse, WeaponModId.Siphon, WeaponModId.DefensiveWeapon })
             {
                 var definition = WeaponModRegistry.Get(id);
                 Assert.IsTrue(definition.AppliesTo(WeaponClass.Melee), $"{id} must apply to Melee");
@@ -139,7 +149,7 @@ namespace ACE.Server.Tests
                 Assert.IsTrue(definition.AppliesTo(WeaponClass.Caster), $"{id} must apply to Caster");
             }
 
-            foreach (var id in new[] { WeaponModId.Longevity, WeaponModId.QuickRefresh, WeaponModId.ArcaneDefender })
+            foreach (var id in new[] { WeaponModId.Longevity, WeaponModId.QuickRefresh })
             {
                 var definition = WeaponModRegistry.Get(id);
                 Assert.IsFalse(definition.AppliesTo(WeaponClass.Melee), $"{id} must not apply to Melee");
@@ -155,8 +165,9 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// Pool depth is data-driven off these nine rows' Classes, so it is asserted here as a cross-check
-        /// against the counts pinned in WeaponModTests.Registry_PoolDepthMatchesTheDesign: melee +5, missile
-        /// +6, caster +8.
+        /// against the counts pinned in WeaponModTests.Registry_PoolDepthMatchesTheDesign: melee +6, missile
+        /// +7, caster +8. (Melee and missile each gained one on 2026-10-25, when Defensive Weapon was widened
+        /// from caster-only to every class; caster is unchanged.)
         /// </summary>
         [TestMethod]
         public void CatalogV4_PoolContributionMatchesTheClassTable()
@@ -167,8 +178,8 @@ namespace ACE.Server.Tests
             var missile = WeaponModRegistry.Pool(WeaponClass.Missile, true).Count(m => v4Ids.Contains(m.Id));
             var caster = WeaponModRegistry.Pool(WeaponClass.Caster, true).Count(m => v4Ids.Contains(m.Id));
 
-            Assert.AreEqual(5, melee, "v4 rows reachable from the melee pool with the gate on");
-            Assert.AreEqual(6, missile, "v4 rows reachable from the missile pool with the gate on");
+            Assert.AreEqual(6, melee, "v4 rows reachable from the melee pool with the gate on");
+            Assert.AreEqual(7, missile, "v4 rows reachable from the missile pool with the gate on");
             Assert.AreEqual(8, caster, "v4 rows reachable from the caster pool with the gate on");
 
             // and none is reachable with the gate off, since every v4 row is Tier B

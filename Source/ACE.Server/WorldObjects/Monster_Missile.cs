@@ -56,6 +56,9 @@ namespace ACE.Server.WorldObjects
         {
             //IsTurning = false;
 
+            // Elemental Proficiency Bludgeon stun: no missile attack starts while stunned
+            if (IsClassAbilityStunned) return;
+
             var weapon = GetEquippedMissileWeapon();
             if (weapon == null || AttackTarget == null) return;
 
@@ -108,7 +111,16 @@ namespace ACE.Server.WorldObjects
             // launch projectile
             actionChain.AddAction(this, () =>
             {
-                if (IsDead) return;
+                // Elemental Proficiency Bludgeon stun: a shot winding up when the stun landed is never fired
+                if (IsDead || IsClassAbilityStunned) return;
+
+                // read once: the extra arrows below must fly at the same target as the real one
+                var target = AttackTarget;
+
+                // Custom Summons: a never-initiates pet holds fire when its target dropped out of combat during
+                // the wind-up (went Return, fell asleep) - the arrow would wake it (CombatPet.MayLooseAt)
+                if (this is CombatPet shooter && !shooter.MayLooseAt(target))
+                    return;
 
                 // handle self-procs
                 TryProcEquippedItems(this, this, true, weapon);
@@ -118,10 +130,16 @@ namespace ACE.Server.WorldObjects
 
                 // TODO: monster stamina usage
 
-                if (AttackTarget != null)
+                if (target != null)
                 {
-                    var projectile = LaunchProjectile(launcher, ammo, AttackTarget, origin, orientation, velocity);
+                    var projectile = LaunchProjectile(launcher, ammo, target, origin, orientation, velocity);
                     UpdateAmmoAfterLaunch(ammo);
+
+                    // Custom Summons: a combat pet whose missile weapon carries MultiShot fires its extra arrows
+                    // the way a player does (Creature.FireWeaponMultiShot). Pets only - a monster never shoots a
+                    // fan of arrows, whatever its weapon says. A no-op for a weapon without the flag.
+                    if (projectile != null && this is CombatPet && target is Creature primary)
+                        FireWeaponMultiShot(launcher, ammo, weapon, primary, projectileSpeed);
                 }
             });
 
@@ -168,7 +186,9 @@ namespace ACE.Server.WorldObjects
 
             var timeOffset = launchTime + reloadTime + linkTime;
 
-            NextMoveTime = NextAttackTime = PrevAttackTime + timeOffset + MissileDelay;
+            // Weakened Blood slow: the reload animation above is already slowed through GetAnimSpeed; the
+            // fixed post-shot delay is a duration, so it stretches by the same factor (unchanged when unslowed)
+            NextMoveTime = NextAttackTime = PrevAttackTime + timeOffset + ScaleWeakenedBloodSlowDuration(MissileDelay);
         }
 
         /// <summary>
@@ -272,7 +292,9 @@ namespace ACE.Server.WorldObjects
 
                     NextMoveTime = NextAttackTime = Timers.RunningTime + newStanceTime;
 
-                    PrevAttackTime = NextMoveTime - (AiUseMagicDelay ?? 3.0f);
+                    // the same (Weakened Blood slow-scaled) delay NextMagicAttackTime adds back, so the magic
+                    // gate still opens exactly at NextMoveTime
+                    PrevAttackTime = NextMoveTime - GetWeakenedBloodScaledMagicDelay();
 
                     PhysicsObj.StartTimer();
 

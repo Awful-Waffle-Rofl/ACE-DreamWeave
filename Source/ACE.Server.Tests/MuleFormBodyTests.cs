@@ -345,6 +345,117 @@ namespace ACE.Server.Tests
                 "an unmeasurable donor is refused here, so the caller falls back to the plain mule");
         }
 
+        // ---------------- stand-in body ----------------
+
+        private const uint SarcophagusSetup = 0x02000E1B;
+
+        /// <summary>The Dark Sarcophagus as the world database carries it: a body that draws nothing.</summary>
+        private static Weenie MakeSarcophagus()
+        {
+            var donor = MakeDonor();
+            donor.WeenieClassId = MuleFormStandIn.DarkSarcophagusWcid;
+            donor.ClassName = "mysterioussarcophagus";
+            donor.PropertiesDID[PropertyDataId.Setup] = SarcophagusSetup;
+            donor.PropertiesDID[PropertyDataId.ClothingBase] = 0x100003ED;
+            donor.PropertiesDID[PropertyDataId.PaletteBase] = 0x04001414;
+            donor.PropertiesInt[PropertyInt.CreatureType] = (int)CreatureType.Undead;
+            donor.PropertiesString[PropertyString.Name] = "Dark Sarcophagus";
+            donor.PropertiesPalette = new List<PropertiesPalette> { new PropertiesPalette() };
+            donor.PropertiesTextureMap = new List<PropertiesTextureMap> { new PropertiesTextureMap() };
+            donor.PropertiesAnimPart = new List<PropertiesAnimPart> { new PropertiesAnimPart() };
+            return donor;
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_WearsTheCoffinStandIn()
+        {
+            var clone = Clone(MakeMule(), MakeSarcophagus());
+
+            Assert.AreEqual(0x020000CEu, clone.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(0x09000024u, clone.PropertiesDID[PropertyDataId.MotionTable]);
+            Assert.AreEqual(0x20000025u, clone.PropertiesDID[PropertyDataId.SoundTable]);
+            Assert.AreEqual(0x060012C7u, clone.PropertiesDID[PropertyDataId.Icon]);
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_RemovesEveryDidTheStandInDoesNotSupply()
+        {
+            var clone = Clone(MakeMule(), MakeSarcophagus());
+
+            // Neither the mule's nor the donor's value may survive: a ClothingBase or PaletteBase
+            // meant for another Setup recolours or reshapes the coffin.
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.ClothingBase));
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.PaletteBase));
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.CombatTable));
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.PhysicsEffectTable));
+            Assert.IsFalse(clone.PropertiesInt.ContainsKey(PropertyInt.PaletteTemplate));
+            Assert.IsFalse(clone.PropertiesFloat.ContainsKey(PropertyFloat.Shade));
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_UsesTheStandInsOwnScale_NotTheHeightRatio()
+        {
+            // The height-normalising formula would give 0.25 with these fixtures; the stand-in's
+            // authored constant must win, and the donor's (unmeasurable here) Setup is never consulted.
+            var clone = MuleFormBody.CloneWithDonorBody(MakeMule(), MakeSarcophagus(), Height(MuleSetup) * 0.5f, Height);
+
+            Assert.IsNotNull(clone, "Height() answers 0 for the Sarcophagus Setup; a stand-in must not need it");
+            Assert.AreEqual(MuleFormStandIn.CoffinDefaultScale, clone.PropertiesFloat[PropertyFloat.DefaultScale], 0.0001);
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_DropsTheDonorsAppearanceLists()
+        {
+            var clone = Clone(MakeMule(), MakeSarcophagus());
+
+            Assert.IsNull(clone.PropertiesPalette);
+            Assert.IsNull(clone.PropertiesTextureMap);
+            Assert.IsNull(clone.PropertiesAnimPart);
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_KeepsTheDonorsCreatureTypeAndTheMulesIdentity()
+        {
+            var mule = MakeMule();
+            var clone = Clone(mule, MakeSarcophagus());
+
+            Assert.AreEqual((int)CreatureType.Undead, clone.PropertiesInt[PropertyInt.CreatureType]);
+            Assert.AreEqual(mule.WeenieClassId, clone.WeenieClassId);
+            Assert.AreEqual(mule.PropertiesString[PropertyString.Name], clone.PropertiesString[PropertyString.Name],
+                "the clone has never copied the donor's name; appraisal gets it from the token, not from here");
+            Assert.IsTrue(clone.PropertiesBool[PropertyBool.PersonalVendor]);
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.WieldedTreasureType));
+            Assert.IsFalse(clone.PropertiesDID.ContainsKey(PropertyDataId.DeathTreasureType));
+        }
+
+        [TestMethod]
+        public void Clone_ForTheSarcophagus_DoesNotMutateEitherSourceWeenie()
+        {
+            var mule = MakeMule();
+            var donor = MakeSarcophagus();
+
+            Clone(mule, donor);
+
+            Assert.AreEqual(MuleSetup, mule.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(0x100002BEu, mule.PropertiesDID[PropertyDataId.ClothingBase]);
+            Assert.AreEqual(7, mule.PropertiesInt[PropertyInt.PaletteTemplate]);
+            Assert.AreEqual(0.5, mule.PropertiesFloat[PropertyFloat.DefaultScale], 0.0001);
+            Assert.AreEqual(SarcophagusSetup, donor.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(0x100003EDu, donor.PropertiesDID[PropertyDataId.ClothingBase]);
+            Assert.AreEqual(1, donor.PropertiesPalette.Count);
+        }
+
+        [TestMethod]
+        public void Clone_ForAnOrdinaryDonor_HasNoStandIn()
+        {
+            Assert.IsFalse(MuleFormStandIn.Has(1234), "the fixture donor is an ordinary Tusker Guard");
+
+            var clone = Clone(MakeMule(), MakeDonor());
+
+            Assert.AreEqual(DonorSetup, clone.PropertiesDID[PropertyDataId.Setup]);
+            Assert.AreEqual(0.25, clone.PropertiesFloat[PropertyFloat.DefaultScale], 0.0001);
+        }
+
         [TestMethod]
         public void Clone_WithADonorCarryingNoSetup_ReturnsNull()
         {

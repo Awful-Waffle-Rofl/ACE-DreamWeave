@@ -92,7 +92,8 @@ namespace ACE.Server.Tests.ThreadDungeons
                 "QueueCopyForDestructionWhenEmpty(landblock,occupied,LandblockManager.AddToDestructionQueue,copy=>endedOccupiedCopies[copy.Instance]=copy)",
                 "the Landblock overload must queue now through AddToDestructionQueue and watch through endedOccupiedCopies, in that argument order");
 
-            StringAssert.Contains(compact, "QueueCopyForDestructionWhenEmpty(landblock,occupied:players.Count>0)",
+            // Open World Threads F2: the occupancy is still the scan's player count, and an outdoor primary is always watched.
+            StringAssert.Contains(compact, "QueueCopyForDestructionWhenEmpty(landblock,occupied:EndedCopyNeedsWatch(run.Dungeon?.IsOutdoor==true,players.Count))",
                 "EndRun must still route through the shared helper with its occupancy scan");
         }
 

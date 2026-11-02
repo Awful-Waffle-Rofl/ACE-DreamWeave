@@ -290,7 +290,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             var attacker = SeededPlayer(Bound(match, Attackers));
             var defender = SeededPlayer(Bound(match, Defenders));
 
-            Player.OnPvpDamageRecorded(defender, attacker);
+            Player.OnPvpDamageRecorded(defender, attacker, 10);
 
             Assert.AreEqual(new PvpEngagementStamp(match.MatchId, Now), defender.PvpEngagement, "the defender TOOK damage");
             Assert.AreEqual(new PvpEngagementStamp(match.MatchId, Now), attacker.PvpEngagement, "the attacker DEALT it");
@@ -298,7 +298,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             // and the other direction: a defender dealing damage is engaged too
             var defender2 = SeededPlayer(Bound(match, Defenders));
             var attacker2 = SeededPlayer(Bound(match, Attackers));
-            Player.OnPvpDamageRecorded(attacker2, defender2);
+            Player.OnPvpDamageRecorded(attacker2, defender2, 10);
             Assert.IsNotNull(defender2.PvpEngagement, "the defender DEALT damage");
         }
 
@@ -309,27 +309,27 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             var a = SeededPlayer(Bound(match, Defenders));
             var b = SeededPlayer(Bound(match, Defenders));
-            Player.OnPvpDamageRecorded(a, b);
+            Player.OnPvpDamageRecorded(a, b, 10);
             Assert.IsNull(a.PvpEngagement, "teammate");
             Assert.IsNull(b.PvpEngagement, "teammate");
 
             var c = SeededPlayer(Bound(match, Defenders));
             var d = SeededPlayer(Bound(NewMatch(), Attackers));
-            Player.OnPvpDamageRecorded(c, d);
+            Player.OnPvpDamageRecorded(c, d, 10);
             Assert.IsNull(c.PvpEngagement, "another match");
 
             var e = SeededPlayer(Bound(match, Defenders, PvpMatchState.Countdown));
             var f = SeededPlayer(Bound(match, Attackers, PvpMatchState.Countdown));
-            Player.OnPvpDamageRecorded(e, f);
+            Player.OnPvpDamageRecorded(e, f, 10);
             Assert.IsNull(e.PvpEngagement, "not Live (a Countdown vuln)");
 
             var g = SeededPlayer(Bound(match, Defenders));
-            Player.OnPvpDamageRecorded(g, g);
+            Player.OnPvpDamageRecorded(g, g, 10);
             Assert.IsNull(g.PvpEngagement, "self damage");
 
             var h = SeededPlayer(null);
             var i = SeededPlayer(Bound(match, Attackers));
-            Player.OnPvpDamageRecorded(h, i);
+            Player.OnPvpDamageRecorded(h, i, 10);
             Assert.IsNull(i.PvpEngagement, "an unbound victim");
         }
 
@@ -340,17 +340,17 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             var defender = SeededPlayer(Bound(match, Defenders));
             var npc = TestCreatures.CreateAttacker();
 
-            Player.OnPvpDamageRecorded(defender, npc);
+            Player.OnPvpDamageRecorded(defender, npc, 10);
             Assert.IsNull(defender.PvpEngagement, "taken from an NPC");
 
             var crystal = TestCreatures.CreateDefender(maxHealth: 990);
             Assert.IsTrue(crystal.SetBattlegroundObjective(Tag(match)));
             var attacker = SeededPlayer(Bound(match, Attackers));
 
-            Player.OnPvpDamageRecorded(crystal, attacker);
+            Player.OnPvpDamageRecorded(crystal, attacker, 10);
             Assert.IsNull(attacker.PvpEngagement, "dealt to a crystal");
 
-            Player.OnPvpDamageRecorded(npc, defender);
+            Player.OnPvpDamageRecorded(npc, defender, 10);
             Assert.IsNull(defender.PvpEngagement, "dealt to an NPC");
         }
 
@@ -617,7 +617,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsNotNull(SpellSinkFault(body.Replace(SpellSinkCall, "").Replace(SpellHealthWrite, SpellHealthWrite + "\n" + SpellSinkCall)), "moving it after the write must fail the check");
         }
 
-        private const string HistoryHook = "Player.OnPvpDamageRecorded(Creature, attacker);";
+        private const string HistoryHook = "Player.OnPvpDamageRecorded(Creature, attacker, amount);";
 
         /// <summary>
         /// Null when DamageHistory.Add stamps engagement AFTER its zero-amount early return (a fully absorbed hit is not damage) and once.

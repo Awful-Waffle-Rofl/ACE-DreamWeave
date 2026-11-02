@@ -24,7 +24,7 @@ namespace ACE.Server.Pvp.Battlegrounds
     /// <see cref="OnCrystalDestroyed"/> advances it and announces the unlock; the crystal damage gate reads it. A sealed crystal sends no
     /// under-attack alert, and the role and status lines name the order and the vulnerable crystal.
     /// </summary>
-    public sealed class AttackDefendTickHandler : IObjectiveModeHandler
+    public sealed class AttackDefendTickHandler : IObjectiveModeHandler, ITeamColourAware
     {
         private readonly BattlegroundDials _dials;
         private AttackDefendPlan _plan;
@@ -62,7 +62,16 @@ namespace ACE.Server.Pvp.Battlegrounds
 
         // ---------------- IObjectiveModeHandler ----------------
 
+        /// <summary>"Attackers" / "Defenders", colour or not: the role IS the team name here (owner ruling 2026-10-15); the colour is added where the role line and the lineup name the team.</summary>
         public string TeamName(int team) => BattlegroundText.AttackDefendTeamName(team);
+
+        /// <summary>Team index to colour once the coordinator binds them (attackers Red, defenders Blue); null adds no colour tag.</summary>
+        private IReadOnlyDictionary<int, PvpTeamColour> _colours;
+
+        public void BindTeamColours(IReadOnlyDictionary<int, PvpTeamColour> colours) => _colours = colours;
+
+        /// <summary>"Red" / "Blue" for <paramref name="team"/> once bound, else null.</summary>
+        private string ColourOf(int team) => _colours != null && _colours.TryGetValue(team, out var c) ? BattlegroundText.ColourTeamName(c) : null;
 
         /// <summary>
         /// The attackers' win (every crystal destroyed) or the defenders' timeout win, which names how many crystals they held once any
@@ -141,16 +150,16 @@ namespace ACE.Server.Pvp.Battlegrounds
 
                 return team switch
                 {
-                    CrystalWinCondition.AttackerTeam => BattlegroundText.RoleAttackerOrdered(sites),
-                    CrystalWinCondition.DefenderTeam => BattlegroundText.RoleDefenderOrdered(sites),
+                    CrystalWinCondition.AttackerTeam => BattlegroundText.RoleAttackerOrdered(sites, ColourOf(team)),
+                    CrystalWinCondition.DefenderTeam => BattlegroundText.RoleDefenderOrdered(sites, ColourOf(team)),
                     _ => null
                 };
             }
 
             return team switch
             {
-                CrystalWinCondition.AttackerTeam => BattlegroundText.RoleAttacker(_plan.Count, BattlegroundText.CrystalList(_plan.Crystals.Select(c => c.Site))),
-                CrystalWinCondition.DefenderTeam => BattlegroundText.RoleDefender(_plan.Count, BattlegroundText.CrystalList(_plan.Crystals.Select(c => c.Site))),
+                CrystalWinCondition.AttackerTeam => BattlegroundText.RoleAttacker(_plan.Count, BattlegroundText.CrystalList(_plan.Crystals.Select(c => c.Site)), ColourOf(team)),
+                CrystalWinCondition.DefenderTeam => BattlegroundText.RoleDefender(_plan.Count, BattlegroundText.CrystalList(_plan.Crystals.Select(c => c.Site)), ColourOf(team)),
                 _ => null
             };
         }

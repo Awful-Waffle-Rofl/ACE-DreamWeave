@@ -175,17 +175,21 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// The ordering contract: class, then tier, then id. A planner diffing two catalogs across releases
-        /// needs the file to be line-stable, so this is pinned rather than left to whatever order the
-        /// registry dictionary happens to enumerate in.
+        /// The ordering contract: class, then tier, then the ability's position in its class trainer's
+        /// create_list order (first appearance of any rank's token), then id for anything no trainer stocks. A planner
+        /// diffing two catalogs across releases needs the file to be line-stable, so this is pinned rather
+        /// than left to whatever order the registry dictionary happens to enumerate in.
         /// </summary>
         [TestMethod]
         public void PlannerCatalog_IsDeterministicallyOrdered()
         {
             var abilities = BuildCatalog(withProvenance: false)["abilities"].AsArray();
 
+            var position = TrainerPositionByAbility();
+
             var keys = abilities
-                .Select(a => (Class: ClassRank((string)a["class"]), Tier: (int)a["tier"], Id: (string)a["id"]))
+                .Select(a => (Class: ClassRank((string)a["class"]), Tier: (int)a["tier"],
+                    Pos: position.TryGetValue((string)a["id"], out var p) ? p : int.MaxValue, Id: (string)a["id"]))
                 .ToArray();
 
             for (var i = 1; i < keys.Length; i++)
@@ -195,13 +199,140 @@ namespace ACE.Server.Tests
 
                 var ordered = previous.Class < current.Class
                     || (previous.Class == current.Class && previous.Tier < current.Tier)
-                    || (previous.Class == current.Class && previous.Tier == current.Tier
+                    || (previous.Class == current.Class && previous.Tier == current.Tier && previous.Pos < current.Pos)
+                    || (previous.Class == current.Class && previous.Tier == current.Tier && previous.Pos == current.Pos
                         && string.CompareOrdinal(previous.Id, current.Id) < 0);
 
                 Assert.IsTrue(ordered, $"catalog rows out of order at index {i}: {previous} then {current}");
             }
         }
 
+        /// <summary>
+        /// One invariant: the planner's display order equals the trainer's shop order. For every class with a
+        /// trainer, the catalog's live abilities of each tier appear in the order their tokens first appear in
+        /// that trainer's create_list, and every live ability of the class is stocked (an unstocked one would
+        /// silently fall back to id order and break the invariant).
+        /// </summary>
+        [TestMethod]
+        public void PlannerCatalog_OrderMatchesEachTrainersCreateList()
+        {
+            var (sql, trainerByClass) = ClassAbilityTokenTests.LoadTrainerContent();
+            var orderByTrainer = ClassAbilityTokenTests.ParseStockedTokenOrderByTrainer(sql);
+
+            var definitionByWcid = ClassAbilityTokenCatalog.AllOfferings()
+                .GroupBy(o => o.Wcid)
+                .ToDictionary(g => g.Key, g => g.First().Definition);
+
+            var abilities = BuildCatalog(withProvenance: false)["abilities"].AsArray();
+
+            foreach (var (abilityClass, trainerId) in trainerByClass)
+            {
+                Assert.IsTrue(orderByTrainer.TryGetValue(trainerId, out var wcids), $"trainer {trainerId} stocks nothing");
+
+                var stockedOrder = new List<string>();
+                foreach (var wcid in wcids)
+                {
+                    if (definitionByWcid.TryGetValue(wcid, out var d) && d.AbilityClass == abilityClass && !stockedOrder.Contains(d.Name))
+                        stockedOrder.Add(d.Name);
+                }
+
+                var catalogClass = abilities
+                    .Where(a => !(bool)a["retired"] && (string)a["class"] == abilityClass.ToString())
+                    .ToArray();
+
+                foreach (var tier in catalogClass.Select(a => (int)a["tier"]).Distinct())
+                {
+                    var inCatalog = catalogClass.Where(a => (int)a["tier"] == tier).Select(a => (string)a["id"]).ToArray();
+                    var inTrainer = stockedOrder.Where(n => inCatalog.Contains(n)).ToArray();
+
+                    CollectionAssert.AreEqual(inTrainer, inCatalog,
+                        $"{abilityClass} tier {tier}: planner catalog order must equal the trainer {trainerId} create_list order");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Pins the Blood Mage owner ruling: the Blood Mage trainer's create_list lists abilities in the row
+        /// order of the Blood Mage tier tables in Docs/ClassAbilities/SKILL-TABLES.md. Only Blood Mage is
+        /// pinned to the doc; the other trainers' order is whatever their create_list says.
+        /// </summary>
+        [TestMethod]
+        public void PlannerCatalog_BloodMageOrderMatchesSkillTablesDoc()
+        {
+            var root = ClassAbilityAffinityDeclarationTests.RepoRoot();
+            var lines = File.ReadAllText(Path.Combine(root, "Docs", "ClassAbilities", "SKILL-TABLES.md"))
+                .Replace("\r\n", "\n").Split('\n');
+
+            var start = Array.FindIndex(lines, l => l.Trim() == "## Blood Mage");
+            Assert.IsTrue(start >= 0, "SKILL-TABLES.md has no '## Blood Mage' section");
+
+            var idByDisplayName = ClassAbilityRegistry.Abilities.Values
+                .Where(d => d.AbilityClass == ClassAbilityClass.BloodMage)
+                .ToDictionary(d => d.DisplayName, d => d.Name, StringComparer.OrdinalIgnoreCase);
+
+            var docByTier = new Dictionary<int, List<string>>();
+            var tier = 0;
+
+            for (var i = start + 1; i < lines.Length; i++)
+            {
+                var line = lines[i].Trim();
+
+                if (line.StartsWith("## ", StringComparison.Ordinal))
+                    break;
+
+                var heading = System.Text.RegularExpressions.Regex.Match(line, @"^### Tier (\d)");
+                if (heading.Success)
+                {
+                    tier = int.Parse(heading.Groups[1].Value);
+                    docByTier[tier] = new List<string>();
+                    continue;
+                }
+
+                if (tier == 0 || !line.StartsWith("| ", StringComparison.Ordinal))
+                    continue;
+
+                var cell = line.Split('|')[1].Trim();
+
+                if (cell == "Ability" || cell.StartsWith("---", StringComparison.Ordinal))
+                    continue;
+
+                cell = cell.Replace("**", string.Empty);
+                if (cell.StartsWith("GC:", StringComparison.Ordinal))
+                    cell = cell.Substring(3).Trim();
+                var paren = cell.IndexOf(" (", StringComparison.Ordinal);
+                if (paren > 0)
+                    cell = cell.Substring(0, paren).Trim();
+
+                Assert.IsTrue(idByDisplayName.TryGetValue(cell, out var id),
+                    $"SKILL-TABLES.md Blood Mage tier {tier} row '{cell}' matches no Blood Mage ability display name");
+
+                docByTier[tier].Add(id);
+            }
+
+            Assert.AreEqual(3, docByTier.Count, "expected Blood Mage Tier 1, 2 and 3 tables in SKILL-TABLES.md");
+
+            var (sql, trainerByClass) = ClassAbilityTokenTests.LoadTrainerContent();
+            var wcids = ClassAbilityTokenTests.ParseStockedTokenOrderByTrainer(sql)[trainerByClass[ClassAbilityClass.BloodMage]];
+
+            var definitionByWcid = ClassAbilityTokenCatalog.AllOfferings()
+                .GroupBy(o => o.Wcid)
+                .ToDictionary(g => g.Key, g => g.First().Definition);
+
+            var trainerOrder = new List<ClassAbilityDefinition>();
+            foreach (var wcid in wcids)
+            {
+                if (definitionByWcid.TryGetValue(wcid, out var d) && d.AbilityClass == ClassAbilityClass.BloodMage
+                    && !trainerOrder.Any(t => t.Name == d.Name))
+                    trainerOrder.Add(d);
+            }
+
+            foreach (var (docTier, docIds) in docByTier)
+            {
+                var trainerIds = trainerOrder.Where(d => d.Tier == docTier).Select(d => d.Name).ToArray();
+                CollectionAssert.AreEqual(docIds.ToArray(), trainerIds,
+                    $"Blood Mage tier {docTier}: trainer 1001950 create_list order must match the SKILL-TABLES.md table row order");
+            }
+        }
         /// <summary>The level milestones come from ClassAbilityMilestones, never from a hand-typed list.</summary>
         [TestMethod]
         public void PlannerCatalog_LevelMilestonesComeFromTheSource()
@@ -237,11 +368,13 @@ namespace ACE.Server.Tests
                 milestones.Add(level);
             root["levelMilestones"] = milestones;
 
-            var rows = new List<(int ClassRank, int Tier, string Id, JsonObject Node)>();
+            var rows = new List<(int ClassRank, int Tier, int TrainerPosition, string Id, JsonObject Node)>();
+
+            var trainerPosition = TrainerPositionByAbility();
 
             foreach (var definition in ClassAbilityRegistry.Abilities.Values)
             {
-                rows.Add(((int)definition.AbilityClass, definition.Tier, definition.Name, new JsonObject
+                rows.Add(((int)definition.AbilityClass, definition.Tier, trainerPosition.TryGetValue(definition.Name, out var position) ? position : int.MaxValue, definition.Name, new JsonObject
                 {
                     ["id"] = definition.Name,
                     ["displayName"] = definition.DisplayName,
@@ -266,7 +399,7 @@ namespace ACE.Server.Tests
             // tools/ca-planner/README.md.
             foreach (var retired in RetiredClassAbilities.All())
             {
-                rows.Add((0, 0, retired.Name, new JsonObject
+                rows.Add((0, 0, int.MaxValue, retired.Name, new JsonObject
                 {
                     ["id"] = retired.Name,
                     ["displayName"] = retired.DisplayName,
@@ -288,6 +421,7 @@ namespace ACE.Server.Tests
             foreach (var row in rows
                 .OrderBy(r => r.ClassRank)
                 .ThenBy(r => r.Tier)
+                .ThenBy(r => r.TrainerPosition)
                 .ThenBy(r => r.Id, StringComparer.Ordinal))
             {
                 abilities.Add(row.Node);
@@ -296,6 +430,40 @@ namespace ACE.Server.Tests
             root["abilities"] = abilities;
 
             return root;
+        }
+
+        /// <summary>
+        /// Each ability's position in its own class trainer's create_list: the index of the first token row
+        /// (any rank) that stocks it. Abilities no trainer stocks are absent and sort after the stocked ones
+        /// within their tier, by id.
+        /// </summary>
+        private static Dictionary<string, int> TrainerPositionByAbility()
+        {
+            var (sql, trainerByClass) = ClassAbilityTokenTests.LoadTrainerContent();
+            var orderByTrainer = ClassAbilityTokenTests.ParseStockedTokenOrderByTrainer(sql);
+
+            var nameByWcid = ClassAbilityTokenCatalog.AllOfferings()
+                .GroupBy(o => o.Wcid)
+                .ToDictionary(g => g.Key, g => g.First().Definition);
+
+            var result = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            foreach (var (abilityClass, trainerId) in trainerByClass)
+            {
+                if (!orderByTrainer.TryGetValue(trainerId, out var wcids))
+                    continue;
+
+                for (var i = 0; i < wcids.Count; i++)
+                {
+                    if (!nameByWcid.TryGetValue(wcids[i], out var definition) || definition.AbilityClass != abilityClass)
+                        continue;
+
+                    if (!result.ContainsKey(definition.Name))
+                        result[definition.Name] = i;
+                }
+            }
+
+            return result;
         }
 
         private static JsonObject BuildTunables() => new JsonObject

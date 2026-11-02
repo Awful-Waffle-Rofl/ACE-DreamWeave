@@ -11,6 +11,7 @@ using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
+using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.ClassAbilities.Abilities
 {
@@ -236,7 +237,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         private static bool ApplyBloom(Player killer, Creature target, Spell spell, PropertiesEnchantmentRegistry source, double duration)
         {
-            var result = target.EnchantmentManager.Add(spell, killer, null);
+            var result = target.EnchantmentManager.Add(spell, killer, null, procSourced: ProcDotMarks.IsProcSourced(source));
 
             var entry = result?.Enchantment;
             if (entry == null)

@@ -245,7 +245,11 @@ namespace ACE.Server.WorldObjects
             if (PvpTemplateSystemBypass || !IsPvpTemplated)
                 return null;
 
-            ICollection<int> spells = TryGetPvpTemplateRecord(out var record, out _) ? record.TemplateSpells : null;
+            // AlwaysGrantedSpells is unioned here too, not only at Capture, so a record persisted before a spell joined the list
+            // (a player templated across the deploy) still allows it.
+            ICollection<int> spells = TryGetPvpTemplateRecord(out var record, out _)
+                ? record.TemplateSpells.Concat(PvpTemplateOverlay.AlwaysGrantedSpells).ToList()
+                : null;
 
             return PvpTemplateGate.DecideCast(spellId, true, false, spells, ClassifyForPvpTemplate(casterItem));
         }
@@ -331,6 +335,12 @@ namespace ACE.Server.WorldObjects
             // No dialog opened before the template may survive into it (HIGH-1: a stale Yes would bypass the Use gate).
             ConfirmationManager?.AbortAll();
 
+            // Owner ruling 2026-10-15: the level 7 War/Life spells are kept after the match. They must already be in the spellbook when
+            // Capture runs, or a template spell that overlaps them is recorded as template-added (AddedSpells) and removed at exit.
+            // Normally the queue join has taught them; this is the idempotent safety net. IsPvpTemplated was refused above, so this
+            // never runs while a record exists.
+            GrantPvpMatchSpells();
+
             var record = PvpTemplateOverlay.Capture(Biota, BiotaDatabaseLock, definition, matchId, DateTime.UtcNow,
                 PvpTemplateSettings.KeepOwnBuffsSource(), CaptureFacetEquip());
 
@@ -384,6 +394,19 @@ namespace ACE.Server.WorldObjects
                             return FailAfterStart(matchId, "kit issue failed");
                         }
                     }
+
+                    // pvp_match_block_dual_wield: a kit that equipped a weapon in the off-hand (the issue above bypasses the equip
+                    // check) has it removed (it is issued, so it needs no pack room). The record is already written, so IsPvpTemplated makes the rule apply here.
+                    // A failure to move it is logged inside and is not an apply failure: the restore removes the kit either way.
+                    if (ClearPvpOffHandWeapon(definition.Key))
+                        PvpTemplateSettings.Log.Warn($"[PVPTEMPLATE] {Name} (0x{Guid.Full:X8}): template {definition.Key} v{definition.Version} equips a weapon in the off-hand, which pvp_match_block_dual_wield forbids; it was removed. Fix the template.");
+
+                    // PropertyBool.PveOnly: a kit that equipped a PvE-only item has it consumed (it is issued). The record is already written, so IsPvpTemplated makes the rule apply here.
+                    ClearPvpPveOnlyItems(definition.Key);
+
+                    // The kit is weightless, so the burden should not have moved; sending it anyway makes the client's
+                    // burden bar match the server's after the strip and the issue, whatever path each item took.
+                    Session?.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.EncumbranceVal, EncumbranceVal ?? 0));
 
                     // ---- template buffs, then full vitals (the maximum depends on the buffs and the kit) ----
 
@@ -502,6 +525,22 @@ namespace ACE.Server.WorldObjects
                     RemoveProperty(PropertyString.PvpTemplatePreference);
                 else
                     SetProperty(PropertyString.PvpTemplatePreference, value);
+            }
+        }
+
+        /// <summary>
+        /// The /arena norematch choice (PropertyBool 9075), persisted on the character's biota so it survives a relog. ON means
+        /// "never match me into an unpaid rematch"; absent is OFF. OFF removes the property rather than storing false.
+        /// </summary>
+        public bool PvpArenaRefuseUnpaidRematch
+        {
+            get => GetProperty(PropertyBool.PvpArenaRefuseUnpaidRematch) ?? false;
+            set
+            {
+                if (value)
+                    SetProperty(PropertyBool.PvpArenaRefuseUnpaidRematch, true);
+                else
+                    RemoveProperty(PropertyBool.PvpArenaRefuseUnpaidRematch);
             }
         }
 
@@ -663,6 +702,14 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // The Container constructor re-reads a container's own burden from its weenie, which would undo the zero
+            // BuildIssuedBiota wrote; the item is empty and brand new here, so its whole burden is its own and is zeroed again.
+            // That fixes the freshly built item ONLY: on a reload the Container(Biota) constructor re-reads the weenie's burden again.
+            // It cannot bite today because captured kits skip containers (PvpTemplateKit.cs:170); a kit that issued one would need
+            // the zero re-applied on load as well.
+            if (item.EncumbranceVal.GetValueOrDefault() != 0)
+                item.EncumbranceVal = 0;
+
             // Equip first: TryEquipWithdrawnForFacet equips an unparented object and only then introduces it to the
             // client with one GameMessageCreateObject describing its worn state, and saves it - exactly the shape a
             // freshly built object needs (see its remarks for why the pack round trip is wrong). It does NOT run
@@ -670,7 +717,10 @@ namespace ACE.Server.WorldObjects
             if (kitItem.WieldLocation.HasValue && TryEquipWithdrawnForFacet(item, (EquipMask)kitItem.WieldLocation.Value))
                 return true;
 
-            if (TryCreateInInventoryWithNetworking(item))
+            // burdenCheck: false - an issued item weighs 0, so it adds nothing to the load, but the pack gate compares the player's whole
+            // load with capacity (3 x Strength-derived), and a low template Strength could otherwise refuse a 0-burden item. The equip
+            // path above has no burden gate (Creature_Equipment.TryEquipObject only adds the item's burden).
+            if (TryCreateInInventoryWithNetworking(item, out _, burdenCheck: false))
                 return true;
 
             item.Destroy();
@@ -938,7 +988,13 @@ namespace ACE.Server.WorldObjects
                     continue;
                 }
 
-                var wieldError = CheckWieldRequirements(item, false);
+                // The facet swap-back's rule (RestoreFacetEquip, #1422), for the same reason: this gear was provably
+                // worn at match entry (CaptureFacetEquip reads EquippedObjects), and the restore writes back the exact
+                // build that wore it, so no rank was trimmed. What CAN read low mid-restore is a buffed value - an
+                // item cantrip that raised the skill or attribute is on a piece that has not gone back on yet, since
+                // this loop runs in capture order, not dependency order. So only the buff-dependent wield kinds are
+                // waived here, exactly as the facet swap-back waives them.
+                var wieldError = CheckWieldRequirements(item, waiveBuffedRequirements: true);
 
                 if (wieldError != WeenieError.None)
                 {
@@ -946,11 +1002,33 @@ namespace ACE.Server.WorldObjects
                     continue;
                 }
 
-                TryDetachAndEquipForFacet(rootOwner, item, (EquipMask)entry.Slot, report);
+                // An item whose spells were active at match entry reactivates without re-running the two buffed
+                // checks in CheckUseRequirements (arcane lore vs ItemDifficulty, ItemSkillLimit) - the facet
+                // mechanism, keyed on the same FacetEquipEntry.SpellsActive the apply already captures. Without it,
+                // TryActivateSpells refuses on those checks and the piece goes back on with its spells off. The
+                // finally is mandatory: the equip call can throw.
+                var waiveSpells = entry.SpellsActive;
+
+                if (waiveSpells)
+                    BeginFacetSpellActivationWaiver(item.Guid.Full);
+
+                try
+                {
+                    PvpTemplateSettings.EquipOwnItem(this, rootOwner, item, (EquipMask)entry.Slot, report);
+                }
+                finally
+                {
+                    if (waiveSpells)
+                        EndFacetSpellActivationWaiver(item.Guid.Full);
+                }
             }
 
             return report;
         }
+
+        /// <summary>The production body of PvpTemplateSettings.EquipOwnItem: the facet inventory detach-and-equip.</summary>
+        internal bool EquipOwnItemForPvpTemplate(Container rootOwner, WorldObject item, EquipMask slot, List<string> report)
+            => TryDetachAndEquipForFacet(rootOwner, item, slot, report);
 
         // ======================================================================================
         // client pushes and enchantment edits shared by apply and restore

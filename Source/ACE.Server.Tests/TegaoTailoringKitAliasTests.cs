@@ -10,8 +10,10 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// Covers Tailoring.ResolveKitWcid / Tailoring.IsTailoringKit for the Tegao Wavecounter (wcid
-    /// 1004130) cosmetic clones of the retail tailoring kits. Without the alias resolution these
+    /// Covers Tailoring.ResolveKitWcid / Tailoring.IsTailoringKit for the cosmetic clones (1004312-1004318)
+    /// of the retail tailoring kits, which Hopeslayer's Tailor (wcid 1006653, named Bloodwarden Tailor until 2026-10-15; split from the single
+    /// Bloodwarden 1004130 on 2026-10-12) stocks - routing rule 3, WeenieType Gem. This test reads no
+    /// vendor file, so it needs no vendor wcid; VendorRoutingTests pins which vendor stocks the kits. Without the alias resolution these
     /// clones dispatch to nothing in Tailoring.DoTailoring and silently do nothing when used.
     ///
     /// Only the pure/static parts are exercised - ACE.Server.Tests cannot construct a live Player.

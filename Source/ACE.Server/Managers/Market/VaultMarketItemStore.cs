@@ -15,11 +15,14 @@ namespace ACE.Server.Managers.Market
     /// THE SELLER IS THE ACTOR, NOT THE BUYER: TryWithdraw re-resolves authorization on every call and a
     /// buyer holds no grant on the seller's vault. Every mutation must run inside RunSerialized.
     /// </summary>
-    public class VaultMarketItemStore : IMarketItemStore
+    public class VaultMarketItemStore : IMarketItemStore, ISharedVaultSource
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         private readonly Func<uint, AccountVaultStore> storeResolver;
+        private readonly Func<uint, List<ACE.Database.Models.Shard.AccountVaultGrant>> grantsResolver;
+        private readonly Func<uint, AccountVaultStore> existingStoreResolver;
+        private readonly Func<uint, bool> requestWarm;
 
         /// <summary>Production wiring: every account's store comes from AccountVaultManager.</summary>
         public VaultMarketItemStore()
@@ -32,13 +35,56 @@ namespace ACE.Server.Managers.Market
         /// shard backend, so without this nothing in the test assembly could drive the real custody
         /// code below against a real AccountVaultStore - which is exactly where the partial-delivery
         /// duplicate lived while every fake-driven purchase test stayed green. Null means production.
+        ///
+        /// <paramref name="grantsResolver"/> is the grantee-keyed grant read beside it (the suit builder's
+        /// shared mules), for the same reason: AccountVaultManager.GetGrantsForGrantee hardcodes the
+        /// production backend. Null means production.
+        ///
+        /// <paramref name="existingStoreResolver"/> answers only a store that is ALREADY LIVE and never builds one
+        /// (AccountVaultManager.TryGetExistingStore in production; GetStore builds a store and refreshes its capacity
+        /// bonuses, a possible shard read). The shared-mule reads go through it alone. Null means production when
+        /// <paramref name="storeResolver"/> is null too, else <paramref name="storeResolver"/> (a test resolver hands
+        /// back fixed stores and builds nothing). <paramref name="requestWarm"/> is AccountVaultManager.RequestWarm.
         /// </summary>
-        internal VaultMarketItemStore(Func<uint, AccountVaultStore> storeResolver)
+        internal VaultMarketItemStore(Func<uint, AccountVaultStore> storeResolver,
+                                      Func<uint, List<ACE.Database.Models.Shard.AccountVaultGrant>> grantsResolver = null,
+                                      Func<uint, AccountVaultStore> existingStoreResolver = null,
+                                      Func<uint, bool> requestWarm = null)
         {
             this.storeResolver = storeResolver ?? AccountVaultManager.GetStore;
+            this.grantsResolver = grantsResolver ?? AccountVaultManager.GetGrantsForGrantee;
+            this.existingStoreResolver = existingStoreResolver
+                ?? (storeResolver != null ? storeResolver : id => AccountVaultManager.TryGetExistingStore(id, out var live) ? live : null);
+            this.requestWarm = requestWarm ?? AccountVaultManager.RequestWarm;
         }
 
         private AccountVaultStore ResolveStore(uint accountId) => storeResolver(accountId);
+
+        // ---- ISharedVaultSource (the suit builder's shared mules; reads only, no custody) ----
+
+        List<ACE.Database.Models.Shard.AccountVaultGrant> ISharedVaultSource.GetGrantsForGrantee(uint granteeCharacterGuid)
+            => grantsResolver(granteeCharacterGuid);
+
+        bool ISharedVaultSource.TryGetAccess(uint ownerAccountId, VaultActor actor, out VaultAccess access)
+        {
+            access = VaultAccess.None;
+
+            var store = existingStoreResolver(ownerAccountId);
+
+            return store != null && store.TryGetAccess(actor, out access, out _);
+        }
+
+        bool ISharedVaultSource.IsWarm(uint ownerAccountId)
+        {
+            // An ALREADY LIVE store only: none live is simply not warm, and the warm queue builds it.
+            var store = existingStoreResolver(ownerAccountId);
+
+            return store != null && store.IsWarm;
+        }
+
+        bool ISharedVaultSource.RequestWarm(uint ownerAccountId) => requestWarm(ownerAccountId);
+
+        string ISharedVaultSource.GranterName(ACE.Database.Models.Shard.AccountVaultGrant grant) => VaultGranterName.Resolve(grant);
 
         public bool IsReady(uint accountId, out string failReason)
         {
@@ -619,26 +665,41 @@ namespace ACE.Server.Managers.Market
         /// indistinguishable from the probe, so the probe's answer IS every unit's answer. It is
         /// probed once per DISTINCT wcid, because the answer cannot differ between two rows of one
         /// wcid and a probe costs an object construction and a destroy.
+        ///
+        /// A counted CLASS LINE COUNTS TOO, by the same probe argument applied one level down: a
+        /// player-made salvage bag is not identical to its weenie, so it never reaches the ledger, but
+        /// the vault folds equivalent ones into an account_vault_class row and deletes the item record.
+        /// A seller holding four full bags of one material then holds a class line and nothing else.
+        /// The line is tested through ONE materialized representative (<see cref="ClassLineMatches"/>),
+        /// and that is exact for the order predicates because everything they read is constant across
+        /// a display line: Structure is a whitelisted override that is part of the display key, while
+        /// MaxStructure, SalvageToolCharges and MaterialType come from the weenie. Members of one line
+        /// differ only below the display bucket (workmanship, material count), which no order reads.
         /// </summary>
         internal static int CountMatchingEntries(IReadOnlyList<VaultEntry> entries, Func<WorldObject, bool> predicate,
                                                  IAccountVaultWorldSource world)
         {
             var total = 0;
             var probed = new Dictionary<uint, bool>();
+            var probedLines = new Dictionary<string, bool>(StringComparer.Ordinal);
 
             foreach (var entry in entries)
             {
-                // A counted CLASS row does not participate in the market in v1, so it counts for
-                // nothing here. Skipped EXPLICITLY rather than left to fall through the member loop
-                // with an empty Members list: the two happen to produce the same number today, and one
-                // of them says why.
+                // A counted CLASS line: one probe per display line, and every item on a matching line
+                // counts. Handled explicitly rather than left to fall through the member loop, whose
+                // Members list is empty for a class row and would silently answer 0.
                 if (entry.Kind == VaultEntryKind.Class)
+                {
+                    if (ClassLineMatches(entry, predicate, world, probedLines))
+                        total = SaturatingAdd(total, ClassItemsAvailable(entry));
+
                     continue;
+                }
 
                 if (entry.Kind == VaultEntryKind.Ledger)
                 {
                     if (LedgerRowMatches(entry, predicate, world, probed))
-                        total += LedgerUnitsAvailable(entry);
+                        total = SaturatingAdd(total, LedgerUnitsAvailable(entry));
 
                     continue;
                 }
@@ -648,6 +709,89 @@ namespace ACE.Server.Managers.Market
             }
             return total;
         }
+
+        /// <summary>
+        /// Adds without wrapping. A ledger row or class line is clamped to int.MaxValue on its own, so two
+        /// of them could otherwise sum past it into a negative count, which would read as "holds nothing".
+        /// </summary>
+        private static int SaturatingAdd(int total, int more)
+            => (long)total + more >= int.MaxValue ? int.MaxValue : total + more;
+
+        /// <summary>
+        /// Whether ONE materialized representative of this class line satisfies the predicate, memoized
+        /// by display id in <paramref name="probed"/> so one call probes each line once.
+        ///
+        /// The representative is built exactly as <see cref="DescribeClass(uint, VaultEntry, out bool)"/>
+        /// builds its display object: the line's canonical form is parsed back into its overrides, the
+        /// parsed wcid must be the line's own, and the object carries the line's pooled share as its
+        /// Value. It is destroyed in a finally; leaking one guid per line per fill attempt would drain
+        /// the dynamic range on a busy shard.
+        ///
+        /// The same two clauses <see cref="LedgerRowMatches"/> applies: the predicate must pass, and the
+        /// item must be effectively NON-STACKABLE. A class withdraw builds one object per item already,
+        /// so the second clause is not what keeps objects and items the same number here; it is kept so
+        /// the ledger and class arms answer the same question.
+        ///
+        /// A null world source, an empty line, an unreadable canonical form, a payload that will not
+        /// materialize and a throw from the materializer or the predicate all answer false: a line the
+        /// market cannot inspect is a line it does not offer to fill from.
+        /// </summary>
+        private static bool ClassLineMatches(VaultEntry entry, Func<WorldObject, bool> predicate,
+                                             IAccountVaultWorldSource world, Dictionary<string, bool> probed)
+        {
+            if (world == null || entry.Count <= 0 || entry.ClassDisplayId == null)
+                return false;
+
+            if (probed.TryGetValue(entry.ClassDisplayId, out var cached))
+                return cached;
+
+            var matches = false;
+
+            if (!VaultItemClass.TryParseCanonicalForm(entry.CanonicalForm, out var classWcid, out var overrides, out _) || classWcid != entry.Wcid)
+            {
+                log.Error($"[MARKET] could not read back the canonical form of class line {entry.ClassDisplayId} (wcid {entry.Wcid}) to test it against an order predicate; the line counts as no match.");
+                probed[entry.ClassDisplayId] = false;
+                return false;
+            }
+
+            WorldObject probe = null;
+
+            try
+            {
+                probe = world.MaterializeClass(entry.Wcid, overrides, AccountVaultStore.PooledShare(entry.TotalValue, entry.Count));
+
+                if (probe != null)
+                    matches = (probe.MaxStackSize ?? 1) <= 1 && predicate(probe);
+                else
+                    log.Warn($"[MARKET] could not materialize class line {entry.ClassDisplayId} (wcid {entry.Wcid}) to test it against an order predicate; the line counts as no match.");
+            }
+            catch (Exception ex)
+            {
+                matches = false;
+                log.Error($"[MARKET] testing class line {entry.ClassDisplayId} (wcid {entry.Wcid}) against an order predicate threw; the line counts as no match: {ex.GetFullMessage()}");
+            }
+            finally
+            {
+                if (probe != null)
+                {
+                    try
+                    {
+                        world.DestroyItem(probe);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[MARKET] could not destroy the probe for class line {entry.ClassDisplayId}; a guid has been leaked: {ex.GetFullMessage()}");
+                    }
+                }
+            }
+
+            probed[entry.ClassDisplayId] = matches;
+            return matches;
+        }
+
+        /// <summary>A class line's item count as an int, clamped for the reason <see cref="LedgerUnitsAvailable"/> is.</summary>
+        private static int ClassItemsAvailable(VaultEntry entry)
+            => entry.Count >= int.MaxValue ? int.MaxValue : (int)Math.Max(0, entry.Count);
 
         /// <summary>
         /// Whether a fresh instance of this ledger row's wcid satisfies the predicate, memoized in
@@ -748,6 +892,14 @@ namespace ACE.Server.Managers.Market
             // the only place the difference exists is here, at the withdraw that produced them.
             var ledgerSourced = new HashSet<uint>();
 
+            // The same provenance for a CLASS line, keyed to the display id the object came off. An
+            // object built by a class withdraw carries its pooled share as its Value and was counted
+            // against the entry cap only as part of its line, so it has to go back INTO its class
+            // (TryReturnWithdrawnToClass), which credits exactly that Value to the pool. Filed as a
+            // stored biota instead it would take its share out of the pool for good and bypass the cap.
+            var classSourced = new Dictionary<uint, string>();
+            var probedLines = new Dictionary<string, bool>(StringComparer.Ordinal);
+
             // Snapshot the entry list once: TryWithdraw invalidates the store's grouping memo, and
             // walking a list the store is re-projecting under us would revisit or skip rows.
             var entries = store.GetEntries(0, -1).ToList();
@@ -769,15 +921,24 @@ namespace ACE.Server.Managers.Market
                 {
                     if (needed == 0) break;
 
-                    // A counted CLASS row does not participate in the market in v1, so a buy order
-                    // never fills from one. Matching CountMatchingEntries exactly, which is what keeps
-                    // the promised count and the delivered count the same number.
-                    if (entry.Kind == VaultEntryKind.Class)
-                        continue;
-
                     int amount;
 
-                    if (entry.Kind == VaultEntryKind.Ledger)
+                    // A counted CLASS line, tested exactly as CountMatchingEntries tests it, which is
+                    // what keeps the promised count and the delivered count the same number. The
+                    // entries come in the vault's own order (stored, then ledger, then class), so a
+                    // class line is drawn on only for what the stored and ledger rows could not cover.
+                    if (entry.Kind == VaultEntryKind.Class)
+                    {
+                        // A CHEAP FILTER, as the ledger probe is: authority rests with the per-item
+                        // re-check below.
+                        if (!ClassLineMatches(entry, predicate, world, probedLines)) continue;
+
+                        // One item is one object on a class withdraw, so this never asks for more
+                        // objects than are needed. TryWithdraw dispatches it to WithdrawFromClass,
+                        // which is all or nothing for exactly this many and hands each its pooled share.
+                        amount = Math.Min(needed, ClassItemsAvailable(entry));
+                    }
+                    else if (entry.Kind == VaultEntryKind.Ledger)
                     {
                         // The probe is a CHEAP FILTER and nothing more - it decides whether to open
                         // this row at all. Authority still rests with the per-item re-check below,
@@ -806,15 +967,23 @@ namespace ACE.Server.Managers.Market
                         continue;
                     }
 
+                    // TWO PASSES, and the split is custody, not style. The whole batch is already out of
+                    // the vault, so EVERY object is added to `taken` with its provenance before the
+                    // predicate runs on any of them. With one interleaved pass a predicate throw on
+                    // object k left objects k+1.. debited and in nobody's list: the catch below unwinds
+                    // only `taken`, so they were lost (a 4-item class line lost 3 items and their pooled
+                    // value). The unwind's correctness must not depend on the predicate agreeing with the
+                    // probe, nor on it returning at all.
                     foreach (var item in withdrawn)
                     {
                         taken.Add(item);
 
-                        // Recorded BEFORE the predicate re-check, so an object the re-check rejects is
-                        // still returned the way it came out. The unwind's correctness must not depend
-                        // on the predicate agreeing with the probe.
                         if (entry.Kind == VaultEntryKind.Ledger) ledgerSourced.Add(item.Guid.Full);
+                        else if (entry.Kind == VaultEntryKind.Class) classSourced[item.Guid.Full] = entry.ClassDisplayId;
+                    }
 
+                    foreach (var item in withdrawn)
+                    {
                         if (needed > 0 && predicate(item)) needed--;
                     }
                 }
@@ -823,7 +992,7 @@ namespace ACE.Server.Managers.Market
             {
                 log.Error($"[MARKET] TryTakeMatching threw after taking {taken.Count} item(s) for seller account {sellerAccountId}: {ex.GetFullMessage()}");
 
-                UnwindToSeller(sellerAccountId, taken, new MarketTakeReceipt(ledgerSourced), auditActor, "after a throw");
+                UnwindToSeller(sellerAccountId, taken, new MarketTakeReceipt(ledgerSourced, classSourced), auditActor, "after a throw");
 
                 taken = new List<WorldObject>();
 
@@ -833,7 +1002,7 @@ namespace ACE.Server.Managers.Market
                 return false;
             }
 
-            receipt = new MarketTakeReceipt(ledgerSourced);
+            receipt = new MarketTakeReceipt(ledgerSourced, classSourced);
 
             if (needed > 0 || taken.Count != count)
             {
@@ -896,6 +1065,11 @@ namespace ACE.Server.Managers.Market
         /// given and credits units in its place, which for a real stored biota would be exactly the
         /// item degradation VaultCollapse exists to prevent.
         ///
+        /// A CLASS-sourced object is the third provenance and is wrong in both of those homes: the
+        /// ledger is a different holding, and a stored-biota return takes its pooled share out of the
+        /// line's total and bypasses the entry cap. It goes back through the class return, grouped by
+        /// the display line it came off.
+        ///
         /// The ledger half is grouped by the object's OWN wcid rather than by any wcid the caller
         /// supplies: a predicate matches on material and shape, not on class id, so one take can span
         /// several wcids and crediting them all to one row would move units between items.
@@ -921,7 +1095,7 @@ namespace ACE.Server.Managers.Market
 
             try
             {
-                var stored = taken.Where(i => !receipt.IsLedgerSourced(i)).ToList();
+                var stored = taken.Where(i => !receipt.IsLedgerSourced(i) && !receipt.IsClassSourced(i)).ToList();
 
                 // Non-short-circuiting on purpose, all the way down: one refused group must not stop
                 // the rest from going back, and the false still reaches the LOST ITEM RISK line below.
@@ -931,14 +1105,24 @@ namespace ACE.Server.Managers.Market
                 {
                     // The wcid is unused on this branch (TryReturnWithdrawn reads the item's own), but
                     // passing a real one rather than 0 keeps the argument honest if it ever is used.
-                    // classKey null: TryTakeMatching never draws on a class row, so nothing it took is
-                    // class-sourced.
+                    // classKey null: these are the objects the receipt names as neither ledger- nor
+                    // class-sourced, which is exactly the stored biotas.
                     allReturned &= TryReturnToSeller(sellerAccountId, stored, stored[0].WeenieClassId, asLedger: false, classKey: null, auditActor);
                 }
 
                 foreach (var group in taken.Where(receipt.IsLedgerSourced).GroupBy(i => i.WeenieClassId))
                 {
                     allReturned &= TryReturnToSeller(sellerAccountId, group.ToList(), group.Key, asLedger: true, classKey: null, auditActor);
+                }
+
+                // Class-sourced objects go back INTO THEIR CLASS, grouped by the display line they came
+                // off. A non-null classKey is what routes TryReturnToSeller to TryReturnWithdrawnToClass,
+                // which re-derives the exact class row from the object and credits its own Value - its
+                // pooled share - so the line's count and pooled total come back exact.
+                foreach (var group in taken.Where(receipt.IsClassSourced).GroupBy(receipt.ClassLineOf, StringComparer.Ordinal))
+                {
+                    var items = group.ToList();
+                    allReturned &= TryReturnToSeller(sellerAccountId, items, items[0].WeenieClassId, asLedger: false, classKey: group.Key, auditActor);
                 }
 
                 returned = allReturned;
@@ -1098,7 +1282,13 @@ namespace ACE.Server.Managers.Market
                 if (display == null)
                     return fallback;
 
-                var snapshot = MarketSnapshot.FromItem(display);
+                var snapshot = MarketSnapshot.FromItem(display, includeSuit: true);
+
+                // The display object is destroyed below, so its guid must not reach the wire; the line is
+                // identified by its class key. The pool count is NOT stamped: this snapshot is cached by
+                // class key and share across accounts and shown to every viewer, so the seller's whole
+                // pool would leak (the listing's own count is the unit count).
+                snapshot.Suit = MarketSnapshot.ClearedOfItemGuid(snapshot.Suit, entry.Wcid, entry.ClassDisplayId);
 
                 if (string.IsNullOrEmpty(snapshot.Name))
                     snapshot.Name = fallback.Name;

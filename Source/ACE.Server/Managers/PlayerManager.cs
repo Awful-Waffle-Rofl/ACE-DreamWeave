@@ -305,6 +305,9 @@ namespace ACE.Server.Managers
             try
             {
                 var offlinePlayer = new OfflinePlayer(player.Biota);
+                offlinePlayer.CharacterOptions1 = player.Character.CharacterOptions1;
+                offlinePlayer.CharacterOptions2 = player.Character.CharacterOptions2;
+                offlinePlayer.HasCharacterOptions = true;
                 offlinePlayers[offlinePlayer.Guid.Full] = offlinePlayer;
 
                 playerNames[offlinePlayer.Name] = offlinePlayer;
@@ -585,6 +588,9 @@ namespace ACE.Server.Managers
                     return false; // This should never happen
 
                 var offlinePlayer = new OfflinePlayer(player.Biota);
+                offlinePlayer.CharacterOptions1 = player.Character.CharacterOptions1;
+                offlinePlayer.CharacterOptions2 = player.Character.CharacterOptions2;
+                offlinePlayer.HasCharacterOptions = true;
 
                 offlinePlayer.Allegiance = player.Allegiance;
                 offlinePlayer.AllegianceNode = player.AllegianceNode;

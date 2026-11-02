@@ -85,7 +85,8 @@ namespace ACE.Server.ThreadDungeons
         /// before it, so every positional caller keeps binding exactly as it did.
         /// </summary>
         public DungeonStatProfile(int level, uint health, IReadOnlyDictionary<Skill, uint> skills, uint maxBodyDamage, uint maxBaseArmor,
-            int maxSpellTier = 0, double healthRate = 0.0, IReadOnlyDictionary<ACE.Entity.Enum.Properties.PropertyAttribute, uint> attributes = null)
+            int maxSpellTier = 0, double healthRate = 0.0, IReadOnlyDictionary<ACE.Entity.Enum.Properties.PropertyAttribute, uint> attributes = null,
+            ArchetypeFacts archetype = null)
         {
             Level = level;
             Health = health;
@@ -95,7 +96,17 @@ namespace ACE.Server.ThreadDungeons
             MaxSpellTier = maxSpellTier;
             HealthRate = double.IsNaN(healthRate) || double.IsInfinity(healthRate) || healthRate < 0 ? 0.0 : healthRate;
             Attributes = attributes ?? EmptyAttributes;
+            Archetype = archetype ?? ArchetypeFacts.Empty;
         }
+
+        /// <summary>
+        /// The facts <see cref="ArchetypeClassifier"/> needs beyond the band-standard axes (skill ranks, wielded
+        /// launcher / treasure flags, damaging-spell counts). <see cref="ArchetypeFacts.Empty"/> for every profile
+        /// built by <see cref="FromWeenie(ACE.Entity.Models.Weenie)"/>, so the runtime resolver pays nothing for it.
+        /// Like <see cref="HealthRate"/> and <see cref="Attributes"/> it is NOT counted by <see cref="HasData"/>,
+        /// and nothing in <see cref="DungeonBandStandard.Compute"/> reads it.
+        /// </summary>
+        public ArchetypeFacts Archetype { get; }
 
         /// <summary>
         /// Authored base per primary attribute (InitLevel + LevelFromCP, i.e. CreatureAttribute.Base for a
@@ -114,7 +125,7 @@ namespace ACE.Server.ThreadDungeons
         /// sample needs a projected profile. Returns this same instance when the level is unchanged.
         /// </summary>
         public DungeonStatProfile WithLevel(int level)
-            => level == Level ? this : new DungeonStatProfile(level, Health, Skills, MaxBodyDamage, MaxBaseArmor, MaxSpellTier, HealthRate, Attributes);
+            => level == Level ? this : new DungeonStatProfile(level, Health, Skills, MaxBodyDamage, MaxBaseArmor, MaxSpellTier, HealthRate, Attributes, Archetype);
 
         private static readonly IReadOnlyDictionary<Skill, uint> EmptySkills = new Dictionary<Skill, uint>();
 
@@ -183,9 +194,46 @@ namespace ACE.Server.ThreadDungeons
         /// maximum for the parallel reason.
         /// </summary>
         public static DungeonStatProfile FromWeenie(ACE.Entity.Models.Weenie weenie)
+            => FromWeenie(weenie, null, null);
+
+        /// <summary>
+        /// <see cref="FromWeenie(ACE.Entity.Models.Weenie)"/> plus the <see cref="ArchetypeFacts"/> an offline
+        /// census needs. Both resolvers must be non-null for the facts to be read; with either null the result is
+        /// exactly what the one-argument form returns (the runtime path never passes them).
+        /// </summary>
+        /// <param name="weenieOf">Resolves a create-list item wcid to its weenie (launcher / thrown detection).</param>
+        /// <param name="damagingSpellSkillOf">
+        /// Maps a spell id to the magic skill (War, Life or Void) it is a harmful DAMAGING spell of, or null when it
+        /// is not one. Supplied by the caller because the answer needs the client dat and the spell table.
+        /// </param>
+        public static DungeonStatProfile FromWeenie(ACE.Entity.Models.Weenie weenie,
+            Func<uint, ACE.Entity.Models.Weenie> weenieOf, Func<int, Skill?> damagingSpellSkillOf)
+            => FromWeenie(weenie, weenieOf, damagingSpellSkillOf, null);
+
+        /// <summary>
+        /// As the three-argument form, plus <paramref name="wieldedMissileProbabilityOf"/>: maps a WieldedTreasureType id to
+        /// the probability that table rolls a launcher or thrown weapon (WieldedTreasureMath). Optional so the runtime, which
+        /// never passes it, does no table reads.
+        /// </summary>
+        public static DungeonStatProfile FromWeenie(ACE.Entity.Models.Weenie weenie,
+            Func<uint, ACE.Entity.Models.Weenie> weenieOf, Func<int, Skill?> damagingSpellSkillOf,
+            Func<uint, double> wieldedMissileProbabilityOf)
+            => FromWeenie(weenie, weenieOf != null && damagingSpellSkillOf != null
+                ? new ArchetypeFactsResolver(weenieOf, damagingSpellSkillOf, null, wieldedMissileProbabilityOf, null)
+                : null);
+
+        /// <summary>
+        /// The profile with the <see cref="ArchetypeFacts"/> read through <paramref name="resolver"/> (the Threads
+        /// archetype uplift's profile, and archetype-census's). A null resolver, or one without WeenieOf and
+        /// DamagingSpellSkillOf, reads no facts - exactly the one-argument form. Every band-standard axis is read
+        /// identically either way, so DungeonBandStandard.Compute cannot tell the two apart.
+        /// </summary>
+        public static DungeonStatProfile FromWeenie(ACE.Entity.Models.Weenie weenie, ArchetypeFactsResolver resolver)
         {
             if (weenie == null)
                 return Empty;
+
+            var readFacts = resolver != null && resolver.WeenieOf != null && resolver.DamagingSpellSkillOf != null;
 
             var level = weenie.GetProperty(ACE.Entity.Enum.Properties.PropertyInt.Level) ?? 0;
 
@@ -246,7 +294,8 @@ namespace ACE.Server.ThreadDungeons
             // the same "absent is 0" rule CreatureVital applies when it caches the rate (CreatureVital.cs:38).
             return new DungeonStatProfile(level, HealthOf(weenie), skills,
                 (uint)Math.Max(0, maxDamage), (uint)Math.Max(0, maxArmor), maxSpellTier,
-                weenie.GetProperty(ACE.Entity.Enum.Properties.PropertyFloat.HealthRate) ?? 0.0, attributes);
+                weenie.GetProperty(ACE.Entity.Enum.Properties.PropertyFloat.HealthRate) ?? 0.0, attributes,
+                readFacts ? ArchetypeFacts.FromWeenie(weenie, resolver) : null);
         }
 
         private bool HasAnySkill

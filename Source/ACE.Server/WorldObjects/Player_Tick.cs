@@ -65,6 +65,10 @@ namespace ACE.Server.WorldObjects
 
             actionQueue.RunActions();
 
+            // paced teleport flush deletes (teleport_flush_delete_pacing). After the queued actions, so a create queued
+            // this tick cancels its waiting delete first. One volatile read while nothing is waiting.
+            DrainTeleportDeletes();
+
             if (nextAgeUpdateTime <= currentUnixTime)
             {
                 nextAgeUpdateTime = currentUnixTime + ageUpdateInterval;
@@ -129,6 +133,10 @@ namespace ACE.Server.WorldObjects
             // that ends this beat has already restored the status the rule then agrees with.
             FacetPkHeartbeat();
 
+            // Knot loot: resync max health when the Shield of the Rose penalty changed with no equip event
+            // (suppression transition, live setting change). One equipped-items pass; sends only on a change.
+            KnotTraitHeartbeat();
+
             // PvP Template Facets: templated with no live match for pvp_template_backstop_seconds -> restore.
             // One property read when the player is not templated.
             PvpTemplateHeartbeat();
@@ -148,7 +156,12 @@ namespace ACE.Server.WorldObjects
             // between saves (and across a crash) rather than only reconciling at logout
             UpdateOfflineBonus();
 
-            PhysicsObj.ObjMaint.DestroyObjects();
+            // teleport_flush_scope 0/2: a culled object's effects must be re-sent when it returns (scope 1 unchanged)
+            OnClientObjectsCulled(PhysicsObj.ObjMaint.DestroyObjects());
+
+            // one-way player visibility self-heal: every player I can see must have me in their broadcast list
+            // (ObjectMaint.RepairInverseKnownPlayers; the expiry side is ObjectMaint.ExpireObject)
+            PhysicsObj.ObjMaint.RepairInverseKnownPlayers();
 
             // Check if we're due for our periodic SavePlayer
             if (LastRequestedDatabaseSave == DateTime.MinValue)
@@ -434,13 +447,20 @@ namespace ACE.Server.WorldObjects
                 // turn is not blocked; with nothing blocked it costs one IsAnimating read.
                 CheckMotionStall("tick");
 
+                // cast turn-wait bound (spellcast_turn_timeout_seconds): here, not in UpdatePlayerPhysics, because that
+                // only runs while the player is moving or animating, and a cast parked on its turn may be neither.
+                if (MagicState.TurnWaitStart != DateTime.MinValue)
+                    CheckCastTurnTimeout();
+
                 if (FastTick && PhysicsObj.IsMovingOrAnimating || PhysicsObj.Velocity != Vector3.Zero)
-                {
                     UpdatePlayerPhysics();
 
-                    if (MoveToParams?.Callback != null && !PhysicsObj.IsMovingOrAnimating)
-                        HandleMoveToCallback();
-                }
+                // a cancelled use/turn leaves MoveToParams pending (OnMoveComplete_MoveTo2) for completion once the player is
+                // stationary. Check it outside the physics block: a player who is already stationary never enters that block,
+                // so the callback never fired and the client stayed busy until the player moved. !IsPlayerMovingTo2 limits this
+                // to that stranded state, so a freshly queued move/turn that has not started animating yet is not failed early.
+                if (MoveToParams?.Callback != null && !IsPlayerMovingTo2 && !PhysicsObj.IsMovingOrAnimating)
+                    HandleMoveToCallback();
 
                 InUpdate = false;
 
@@ -705,6 +725,7 @@ namespace ACE.Server.WorldObjects
 
                 // Room-based battleground spawn protection: the moment the player is seen outside their spawn room starts its window.
                 CheckPvpSpawnRoomExit();
+                CheckPvpSpawnRoomEntry();
 
                 // newPosition is only committed to Location here, past both later rejection paths above (the
                 // z-hack rubber-band under verifyContact/IsJumping, and `if (!success) return false;`) - so the

@@ -73,8 +73,13 @@ namespace ACE.Server.Managers.Market
         /// market and the character sheet can show an item's weapon and equipment mods and filter on them.
         /// Bumped so the automatic sweep re-projects every Active listing and current listings gain their mods
         /// on the first world start after the deploy. A CLOSED listing keeps null in all three forever.
+        ///
+        /// 5 (2026-10-10) - suit added (SuitItemProjector): the suit-builder projection of a suit-relevant
+        /// item, so the web suit builder can offer other players' listings as candidates. Bumped so the
+        /// automatic sweep re-projects every Active listing on the first world start after the deploy. A
+        /// CLOSED listing keeps null forever.
         /// </summary>
-        public const int CurrentVersion = 4;
+        public const int CurrentVersion = 5;
 
         /// <summary>snake_case per Docs/Market/market-api-v1.yaml; the web app reads snapshot_json verbatim, so this policy is contract.</summary>
         public static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
@@ -105,7 +110,7 @@ namespace ACE.Server.Managers.Market
         }
 
         /// <summary>Projects a live stored item. Must be called OUTSIDE the item's BiotaDatabaseLock.</summary>
-        public static ListingSnapshot FromItem(WorldObject item)
+        public static ListingSnapshot FromItem(WorldObject item, bool includeSuit = false)
         {
             if (item == null)
                 return new ListingSnapshot();
@@ -218,6 +223,13 @@ namespace ACE.Server.Managers.Market
             // nothing to show, which FromWeenie's all-null mirror depends on.
             MarketItemMods.Apply(item, snapshot);
 
+            // The suit projection (version 5) is for LISTING snapshots only: a vault view or a character
+            // sheet would mislabel it (source "vault" on a worn item) and pay for it twice. It carries the
+            // item's own guid, which the callers that project a probe or display object (FromLedgerProbe,
+            // DescribeClass) clear.
+            if (includeSuit)
+                snapshot.Suit = TryProjectSuit(item);
+
             return snapshot;
         }
 
@@ -225,7 +237,8 @@ namespace ACE.Server.Managers.Market
         /// The same projection from a weenie, for a collapsed ledger row that has no WorldObject.
         /// Mirrors FromItem field for field, exactly as ResolveIcons mirrors its WorldObject overload.
         /// </summary>
-        public static ListingSnapshot FromWeenie(Weenie weenie)
+        // includeSuit: true has no production caller (tests only); the production weenie paths leave it off.
+        public static ListingSnapshot FromWeenie(Weenie weenie, bool includeSuit = false)
         {
             if (weenie == null)
                 return new ListingSnapshot();
@@ -319,6 +332,11 @@ namespace ACE.Server.Managers.Market
             // item from its weenie, the fork's mods are applied to item INSTANCES by salvage, and no weenie
             // authors a mod record. FromItem emits null for a mod-less item, so the two projections mirror.
 
+            // Suit (version 5): the same projector, over the weenie. ItemGuid is null and Reductions are
+            // null (no live item to judge); every other field mirrors FromItem's.
+            if (includeSuit)
+                snapshot.Suit = TryProjectSuit(weenie);
+
             return snapshot;
         }
 
@@ -328,7 +346,7 @@ namespace ACE.Server.Managers.Market
         /// </summary>
         public static ListingSnapshot FromLedgerProbe(WorldObject probe, uint wcid)
         {
-            var snapshot = FromItem(probe);
+            var snapshot = FromItem(probe, includeSuit: true);
             snapshot.Wcid = wcid;
 
             // Cleared, not carried through. The probe is a fresh instance of the wcid and its own
@@ -336,7 +354,73 @@ namespace ACE.Server.Managers.Market
             // count, so a stack size here would be a second, wrong denominator for the same price.
             snapshot.StackSize = null;
 
+            // Same reason for the suit's guid: the probe's own guid names nothing a buyer could withdraw.
+            snapshot.Suit = ClearedOfItemGuid(snapshot.Suit, wcid, null);
+
             return snapshot;
+        }
+
+        /// <summary>
+        /// A suit projection of a collapsed line (ledger or class) with the display object's guid removed.
+        /// <paramref name="classKey"/> is applied only when given (a class line). The projector's Count
+        /// (1) is deliberately KEPT: a class line's pooled count is the seller's whole pool, which a
+        /// listing snapshot (cached across accounts and shown to every viewer) must not leak - the
+        /// listing's own count is the number of units. Null in, null out.
+        /// </summary>
+        public static Suit.SuitItem ClearedOfItemGuid(Suit.SuitItem suit, uint wcid, string classKey)
+        {
+            if (suit == null)
+                return null;
+
+            return suit with
+            {
+                ItemGuid = null,
+                Wcid = wcid,
+                ClassKey = classKey ?? suit.ClassKey,
+            };
+        }
+
+        /// <summary>Test seam: the item suit projection. Production is SuitItemProjector.FromItem.</summary>
+        internal static Func<WorldObject, Suit.SuitItem> ItemSuitProjection = i => Suit.SuitItemProjector.FromItem(i);
+
+        /// <summary>Test seam: the weenie suit projection. Production is SuitItemProjector.FromWeenie.</summary>
+        internal static Func<Weenie, Suit.SuitItem> WeenieSuitProjection = w => Suit.SuitItemProjector.FromWeenie(w);
+
+        /// <summary>
+        /// The suit data for a listing snapshot, or null: not a suit piece, bound to one wielder
+        /// (AllowedWielder names a character, so it is no general candidate and the guid stays private),
+        /// or the projection threw (logged; a suit failure must never fail the snapshot or the listing).
+        /// </summary>
+        private static Suit.SuitItem TryProjectSuit(WorldObject item)
+        {
+            try
+            {
+                if (!Suit.SuitItemProjector.IsSuitRelevant(item) || item.GetProperty(PropertyInstanceId.AllowedWielder).HasValue)
+                    return null;
+
+                return ItemSuitProjection(item);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[MARKET] could not project the suit data of 0x{item.Guid.Full:X8}; listing it without: {ex.GetFullMessage()}");
+                return null;
+            }
+        }
+
+        private static Suit.SuitItem TryProjectSuit(Weenie weenie)
+        {
+            try
+            {
+                if (!Suit.SuitItemProjector.IsSuitRelevant(weenie) || weenie.GetProperty(PropertyInstanceId.AllowedWielder).HasValue)
+                    return null;
+
+                return WeenieSuitProjection(weenie);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[MARKET] could not project the suit data of weenie {weenie.WeenieClassId}; projecting it without: {ex.GetFullMessage()}");
+                return null;
+            }
         }
 
         /// <summary>

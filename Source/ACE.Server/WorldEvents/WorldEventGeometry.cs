@@ -208,6 +208,29 @@ namespace ACE.Server.WorldEvents
         }
 
         /// <summary>
+        /// The point <paramref name="radius"/> metres from <paramref name="centre"/> at
+        /// <paramref name="bearingRadians"/> (0 = due north, clockwise), facing the centre. Used by Hold runs
+        /// to re-pick a wave spawn that landed indoors somewhere else on the same ring, and to place portals.
+        /// Ported from DreamWeave #17.
+        /// </summary>
+        public static Position AtBearing(Position centre, float radius, double bearingRadians)
+        {
+            if (centre == null)
+                return null;
+
+            var dx = (float)(Math.Sin(bearingRadians) * radius);
+            var dy = (float)(Math.Cos(bearingRadians) * radius);
+
+            return PlaceFacingCentre(centre, dx, dy);
+        }
+
+        /// <summary>
+        /// A fresh copy of <paramref name="origin"/> moved by (<paramref name="dx"/> east, <paramref name="dy"/> north)
+        /// metres, keeping its facing (the caller sets its own). Used by Hold runs to place the knights on their ring.
+        /// </summary>
+        public static Position Offset(Position origin, float dx, float dy) => origin == null ? null : Translate(origin, dx, dy);
+
+        /// <summary>
         /// A new position offset from <paramref name="origin"/> by (dx, dy) metres, facing back toward it.
         /// The facing is computed from the offset vector rather than from the two positions' coordinates,
         /// because SetPosition may have moved the result into an adjacent landblock, after which its X/Y

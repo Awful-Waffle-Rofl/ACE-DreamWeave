@@ -99,5 +99,12 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         [JsonPropertyName("snap")]
         public bool Snap { get; set; }
+
+        /// <summary>
+        /// Runtime only, never read from JSON: this entry is a Hold restoration shrine (protect.shrine), made usable
+        /// and renamed when it is built. False for every authored decor entry.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public bool HoldShrine { get; set; }
     }
 }

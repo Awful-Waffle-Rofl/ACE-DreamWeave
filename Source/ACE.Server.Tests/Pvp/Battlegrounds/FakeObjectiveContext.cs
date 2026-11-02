@@ -72,6 +72,10 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         {
         }
 
+        public void CreditObjectiveTime(uint characterId, int seconds)
+        {
+        }
+
         public IReadOnlyList<CrystalHealth> SampleCrystals() => Crystals.ToList();
 
         public void AnnounceToTeam(int teamIndex, string text) => TeamAnnouncements.Add((teamIndex, text));

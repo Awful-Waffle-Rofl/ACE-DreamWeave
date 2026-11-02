@@ -36,7 +36,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// discipline Resonance documents at its own AddResonanceStack call.
     ///
     /// Openings are transient, non-persisted stack state (Player_ClassAbilityBuffs.killerInstinctStacks),
-    /// shared-window expiry exactly like Frenzy/Resonance/Nether Rush: any new Opening refreshes the WHOLE
+    /// shared-window expiry exactly like Frenzy/Resonance/Mana Rush: any new Opening refreshes the WHOLE
     /// pool's expiry to now + 8s, rather than each Opening tracking its own independent countdown.
     ///
     /// AFFINITY: Sneak Attack, MULTIPLYING the critical-damage half only (2026-09-12 overhaul model), not an

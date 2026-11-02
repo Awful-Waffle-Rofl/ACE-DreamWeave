@@ -346,6 +346,9 @@ namespace ACE.Server.WorldEvents
                 case WorldEventOutcome.FailedNoParticipants:
                     return FailedLine(goalName, anchorName, "nobody answered the call", failTemplate, bossName, noun, nounPlural);
 
+                case WorldEventOutcome.FailedObjectiveLost:
+                    return FailedLine(goalName, anchorName, ObjectiveLostReason(nounPlural), failTemplate, bossName, noun, nounPlural);
+
                 case WorldEventOutcome.AbortedAdmin:
                 case WorldEventOutcome.AbortedShutdown:
                 case WorldEventOutcome.AbortedError:
@@ -354,6 +357,14 @@ namespace ACE.Server.WorldEvents
                 default:
                     return Global($"The event at {anchorName} ended.");
             }
+        }
+
+        /// <summary>The {reason} for <see cref="WorldEventOutcome.FailedObjectiveLost"/>: "the wards were destroyed".</summary>
+        public static string ObjectiveLostReason(string nounPlural)
+        {
+            var plural = string.IsNullOrWhiteSpace(nounPlural) ? ProtectDef.DefaultNounPlural : nounPlural;
+
+            return $"the {plural} were destroyed";
         }
 
         private static string FailedLine(string goalName, string anchorName, string reason, string failTemplate = null,
@@ -576,7 +587,9 @@ namespace ACE.Server.WorldEvents
             try
             {
                 var anchor = evt.Composition?.AnchorPosition;
-                var radius = evt.Composition?.Source?.RewardRadius ?? 0f;
+                // The run's participant radius: the objective's own (IWorldEventObjective.ParticipantRadius) when it sets
+                // one, else the theme's rewardRadius exactly as before.
+                var radius = evt.EffectiveParticipantRadius;
 
                 LocalAt(anchor, radius, msg, $"run={evt.RunId} ");
             }

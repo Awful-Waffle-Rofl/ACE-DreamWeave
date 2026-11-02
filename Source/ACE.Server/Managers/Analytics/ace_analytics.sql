@@ -726,3 +726,103 @@ CREATE TABLE IF NOT EXISTS `session_event` (
     KEY `ix_ip_login` (`ip`, `login_utc`),
     KEY `ix_char_login` (`character_id`, `login_utc`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------------------------
+-- Knot telemetry. One row per Knot-economy EVENT: a Fiber or Pattern roll at a run's clear, a
+-- weave, a Pattern bind, a Pinnacle copy opening, an entry spent, an attempt ending, a Knot
+-- consumed. Written by KnotTelemetry.Record* (Knots/KnotTelemetry.cs), each call placed AFTER the
+-- effect it describes, so a row never reports something that did not happen.
+--
+-- *** THIS TABLE'S SHAPE FREEZES ON ITS FIRST DEPLOY. READ THE MIGRATION NOTE ABOVE THE THREAD
+-- RUN TABLES. *** It is CREATE TABLE IF NOT EXISTS only: no ALTER, no migration path. A column or
+-- an index added here later never reaches a database that already has the table, and the INSERT
+-- naming the column then fails on every write. Do not rename or drop anything below.
+--
+-- RETENTION: NEVER pruned, like the Thread run tables. The stream is bounded by how many Knot
+-- events players cause, far below chat, and the data exists for season-over-season tuning.
+--
+-- `kind` + `result` are a closed matrix, all lowercase, defined once in KnotTelemetry (the const
+-- strings there are the only spelling; a dashboard filters on exactly these):
+--
+--   kind          result values
+--   fiber_roll    dropped | dry | lost          one Fiber roll per rolling SEAT of a cleared run (the owner,
+--                                               plus every survey-eligible member of a group when the roll is
+--                                               per seat), so a group clear writes one row per seat, each owned
+--                                               by that seat. 'lost' = it rolled a drop but the item never
+--                                               reached the held pile.
+--   pattern_roll  dropped | none | lost         one per seat, only written when at least one pinnacle was available.
+--   weave         ok | partial                  'partial' = the Knot was made but a Fiber could not be
+--                                               consumed. `reason` is 'pattern' (a full Pattern turned into a Knot);
+--                                               rows before 2026-10-29 carry 'maelis' or 'pouch'.
+--   bind          pattern | random              a Knot took its pinnacle from a Pattern, or at random.
+--   copy_open     ok                            a Pinnacle copy was created and the owner sent in.
+--   entry         charge | paid_return | seam   an entry was spent. 'paid_return' is a return into a
+--                                               held fight; 'seam' is the dormant seam-charged path.
+--   attempt_end   won | unpaid | expired | forfeit | reset | unloaded | fault | lost
+--                                               derived in ONE place, KnotTelemetry.AttemptResultFor.
+--                                               'unpaid' = won but the cache was never delivered, so
+--                                               the entry was refunded.
+--   knot_spent    won | lost_at_zero | forfeit | no_entries | last_entry
+--                                               a Knot item was consumed, and why.
+--
+-- NULL (never 0) means not applicable, except `character_id`, `account_id` and `qty`.
+--
+-- `source` is 'live' for every row the running server writes and 'log' for a row reconstructed
+-- from a saved server log by Backfill/knot-event-from-log.ps1 (fiber_roll / pattern_roll only). A
+-- 'log' row from an older owner-only log line has `character_id` 0 when the name could not be resolved, and NULL `item_guid` and
+-- `char_level`. The backfill only inserts rows older than the first 'live' row, so the two never
+-- overlap.
+--
+-- `name` is the character's name AT EVENT TIME; a later rename does not rewrite history.
+-- `knot_level` is the Fiber's level on a roll and the Knot's level everywhere else.
+-- `qty` is 1, except 10 on a weave (the Fibers consumed); `fiber_levels` then holds the ten Fiber
+-- levels as a comma list.
+-- `item_guid` is the Fiber on a fiber_roll and the Pattern on a pattern_roll or a pattern bind.
+-- `entries_left` / `entries_max` are the Knot's entry count after / at the event.
+-- `misses_before` / `misses_after` are the seat's Fiber pity counter around a fiber_roll.
+-- `enabled_pinnacles` is how many pinnacles a roll could pick from.
+-- `instance_id` is the EPHEMERAL instance id and RECYCLES: never join on it. `start_group` is
+-- dungeon_run.start_group of the Thread run that rolled; `attempt_id` is minted once per Pinnacle
+-- copy and ties its copy_open, entry and attempt_end rows together.
+-- `phase_reached` / `phase_count` / `charged` / `duration_secs` / `reason` describe an attempt_end;
+-- `reason` is the raw End reason text, kept beside the derived result so a new reason is visible
+-- in the data before the mapping learns about it.
+CREATE TABLE IF NOT EXISTS `knot_event` (
+    `id`                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `ts_utc`            DATETIME        NOT NULL,
+    `kind`              VARCHAR(16)     NOT NULL,
+    `result`            VARCHAR(16)     NOT NULL,
+    `source`            VARCHAR(8)      NOT NULL,   -- 'live' | 'log'
+    `character_id`      INT UNSIGNED    NOT NULL,   -- 0 only on an unresolved 'log' row
+    `name`              VARCHAR(64)     NOT NULL,   -- name AT EVENT TIME
+    `account_id`        INT UNSIGNED    NOT NULL,   -- 0 when unknown
+    `char_level`        INT             NULL,
+    `knot_level`        INT             NULL,       -- Fiber level on rolls, Knot level elsewhere
+    `qty`               INT             NOT NULL,   -- 1; 10 on weave
+    `knot_guid`         INT UNSIGNED    NULL,
+    `item_guid`         INT UNSIGNED    NULL,       -- Fiber (roll) or Pattern (pattern_roll, bind)
+    `pinnacle_key`      VARCHAR(32)     NULL,
+    `entries_left`      INT             NULL,
+    `entries_max`       INT             NULL,
+    `misses_before`     INT             NULL,
+    `misses_after`      INT             NULL,
+    `enabled_pinnacles` INT             NULL,
+    `fiber_levels`      VARCHAR(96)     NULL,       -- weave: comma list of the 10 levels
+    `phase_reached`     INT             NULL,
+    `phase_count`       INT             NULL,
+    `charged`           TINYINT(1)      NULL,
+    `duration_secs`     DOUBLE          NULL,
+    `reason`            VARCHAR(64)     NULL,
+    `dungeon_id`        VARCHAR(16)     NULL,
+    `instance_id`       INT UNSIGNED    NULL,       -- ephemeral, RECYCLES
+    `start_group`       CHAR(32)        NULL,       -- = dungeon_run.start_group
+    `attempt_id`        CHAR(32)        NULL,       -- minted per Pinnacle copy
+    PRIMARY KEY (`id`),
+    KEY `ix_ts` (`ts_utc`),
+    KEY `ix_kind_ts` (`kind`, `ts_utc`),
+    KEY `ix_char_kind_ts` (`character_id`, `kind`, `ts_utc`),
+    KEY `ix_knot` (`knot_guid`),
+    KEY `ix_attempt` (`attempt_id`),
+    KEY `ix_start_group` (`start_group`),
+    KEY `ix_source_ts` (`source`, `ts_utc`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

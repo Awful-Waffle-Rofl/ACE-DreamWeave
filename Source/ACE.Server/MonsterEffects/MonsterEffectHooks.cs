@@ -194,6 +194,26 @@ namespace ACE.Server.MonsterEffects
     }
 
     /// <summary>
+    /// NOT A HOOK - a capability an IMonsterOutgoingHit or IMonsterSpellHit rider opts into, read by
+    /// Creature.ApplyReflectedMonsterEffectRiders off the bucket the rider already sits in, so it needs no
+    /// registry bucket or index of its own. A player's Reflect (Vanguard T3) bounced this monster's shot
+    /// back at it: the shot's riders never reached the player, and a rider implementing this is answered
+    /// INSTEAD, with the roles reversed - <paramref name="monster"/> is both the effect's carrier (its ramp
+    /// and its state slot) and the creature the reflected rider lands on, and <paramref name="reflector"/> is
+    /// the player it is attributed to. Today: dot and debuff (land on the monster), leech (mirrored - the
+    /// reflector gains what the monster would have leeched). A rider that does not implement it is simply
+    /// suppressed.
+    ///
+    /// <paramref name="firedAs"/> is Hit for a bounced missile and SpellHit for a bounced spell projectile, so
+    /// an on= gated rider answers exactly the trigger the original shot would have fired.
+    /// <paramref name="damage"/> is what the shot would have dealt the reflector.
+    /// </summary>
+    public interface IMonsterReflectedRider : IMonsterEffect
+    {
+        void OnReflected(Creature monster, Creature reflector, MonsterEffectTrigger firedAs, DamageType damageType, float damage, MonsterEffectSpec spec, ref MonsterEffectState state);
+    }
+
+    /// <summary>
     /// Multiplies this monster's attack or cast speed. Multipliers from several effects compose by product
     /// and the total is clamped by monster_effect_speed_cap at the dispatch site, never here.
     /// </summary>
@@ -217,6 +237,17 @@ namespace ACE.Server.MonsterEffects
     public interface IMonsterHeartbeat : IMonsterEffect
     {
         void OnHeartbeat(Creature creature, MonsterEffectSpec spec, ref MonsterEffectState state);
+    }
+
+    /// <summary>
+    /// Scales how long a Taunt (Creature.ApplyTaunt) holds this monster. Returns the fraction of the normal
+    /// hold this record leaves (0.6 = a 40% shorter hold); multipliers from several effects compose by
+    /// product and the total is floored by monster_effect_taunt_hold_floor at the dispatch site
+    /// (Creature.GetMonsterEffectTauntHoldMultiplier), never here. A pure read.
+    /// </summary>
+    public interface IMonsterTauntHold : IMonsterEffect
+    {
+        double GetTauntHoldMultiplier(Creature holder, MonsterEffectSpec spec, ref MonsterEffectState state);
     }
 
     /// <summary>

@@ -35,11 +35,11 @@ namespace ACE.Server.Tests.Pvp
         }
 
         [TestMethod]
-        public void BloodFor_ShippedDefaults_Are2_1_1()
+        public void BloodFor_ShippedDefaults_Pay2_1_1()
         {
             var d = PvpTunables.Defaults with { BloodEnabled = true };
 
-            Assert.AreEqual(2, PvpArenaRewards.BloodFor(PvpBloodResult.Win, false, true, false, d));
+            Assert.AreEqual(2, PvpArenaRewards.BloodFor(PvpBloodResult.Win, false, true, false, d), "owner ruling 2026-10-18: arena pays 2 / 1 / 1");
             Assert.AreEqual(1, PvpArenaRewards.BloodFor(PvpBloodResult.Loss, false, true, false, d));
             Assert.AreEqual(1, PvpArenaRewards.BloodFor(PvpBloodResult.Draw, false, true, false, d));
         }

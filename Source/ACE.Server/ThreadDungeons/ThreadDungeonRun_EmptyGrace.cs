@@ -10,25 +10,25 @@ namespace ACE.Server.ThreadDungeons
     /// The landblock PULLS the grace on every heartbeat through EphemeralRealm.UnloadIntervalOverride, and
     /// this side only ever answers "what should it be right now". Nothing is pushed onto the landblock, so
     /// there is no stale override to clear when the run clears or ends: <see cref="UnloadIntervalOverride"/>
-    /// simply turns null and the copy falls back to Landblock.UnloadInterval. A Cleared run therefore keeps
-    /// exactly the behaviour it had before - ThreadDungeonManager.ShouldEnd reaps it 30 seconds after the
-    /// clear once it is empty.
+    /// simply turns null and the copy falls back to Landblock.UnloadInterval. A Cleared run that owes nothing
+    /// therefore keeps exactly the behaviour it had before - ThreadDungeonManager.ShouldEnd reaps it 30 seconds
+    /// after the clear once it is empty.
     ///
-    /// Group Threads (ruling R29 as merged with this mechanism): the empty grace is the ONE empty-copy lifetime
-    /// mechanism for every run. The exception is a Cleared GROUP run that still owes loot
-    /// (<see cref="GroupLootHoldActive"/>): its copy keeps a window - <see cref="ThreadDungeonRun.Group"/>'s
-    /// lock-time LootHold (dynamic_dungeons_group_loot_hold_minutes) - in place of the grace, and ShouldEnd's
-    /// 30-second cleared-and-empty reap stands down for it. The landblock's own idle clock (refreshed by any player
-    /// standing in the copy, and only roster members can be) is what the hold is measured on, so once no member has
-    /// been inside for the hold the copy unloads and the run ends exactly as a live run's does. Uncleared runs and
-    /// group runs owing nothing are untouched.
+    /// The loot hold (Group Threads ruling R29 as merged with this mechanism, extended to solo runs by owner ruling
+    /// 2026-10-10): the empty grace is the ONE empty-copy lifetime mechanism for every run. The exception is a
+    /// Cleared run that still owes loot (<see cref="LootHoldActive"/>, fed by ThreadRunPresence.LootOwed): its
+    /// copy keeps a window - the run's lock-time <see cref="LootHold"/> (dynamic_dungeons_group_loot_hold_minutes,
+    /// for solo and group runs alike) - in place of the grace, and ShouldEnd's 30-second cleared-and-empty reap
+    /// stands down for it. The landblock's own idle clock (refreshed by any player standing in the copy, and only
+    /// roster members can be) is what the hold is measured on, so once no member has been inside for the hold the
+    /// copy unloads and the run ends exactly as a live run's does. Uncleared runs and runs owing nothing are
+    /// untouched.
     ///
-    /// A SOLO run is never held for loot (owner ruling, 2026-09-27): its gem is destroyed at the clear
-    /// (AnnounceCleared -> GemDestroyer, ruling A1), so nobody can re-enter it whatever it still owes, and
-    /// undelivered loot left behind is forfeit at run end. A Cleared solo run therefore falls straight to
-    /// ShouldEnd's cleared-and-empty branch once it is empty and past ClearedGrace, with no countdown warning
-    /// in between (an earlier item 1b fix, 2026-09-22, briefly held a solo run the same way a group run is held;
-    /// this ruling retires that hold rather than extending it).
+    /// A SOLO run's gem survives the clear (owner ruling 2026-10-10, superseding ruling A1 of 2026-09-27, which
+    /// destroyed it at the clear and never held a solo run): an owner who dies to the monsters left behind can
+    /// still come back for their loot. The gem is retired only by the owner's willing exit from the cleared copy
+    /// (<see cref="RetireOwnerGem"/>, see ThreadWillingExit), and a retired gem owes nothing more, so the hold
+    /// releases and the copy reaps as before.
     /// </summary>
     public sealed partial class ThreadDungeonRun
     {
@@ -56,6 +56,42 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         public TimeSpan EmptyGrace { get; set; } = DefaultEmptyGrace;
 
+        /// <summary>
+        /// How long a Cleared copy that still owes loot may stand empty (<see cref="LootHoldActive"/>). Stamped by
+        /// ThreadDungeonManager.TryStart from dynamic_dungeons_group_loot_hold_minutes - a group run's
+        /// <see cref="GroupScaling.LootHold"/>, a solo run's own sanitised read of the same tunable (owner ruling
+        /// 2026-10-10) - and set before the run is published to the registry, the same write-once-before-publication
+        /// convention as <see cref="EmptyGrace"/>, so it MUST NOT be re-assigned after that (landblock threads read it
+        /// without the lock). Zero (the tunable's "no hold") never holds a copy. A run built without TryStart (tests)
+        /// that never sets it reads <see cref="Group"/>'s LootHold: the lock-time hold for a group run, 0 for solo.
+        /// </summary>
+        public TimeSpan LootHold
+        {
+            get => lootHold ?? Group.LootHold;
+            set => lootHold = value;
+        }
+
+        /// <summary>Backing field for <see cref="LootHold"/>; null until stamped.</summary>
+        private TimeSpan? lootHold;
+
+        /// <summary>Set once by <see cref="RetireOwnerGem"/>. Guarded by stateLock.</summary>
+        private bool ownerGemRetired;
+
+        /// <summary>
+        /// Retires the owner's gem: from now on <see cref="IsRunGem"/> no longer knows it, so the sweeper, a lazy
+        /// use (ConsumeDeadGem) and the Fragment Press all treat it as a dead gem, and a SOLO run owes nothing more
+        /// (ThreadRunPresence.LootOwed), so its loot hold releases. Called by Player.Teleport when a solo owner's
+        /// willing exit (ThreadWillingExit) actually leaves the cleared copy. One-way and idempotent.
+        /// </summary>
+        public void RetireOwnerGem()
+        {
+            lock (stateLock)
+                ownerGemRetired = true;
+        }
+
+        /// <summary>See <see cref="RetireOwnerGem"/>.</summary>
+        public bool IsOwnerGemRetired { get { lock (stateLock) return ownerGemRetired; } }
+
         /// <summary>How many of <see cref="GraceWarningThresholds"/> have already been announced. Guarded by stateLock.</summary>
         private int graceWarningsFired;
 
@@ -64,69 +100,124 @@ namespace ACE.Server.ThreadDungeons
         /// Starting or Active, null (the landblock default) for Cleared and Ended.
         /// </summary>
         internal static TimeSpan? ResolveUnloadInterval(ThreadDungeonRunState state, TimeSpan grace)
-            => ResolveUnloadInterval(state, grace, groupLootHeld: false, lootHold: TimeSpan.Zero);
+            => ResolveUnloadInterval(state, grace, lootHeld: false, lootHold: TimeSpan.Zero);
 
         /// <summary>
         /// The floor the empty grace tunable is clamped to (ThreadDungeonManager.EmptyGraceMinutesMin, the ordinary
-        /// landblock UnloadInterval). A positive group loot hold is clamped to it too, so a held copy never unloads
+        /// landblock UnloadInterval). A positive loot hold is clamped to it too, so a held copy never unloads
         /// faster than master's grace allows.
         /// </summary>
         internal static readonly TimeSpan EmptyWindowFloor = TimeSpan.FromMinutes(ThreadDungeonManager.EmptyGraceMinutesMin);
 
         /// <summary>
-        /// The idle window with the Group Threads hold folded in: the grace while Starting or Active; the
+        /// The idle window with the loot hold folded in: the grace while Starting or Active; the
         /// <paramref name="lootHold"/>, raised to <see cref="EmptyWindowFloor"/>, for a Cleared run whose
-        /// <paramref name="groupLootHeld"/> is set (see <see cref="GroupLootHoldActive"/>, which already requires a
-        /// positive hold); null otherwise. With <paramref name="groupLootHeld"/> false this is exactly the
-        /// two-argument form. This is the single site where the hold replaces the grace, and so the single clamp.
+        /// <paramref name="lootHeld"/> is set (see <see cref="LootHoldActive"/>, which already requires a
+        /// positive hold); null otherwise. With <paramref name="lootHeld"/> false this is exactly the
+        /// two-argument form. Exactly the six-argument form with no PvP hold.
         /// </summary>
-        internal static TimeSpan? ResolveUnloadInterval(ThreadDungeonRunState state, TimeSpan grace, bool groupLootHeld, TimeSpan lootHold)
+        internal static TimeSpan? ResolveUnloadInterval(ThreadDungeonRunState state, TimeSpan grace, bool lootHeld, TimeSpan lootHold)
+            => ResolveUnloadInterval(state, grace, lootHeld, lootHold, pvpHeld: false, pvpHold: TimeSpan.Zero);
+
+        /// <summary>
+        /// The idle window with both holds folded in. First the window the run has without a PvP hold: the grace while Starting or
+        /// Active; the <paramref name="lootHold"/> for a Cleared run whose <paramref name="lootHeld"/> is set (see
+        /// <see cref="LootHoldActive"/>, which already requires a positive hold); null otherwise. Then the PvP hold (Docs/Pvp/
+        /// BATTLEGROUNDS.md "Pulled from a Thread"): while <paramref name="pvpHeld"/> is set (a member pulled into a PvP match is away,
+        /// ThreadPvpAway) with a positive <paramref name="pvpHold"/>, the window is that hold whenever it is longer than (or replaces
+        /// the absence of) the window above, for any state but Ended. Every window that is a HOLD (loot or PvP) is raised to
+        /// <see cref="EmptyWindowFloor"/>; the grace is clamped where it is read. This is the single site where a hold replaces the
+        /// grace, and so the single clamp, for both holds.
+        /// </summary>
+        internal static TimeSpan? ResolveUnloadInterval(ThreadDungeonRunState state, TimeSpan grace, bool lootHeld, TimeSpan lootHold, bool pvpHeld, TimeSpan pvpHold)
         {
+            if (state == ThreadDungeonRunState.Ended)
+                return null;
+
+            TimeSpan? window = null;
+            var isHold = false;
+
             if (state == ThreadDungeonRunState.Starting || state == ThreadDungeonRunState.Active)
-                return grace;
+                window = grace;
+            else if (state == ThreadDungeonRunState.Cleared && lootHeld && lootHold > TimeSpan.Zero)
+            {
+                window = lootHold;
+                isHold = true;
+            }
 
-            if (state == ThreadDungeonRunState.Cleared && groupLootHeld && lootHold > TimeSpan.Zero)
-                return lootHold < EmptyWindowFloor ? EmptyWindowFloor : lootHold;
+            if (pvpHeld && pvpHold > TimeSpan.Zero && (window == null || pvpHold > window.Value))
+            {
+                window = pvpHold;
+                isHold = true;
+            }
 
-            return null;
+            if (isHold && window.Value < EmptyWindowFloor)
+                return EmptyWindowFloor;
+
+            return window;
         }
 
         /// <summary>
-        /// Is a run's copy on the Group Threads loot hold? A Cleared GROUP run that still owes loot
-        /// (ThreadRunPresence.GroupLootOwed) with a positive lock-time hold. Always false for a solo run (never
-        /// held for loot, owner ruling 2026-09-27), an uncleared run, a run owing nothing, or a hold of 0 (the
-        /// tunable's "no hold").
+        /// Is a run's copy on the loot hold? A Cleared run, solo or group, that still owes loot
+        /// (<paramref name="lootOwed"/>, ThreadRunPresence.LootOwed) with a positive lock-time hold. False for an
+        /// uncleared run, a run owing nothing (a solo run whose owner gem is retired owes nothing), or a hold of 0
+        /// (the tunable's "no hold"). The solo/group difference lives entirely in what LootOwed counts as owed.
         /// </summary>
-        internal static bool GroupLootHoldActive(ThreadDungeonRunState state, bool isGroup, bool groupLootOwed, TimeSpan lootHold)
-            => isGroup && state == ThreadDungeonRunState.Cleared && groupLootOwed && lootHold > TimeSpan.Zero;
+        internal static bool LootHoldActive(ThreadDungeonRunState state, bool lootOwed, TimeSpan lootHold)
+            => state == ThreadDungeonRunState.Cleared && lootOwed && lootHold > TimeSpan.Zero;
 
         /// <summary>
-        /// The last <see cref="GroupLootHoldActive"/> answer, stored by ThreadDungeonManager.Tick on the world
-        /// thread each reap pass so the landblock heartbeat can read it without computing GroupLootOwed (which
+        /// The last <see cref="LootHoldActive"/> answer, stored by ThreadDungeonManager.Tick on the world
+        /// thread each reap pass so the landblock heartbeat can read it without computing LootOwed (which
         /// reads placed caches) on a landblock thread. Up to one reap interval stale, in either direction; the
         /// reap decision itself always uses a fresh value. Guarded by stateLock.
         /// </summary>
-        private bool groupLootHeld;
+        private bool lootHeld;
 
-        /// <summary>See <see cref="groupLootHeld"/>.</summary>
-        public bool IsGroupLootHeld { get { lock (stateLock) return groupLootHeld; } }
+        /// <summary>See <see cref="lootHeld"/>.</summary>
+        public bool IsLootHeld { get { lock (stateLock) return lootHeld; } }
 
-        /// <summary>Stores the reap pass's <see cref="GroupLootHoldActive"/> answer (always false for a solo run). Only ThreadDungeonManager.Tick calls it.</summary>
-        public void SetGroupLootHeld(bool held)
+        /// <summary>Stores the reap pass's <see cref="LootHoldActive"/> answer. Only ThreadDungeonManager.Tick calls it.</summary>
+        public void SetLootHeld(bool held)
         {
             lock (stateLock)
-                groupLootHeld = held;
+                lootHeld = held;
         }
 
         /// <summary>
-        /// Read from the landblock heartbeat, on a landblock thread. Takes stateLock (through State and
-        /// IsGroupLootHeld) and nothing else, and nothing that holds stateLock ever takes a landblock lock, so
-        /// there is no ordering to get wrong. Group is immutable after construction. <see cref="Group"/>'s
-        /// LootHold is 0 for a solo run (GroupScaling.Solo), which is moot: IsGroupLootHeld can never be true for
-        /// one (GroupLootHoldActive requires isGroup), so a solo run's window always resolves through
-        /// ResolveUnloadInterval's uncleared/null cases, never through the hold.
+        /// The PvP hold (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): the window ThreadPvpAway.HeldWindow gave on the last reap
+        /// pass, or null when no away member holds the copy. Stored by ThreadDungeonManager.Tick on the world thread next to
+        /// <see cref="lootHeld"/>, the same shape and the same staleness (up to one reap interval). Guarded by stateLock.
         /// </summary>
-        public TimeSpan? UnloadIntervalOverride => ResolveUnloadInterval(State, EmptyGrace, IsGroupLootHeld, Group.LootHold);
+        private TimeSpan? pvpHeldWindow;
+
+        /// <summary>See <see cref="pvpHeldWindow"/>.</summary>
+        public TimeSpan? PvpHeldWindow { get { lock (stateLock) return pvpHeldWindow; } }
+
+        /// <summary>True while an away member's PvP hold holds the copy (<see cref="PvpHeldWindow"/> is set).</summary>
+        public bool IsPvpHeld => PvpHeldWindow.HasValue;
+
+        /// <summary>Stores the reap pass's ThreadPvpAway.HeldWindow answer. Only ThreadDungeonManager.Tick calls it.</summary>
+        public void SetPvpHeld(TimeSpan? window)
+        {
+            lock (stateLock)
+                pvpHeldWindow = window;
+        }
+
+        /// <summary>
+        /// Read from the landblock heartbeat, on a landblock thread. Takes stateLock (through State,
+        /// IsLootHeld and PvpHeldWindow) and nothing else, and nothing that holds stateLock ever takes a landblock lock, so
+        /// there is no ordering to get wrong. <see cref="LootHold"/> is write-once before publication, so it is
+        /// read without the lock.
+        /// </summary>
+        public TimeSpan? UnloadIntervalOverride
+        {
+            get
+            {
+                var pvp = PvpHeldWindow;
+                return ResolveUnloadInterval(State, EmptyGrace, IsLootHeld, LootHold, pvp.HasValue, pvp ?? TimeSpan.Zero);
+            }
+        }
 
         /// <summary>
         /// Who the empty-grace warning goes to (the merged ruling: "whoever is relevant"), in roster order, with
@@ -285,5 +376,12 @@ namespace ACE.Server.ThreadDungeons
         /// sentence: using the gem is still how they get back in, and saying nothing would imply they cannot.
         /// </summary>
         internal static bool GemCanReEnter(bool gemFound, int structure) => !gemFound || structure > 0;
+
+        /// <summary>
+        /// <see cref="GemCanReEnter(bool, int)"/> with the cleared-solo return folded in (owner ruling 2026-10-10):
+        /// re-entering a Cleared SOLO run is free (DungeonGemRules.IsClearedSoloReturn), so its gem can always step
+        /// back in, whatever its entry count.
+        /// </summary>
+        internal static bool GemCanReEnter(bool gemFound, int structure, bool clearedSoloReturn) => clearedSoloReturn || GemCanReEnter(gemFound, structure);
     }
 }

@@ -34,3 +34,7 @@ tools/suit-catalog/suit-catalog.json text eol=lf
 tools/loot-catalog/loot-catalog.json text eol=lf
 tools/loot-catalog/item-names.tsv text eol=lf
 tools/loot-catalog/material-names.tsv text eol=lf
+tools/loot-catalog/dreamweave-items.tsv text eol=lf
+
+# Generated and drift-compared by loot-catalog; byte-stable across platforms
+tools/loot-catalog/loot-palettes.json text eol=lf

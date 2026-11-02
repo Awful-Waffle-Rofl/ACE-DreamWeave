@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="ACE.Server.Tests" />
+    <InternalsVisibleTo Include="ACE.Content.Tools" />
   </ItemGroup>
 
   <ItemGroup>
@@ -202,6 +203,10 @@
       <Link>Content\dungeons\dynamic\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\Content\dungeons\dynamic\outdoor\*.json">
+      <Link>Content\dungeons\dynamic\outdoor\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
@@ -307,10 +312,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
+    <PackageReference Include="Lib.Harmony" Version="2.4.3" />
     <PackageReference Include="log4net" Version="2.0.17" />
     <PackageReference Include="Log4Net.Async.Standard" Version="3.1.0" />
-    <PackageReference Include="MaxMind.Db" Version="4.3.4" />
+    <PackageReference Include="MaxMind.Db" Version="5.2.0" />
     <PackageReference Include="McMaster.NETCore.Plugins" Version="2.0.0" />
     <PackageReference Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>

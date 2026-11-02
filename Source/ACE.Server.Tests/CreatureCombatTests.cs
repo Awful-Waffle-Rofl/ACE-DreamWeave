@@ -270,12 +270,12 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Arcane Defender stays stance-bound: only an EQUIPPED SHIELD counts in peace mode. A wand-only Arcane Defender
+        /// Defensive Weapon (formerly Arcane Defender) stays stance-bound: only an EQUIPPED SHIELD counts in peace mode. A wand-only Defensive Weapon
         /// player gets 1.0 in NonCombat even with shield_applies_in_noncombat on, and the same player in a combat
         /// stance is deflecting (the branch is live, so the NonCombat 1.0 is the gate and not an inert setup).
         /// </summary>
         [TestMethod]
-        public void ArcaneDefender_NoShield_StaysStanceBound_EvenWithTheShieldSettingOn()
+        public void DefensiveWeapon_NoShield_StaysStanceBound_EvenWithTheShieldSettingOn()
         {
             var attacker = TestCreatures.CreateAttacker();
 
@@ -284,7 +284,7 @@ namespace ACE.Server.Tests
                 WeenieClassId = 991200,
                 WeenieType = WeenieType.Caster,
                 PropertiesInt = new Dictionary<PropertyInt, int> { { PropertyInt.CurrentWieldedLocation, (int)EquipMask.Held } },
-                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.WeaponModArcaneDefender, 1.0 } },
+                PropertiesFloat = new Dictionary<PropertyFloat, double> { { PropertyFloat.WeaponModDefensiveWeapon, 1.0 } },
             };
 
             var wasEnabled = PropertyManager.GetBool("weapon_mods_enabled").Item;
@@ -310,7 +310,7 @@ namespace ACE.Server.Tests
 
                 WithShieldSetting(true, () =>
                 {
-                    Assert.IsTrue(Mod(CombatMode.Melee) < 1.0f, "sanity: the Arcane Defender branch deflects in a combat stance");
+                    Assert.IsTrue(Mod(CombatMode.Melee) < 1.0f, "sanity: the Defensive Weapon branch deflects in a combat stance");
                     Assert.AreEqual(1.0f, Mod(CombatMode.NonCombat), "no shield, so peace mode is unchanged");
                 });
             }

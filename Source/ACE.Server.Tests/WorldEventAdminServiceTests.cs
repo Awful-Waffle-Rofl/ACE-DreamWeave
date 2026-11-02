@@ -428,6 +428,41 @@ namespace ACE.Server.Tests
         private static List<string> SourceIds(JsonElement catalog) =>
             catalog.GetProperty("sources").EnumerateArray().Select(s => s.GetProperty("id").GetString()).ToList();
 
+        private static List<string> GoalIds(JsonElement catalog) =>
+            catalog.GetProperty("goals").EnumerateArray().Select(g => g.GetProperty("id").GetString()).ToList();
+
+        /// <summary>
+        /// World Events Hold H6: the catalog's goals are the goals its (web-startable) sources offer, so a goal listed only by
+        /// a non-web source (defend_envoys, on ambush) is never a dead choice in the panel.
+        /// </summary>
+        [TestMethod]
+        public void Catalog_ListsOnlyTheGoalsItsSourcesOffer()
+        {
+            const string goals = @"{ ""goals"": [
+                { ""id"": ""kill_count"", ""displayName"": ""Kill Count"", ""type"": ""KillCount"",
+                  ""count"": { ""base"": 20, ""perParticipant"": 6, ""cap"": 150 }, ""holdSeconds"": 0,
+                  ""mvpRule"": ""mostKills"", ""progressTemplate"": ""{killed} of {target} slain."" },
+                { ""id"": ""lonely"", ""displayName"": ""Lonely"", ""type"": ""KillCount"",
+                  ""count"": { ""base"": 20, ""perParticipant"": 6, ""cap"": 150 }, ""holdSeconds"": 0,
+                  ""mvpRule"": ""mostKills"", ""progressTemplate"": ""{killed} of {target} slain."" },
+                { ""id"": ""kill_boss"", ""displayName"": ""Slay the Champion"", ""type"": ""KillBoss"",
+                  ""holdSeconds"": 0, ""mvpRule"": ""killingBlowAndTopDamage"",
+                  ""progressTemplate"": ""The champion still stands."" } ] }";
+
+            string SourcesWith(bool? ambushWeb) => "{ \"sources\": [ " + string.Join(", ",
+                Source("ambush", "edges", 45.0, "\"kill_count\", \"lonely\"", ambushWeb),
+                Source("element_portal_fire", "disc", 10.0, "\"kill_count\", \"kill_boss\"", null)) + " ] }";
+
+            WorldEventManager.InitializeWith(() => (WorldEventAxisStore.Parse(SourcesWith(false), Families, goals, Rewards, null, Bosses), Catalog()));
+
+            var ids = GoalIds(Parse(Service().Catalog().Body));
+            CollectionAssert.AreEquivalent(new[] { "kill_count", "kill_boss" }, ids, "lonely is offered only by the non-web ambush");
+
+            WorldEventManager.InitializeWith(() => (WorldEventAxisStore.Parse(SourcesWith(null), Families, goals, Rewards, null, Bosses), Catalog()));
+
+            CollectionAssert.Contains(GoalIds(Parse(Service().Catalog().Body)), "lonely", "a web-startable source offering it puts it back");
+        }
+
         [TestMethod]
         public void Catalog_CarriesLimitsFromTheSharedConstants_AndTheAutoBoss()
         {
@@ -583,6 +618,57 @@ namespace ACE.Server.Tests
             StringAssert.Contains(legacyError, "already running");
         }
 
+        /// <summary>
+        /// World Events Hold H0: TryStart applies the goal's start-spot rule after composing and before building the run. A
+        /// rule that refuses ends the start as CompositionFailed with the rule's own error, and no run is current.
+        /// </summary>
+        [TestMethod]
+        public void TryStart_StartSpotRuleRefuses_IsCompositionFailed_WithTheRulesError()
+        {
+            var request = new WorldEventRequest
+            {
+                SourceId = "element_portal_fire", FamilyId = "emberwrought", GoalId = "kill_count",
+                AnchorPosition = new Position(ZaikhalCell, 96, 96, 124, 0, 0, 0, 1, 0), TeaserLeadSeconds = 60
+            };
+
+            var asked = new List<string>();
+            var prior = ACE.Server.WorldEvents.Objectives.WorldEventObjectiveFactory.StartSpotRuleOverride;
+
+            ACE.Server.WorldEvents.Objectives.WorldEventObjectiveFactory.StartSpotRuleOverride = goal =>
+            {
+                asked.Add(goal?.Id);
+                return new RefusingStartSpotRule();
+            };
+
+            try
+            {
+                Assert.IsFalse(WorldEventManager.TryStart(request, out var evt, out var error, out var refusal));
+                Assert.AreEqual(WorldEventStartRefusal.CompositionFailed, refusal);
+                Assert.AreEqual(RefusingStartSpotRule.Error, error);
+                Assert.IsNull(evt);
+                Assert.IsNull(WorldEventManager.Current, "a refused start builds no run");
+                CollectionAssert.AreEqual(new List<string> { "kill_count" }, asked, "asked once, for the composed goal");
+            }
+            finally
+            {
+                ACE.Server.WorldEvents.Objectives.WorldEventObjectiveFactory.StartSpotRuleOverride = prior;
+            }
+
+            // Control: with the seam restored, the same request starts.
+            Assert.IsTrue(WorldEventManager.TryStart(request, out _, out var okError, out _), okError);
+        }
+
+        private sealed class RefusingStartSpotRule : ACE.Server.WorldEvents.Objectives.IWorldEventStartSpotRule
+        {
+            public const string Error = "no open ground near the anchor (test rule)";
+
+            public bool TryResolve(WorldEventComposition composition, WorldEventRequest request, out string error)
+            {
+                error = Error;
+                return false;
+            }
+        }
+
         [TestMethod]
         public void Start_Disabled_IsWorldEventsDisabled_EnabledStarts()
         {
@@ -652,6 +738,84 @@ namespace ACE.Server.Tests
         {
             var started = Parse(Service().Start(Body(teaser: null), Account).Body);
             Assert.AreEqual(180, started.GetProperty("teaser_seconds").GetInt32());
+        }
+
+        // ---- hazard (HAZARDS-PLAN B2) ----
+
+        [TestMethod]
+        public void Catalog_PublishesTheHazardWords()
+        {
+            var hazards = Parse(Service().Catalog().Body).GetProperty("hazards").EnumerateArray().Select(h => h.GetString()).ToList();
+
+            CollectionAssert.AreEqual(new[] { "random", "none", "wisps", "balls", "rain" }, hazards);
+        }
+
+        [TestMethod]
+        public void Hazard_Absent_MapsToNull_SourceDefault_BlankToo()
+        {
+            foreach (var raw in new string[] { null, "", "   " })
+            {
+                var body = Body();
+                body.Hazard = raw;
+
+                Assert.IsNull(WorldEventAdminService.TryBuildRequest(body, Store(), RealmZeroOnly, 180, "t", out var request, out _));
+                Assert.IsNull(request.Hazard, $"'{raw}' is absent");
+            }
+        }
+
+        [TestMethod]
+        public void Hazard_EachWord_IsAccepted_CaseInsensitive_AndNormalizedToLower()
+        {
+            foreach (var word in new[] { "random", "none", "wisps", "balls", "rain" })
+            {
+                foreach (var spelled in new[] { word, word.ToUpperInvariant(), " " + word + " " })
+                {
+                    var body = Body();
+                    body.Hazard = spelled;
+
+                    Assert.IsNull(WorldEventAdminService.TryBuildRequest(body, Store(), RealmZeroOnly, 180, "t", out var request, out _), spelled);
+                    Assert.AreEqual(word, request.Hazard);
+                }
+            }
+        }
+
+        [TestMethod]
+        public void Hazard_Invalid_IsRefused_WithAReasonNamingTheAllowedValues()
+        {
+            var body = Body();
+            body.Hazard = "lava";
+
+            var refused = WorldEventAdminService.TryBuildRequest(body, Store(), RealmZeroOnly, 180, "t", out var request, out _);
+
+            Assert.IsNotNull(refused);
+            Assert.AreEqual(MarketError.WorldEventRefused, refused.Error);
+            Assert.IsNull(request);
+
+            foreach (var word in new[] { "random", "none", "wisps", "balls", "rain" })
+                StringAssert.Contains(refused.Reason, word);
+
+            var service = Service();
+            Assert.AreEqual(MarketError.WorldEventRefused, service.Start(body, Account).Error);
+            Assert.AreEqual(MarketError.WorldEventRefused, service.Preview(body).Error);
+            Assert.IsNull(WorldEventManager.Current, "a refused hazard stages nothing");
+        }
+
+        [TestMethod]
+        public void Hazard_OnTheWire_IsReadFromTheHazardJsonField()
+        {
+            var body = JsonSerializer.Deserialize<WorldEventStartBody>("{\"hazard\":\"Rain\"}", MarketApiHost.Json);
+
+            Assert.AreEqual("Rain", body.Hazard);
+        }
+
+        [TestMethod]
+        public void Start_WithAHazard_ReachesTheRun()
+        {
+            var body = Body();
+            body.Hazard = "NONE";
+
+            Assert.AreEqual(MarketError.None, Service().Start(body, Account).Error);
+            Assert.AreEqual("none", WorldEventManager.Current.Request.Hazard);
         }
 
         [TestMethod]

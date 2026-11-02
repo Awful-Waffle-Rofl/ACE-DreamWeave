@@ -133,7 +133,7 @@ namespace ACE.Server.Tests
                 "sources.json should ship ambush + rift + sky_rift + weave_spiral + the five element_portal_* themes (WP-21)");
             Assert.AreEqual(11, store.Families.Count, "families.json should ship the testclone smoke family plus the ten boss species");
             Assert.AreEqual(12, store.Bosses.Count, "the two built-in entries plus the ten named bosses from bosses.json");
-            Assert.AreEqual(3, store.Goals.Count, "goals.json should ship kill_count, destroy_source, kill_boss");
+            Assert.AreEqual(4, store.Goals.Count, "goals.json should ship kill_count, destroy_source, kill_boss, defend_envoys");
             Assert.AreEqual(1, store.Rewards.Count, "rewards.json should ship the standard reward");
             Assert.AreEqual(0, store.Anchors.Count, "anchors.json is empty in v1");
             CollectionAssert.AreEqual(Array.Empty<string>(), store.Diagnostics.ToArray(), "shipped files should validate clean");
@@ -1046,7 +1046,7 @@ namespace ACE.Server.Tests
             var store = WorldEventAxisStore.Parse(brokenSources, families, goals, rewards, anchors);
 
             Assert.AreEqual(0, store.Sources.Count, "the malformed axis loads empty");
-            Assert.AreEqual(3, store.Goals.Count, "the other axes still load");
+            Assert.AreEqual(4, store.Goals.Count, "the other axes still load");
             Assert.AreEqual(1, store.Rewards.Count);
             Assert.AreEqual(11, store.Families.Count);
             Assert.IsTrue(store.Diagnostics.Any(d => d.Contains("sources.json") && d.Contains("malformed")));
@@ -1159,6 +1159,88 @@ namespace ACE.Server.Tests
             Assert.AreEqual("none", reason);
         }
 
+        // ---- presence arena + reward pool ---------------------------------------------------------------
+
+        [TestMethod]
+        public void Arena_ParsesAndKeepsDefaults()
+        {
+            var store = WorldEventAxisStore.Parse(PlainSource(@"""arena"": { ""radius"": 40.0, ""ringWcid"": 1002, ""ringDz"": 0.5 },"), null, null, null, null);
+            var arena = store.Sources["plain"].Arena;
+
+            Assert.IsNotNull(arena);
+            Assert.AreEqual(40f, arena.Radius);
+            Assert.AreEqual(0f, arena.HalfHeight);
+            Assert.AreEqual(1002u, arena.RingWcid);
+            Assert.AreEqual(10f, arena.RingSpacing);
+            Assert.AreEqual(12, arena.RingMin);
+            Assert.AreEqual(40, arena.RingMax);
+            Assert.AreEqual(1.0f, arena.RingScale);
+            Assert.AreEqual(0.5f, arena.RingDz);
+            Assert.AreEqual(60f, arena.ProbeHeight);
+            Assert.AreEqual(0, store.Diagnostics.Count);
+        }
+
+        [TestMethod]
+        public void Arena_Absent_IsNull()
+        {
+            Assert.IsNull(WorldEventAxisStore.Parse(PlainSource(""), null, null, null, null).Sources["plain"].Arena);
+        }
+
+        [DataTestMethod]
+        [DataRow(@"""radius"": -1")]
+        [DataRow(@"""halfHeight"": -2")]
+        [DataRow(@"""ringSpacing"": 0")]
+        [DataRow(@"""ringMin"": 0")]
+        [DataRow(@"""ringMin"": 20, ""ringMax"": 10")]
+        [DataRow(@"""ringScale"": 0")]
+        [DataRow(@"""probeHeight"": 0")]
+        public void BadArena_IsDropped_ThemeKept(string body)
+        {
+            var store = WorldEventAxisStore.Parse(PlainSource(@"""arena"": { " + body + @" },"), null, null, null, null);
+
+            Assert.IsTrue(store.Sources.ContainsKey("plain"), "the theme is kept");
+            Assert.IsNull(store.Sources["plain"].Arena);
+            Assert.AreEqual(1, store.Diagnostics.Count(d => d.Contains("plain") && d.Contains("arena")));
+        }
+
+        private static string RewardWithPool(string pool) => @"{ ""rewards"": [ {
+                ""id"": ""r"", ""displayName"": ""R"", ""successCrateWcid"": 1, ""consolationCrateWcid"": 2, ""cacheWcid"": 3,
+                ""participantsPerCache"": 5, ""claimWindowSeconds"": 60, ""pool"": " + pool + @"
+            } ] }";
+
+        [TestMethod]
+        public void RewardPool_ValidEntriesKept_BadEntriesDropped()
+        {
+            var store = WorldEventAxisStore.Parse(null, null, null, RewardWithPool(@"[
+                { ""wcid"": 10, ""qty"": 10, ""weight"": 5, ""scale"": ""stack"" },
+                { ""wcid"": 11, ""qty"": 1, ""weight"": 5, ""scale"": ""CHANCE"" },
+                { ""wcid"": 12, ""qty"": 1, ""weight"": 5, ""scale"": ""bags"", ""bagWcid"": 99 },
+                { ""wcid"": 13, ""qty"": 1, ""weight"": 5, ""scale"": ""bogus"" },
+                { ""wcid"": 14, ""qty"": 0, ""weight"": 5, ""scale"": ""stack"" },
+                { ""wcid"": 15, ""qty"": 1, ""weight"": 0, ""scale"": ""stack"" },
+                { ""wcid"": 16, ""qty"": 1, ""weight"": 5, ""scale"": ""bags"" },
+                { ""wcid"": 0, ""qty"": 1, ""weight"": 5, ""scale"": ""stack"" },
+                null
+            ]"), null);
+
+            Assert.IsTrue(store.Rewards.ContainsKey("r"), "the reward profile is kept");
+
+            var pool = store.Rewards["r"].Pool;
+            CollectionAssert.AreEqual(new uint[] { 10, 11, 12 }, pool.Select(e => e.Wcid).ToArray());
+            Assert.AreEqual("chance", pool[1].Scale, "scale is normalised to lower case");
+            Assert.AreEqual(10, pool[2].BagsPerUnit);
+            Assert.AreEqual(6, store.Diagnostics.Count(d => d.Contains("pool entry")));
+        }
+
+        [TestMethod]
+        public void RewardPool_Absent_IsEmpty()
+        {
+            var store = WorldEventAxisStore.Parse(null, null, null, @"{ ""rewards"": [ {
+                ""id"": ""r"", ""displayName"": ""R"", ""successCrateWcid"": 1, ""consolationCrateWcid"": 2, ""cacheWcid"": 3,
+                ""participantsPerCache"": 5, ""claimWindowSeconds"": 60 } ] }", null);
+
+            Assert.AreEqual(0, store.Rewards["r"].Pool.Count);
+        }
         [TestMethod]
         public void ResolveFolder_ExpandsLeadingDotContentFolder()
         {

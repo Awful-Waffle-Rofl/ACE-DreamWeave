@@ -78,7 +78,7 @@ namespace ACE.Server.ClassAbilities
         /// </summary>
         VoucherApply,
 
-        /// <summary>Player_ClassAbilityTokens.cs:249, in RefundUnusedVoucher (Player_ClassAbilityTokens.cs:205) - refunds an unused, still-live voucher's rank cost to Available.</summary>
+        /// <summary>Player_ClassAbilityTokens.cs:249, in RefundUnusedVoucher (Player_ClassAbilityTokens.cs:205) - refunds an unused, still-live voucher's rank cost to Available. Also written by Player.ApplyClassAbilityRepricing for each carried token the reprice migration takes back, at the token's old price. A sink reason (IsSinkReason), so it nets the purchase it undoes.</summary>
         VoucherRefund,
 
         /// <summary>Player_ClassAbilityTokens.cs:291, in TryRefundRetiredVoucher (Player_ClassAbilityTokens.cs:271) - refunds an unused voucher for an ability that has since been retired, priced from RetiredClassAbilities.</summary>
@@ -132,6 +132,17 @@ namespace ACE.Server.ClassAbilities
         /// ordinal and the column stores ToCode's string anyway, so no already-written row moves.
         /// </summary>
         OverhaulRespec,
+
+        /// <summary>
+        /// The Blood Mage reprice wave (Player.ApplyClassAbilityRepricing, guarded per character by
+        /// PropertyInt.ClassAbilityRepriceWave), for a character the wave touches: one zero-delta row
+        /// per unlearned ability (rank_After 0), and ONE row carrying the rest of the points recompute's
+        /// delta, written even when that is 0. Each carried token it takes back is a separate
+        /// <see cref="VoucherRefund"/> row crediting the token's old price, so SinkSpend nets it.
+        /// Appended at the END, matching OverhaulRespec's reasoning: every existing member keeps its
+        /// ordinal and the column stores ToCode's string anyway.
+        /// </summary>
+        Reprice,
     }
 
     /// <summary>
@@ -166,6 +177,7 @@ namespace ACE.Server.ClassAbilities
                 case CapLedgerReason.AdminCorrect: return "admin_correct";
                 case CapLedgerReason.GrantItem: return "grant_item";
                 case CapLedgerReason.OverhaulRespec: return "overhaul_respec";
+                case CapLedgerReason.Reprice: return "reprice";
                 default:
                     throw new ArgumentOutOfRangeException(nameof(reason), reason, "no reason code mapped for this CapLedgerReason member");
             }
@@ -201,18 +213,25 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
-        /// True for exactly the reasons that debit Available WITHOUT touching Total: buying a
-        /// prepaid training voucher (<see cref="CapLedgerReason.VoucherBuy"/>) and a vendor
-        /// alternate-currency debit (<see cref="CapLedgerReason.VendorDebit"/>). Both of those
-        /// spends' refund counterparts (VoucherRefund, VoucherRefundRetired) credit Available back
-        /// on the same character, so they are already netted out by summing delta_Available over
-        /// the ledger - they do not need their own entry here. Every other reason either changes
-        /// Total alongside Available (grants) or is priced by OwnedCost (Learn/Unlearn/Respec/
-        /// SweepRetired), so it is not a "sink" in this sense.
+        /// True for exactly the reasons that move Available WITHOUT touching Total and without
+        /// moving a rank: buying a prepaid training voucher (<see cref="CapLedgerReason.VoucherBuy"/>),
+        /// a vendor alternate-currency debit (<see cref="CapLedgerReason.VendorDebit"/>, whose own
+        /// failed-instant-learn refund is a positive VendorDebit row), and the two refunds that undo a
+        /// voucher purchase (<see cref="CapLedgerReason.VoucherRefund"/> at the exchanger or the
+        /// reprice migration's token take-back, <see cref="CapLedgerReason.VoucherRefundRetired"/> for a
+        /// retired ability's token).
+        ///
+        /// THE REFUNDS MUST BE HERE. SinkSpend sums delta_Available over these reasons only, so a refund
+        /// left out would raise Available while the purchase it undoes still counted as spent: earned
+        /// 10, voucher_buy -3, refund +3 reads unexplained -3 instead of 0. Netting them makes SinkSpend
+        /// the points still sunk in tokens the character has not applied or returned. Every other reason
+        /// either changes Total alongside Available (grants) or is priced by OwnedCost (Learn/Unlearn/
+        /// Respec/SweepRetired), so it is not a "sink" in this sense.
         /// </summary>
         public static bool IsSinkReason(CapLedgerReason reason)
         {
-            return reason == CapLedgerReason.VoucherBuy || reason == CapLedgerReason.VendorDebit;
+            return reason == CapLedgerReason.VoucherBuy || reason == CapLedgerReason.VendorDebit
+                || reason == CapLedgerReason.VoucherRefund || reason == CapLedgerReason.VoucherRefundRetired;
         }
 
         /// <summary>

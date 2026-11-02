@@ -173,11 +173,12 @@ namespace ACE.Server.WorldEvents
         /// never does: it is the thing being sized, so counting it would let a boss's own health inflate the
         /// rate that sizes the next one. Decor and spawn-time npcs never do either; an npc cannot even reach
         /// the death hook (WorldEventSpawner.Adopt withholds its P_WorldEvent back-reference), and this is
-        /// belt and braces for both.
+        /// belt and braces for both. A friendly the run placed for the players to defend
+        /// (<paramref name="isFriendly"/>) never counts: losing one is not something the group cleared.
         /// </summary>
-        public static bool Counts(uint guid, uint bossGuid, bool isDecor, bool isNpc)
+        public static bool Counts(uint guid, uint bossGuid, bool isDecor, bool isNpc, bool isFriendly = false)
         {
-            if (guid == 0 || isDecor || isNpc)
+            if (guid == 0 || isDecor || isNpc || isFriendly)
                 return false;
 
             return guid != bossGuid;

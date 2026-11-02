@@ -146,20 +146,28 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.BerserkerTraining,
             EnhancedStatAbility.ClassIdForSkill(Skill.TwoHandedCombat),
             EnhancedStatAbility.ClassIdForAttribute(PropertyAttribute.Strength),
-            ClassAbilityId.SavageBlows,
-            ClassAbilityId.BloodFury,     // RETIRED 2026-08-17 (Berserker/Rogue balance pass): slot RESERVED
+            ClassAbilityId.SavageBlows,   // RETIRED 2026-10-24 (Berserker pass): slot RESERVED at index 39
+                                          // so every later token wcid stays stable; it is unregistered, so the
+                                          // offering generators below skip it.
+            ClassAbilityId.BloodFury,    // RETIRED 2026-08-17 (Berserker/Rogue balance pass): slot RESERVED
                                           // at index 40 so every later token wcid stays stable; it is
                                           // unregistered, so the offering generators below skip it.
             ClassAbilityId.Executioner,
-            EnhancedStatAbility.ClassIdForVital(PropertyAttribute2nd.MaxStamina),
+            EnhancedStatAbility.ClassIdForVital(PropertyAttribute2nd.MaxStamina),   // RETIRED 2026-10-24
+                                          // (Berserker pass): slot RESERVED at index 42 so every later token
+                                          // wcid stays stable; EnhancedStatAbility.GenerateAll excludes
+                                          // MaxStamina so it is unregistered, and the generators skip it.
             ClassAbilityId.DamageRating,
-            ClassAbilityId.Whirlwind,
+            ClassAbilityId.Whirlwind,     // ranks 2-3 added 2026-10-24 (Berserker pass) mint 1000765-1000766
+                                          // inside this slot's existing 6-wide stride - no renumbering.
             ClassAbilityId.Bloodlust,
             // Archmage
             ClassAbilityId.ArchmageTraining,
             EnhancedStatAbility.ClassIdForSkill(Skill.WarMagic),
             EnhancedStatAbility.ClassIdForAttribute(PropertyAttribute.Focus),
-            ClassAbilityId.FlatCastSpeed,
+            ClassAbilityId.FlatCastSpeed, // RETIRED 2026-10-24 (Archmage pass): slot RESERVED at index 49
+                                          // so every later token wcid stays stable; it is unregistered,
+                                          // so the offering generators below skip it.
             ClassAbilityId.Overchannel,
             EnhancedStatAbility.ClassIdForVital(PropertyAttribute2nd.MaxMana),
             ClassAbilityId.EchoCast,
@@ -245,7 +253,9 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.Opportunist,        // Rogue T1
             ClassAbilityId.RallyingPresence,   // Vanguard T1
             ClassAbilityId.Adrenaline,         // Berserker T1
-            ClassAbilityId.QuickenedCasting,   // Archmage T1
+            ClassAbilityId.QuickenedCasting,   // RETIRED 2026-10-24 (Archmage pass): slot RESERVED at index
+                                               // 96 so every later token wcid stays stable; unregistered, so
+                                               // the offering generators below skip it.
             ClassAbilityId.UmbralSiphon,       // Void/Summon T1
             ClassAbilityId.Hemomancy,          // Blood Mage T1
             ClassAbilityId.Spellweave,         // Spellsword T1
@@ -253,13 +263,33 @@ namespace ACE.Server.ClassAbilities
             ClassAbilityId.KillerInstinct,     // Rogue T3
             ClassAbilityId.KineticCharge,      // Vanguard T1 as of 2026-09-29 (entered at T2 2026-09-12)
             ClassAbilityId.ReflectMagic,       // Vanguard T3
-            ClassAbilityId.Vengeance,          // Berserker T2
+            ClassAbilityId.Vengeance,          // RETIRED 2026-10-24 (Berserker pass): slot RESERVED at index
+                                               // 104 so every later token wcid stays stable; unregistered, so
+                                               // the offering generators below skip it.
             ClassAbilityId.SoulJump,           // Void/Summon T3
             ClassAbilityId.RunicWard,          // Spellsword T2
             // APPENDED 2026-09-29 at index 107, which mints 1002168 for its single rank:
             // WcidOverflowBase 1002000 + (107 - OverflowStartIndex 79) * WcidsPerAbility 6 + (1 - 1).
             // 1002169-1002173 are this slot's unused ranks 2-6 and are NOT free for another ability.
             ClassAbilityId.CloakedInPower,     // Vanguard T2
+            // Berserker pass 2026-10-24: APPENDED at indices 108-110, minted from the overflow block as
+            // WcidOverflowBase 1002000 + (index - 79) * 6 + (tier - 1): Heavy Blows 1002174-1002176,
+            // Intimidate 1002180-1002182, Berserk Rage 1002186-1002188. Each slot's ranks 4-6 are reserved
+            // spare for that ability.
+            ClassAbilityId.HeavyBlows,         // Berserker T2 (the slot Savage Blows vacated)
+            ClassAbilityId.Intimidate,         // Berserker T2 (the slot Vengeance vacated)
+            ClassAbilityId.BerserkRage,        // Berserker T3
+            // Archmage pass 2026-10-24: APPENDED at indices 111-113, minted from the overflow block as
+            // WcidOverflowBase 1002000 + (index - 79) * 6 + (tier - 1): Elemental Inversion 1002192-1002196
+            // (5 ranks, 1002197 its spare rank 6), Arcane Hollow 1002198-1002200, Volatile Wall 1002204-1002206.
+            // Each 3-rank slot's ranks 4-6 are reserved spare for that ability.
+            ClassAbilityId.ElementalInversion, // Archmage T1 (the slot Quickened Casting vacated)
+            ClassAbilityId.ArcaneHollow,       // Archmage T2 (the slot Flat Cast Speed vacated)
+            ClassAbilityId.VolatileWall,       // Archmage T3
+            // Spellsword 2026-10-30: APPENDED at index 114, minted from the overflow block as
+            // WcidOverflowBase 1002000 + (114 - 79) * 6 + (tier - 1) = 1002210-1002212. Ranks 4-6
+            // (1002213-1002215) are reserved spare for this ability.
+            ClassAbilityId.VolatileElements,   // Spellsword T2
         };
 
         public readonly struct Offering

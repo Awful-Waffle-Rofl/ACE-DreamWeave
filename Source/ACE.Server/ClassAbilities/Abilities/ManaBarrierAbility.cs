@@ -46,7 +46,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// accounting. Never call the barrier from TakeDamageOverTime again.
     ///
     /// The magic sites dispatch the PRE-WRITE hook, never the post-write IIncomingDamageAbility one, on
-    /// purpose: Vengeance rides that other hook and must not begin tracking magic damage. Thorns rides it
+    /// purpose: that other hook is physical-only by contract (Vengeance rode it until 2026-10-24). Thorns rides it
     /// too, but now also reacts to direct magic hits (user ruling 2026-10-07) through its own by-name call
     /// at the three direct magic sites (Player.ApplyThornsOnMagicHit), never through the whole post-write
     /// dispatch. Keeping the two hooks separate is what lets the barrier cover all five sites while each
@@ -66,6 +66,8 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// ward is called unconditionally. Order at every site is: cloak proc, ward, barrier, health write.
     ///
     /// If Mana cannot pay the whole diverted share, it pays what it can (partial) and never goes negative.
+    /// It also stops at a Mana floor (class_ability_manabarrier_mana_floor, default 50): only Mana above the floor is spendable.
+    /// The "50" is hardcoded in Description and its derived copies (token SQL LongDescs, PLAYER-GUIDE.md, ca-planner catalog.json); change them together.
     /// </summary>
     public class ManaBarrierAbility : IClassAbility, IPreWriteDamageAbility, IAbilityReadout
     {
@@ -77,10 +79,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "manabarrier",
             DisplayName = "Mana Barrier",
             Description = "6/12/18% of the damage you take is paid out of your Mana instead of your Health " +
-                          "(25% cap). Higher Magic Defense increases the share. If your Mana runs short it pays " +
-                          "what it can.",
+                          "(30% cap). Higher Magic Defense increases the share. It stops at 50 Mana, so it " +
+                          "never drains you below that.",
             MaxRank = 3,
-            CostPerRank = new[] { 1, 2, 3 },
+            CostPerRank = new[] { 1, 1, 1 },   // Archmage pass 2026-10-24 (reprice wave 6): was 1/2/3
             Implemented = true,
             AffinitySkill = Skill.MagicDefense,
         };
@@ -120,6 +122,10 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// </summary>
         public void ModifyIncomingDamage(Player defender, int rank, PreWriteDamageContext context)
         {
+            // a hazard-library hit is not diverted to Mana (owner ruling R3)
+            if (context.IsHazard)
+                return;
+
             if (context.IsDamageOverTime)
                 context.Damage = defender.AbsorbWithManaBarrierDot(context.Damage);
 
@@ -233,9 +239,13 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// never more than was thrown, whatever an out-of-range tunable says. In normal operation the
         /// share arrives already capped by <see cref="DivertShare"/>, so this clamp is inert.
         /// </summary>
-        public static Absorbed AbsorbDamage(uint incomingDamage, double share, uint currentMana, double manaPerHealth)
+        public static Absorbed AbsorbDamage(uint incomingDamage, double share, uint currentMana, double manaPerHealth, long manaFloor = 0)
         {
-            var divert = Resolve(incomingDamage, Math.Clamp(share, 0.0, 1.0), currentMana, manaPerHealth);
+            // only Mana above the floor is spendable; a negative floor clamps to 0 (old behaviour)
+            var floor = (uint)Math.Clamp(manaFloor, 0L, (long)uint.MaxValue);
+            var spendableMana = currentMana > floor ? currentMana - floor : 0u;
+
+            var divert = Resolve(incomingDamage, Math.Clamp(share, 0.0, 1.0), spendableMana, manaPerHealth);
 
             return new Absorbed
             {

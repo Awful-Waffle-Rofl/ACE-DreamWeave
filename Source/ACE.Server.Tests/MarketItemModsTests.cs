@@ -105,7 +105,7 @@ namespace ACE.Server.Tests
         public void Token_ATwoWordMember_SplitsAtTheSecondCapital()
         {
             Assert.AreEqual("Weak Point", MarketItemMods.Token(WeaponModId.WeakPoint));
-            Assert.AreEqual("Arcane Defender", MarketItemMods.Token(WeaponModId.ArcaneDefender));
+            Assert.AreEqual("Defensive Weapon", MarketItemMods.Token(WeaponModId.DefensiveWeapon));
             Assert.AreEqual("Eagle Eye", MarketItemMods.Token(EquipmentModId.EagleEye));
         }
 
@@ -145,7 +145,10 @@ namespace ACE.Server.Tests
                 "Devastation", "Weak Point", "Bloodthirst", "Shield Bypass", "Ambush", "Quickening",
                 "Second Wind", "Heft", "Tension", "Leverage", "Attunement", "Focus", "Execution",
                 "Efficiency", "Recovery", "Mana Well", "Cleanse", "Longevity", "Siphon", "Quick Refresh",
-                "Arcane Defender", "Panic Reload",
+                // "Arcane Defender" became "Defensive Weapon" on 2026-10-25 (owner ruling: the row was renamed,
+                // and the token follows the enum member). A saved Browse URL filtering on the old token stops
+                // matching; that cost was accepted with the rename.
+                "Defensive Weapon", "Panic Reload",
             };
 
             CollectionAssert.AreEqual(expected, WeaponModRegistry.AllMods.Select(d => MarketItemMods.Token(d.Id)).ToArray(),
@@ -198,7 +201,7 @@ namespace ACE.Server.Tests
             {
                 Mods = new List<ItemMod>
                 {
-                    new ItemMod { Kind = "weapon", Token = "Arcane Defender", Name = "Arcane Defender", IntensityPct = 67, Effect = "deflects frontal blows as a 25 armor level shield" },
+                    new ItemMod { Kind = "weapon", Token = "Defensive Weapon", Name = "Defensive Weapon", IntensityPct = 67, Effect = "134 shield armor level against frontal blows" },
                     new ItemMod { Kind = "armor", Token = "Deadeye", Name = "Deadeye", IntensityPct = null, Effect = "missile damage" },
                 },
                 ModCapacity = 3,
@@ -207,7 +210,7 @@ namespace ACE.Server.Tests
 
             foreach (var name in new[]
             {
-                "\"mods\":[{\"kind\":\"weapon\",\"token\":\"Arcane Defender\",\"name\":\"Arcane Defender\",\"intensity_pct\":67,\"effect\":\"deflects frontal blows as a 25 armor level shield\"}",
+                "\"mods\":[{\"kind\":\"weapon\",\"token\":\"Defensive Weapon\",\"name\":\"Defensive Weapon\",\"intensity_pct\":67,\"effect\":\"134 shield armor level against frontal blows\"}",
                 "{\"kind\":\"armor\",\"token\":\"Deadeye\",\"name\":\"Deadeye\",\"effect\":\"missile damage\"}",
                 "\"mod_capacity\":3",
                 "\"weapon_quality_tier\":\"Elite\"",

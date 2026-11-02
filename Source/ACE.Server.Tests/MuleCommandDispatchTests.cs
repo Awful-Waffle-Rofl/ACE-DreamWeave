@@ -98,6 +98,15 @@ namespace ACE.Server.Tests
                 CallCount++;
             }
 
+            public bool? LastEnabled;
+
+            public void MuleAutoSalvage(bool? enabled)
+            {
+                LastCall = nameof(MuleAutoSalvage);
+                LastEnabled = enabled;
+                CallCount++;
+            }
+
             public void MuleHelp()
             {
                 LastCall = nameof(MuleHelp);
@@ -255,6 +264,33 @@ namespace ACE.Server.Tests
         /// /mule help is a dispatch arm like any other rather than something the command handler does
         /// inline, so a future refactor of the switch cannot silently drop it.
         /// </summary>
+        [TestMethod]
+        public void AutoSalvageSet_DispatchesToMuleAutoSalvage_WithTheValue()
+        {
+            foreach (var value in new[] { true, false })
+            {
+                var target = new RecordingTarget();
+
+                MuleCommands.Dispatch(MuleCommandResult.AutoSalvageSet(value), target);
+
+                Assert.AreEqual(1, target.CallCount);
+                Assert.AreEqual(nameof(RecordingTarget.MuleAutoSalvage), target.LastCall);
+                Assert.AreEqual(value, target.LastEnabled);
+            }
+        }
+
+        [TestMethod]
+        public void AutoSalvageStatus_DispatchesToMuleAutoSalvage_WithNull()
+        {
+            var target = new RecordingTarget();
+
+            MuleCommands.Dispatch(MuleCommandResult.AutoSalvageStatus(), target);
+
+            Assert.AreEqual(1, target.CallCount);
+            Assert.AreEqual(nameof(RecordingTarget.MuleAutoSalvage), target.LastCall);
+            Assert.IsNull(target.LastEnabled);
+        }
+
         [TestMethod]
         public void Upgrade_DispatchesToMuleUpgrade()
         {

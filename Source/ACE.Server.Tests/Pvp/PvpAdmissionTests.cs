@@ -23,8 +23,7 @@ namespace ACE.Server.Tests.Pvp
             IsTeleporting: false,
             AlreadyQueued: false,
             AlreadyInMatch: false,
-            CharacterLevel: 100,
-            MinLevel: 50);
+            HasClearedThread: true);
 
         [TestMethod]
         public void OrdinaryEligiblePlayer_IsAccepted()
@@ -55,20 +54,6 @@ namespace ACE.Server.Tests.Pvp
         public void AlreadyInInstance_Refuses()
         {
             Assert.AreEqual(PvpAdmissionRefusal.AlreadyInInstance, PvpAdmission.Evaluate(Eligible() with { AlreadyInInstance = true }));
-        }
-
-        /// <summary>
-        /// The PK facet is required only by a mode that opted out of templates (owner rulings 2026-10-03,
-        /// Docs/Pvp/TEMPLATES.md): RequiresPkFacet defaults false, so a templated mode admits an off-facet player, and an
-        /// untemplated one refuses it. The coordinator-level proofs are PvpMatchCoordinatorTests.Join_OffThePkFacet_IsAdmitted
-        /// and BattlegroundCoordinatorTests.Koth_PkFacet_IsNotRequired.
-        /// </summary>
-        [TestMethod]
-        public void PkFacet_RequiredOnlyWhenTheModeOptsOutOfTemplates()
-        {
-            Assert.AreEqual(PvpAdmissionRefusal.None, PvpAdmission.Evaluate(Eligible() with { OnPkFacet = false }), "templated (the default): admitted");
-            Assert.AreEqual(PvpAdmissionRefusal.NotOnPkFacet, PvpAdmission.Evaluate(Eligible() with { RequiresPkFacet = true, OnPkFacet = false }), "opted out: refused");
-            Assert.AreEqual(PvpAdmissionRefusal.None, PvpAdmission.Evaluate(Eligible() with { RequiresPkFacet = true, OnPkFacet = true }), "control");
         }
 
         /// <summary>DISCRIMINATES: a character on pvp_template_account is refused (an authoring source, never a fighter).</summary>
@@ -133,16 +118,22 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(PvpAdmissionRefusal.AlreadyInMatch, PvpAdmission.Evaluate(Eligible() with { AlreadyInMatch = true }));
         }
 
+        /// <summary>
+        /// Owner ruling 2026-10-15: one Thread clear replaces the level and PK facet requirements. A character with no Thread
+        /// clear is refused; the request has no level or facet field at all, so neither can refuse anyone.
+        /// </summary>
         [TestMethod]
-        public void BelowMinLevel_Refuses()
+        public void NoThreadCleared_Refuses()
         {
-            Assert.AreEqual(PvpAdmissionRefusal.BelowMinLevel, PvpAdmission.Evaluate(Eligible() with { CharacterLevel = 49 }));
+            Assert.AreEqual(PvpAdmissionRefusal.NoThreadCleared, PvpAdmission.Evaluate(Eligible() with { HasClearedThread = false }));
         }
 
+        /// <summary>The Thread check sits last, where the level check was: any earlier refusal still wins.</summary>
         [TestMethod]
-        public void AtExactlyMinLevel_IsAccepted()
+        public void NoThreadCleared_IsTheLastCheck()
         {
-            Assert.AreEqual(PvpAdmissionRefusal.None, PvpAdmission.Evaluate(Eligible() with { CharacterLevel = 50 }));
+            Assert.AreEqual(PvpAdmissionRefusal.IsTeleporting, PvpAdmission.Evaluate(Eligible() with { HasClearedThread = false, IsTeleporting = true }));
+            Assert.AreEqual(PvpAdmissionRefusal.ArenaDisabled, PvpAdmission.Evaluate(Eligible() with { HasClearedThread = false, ArenaEnabled = false }));
         }
     }
 }

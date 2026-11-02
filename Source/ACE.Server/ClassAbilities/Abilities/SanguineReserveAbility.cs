@@ -1,3 +1,4 @@
+using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -8,8 +9,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// Blood Mage T1 game-changer: every landed harmful Life Magic spell (Harm, Drain, Martyr's Hecatomb,
     /// Curse of Raven Fury, Bloodstone Bolt) grants a Blood Charge. Max 3/4/5 charges by rank; each charge
     /// adds +7% life-magic damage, so the full ramp is +21/28/35%. Charges decay after 15s with no life
-    /// cast. PvE only. Deliberately unscaled - the stacks are its scaling (the Frenzy / Nether Rush
-    /// precedent). BLOOD-MAGE-DESIGN.md sec 3, rev 4.
+    /// cast. PvE only. The stacks are its main scaling (the Frenzy / Mana Rush precedent); since the
+    /// Blood Mage buff pass the PER-CHARGE value also carries a Creature Enchantment affinity multiplier
+    /// (gear additive outside it), which flows into Exsanguinate's burst by design because the burst reads
+    /// the same per-charge value. BLOOD-MAGE-DESIGN.md sec 3, rev 4.
     ///
     /// WHERE THE MECHANIC LIVES. No hook interface: like the Enhanced-stat family this is read directly at
     /// the computation sites rather than dispatched from a combat event.
@@ -49,44 +52,51 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Sanguine Reserve",
             Description = "Landing a harmful Life Magic spell grants a Blood Charge, up to 3/4/5 by rank. Each " +
                           "charge adds +7% Life Magic damage (up to +21/28/35%). Charges fade after 15 seconds " +
-                          "with no Life Magic cast. Against monsters only.",
+                          "with no Life Magic cast. Against monsters only. Higher Creature Enchantment " +
+                          "multiplies the per-charge bonus.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.CreatureEnchantment,
         };
 
         /// <summary>
-        /// Reports the PER-CHARGE life-magic damage rate. Skill = class_ability_bloodmage_charge_per_stack
-        /// (BloodChargePerStack in Player_ClassAbilityBuffs.cs), a flat rate shared with Exsanguinate's
-        /// burst multiplier and not rank-scaled, so it is identical at every owned rank. There is no
-        /// affinity rider. Gear = the BLOOD CHARGE mod, which is added to that same per-charge rate inside
-        /// the ramp (BloodChargeMath.DamageMultiplier), so the two sum in one unit exactly as the readout
-        /// contract requires.
+        /// Reports the PER-CHARGE life-magic damage rate. Skill = class_ability_bloodmage_charge_per_stack, a
+        /// flat rate shared with Exsanguinate's burst multiplier and not rank-scaled, so it is identical at
+        /// every owned rank. Affinity = the amount the CREATURE ENCHANTMENT multiplier adds to it
+        /// (perStack * multiplier - perStack), the same expression BloodChargePerStack in
+        /// Player_ClassAbilityBuffs.cs applies through BloodChargeMath.PerChargeValue. Gear = the BLOOD
+        /// CHARGE mod, which is added to the per-charge rate inside the ramp (BloodChargeMath.DamageMultiplier)
+        /// and never multiplied, so the three sum in one unit exactly as the readout contract requires.
         ///
         /// PER-CHARGE, NOT THE WHOLE RAMP - Per is "/charge" and the caller multiplies mentally by the pool
         /// size. The stack CAP (3/4/5 by rank, see BloodChargeMath.StackCap) bounds how many charges the
         /// pool holds, not this rate, so it never reduces this readout and CapNote is always null.
         ///
-        /// The null-conditional on the gear read is for the readout unit tests, which call this with a null
-        /// Player because Player's static initializer cannot run under the test host; every live caller
-        /// (/abilities list) passes session.Player.
+        /// The null-conditionals on the affinity and gear reads are for the readout unit tests, which call
+        /// this with a null Player because Player's static initializer cannot run under the test host; every
+        /// live caller (/abilities list) passes session.Player. The affinity fallback is 1.0, the NEUTRAL
+        /// factor, never 0.0.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var perStack = PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item;
 
+            var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment) ?? 1.0;
+
             var gearPerStack = player?.GetEquippedModValue(EquipmentModId.BloodCharge) ?? 0.0;
 
             var skill = perStack * 100.0;
+            var affinity = (BloodChargeMath.PerChargeValue(perStack, multiplier) - perStack) * 100.0;
             var gear = gearPerStack * 100.0;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
                 Skill = skill,
-                Affinity = 0.0,
+                Affinity = affinity,
                 Gear = gear,
-                Effective = skill + gear,
+                Effective = skill + affinity + gear,
                 Unit = "%",
                 Label = "life dmg",
                 Per = "/charge",

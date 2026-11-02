@@ -75,7 +75,7 @@ namespace ACE.Server.Entity.AccountVault
     /// items appear to have vanished, and the orphan can never be reaped because invariant 5 forbids
     /// destroying a container that might be non-empty.
     /// </summary>
-    public class AccountVaultStore
+    public partial class AccountVaultStore
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -1768,6 +1768,30 @@ namespace ACE.Server.Entity.AccountVault
         }
 
         /// <summary>
+        /// True once the vault index has been read into memory. Answers from state alone and never starts a
+        /// load. Weaker than <see cref="IsWarm"/>: an index-loaded store may still have a ledger reload
+        /// pending or a vault inventory loading, which <see cref="TryCheckReady"/> resolves.
+        /// </summary>
+        public bool IsIndexLoaded
+        {
+            get
+            {
+                lock (stateLock)
+                    return indexLoaded;
+            }
+        }
+
+        private volatile bool lastLoadFailed;
+
+        /// <summary>
+        /// True when the most recent initial load could not read the vault index, the stack ledger, the
+        /// item-class ledger or a (non-barrel) vault container (the four logged read failures in
+        /// <see cref="TryEnsureLoadedLocked"/>); cleared by the next successful load. Read-only and never starts a load, so a caller can refuse a store
+        /// that already failed without asking it to read the shard again.
+        /// </summary>
+        public bool LastLoadFailed => lastLoadFailed;
+
+        /// <summary>
         /// <see cref="IsWarm"/> for a caller that already holds <see cref="stateLock"/>.
         ///
         /// Split out rather than reading the property from inside the lock (which C# would allow,
@@ -1949,6 +1973,7 @@ namespace ACE.Server.Entity.AccountVault
             if (rows == null)
             {
                 log.Error($"[VAULT] account {AccountId}: could not read the vault index; refusing rather than treating it as an empty vault.");
+                lastLoadFailed = true;
                 return false;
             }
 
@@ -1957,6 +1982,7 @@ namespace ACE.Server.Entity.AccountVault
             if (stacks == null)
             {
                 log.Error($"[VAULT] account {AccountId}: could not read the stack ledger; refusing rather than treating it as an empty ledger.");
+                lastLoadFailed = true;
                 return false;
             }
 
@@ -1967,6 +1993,7 @@ namespace ACE.Server.Entity.AccountVault
             if (classRows == null)
             {
                 log.Error($"[VAULT] account {AccountId}: could not read the item-class ledger; refusing rather than treating it as an empty ledger.");
+                lastLoadFailed = true;
                 return false;
             }
 
@@ -2013,6 +2040,7 @@ namespace ACE.Server.Entity.AccountVault
                     }
 
                     log.Error($"[VAULT] account {AccountId}: vault container 0x{row.ContainerGuid:X8} (account_vault row {row.Id}) could not be READ. The whole store is refused until it can be, because proceeding would hide items rather than lose them loudly.");
+                    lastLoadFailed = true;
                     return false;
                 }
 
@@ -2074,6 +2102,7 @@ namespace ACE.Server.Entity.AccountVault
             indexLoaded = true;
             ledgerReloadPending = false;
             classReloadPending = false;
+            lastLoadFailed = false;
             return true;
         }
 
@@ -2448,6 +2477,51 @@ namespace ACE.Server.Entity.AccountVault
         /// the worse failure.
         /// </summary>
         public static Func<uint, uint?, uint, string, bool> IsListedHook;
+
+        /// <summary>
+        /// Part of <see cref="IsListedHook"/>'s contract: whether the index behind that hook can be TRUSTED
+        /// to answer, i.e. the market's listing read at boot succeeded. Set and cleared with the hook by
+        /// MarketManager. A "not listed" from an untrusted index means "unknown", not "not listed".
+        ///
+        /// Read only where a wrong "not listed" is worth refusing over - today the partial-salvage combine,
+        /// which rewrites the class rows behind a line. With <see cref="IsListedHook"/> set, a null, false or
+        /// throwing predicate all read as UNTRUSTED. With the hook null there is no market in this process and
+        /// nothing to protect, so this is not consulted at all.
+        /// </summary>
+        public static Func<bool> IsListedHookIndexTrusted;
+
+        /// <summary>
+        /// Answers whether a withdraw of (accountId, itemGuid, wcid, amount, classDisplayId) - the same
+        /// arguments <see cref="PreWithdrawHook"/> receives - would CLOSE an active market listing.
+        /// Returns null when every listing would be left standing; otherwise the largest amount that
+        /// could be taken without closing one, which is 0 for a stored item or group (any withdraw
+        /// from those closes the listing) and the unlisted remainder for a ledger row or class line.
+        /// Set by MarketManager on startup and cleared on shutdown, exactly as the two hooks above are.
+        ///
+        /// Consulted for a NON-OWNER actor only (a mule grantee). The owner's own withdraw keeps the
+        /// auto-delist behaviour: it is the seller's listing to cancel. A grantee's withdraw must not
+        /// cancel a listing that belongs to somebody else, so it is refused instead
+        /// (<see cref="ListedByOwnerMessage"/>).
+        ///
+        /// A null hook means the market never started, so there is no listing to protect. A hook that
+        /// throws refuses the grantee's withdraw: the cost of that is one retry, while letting it through
+        /// could silently cancel the owner's listing. A subscriber MUST NOT call back into this store.
+        /// </summary>
+        public static Func<uint, uint?, uint, int, string, int?> WithdrawWouldDelistHook;
+
+        /// <summary>
+        /// The <see cref="WithdrawWouldDelistHook"/> answer for "the market cannot tell" (its listing read failed
+        /// at boot): the withdraw is refused with <see cref="UnavailableMessage"/>, because claiming the item is
+        /// listed would be a guess. Any negative answer is read this way.
+        /// </summary>
+        public const int WithdrawGuardUnavailable = -1;
+
+        /// <summary>The refusal a non-owner sees for a withdraw that would cancel the owner's market listing.</summary>
+        public const string ListedByOwnerMessage = "That item is listed on the market by its owner and cannot be withdrawn.";
+
+        /// <summary>The refusal a non-owner sees for a ledger or class withdraw that would dig into the listed part.</summary>
+        internal static string ListedByOwnerRemainderMessage(int free)
+            => $"Only {free} of that item can be withdrawn. The rest is listed on the market by its owner.";
 
         /// <summary>
         /// Work items WAITING to run - it does not count the one executing, so a zero here does not
@@ -3011,6 +3085,122 @@ namespace ACE.Server.Entity.AccountVault
 
         #endregion
 
+        #region Vault settings
+
+        /// <summary>
+        /// The account's cached salvage-combine preference (/mule autosalvage). Only meaningful once
+        /// <see cref="salvageCombineLoaded"/> is true. Guarded by <see cref="stateLock"/>.
+        /// </summary>
+        private bool salvageCombineEnabled = true;
+
+        private bool salvageCombineLoaded;
+
+        /// <summary>
+        /// The account_vault_setting row last read or written, or null when the account has none (or nothing
+        /// has been read yet). Kept so <see cref="TrySetSalvageCombineCore"/> upserts a COPY of it with one
+        /// column changed, rather than a fresh row that would reset every other column to its default.
+        /// Guarded by <see cref="stateLock"/>.
+        /// </summary>
+        private AccountVaultSetting salvageSettingRow;
+
+        /// <summary>
+        /// Whether partial salvage bags stored for this account are combined automatically, or null when
+        /// the setting could not be read. MUST run on the mutation queue, because the answer decides how
+        /// a deposit is shaped and the queue is what keeps that decision ordered against the deposit.
+        ///
+        /// A MISSING row is the ordinary answer and means ON (the column default). A FAILED read is
+        /// reported as null and is NOT cached, unlike the mule form: a cosmetic may degrade to a
+        /// default for the store's lifetime, but a setting that silently flipped to ON would combine
+        /// bags for a player who opted out. The next call re-reads the backend. Like the mule form this
+        /// load is independent of the vault index load and shares only the lock.
+        /// </summary>
+        internal bool? TryGetSalvageCombineEnabled()
+        {
+            AssertOnMutationQueue(nameof(TryGetSalvageCombineEnabled));
+
+            lock (stateLock)
+            {
+                if (salvageCombineLoaded)
+                    return salvageCombineEnabled;
+
+                var (ok, row) = backend.GetAccountVaultSetting(AccountId);
+
+                if (!ok)
+                {
+                    log.Error($"[VAULTSETTING] account {AccountId}: could not read the vault settings; the salvage-combine preference is unknown for this call.");
+                    return null;
+                }
+
+                salvageCombineEnabled = row == null || row.SalvageCombine;
+                salvageSettingRow = row?.ShallowCopy();
+                salvageCombineLoaded = true;
+
+                return salvageCombineEnabled;
+            }
+        }
+
+        /// <summary>
+        /// Saves the account's salvage-combine preference. The caller always acts on its OWN account's
+        /// store, so there is no ownership check and no refusal string beyond <see cref="UnavailableMessage"/>.
+        /// </summary>
+        internal bool TrySetSalvageCombine(bool enabled, VaultActor actor, out string error)
+        {
+            var ok = false;
+            string reason = null;
+
+            if (!RunOnQueue(() => ok = TrySetSalvageCombineCore(enabled, actor, out reason)))
+                reason = UnavailableMessage;
+
+            error = reason;
+            return ok;
+        }
+
+        /// <summary>
+        /// MUST run on the mutation queue. Upserts the WHOLE row and updates the cache only on success.
+        /// Does NOT bump <see cref="Version"/> (a preference is not an inventory change) and writes no
+        /// account_vault_log row.
+        /// </summary>
+        internal bool TrySetSalvageCombineCore(bool enabled, VaultActor actor, out string error)
+        {
+            AssertOnMutationQueue(nameof(TrySetSalvageCombineCore));
+
+            Touch();
+
+            error = null;
+
+            // Built from a COPY of the row this store last read or wrote, when it has one, so the upsert
+            // changes salvage_Combine and nothing else: the setting row is one row per account, and a second
+            // column added later would otherwise be reset to its default every time this one changed. With
+            // no cached row (never read, or the account has none) the defaults are the right starting point.
+            AccountVaultSetting row;
+
+            lock (stateLock)
+                row = salvageSettingRow?.ShallowCopy() ?? new AccountVaultSetting();
+
+            row.AccountId = AccountId;
+            row.SalvageCombine = enabled;
+            row.SetByCharacterGuid = actor.CharacterGuid;
+
+            if (!backend.UpsertAccountVaultSetting(row))
+            {
+                error = UnavailableMessage;
+                return false;
+            }
+
+            lock (stateLock)
+            {
+                salvageCombineEnabled = enabled;
+                salvageSettingRow = row.ShallowCopy();
+                salvageCombineLoaded = true;
+            }
+
+            log.Info($"[VAULTSETTING] account {AccountId}: character {actor.Name} (0x{actor.CharacterGuid:X8}) set salvage-combine to {(enabled ? "ON" : "OFF")}.");
+
+            return true;
+        }
+
+        #endregion
+
         #region Vendor windows
 
         /// <summary>How many vendor windows are currently open onto this store.</summary>
@@ -3206,7 +3396,7 @@ namespace ACE.Server.Entity.AccountVault
 
             // Account id 0 means the actor's account could not be resolved, and never matches a real
             // account, so an unresolved actor is denied rather than treated as the owner.
-            if (actor.AccountId != 0 && actor.AccountId == AccountId)
+            if (IsOwner(actor))
             {
                 access = VaultAccess.DepositWithdraw;
                 return true;
@@ -5848,6 +6038,15 @@ namespace ACE.Server.Entity.AccountVault
                 return false;
             }
 
+            // A mule grantee must never cancel the OWNER's market listing. This is the one place every
+            // withdraw passes through (the vendor panel, the facet core, the suit transfer and the
+            // market's own takes all reach TryWithdraw), so the rule lives here rather than per caller.
+            // The market's own takes run as the seller (VaultMarketItemStore.SellerActor) and are owner
+            // withdraws, so they never reach this check. Placed BEFORE the auto-delist hook below,
+            // which would otherwise have already closed the listing.
+            if (!IsOwner(actor) && !CheckNonOwnerListing(entry, amount, out failReason))
+                return false;
+
             // DESIGN 5.3 auto-delist. Fires after every refusal above, so a withdraw that is about to be
             // refused never delists, and guarded because a subscriber's throw must not abort a legitimate
             // withdraw.
@@ -5898,6 +6097,64 @@ namespace ACE.Server.Entity.AccountVault
             Interlocked.Increment(ref version);
 
             return handed;
+        }
+
+        /// <summary>
+        /// Whether this actor is the vault's own account. The same predicate <see cref="TryGetAccess"/>
+        /// grants owner access on: account id 0 is an unresolved actor and never the owner.
+        /// </summary>
+        private bool IsOwner(VaultActor actor) => actor.AccountId != 0 && actor.AccountId == AccountId;
+
+        /// <summary>
+        /// The non-owner half of the auto-delist rule (see <see cref="WithdrawWouldDelistHook"/>): false,
+        /// with the player-facing reason, when this withdraw would close the owner's listing. Takes the
+        /// same identity arguments the pre-withdraw hook is about to receive, so the question asked here
+        /// and the delist that would follow are about the same listing.
+        /// </summary>
+        private bool CheckNonOwnerListing(VaultEntry entry, int amount, out string failReason)
+        {
+            failReason = null;
+
+            var hook = WithdrawWouldDelistHook;
+
+            if (hook == null)
+                return true;
+
+            // An over-count ask on a divisible row gets the over-count answer, not "only N are free",
+            // which would read as though N more could be had by asking again. REFUSED HERE rather than
+            // by skipping the guard and leaving it to the kind's own check: that check runs AFTER the
+            // pre-withdraw hook (WithdrawFromClass's count test, and the ledger's database debit), and the
+            // hook would already have closed the owner's listing by the time the refusal came back.
+            if ((entry.Kind == VaultEntryKind.Ledger || entry.Kind == VaultEntryKind.Class) && amount > entry.Count)
+            {
+                failReason = $"Your vault holds only {entry.Count} of those.";
+                return false;
+            }
+
+            int? free;
+
+            try
+            {
+                free = hook(AccountId, entry.Kind == VaultEntryKind.StoredItem ? entry.Guid.Full : (uint?)null, entry.Wcid, amount, entry.ClassDisplayId);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] account {AccountId}: the market listing guard threw; refusing a non-owner withdraw of wcid {entry.Wcid} rather than risk cancelling the owner's listing: {ex.GetFullMessage()}");
+                failReason = UnavailableMessage;
+                return false;
+            }
+
+            if (free == null)
+                return true;
+
+            if (free.Value < 0)
+            {
+                failReason = UnavailableMessage;
+                return false;
+            }
+
+            failReason = free.Value > 0 ? ListedByOwnerRemainderMessage(free.Value) : ListedByOwnerMessage;
+            return false;
         }
 
         private bool WithdrawFromLedger(VaultEntry entry, int amount, VaultActor actor, List<WorldObject> withdrawn, out string failReason)
@@ -6119,6 +6376,19 @@ namespace ACE.Server.Entity.AccountVault
             var anomalous = false;
             var reap = false;
 
+            // THROW SAFETY. Everything below can throw (a materialize, an audit write, a debit), and a
+            // throw used to escape with earlier members already debited and their objects in no list:
+            // `withdrawn` is filled only on success, so the caller had nothing to return and the debits
+            // were lost. The catch below takes the SAME unwind the null-return paths take. These three
+            // track what that unwind needs: the current member's objects not yet in `created`, the
+            // member whose debit was in flight, and whether an existing unwind path had already begun
+            // (re-running it then could refund a member twice).
+            List<WorldObject> building = null;
+            ClassDrainStep debiting = null;
+            var unwinding = false;
+
+            try
+            {
             foreach (var step in plan)
             {
                 // Built BEFORE this member's debit, exactly as WithdrawFromLedger's probe is, and for
@@ -6131,28 +6401,36 @@ namespace ACE.Server.Entity.AccountVault
                 {
                     log.Error($"[VAULT] account {AccountId}: could not materialize wcid {step.Wcid} for a class withdraw of {step.Take} (class {step.ClassKey}); refusing before that row moves.");
 
+                    unwinding = true;
                     UnwindClassDrain(created, committed, actor);
 
                     failReason = UnavailableMessage;
                     return false;
                 }
 
+                building = new List<WorldObject> { probe };
+
                 step.ProbeName = probe.Name;
 
                 // Audit BEFORE the debit. See this method's remarks and WithdrawFromLedger's for why.
                 WriteLog(AccountVaultAction.Withdraw, actor, step.Wcid, null, probe.Name, step.Take, step.ValueLeaving, step.ClassKey);
 
+                debiting = step;
+
                 var debit = backend.TryAdjustAccountVaultClass(AccountId, step.ClassKey, -step.Take, -step.ValueLeaving, null, out var newCount, out var newTotalValue);
 
                 if (debit == AccountVaultStackAdjustResult.Refused)
                 {
+                    debiting = null;
+                    unwinding = true;
+
                     // The Withdraw row above recorded an ask the database then refused, so it has to be
                     // balanced or the audit trail shows items leaving a vault they never left. Written
                     // ONLY for a provable refusal: writing it for a database failure would cancel out a
                     // debit that may have landed and record a real loss as a non-event.
                     WriteLog(AccountVaultAction.Return, actor, step.Wcid, null, probe.Name, step.Take, step.ValueLeaving, step.ClassKey);
 
-                    world.DestroyItem(probe);
+                    DestroyUnwound(probe, step.ClassKey);
 
                     UnwindClassDrain(created, committed, actor);
 
@@ -6162,6 +6440,7 @@ namespace ACE.Server.Entity.AccountVault
 
                 step.Debit = debit;
                 committed.Add(step);
+                debiting = null;
 
                 if (debit == AccountVaultStackAdjustResult.Failed)
                 {
@@ -6187,7 +6466,7 @@ namespace ACE.Server.Entity.AccountVault
                     anomalous = true;
                 }
 
-                var built = new List<WorldObject> { probe };
+                var built = building;
 
                 var shortfall = false;
 
@@ -6197,27 +6476,28 @@ namespace ACE.Server.Entity.AccountVault
 
                     if (more == null)
                     {
+                        unwinding = true;
+
                         // ALL OR NOTHING, matching WithdrawFromLedger's own out-of-objects path:
                         // everything already built is destroyed and the WHOLE debit is refunded, rather
                         // than the undelivered tail alone.
                         log.Error($"[VAULT] account {AccountId}: ran out of objects part way through a class withdraw of {step.Take} from {step.ClassKey}; destroying the {built.Count} already built for that row and refunding its whole debit.");
 
                         foreach (var orphan in built)
-                            world.DestroyItem(orphan);
+                            DestroyUnwound(orphan, step.ClassKey);
 
                         // THE SECOND REFUND SITE. step.Debit was assigned above, so this can be
                         // refunding a Failed or AppliedCountUnknown member with exactly the risk shape
                         // the unwind's own refunds carry - and it reaches RefundClass without going
                         // through UnwindClassDrain, because it removes itself from `committed` below.
                         // Both sites call the same helper so a third one is a one-line call rather
-                        // than a copied block.
-                        LogRefundOverUnknownDebit(step);
+                        // than a copied block. Guarded like the unwind's own refunds, so a refund that
+                        // throws cannot stop the other members' refunds below.
+                        RefundDrainStep(step, actor);
 
-                        RefundClass(step.ClassKey, step.Wcid, step.CanonicalForm, step.Overrides, step.Take, step.ValueLeaving);
-                        WriteLog(AccountVaultAction.Return, actor, step.Wcid, null, probe.Name, step.Take, step.ValueLeaving, step.ClassKey);
-
-                        // Already refunded by hand, so it must not be refunded a second time by the
-                        // unwind below.
+                        // Already refunded (or attempted) by hand, so it must not be refunded a second
+                        // time by the unwind below - including when the attempt threw, whose outcome is
+                        // unknown and must not be retried.
                         committed.Remove(step);
 
                         shortfall = true;
@@ -6229,6 +6509,7 @@ namespace ACE.Server.Entity.AccountVault
 
                 if (shortfall)
                 {
+                    // `unwinding` is already set: the shortfall branch above set it before it began.
                     UnwindClassDrain(created, committed, actor);
 
                     failReason = UnavailableMessage;
@@ -6236,6 +6517,55 @@ namespace ACE.Server.Entity.AccountVault
                 }
 
                 created.AddRange(built);
+                building = null;
+            }
+            }
+            catch (Exception ex)
+            {
+                failReason = UnavailableMessage;
+
+                if (unwinding)
+                {
+                    // An existing unwind path had begun and then threw. Re-running the unwind could
+                    // refund a member twice, so the store's class map is re-read instead and the loss,
+                    // if any, is left to reconciliation against account_vault_log. A BACKSTOP: every
+                    // destroy and every refund on those paths is already guarded on its own
+                    // (DestroyUnwound, RefundDrainStep) and the audit write swallows its own failures,
+                    // so nothing they call is known to throw out to here.
+                    log.Error($"[VAULT] account {AccountId}: unwinding a class withdraw of {amount} from class {entry.ClassKey} ITSELF threw. The class rows may be INCONSISTENT and need reconciliation against account_vault_log: {ex.GetFullMessage()}");
+
+                    InvalidateClasses($"a class withdraw of {amount} from {entry.ClassKey} whose unwind threw");
+                    return false;
+                }
+
+                log.Error($"[VAULT] account {AccountId}: a class withdraw of {amount} from class {entry.ClassKey} threw part way through; destroying every object built so far and refunding every debited member row: {ex.GetFullMessage()}");
+
+                // A debit that threw has an UNKNOWN outcome, which is exactly a Failed debit, and a
+                // Failed debit is refunded on the unwind under the standing ruling (never destroy
+                // property on an unknown outcome); LogRefundOverUnknownDebit marks it.
+                if (debiting != null)
+                {
+                    debiting.Debit = AccountVaultStackAdjustResult.Failed;
+                    committed.Add(debiting);
+                }
+
+                // The current member's objects are not in `created` yet; UnwindClassDrain destroys
+                // everything in that list.
+                if (building != null)
+                    created.AddRange(building);
+
+                try
+                {
+                    UnwindClassDrain(created, committed, actor);
+                }
+                catch (Exception unwindEx)
+                {
+                    log.Error($"[VAULT] account {AccountId}: the unwind of a class withdraw of {amount} from class {entry.ClassKey} threw after the withdraw itself threw. The class rows may be INCONSISTENT and need reconciliation against account_vault_log: {unwindEx.GetFullMessage()}");
+
+                    InvalidateClasses($"a class withdraw of {amount} from {entry.ClassKey} whose unwind threw");
+                }
+
+                return false;
             }
 
             withdrawn.AddRange(created);
@@ -6407,24 +6737,69 @@ namespace ACE.Server.Entity.AccountVault
 
             log.Error($"[VAULT] account {AccountId}: unwinding a class withdraw part way through - destroying {created.Count} object(s) already built and refunding {committed.Count} member row(s).");
 
+            // Each destroy is guarded on its own (DestroyUnwound), so one that throws can neither stop
+            // the remaining destroys nor - far worse - skip every refund below.
             foreach (var orphan in created)
-                world.DestroyItem(orphan);
+                DestroyUnwound(orphan, null);
 
             created.Clear();
 
             // Last debited, first refunded, so the audit trail reads as an unwind rather than as a
-            // second pass in the same direction.
+            // second pass in the same direction. Each member is guarded on its own (RefundDrainStep), so
+            // one refund that throws does not skip the others.
             for (var i = committed.Count - 1; i >= 0; i--)
-            {
-                var step = committed[i];
+                RefundDrainStep(committed[i], actor);
 
+            committed.Clear();
+        }
+
+        /// <summary>
+        /// Destroys one object an unwinding class withdraw built, and SURVIVES the destroy throwing. That
+        /// is safe: an object being unwound was never delivered and never persisted, so a failed destroy
+        /// leaks at worst one in-memory object and its guid - never a duplicate. Letting the throw escape
+        /// instead skipped every refund after it and lost the debited items outright.
+        /// </summary>
+        private void DestroyUnwound(WorldObject item, string classKey)
+        {
+            try
+            {
+                world.DestroyItem(item);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] account {AccountId}: could not destroy 0x{item?.Guid.Full:X8} while unwinding a class withdraw{(classKey != null ? $" of class {classKey}" : "")}; the object was never delivered or persisted, so at worst its guid leaks. The unwind continues: {ex.GetFullMessage()}");
+            }
+        }
+
+        /// <summary>
+        /// Refunds one debited member of an unwinding class withdraw - the unknown-debit marker, the
+        /// refund itself and its balancing Return row - and SURVIVES that throwing, so the remaining
+        /// members are still refunded. A refund that threw has an UNKNOWN outcome and is NOT retried
+        /// (retrying could credit it twice); the class map is re-read instead and the event logged for
+        /// reconciliation against account_vault_log.
+        /// </summary>
+        private void RefundDrainStep(ClassDrainStep step, VaultActor actor)
+        {
+            try
+            {
                 LogRefundOverUnknownDebit(step);
 
                 RefundClass(step.ClassKey, step.Wcid, step.CanonicalForm, step.Overrides, step.Take, step.ValueLeaving);
                 WriteLog(AccountVaultAction.Return, actor, step.Wcid, null, step.ProbeName, step.Take, step.ValueLeaving, step.ClassKey);
             }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] CLASS REFUND THREW: account {AccountId}, class {step.ClassKey}, wcid {step.Wcid}, refunding +{step.Take} item(s) / +{step.ValueLeaving} value. The outcome is UNKNOWN and the refund is NOT retried; the class map is being re-read. Reconcile against account_vault_log: {ex.GetFullMessage()}");
 
-            committed.Clear();
+                try
+                {
+                    InvalidateClasses($"a class refund of {step.Take} item(s) to {step.ClassKey} that threw");
+                }
+                catch (Exception invalidateEx)
+                {
+                    log.Error($"[VAULT] account {AccountId}: re-reading the class map after a refund threw ALSO threw: {invalidateEx.GetFullMessage()}");
+                }
+            }
         }
 
         /// <summary>

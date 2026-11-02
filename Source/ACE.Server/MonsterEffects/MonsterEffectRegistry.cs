@@ -60,6 +60,9 @@ namespace ACE.Server.MonsterEffects
 
             // Phase 7 - externally toggled filters (ML digsite Boss Rush immune phases)
             new ImmuneEffect(),
+
+            // Threads damage ceiling - taunt-hold shortener
+            new ScatterEffect(),
         };
 
         /// <summary>

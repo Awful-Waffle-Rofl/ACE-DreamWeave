@@ -75,7 +75,10 @@ namespace ACE.Server.ClassAbilities
                                     // bought Rogue's Parry; Kinetic Charge takes the Vanguard T2 slot.
 
         // Berserker combat
-        SavageBlows         = 34,
+        SavageBlows         = 34,   // RETIRED 2026-10-24 (Berserker pass) - id reserved, never re-use;
+                                    // unregistered + inert. Heavy Blows (90) takes the Berserker T2 slot;
+                                    // its equipment mod (id 17 / GearModSavageBlows) was repurposed in place
+                                    // as Heavy Blows' mod.
         BloodFury           = 35,   // RETIRED 2026-08-17 (Berserker/Rogue balance pass) - id reserved, never
                                     // re-use; unregistered + inert. The Berserker T2 slot it held is taken by
                                     // Break Armor (71); its equipment mod (id 18 / PropertyFloat 8117) was
@@ -85,7 +88,8 @@ namespace ACE.Server.ClassAbilities
         Bloodlust           = 38,
 
         // Archmage combat
-        FlatCastSpeed       = 39,
+        FlatCastSpeed       = 39,   // RETIRED 2026-10-24 (Archmage pass) - id reserved, never re-use;
+                                    // unregistered + inert. Arcane Hollow (94) takes the Archmage T2 slot.
         Overchannel         = 40,
         EchoCast            = 41,
         ElementalRend       = 42,
@@ -168,8 +172,10 @@ namespace ACE.Server.ClassAbilities
         ReflectMagic        = 80,   // Vanguard T3. Token/display asymmetry is DELIBERATE: the canonical token
                                     // is "reflect_magic" but it DISPLAYS as "Reflect", per the design table.
         Adrenaline          = 81,   // Berserker T1
-        Vengeance           = 82,   // Berserker T2
-        QuickenedCasting    = 83,   // Archmage T1
+        Vengeance           = 82,   // RETIRED 2026-10-24 (Berserker pass) - id reserved, never re-use;
+                                    // unregistered + inert. Intimidate (91) takes the Berserker T2 slot.
+        QuickenedCasting    = 83,   // RETIRED 2026-10-24 (Archmage pass) - id reserved, never re-use;
+                                    // unregistered + inert. Elemental Inversion (93) takes the Archmage T1 slot.
         UmbralSiphon        = 84,   // Void/Summon T1
         SoulJump            = 85,   // Void/Summon T3
         Hemomancy           = 86,   // Blood Mage T1
@@ -177,6 +183,22 @@ namespace ACE.Server.ClassAbilities
         RunicWard           = 88,   // Spellsword T2
         CloakedInPower      = 89,   // Vanguard T2 (added 2026-09-29): a floor under the wearer's cloak
                                     // spell-proc chance
+
+        // Berserker pass 2026-10-24. Append only, never renumber or reuse. Savage Blows (34) and Vengeance
+        // (82) retired in the same pass; Enhanced Stamina (a generated Enhanced-vital entry, synthetic id)
+        // retired with them.
+        HeavyBlows          = 90,   // Berserker T2: raises the top of the melee power-bar damage range
+        Intimidate          = 91,   // Berserker T2: reckless attacks lower the target's defense for the evade roll
+        BerserkRage         = 92,   // Berserker T3: an enemy's lethal blow leaves you at 1 HP, immune, enraged
+
+        // Archmage pass 2026-10-24. Append only, never renumber or reuse. Quickened Casting (83) and Flat
+        // Cast Speed (39) retired in the same pass.
+        ElementalInversion  = 93,   // Archmage T1: a hit's innate resist term can become the target's weakest of seven types
+        ArcaneHollow        = 94,   // Archmage T2: war magic ignores part of the target's innate resistance (seven types)
+        VolatileWall        = 95,   // Archmage T3: each landed projectile of one wall cast hits harder
+
+        // Spellsword 2026-10-30. Append only, never renumber or reuse.
+        VolatileElements    = 96,   // Spellsword T2: weapon hits are re-typed to a random element, weighted to the target's weakest
     }
 
     /// <summary>
@@ -280,9 +302,10 @@ namespace ACE.Server.ClassAbilities
         /// <see cref="AffinitySkill"/>. Null or empty for almost everything - most abilities have one rider
         /// or none.
         ///
-        /// Empowered Summons is the reason this exists and currently its only user: Leadership scales its pet
-        /// stats and Loyalty scales its pet duration (shipped 2026-09-12), and a single field silently told
-        /// the planner that Loyalty feeds nothing. Same contract as AffinitySkill - DATA mirroring a real
+        /// Empowered Summons is the reason this exists: Leadership scales its pet stats and Loyalty scales its
+        /// pet duration (shipped 2026-09-12), and a single field silently told the planner that Loyalty feeds
+        /// nothing. (Sundermark was briefly a second user, Void Magic on its Nether branch, until the
+        /// 2026-10-30 ruling moved that branch onto Life Magic too.) Same contract as AffinitySkill - DATA mirroring a real
         /// <c>Player.GetClassAbilityScaling(Skill.X, ...)</c> call somewhere, kept honest by
         /// ClassAbilityAffinityDeclarationTests, which requires every entry here to name the file that
         /// carries its call.

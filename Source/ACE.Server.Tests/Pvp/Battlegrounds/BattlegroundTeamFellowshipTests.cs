@@ -270,7 +270,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public FakePlayer Add(uint id, string name)
             {
-                var p = new FakePlayer { Facts = new PvpPlayerFacts(id, name, 100, $"10.0.1.{id & 0xFF}", false, false, false, false, false, false, false, true, Array.Empty<uint>(), PreferredTemplateKey: TemplateKey) };
+                var p = new FakePlayer { Facts = new PvpPlayerFacts(id, name, $"10.0.1.{id & 0xFF}", false, false, false, false, false, false, false, Array.Empty<uint>(), PreferredTemplateKey: TemplateKey, HasClearedThread: true) };
                 Players[id] = p;
                 return p;
             }
@@ -442,6 +442,12 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             public readonly ConcurrentQueue<PvpIntent> Intents = new();
             public PvpArenaDials Dials = PvpTunables.Defaults with { CrierEnabled = false };
             public BattlegroundDials Bg = BattlegroundTunables.Defaults with { FillWindowSeconds = 0 };
+
+            /// <summary>The conduct dials. The contribution floor is OFF here so the stat-less payout tests keep paying; a floor test turns it on.</summary>
+            public ACE.Server.Pvp.PvpConductDials Conduct = ACE.Server.Pvp.PvpConductTunables.Defaults with { FloorEnabled = false };
+            /// <summary>The team-colour coin every match of this rig draws (TeamColourCoin): true makes team 0 Red (and Tugak all Red).</summary>
+            public bool ColourCoin = true;
+
             public PvpMatchCoordinator Coordinator;
 
             public Rig(bool withSeam = true)
@@ -453,7 +459,8 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public Rig Build(params uint[] ids)
             {
-                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, new FakeSink(), () => Now, () => Dials, Intents, new NoCrier(), () => Bg);
+                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, new FakeSink(), () => Now, () => Dials, Intents, new NoCrier(), () => Bg, conductDialSource: () => Conduct);
+                Coordinator.TeamColourCoin = () => ColourCoin;
                 Coordinator.BeginLoadRatings();
                 Coordinator.BeginLoadTemplates();
                 Coordinator.BeginLoadLatestTemplates();
@@ -525,8 +532,9 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             var form = rig.Team.Forms[0];
             Assert.AreEqual(m.MatchId, form.Match);
             Assert.AreEqual(2, form.Teams.Count, "both teams");
-            Assert.AreEqual("West Team", form.Teams.Single(t => t.TeamIndex == 0).Name);
-            Assert.AreEqual("East Team", form.Teams.Single(t => t.TeamIndex == 1).Name);
+            // Named by colour (Docs/Pvp/TEMPLATES.md "Team hue"): this rig's coin makes team 0 Red.
+            Assert.AreEqual("Red Team", form.Teams.Single(t => t.TeamIndex == 0).Name);
+            Assert.AreEqual("Blue Team", form.Teams.Single(t => t.TeamIndex == 1).Name);
 
             foreach (var team in form.Teams)
                 CollectionAssert.AreEqual(TeamIds(m, team.TeamIndex), team.MemberIds.ToArray(), "every active member, in team order");
@@ -536,6 +544,21 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(PvpMatchState.Live, m.State);
             Assert.AreEqual(1, rig.Team.Forms.Count, "never formed again");
             Assert.IsTrue(rig.Gateway.Bindings.Where(b => b.Binding.State == PvpMatchState.Live).All(b => b.Binding.TeamFellowship), "the Live republish derives the flag again");
+        }
+
+        /// <summary>
+        /// The coin false makes team 0 Blue: the team fellowships follow the colour, not the index. DISCRIMINATES the colour naming
+        /// against the coin-true case above (team 0 "Red Team"), so a name read from the team index fails one of the two.
+        /// </summary>
+        [TestMethod]
+        public void Form_CoinFalse_Team0IsTheBlueTeam()
+        {
+            var rig = new Rig { ColourCoin = false }.Build(A, B, C, D);
+            rig.ToCountdown("bg", A, B, C, D);
+
+            var form = rig.Team.Forms.Single();
+            Assert.AreEqual("Blue Team", form.Teams.Single(t => t.TeamIndex == 0).Name);
+            Assert.AreEqual("Red Team", form.Teams.Single(t => t.TeamIndex == 1).Name);
         }
 
         [TestMethod]
@@ -606,7 +629,10 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         [TestMethod]
         public void Release_LogoutForfeit()
         {
-            var rig = new Rig().Build(A, B, C, D);
+            // Grace pinned to 0: this pins today's immediate logout forfeit (the rejoin grace is PvpRejoinCoordinatorTests').
+            var rig = new Rig();
+            rig.Bg = rig.Bg with { RejoinGraceSeconds = 0 };
+            rig.Build(A, B, C, D);
             var m = rig.ToLive("bg", A, B, C, D);
 
             rig.Gateway.Players[C].Online = false;

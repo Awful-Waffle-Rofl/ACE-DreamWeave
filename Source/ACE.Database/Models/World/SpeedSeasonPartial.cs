@@ -42,7 +42,13 @@ namespace ACE.Database.Models.World
         /// <summary>Wcid of the object whose activation starts the clock; 0 means the clock starts on arrival.</summary>
         public uint StartWcid { get; set; }
 
-        /// <summary>Recommended level floor, advisory only in v1 - v1 does not scale enemies.</summary>
+        /// <summary>
+        /// Recommended level floor. For a season with no speed course this stays advisory: nothing scales its enemies.
+        /// For a season that runs a speed course (SpeedCourseManager) it is also the scaling clamp: the run level is
+        /// the player's level raised to at least the larger of this floor and the course's own levelFloor
+        /// (SpeedCourseRules.RunLevel), and the course's population is built at that run level. The floor is
+        /// ignored when the season's course sets fixedLevel (speed-courses.json): that run is flat at the fixed level.
+        /// </summary>
         public int LevelFloor { get; set; }
 
         /// <summary>

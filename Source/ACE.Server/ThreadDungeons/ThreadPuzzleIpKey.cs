@@ -30,7 +30,7 @@ namespace ACE.Server.ThreadDungeons
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>The prefix of a per-account household key.</summary>
-        public const string AccountPrefix = "acct:";
+        public const string AccountPrefix = IpLimitManager.AccountKeyPrefix;
 
         /// <summary>The suffix every IPv6 key carries.</summary>
         public const string Ipv6PrefixSuffix = "/64";
@@ -47,7 +47,7 @@ namespace ACE.Server.ThreadDungeons
                 return null;
 
             if (householdExempt)
-                return accountId == 0 ? null : AccountPrefix + accountId.ToString(CultureInfo.InvariantCulture);
+                return accountId == 0 ? null : IpLimitManager.AccountKey(accountId);
 
             var normalized = RewardClaimRules.NormalizeIpKey(address, false);
 
@@ -82,7 +82,24 @@ namespace ACE.Server.ThreadDungeons
                 return null;
             }
 
-            return For(address, IpLimitManager.IsHouseholdExempt(session, lists), session.AccountId);
+            return For(address, session.AccountId, session.Account, lists);
+        }
+
+        /// <summary>
+        /// Pure core of the session adapter. A clustered account is keyed by its cluster ("cluster:name"), from any
+        /// address. Everything else keeps the existing logic, so the keys already written to the puzzle ledger (the
+        /// /64 form, acct:&lt;id&gt;) are byte-identical. NULL when there is no address.
+        /// </summary>
+        public static string For(IPAddress address, uint accountId, string accountName, IpLimitManager.HouseholdLists lists)
+        {
+            if (address == null)
+                return null;
+
+            var cluster = accountId == 0 ? null : lists?.Clusters.ClusterOf(accountId);
+            if (cluster != null)
+                return IpLimitManager.ClusterKey(cluster);
+
+            return For(address, IpLimitManager.IsHouseholdExemptCore(accountName, address, lists), accountId);
         }
     }
 }

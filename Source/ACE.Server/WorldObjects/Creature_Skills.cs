@@ -27,6 +27,19 @@ namespace ACE.Server.WorldObjects
             => DefenseSkillCeilings != null && DefenseSkillCeilings.TryGetValue(skill, out var v) ? v : (uint?)null;
 
         /// <summary>
+        /// Non-persisted per-instance ceiling on this creature's pre-enchantment MAGIC ATTACK skills (War, Life, Void, Creature
+        /// Enchantment), owner ruling 2026-10-30. Written only by ThreadDungeonSpawner.PrepareForPlacement for a Thread run
+        /// creature, from dynamic_dungeons_magic_attack_skill_cap; never set for a Player or for a World Events or Pinnacle
+        /// creature. Null means no ceiling. Kept apart from <see cref="DefenseSkillCeilings"/> so the uplift code that reads the
+        /// defense ceilings is unaffected. Read by CreatureSkill.Base/Current via <see cref="GetMagicAttackSkillCeiling"/>.
+        /// </summary>
+        public uint? MagicAttackSkillCeiling;
+
+        /// <summary>This creature's magic attack ceiling for <paramref name="skill"/>: the ceiling for the four magic attack schools, null for every other skill.</summary>
+        public uint? GetMagicAttackSkillCeiling(Skill skill)
+            => MagicAttackSkillCeiling.HasValue && ACE.Server.ThreadDungeons.DungeonCombatNormalizer.IsMagicAttackSkill(skill) ? MagicAttackSkillCeiling : (uint?)null;
+
+        /// <summary>
         /// This will get a CreatureSkill wrapper around the BiotaPropertiesSkill record for this player.
         /// If the skill doesn't exist for this Biota, one will be created with a status of Untrained.
         /// </summary>

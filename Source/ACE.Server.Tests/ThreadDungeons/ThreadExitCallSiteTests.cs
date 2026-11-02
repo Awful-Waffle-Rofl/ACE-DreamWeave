@@ -29,7 +29,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             (PlayerLocation, "public void HandleActionTeleToHouse()", "WeenieError.YouMustOwnHouseToUseCommand", CombatModeChange),
             (PlayerLocation, "public void HandleActionTeleToLifestone()", "Your spirit has not been attuned to a sanctuary location.", "UpdateVital(Mana, Mana.Current / 2);"),
             (PlayerLocation, "public void HandleActionTeleToMarketPlace()", "WeenieError.YoureTooBusy", CombatModeChange),
-            (PlayerLocation, "private void HandleActionTeleToNetworkHub(string networkName, Position drop, WorldRealm realm, string unavailableMessage)", "You must leave the network you are standing in", "EnqueueBroadcast("),
+            (PlayerLocation, "private void HandleActionTeleToNetworkHub(string networkName, Position drop, WorldRealm realm, string unavailableMessage, string source)", "You must leave the network you are standing in", "EnqueueBroadcast("),
             (PlayerLocation, "public void HandleActionRecallAllegianceHometown()", "if (!VerifyRecallAllegianceHometown())", CombatModeChange),
             (PlayerLocation, "public void HandleActionTeleToMansion()", "if (allegianceHouse == null)", CombatModeChange),
             (PlayerLocation, "public void HandleActionTeleToPkArena()", "WeenieError.YoureTooBusy", CombatModeChange),
@@ -124,7 +124,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void Forced_moves_never_reach_the_guard()
         {
-            var teleport = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Location.cs"), "public void Teleport(Position _newPosition, bool fromPortal = false)");
+            var teleport = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Location.cs"), "public void Teleport(Position _newPosition, bool fromPortal = false, string source = null)");
             Assert.IsFalse(teleport.Contains(Guard), "Player.Teleport is the forced path; the gate is opt-in at call sites");
 
             var endRun = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonManager.cs"), "public static void EndRun(ThreadDungeonRun run, string why)");

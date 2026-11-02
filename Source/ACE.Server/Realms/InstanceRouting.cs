@@ -1,3 +1,5 @@
+using System;
+
 using ACE.Entity;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -37,9 +39,10 @@ namespace ACE.Server.Realms
         EphemeralInstanceNotLive,
 
         /// <summary>
-        /// The ephemeral instance is live but hosts a DIFFERENT landblock than the destination cell names.
-        /// An ephemeral instance is a private copy of exactly one landblock, so this is a routing bug in the
-        /// caller, not an expiry.
+        /// The ephemeral instance is live but the destination cell's landblock is outside its footprint. A
+        /// single-landblock instance (every dungeon copy) owns exactly that one landblock; an outdoor instance
+        /// group owns its declared footprint (EphemeralFootprint), and a buffer landblock around it is never a
+        /// destination. Either way this is a routing bug in the caller, not an expiry.
         /// </summary>
         EphemeralLandblockMismatch,
 
@@ -158,11 +161,12 @@ namespace ACE.Server.Realms
 
             if (isEphemeral)
             {
-                var landblock = LandblockManager.GetEphemeralLandblock(pos.Instance);
+                // One coherent read of the instance's primary landblock and its footprint.
+                LandblockManager.TryGetEphemeralInstance(pos.Instance, out var landblock, out var footprint);
 
                 if (landblock == null)
                     rejection = InstanceRejection.EphemeralInstanceNotLive;
-                else if (landblock.Id.Landblock != (pos.Cell >> 16))
+                else if (!EphemeralInstanceGroup.RoutingAccepts(footprint, pos.Cell))
                     rejection = InstanceRejection.EphemeralLandblockMismatch;
                 else if (!(landblock.InnerRealmInfo?.Accepts(player) ?? false))
                     rejection = InstanceRejection.EphemeralAccessDenied;
@@ -180,6 +184,76 @@ namespace ACE.Server.Realms
             }
 
             return pos;
+        }
+
+        /// <summary>What <see cref="TryAdmitStaffToInstance"/> found at the target position.</summary>
+        public enum StaffAdmitResult
+        {
+            /// <summary>The position is not in an ephemeral instance; nothing was done.</summary>
+            NotEphemeral,
+
+            /// <summary>The instance is not live (or has no realm info); nothing was done.</summary>
+            NotLive,
+
+            /// <summary>The staff player was added to the instance's admitted list and now passes Accepts.</summary>
+            Admitted,
+
+            /// <summary>The instance has expired; Accepts still refuses.</summary>
+            Expired,
+
+            /// <summary>Accepts still refuses for another reason (a Thread puzzle fail policy).</summary>
+            RefusedByRunPolicy,
+
+            /// <summary>The target cell is on a landblock outside the instance's footprint (an Open World Thread buffer); nobody was admitted.</summary>
+            OutsideFootprint,
+        }
+
+        /// <summary>
+        /// For the staff teleport-to-player command only: if the target position is in a live ephemeral
+        /// instance, admits the staff player to it so the normal Teleport validation passes. Deliberately not
+        /// in EphemeralRealm.Accepts, so portals and every other route stay closed to staff.
+        ///
+        /// <para/>
+        /// Admission lasts for the instance's life and is held on that Player object by reference, so the same
+        /// session can re-enter the instance by other routes until it ends or they relog. Any player present,
+        /// staff included, keeps a Cleared Thread run and its copy alive (ThreadDungeonManager.cs:1987-1988,
+        /// Landblock.cs:224-230), so admins should leave when done.
+        /// </summary>
+        public static StaffAdmitResult TryAdmitStaffToInstance(Position target, Player staff)
+        {
+            if (target == null || !target.IsEphemeralRealm)
+                return StaffAdmitResult.NotEphemeral;
+
+            LandblockManager.TryGetEphemeralInstance(target.Instance, out var landblock, out var footprint);
+
+            return AdmitStaff(landblock?.InnerRealmInfo, footprint, target.Cell, staff);
+        }
+
+        /// <summary>
+        /// The pure half of <see cref="TryAdmitStaffToInstance"/>: a cell outside the footprint is refused
+        /// before anyone is admitted (Teleport would reject it as a landblock mismatch anyway), otherwise
+        /// admit, then report whether Accepts agrees.
+        /// </summary>
+        internal static StaffAdmitResult AdmitStaff(EphemeralRealm realm, EphemeralFootprint footprint, uint cell, Player staff)
+        {
+            if (realm == null)
+                return StaffAdmitResult.NotLive;
+
+            if (!EphemeralInstanceGroup.RoutingAccepts(footprint, cell))
+                return StaffAdmitResult.OutsideFootprint;
+
+            realm.Admit(staff);
+
+            return ClassifyAdmission(realm.Accepts(staff), DateTime.UtcNow, realm.ExpiresAt);
+        }
+
+        /// <summary>The post-Admit verdict: Accepts agreeing is Admitted; otherwise an expired instance is Expired, anything else the run policy.</summary>
+        internal static StaffAdmitResult ClassifyAdmission(bool accepts, DateTime now, DateTime expiresAt)
+        {
+            if (accepts)
+                return StaffAdmitResult.Admitted;
+
+            return now > expiresAt ? StaffAdmitResult.Expired : StaffAdmitResult.RefusedByRunPolicy;
         }
 
         /// <summary>

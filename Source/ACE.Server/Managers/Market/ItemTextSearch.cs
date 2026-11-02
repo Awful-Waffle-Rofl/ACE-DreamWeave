@@ -16,8 +16,10 @@ namespace ACE.Server.Managers.Market
     /// (made internal for exactly this) is the one place that turns a spell id into a display name,
     /// and this class calls it rather than reimplementing it.
     ///
-    /// The equipment-set matching rule is IDENTICAL to the one the separate web market app implements
-    /// against the same snapshot fields, deliberately: see the 4-arg SearchText overload's remarks.
+    /// The equipment-set and gear-rating matching rules are IDENTICAL to the ones the separate web
+    /// market app implements against the same snapshot fields, deliberately: see the 4-arg and 5-arg
+    /// SearchText overloads' remarks. The one intentional difference is the web-only custom mod names
+    /// (see the 5-arg overload).
     ///
     /// A pattern cannot contain a literal double quote: CommandManager.ParseCommand strips every `"`
     /// from a command line that has one (pre-existing, not specific to this class) before /mule search's
@@ -86,6 +88,23 @@ namespace ACE.Server.Managers.Market
         /// today's (pre-set-search) string, which is why setLabel/setToken are optional and null-safe.
         /// </summary>
         public static string SearchText(string name, IEnumerable<string> spellNames, string setLabel, string setToken)
+            => SearchText(name, spellNames, setLabel, setToken, null);
+
+        /// <summary>
+        /// The 4-arg text, then one segment per gear rating, joined with "; ". Each segment is the
+        /// item's own appraisal rating line, "&lt;label&gt;: &lt;+N or -N&gt;" (e.g. "Critical Damage Rating: +2"),
+        /// non-zero only, in the fixed MarketAppraisal.AddRatings order (the labels are that table's,
+        /// not a second one): Damage, Damage Reduction, Critical, Critical Resistance, Critical Damage,
+        /// Critical Damage Reduction, Healing Boost, Nether Resistance, Life Resistance, Maximum Health
+        /// Bonus, PK Damage, PK Damage Reduction, Overpower, Overpower Resistance. So "\+1" or
+        /// "critical damage.*\+2" finds a rated piece. Null/empty entries are skipped, and an item with
+        /// no ratings produces exactly the 4-arg string.
+        ///
+        /// Rating segments come LAST. The web market app puts its WEB-ONLY custom mod names between the
+        /// set parts and the ratings; ACE has no mod segment (in-game search of mods is out of scope), so
+        /// for an item with no mods the two strings are identical.
+        /// </summary>
+        public static string SearchText(string name, IEnumerable<string> spellNames, string setLabel, string setToken, IEnumerable<string> ratingLines)
         {
             var parts = new List<string> { name ?? string.Empty };
 
@@ -103,6 +122,15 @@ namespace ACE.Server.Managers.Market
 
             if (!string.IsNullOrEmpty(setToken) && !string.Equals(setToken, setLabel, StringComparison.Ordinal))
                 parts.Add(setToken);
+
+            if (ratingLines != null)
+            {
+                foreach (var ratingLine in ratingLines)
+                {
+                    if (!string.IsNullOrEmpty(ratingLine))
+                        parts.Add(ratingLine);
+                }
+            }
 
             return string.Join("; ", parts);
         }
@@ -135,7 +163,7 @@ namespace ACE.Server.Managers.Market
             var setLabel = MarketEquipmentSet.Label(equipmentSetId);
             var setToken = MarketEquipmentSet.Classify(equipmentSetId);
 
-            return SearchText(item.Name, spellNames, setLabel, setToken);
+            return SearchText(item.Name, spellNames, setLabel, setToken, MarketAppraisal.RatingLines(item));
         }
 
         /// <summary>
@@ -154,7 +182,7 @@ namespace ACE.Server.Managers.Market
             var setLabel = MarketEquipmentSet.Label(equipmentSetId);
             var setToken = MarketEquipmentSet.Classify(equipmentSetId);
 
-            return SearchText(weenie.GetName(), spellNames, setLabel, setToken);
+            return SearchText(weenie.GetName(), spellNames, setLabel, setToken, MarketAppraisal.RatingLines(weenie));
         }
 
         /// <summary>True on a match, false on a timeout - never throws.</summary>

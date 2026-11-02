@@ -70,7 +70,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Teleport_ClearsMarkerInTheRefusalBranch()
         {
-            var body = MethodBody(PlayerLocationPath, "public void Teleport(Position _newPosition, bool fromPortal = false)");
+            var body = MethodBody(PlayerLocationPath, "public void Teleport(Position _newPosition, bool fromPortal = false, string source = null)");
             var refusal = BlockAfter(body, "if (rejection != InstanceRejection.None && _newPosition.IsEphemeralRealm)");
 
             StringAssert.Contains(refusal, MarkerClear, "a refused ephemeral teleport must clear the pending marker");
@@ -79,7 +79,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Teleport_ClearsMarkerAfterTeleportingIsSet()
         {
-            var body = MethodBody(PlayerLocationPath, "public void Teleport(Position _newPosition, bool fromPortal = false)");
+            var body = MethodBody(PlayerLocationPath, "public void Teleport(Position _newPosition, bool fromPortal = false, string source = null)");
 
             var teleporting = body.IndexOf("Teleporting = true;", StringComparison.Ordinal);
             Assert.IsTrue(teleporting >= 0, "Player.Teleport no longer sets Teleporting - this pin needs revisiting");

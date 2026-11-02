@@ -21,13 +21,16 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// independently-resisted, independently-critting event.
     ///
     /// THE CAST IS PLAYER-SOURCED AND SWORD-LAUNCHED, and the two are different arguments on purpose:
-    /// - CASTER is the player, so the target's magic-defense check and every skill-derived term run off the
-    ///   player's War Magic rather than off an item's spellcraft. That is the class premise - "proc damage
-    ///   scales with the player's magic skills, never their melee skills" (design section 1c / Q3).
+    /// - CASTER is the player, so the target's magic-defense check, the skill damage bonus and the imbue
+    ///   scaling run off the player's Item Enchantment (SpellProjectile.CasterSkillOverride) rather than off an
+    ///   item's spellcraft; proficiency credit and the school-keyed multipliers keep the spell's school. That is
+    ///   the class premise - "proc damage scales with the player's magic skills, never their melee skills"
+    ///   (design section 1c / Q3).
     /// - LAUNCHER is the wielded weapon, which is what lets the weapon's rend, slayer and crit frequency
-    ///   reach the proc (design Q11 / section 5a). The rend term is the happiest part: GetRendingMod reads
-    ///   Spell.School, which for a Streak is War Magic, so a rending light weapon rends the proc and the
-    ///   rend magnitude scales off the player's magic skill.
+    ///   reach the proc (design Q11 / section 5a). The rend term is the happiest part: GetRendingMod reads the
+    ///   CreatureSkill passed as attackSkill, which for a Spellsword proc is the player's Item Enchantment
+    ///   (SpellProjectile.CasterSkillOverride), so a rending light weapon rends the proc and the rend magnitude
+    ///   scales off Item Enchantment.
     /// </summary>
     public class SpellbladeAbility : IOutgoingDamageAbility, IAbilityReadout
     {
@@ -41,7 +44,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your landed light weapon hits have a 25% chance to cast a Streak war spell at the " +
                           "target, matching the damage type of the swing. Rank raises the spell level cap " +
                           "(III / V / the Incantation), not the chance; the level you actually throw is also " +
-                          "limited by your War Magic. Higher Item Enchantment increases the chance.",
+                          "limited by your Item Enchantment, which also sets how hard the spell is to resist " +
+                          "and its skill damage bonus. A Nether weapon casts a Void streak instead. " +
+                          "Higher Item Enchantment increases the chance. " +
+                          "A swing at full power casts a Bolt instead, and every proc hits harder the more " +
+                          "power you put into the swing.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -142,13 +149,24 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 
-            // Level is driven by War Magic against the engine's own MinPower thresholds, capped by rank.
-            // Returns null for an exotic damage type (Health / Stamina / Mana / Nether / Base), which must
-            // proc nothing, silently.
-            var spellId = SpellswordSpellTables.SelectSpell(SpellswordSpellTables.StreakByType,
-                SpellswordSpellTables.StreakLevels,
+            // Level is driven by Item Enchantment (SpellswordSpellTables.LevelSkillFor)
+            // against the engine's own MinPower thresholds, capped by rank. Returns null for an exotic damage
+            // type (Health / Stamina / Mana / Base), which must proc nothing, silently.
+            //
+            // Full-power upgrade (2026-11-01): a swing at a full bar casts the BOLT at the same rung instead -
+            // both ladders are levels 1-8, so the level, rank cap and skill rule are the same call on a
+            // different table. Gated by the kill switch; a Riposte counter reads as power 0 and never upgrades.
+            var swingPower = SpellswordSpellTables.SwingPowerLevel(damageEvent);
+            var fullPower = SpellswordSpellTables.UseFullPowerShape(
+                PropertyManager.GetBool("class_ability_spellsword_full_power_shape").Item, swingPower);
+
+            var ladder = fullPower ? SpellswordSpellTables.BoltByType : SpellswordSpellTables.StreakByType;
+            var ladderLevels = fullPower ? SpellswordSpellTables.BoltLevels : SpellswordSpellTables.StreakLevels;
+
+            var spellId = SpellswordSpellTables.SelectSpell(ladder,
+                ladderLevels,
                 damageType,
-                attacker.GetCreatureSkill(Skill.WarMagic).Current,
+                attacker.GetCreatureSkill(SpellswordSpellTables.LevelSkillFor(damageType)).Current,
                 rank,
                 PropertyManager.GetDouble("class_ability_spellsword_level_skill_scale").Item);
 
@@ -156,6 +174,18 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return;
 
             var spell = new Spell(spellId.Value);
+
+            // Nether parity: 1.0 for every elemental type; for Nether, the Fire Streak at the same rung over
+            // this Nether Streak, times the tunable. Stamped on the projectiles by the cast below.
+            var procDamageScale = SpellswordSpellTables.ProcDamageScaleFor(
+                SpellswordSpellTables.ParityReferenceFor(ladder, damageType, spellId.Value),
+                spell,
+                PropertyManager.GetDouble("class_ability_spellsword_nether_parity").Item);
+
+            // Power-scaled proc damage: x(1 + a x PowerLevel), composed with the parity scale. Exactly 1.0 on
+            // an empty bar, so the unarmed build is unchanged.
+            procDamageScale *= SpellswordSpellTables.PowerProcScale(swingPower,
+                PropertyManager.GetDouble("class_ability_spellsword_power_proc_scale").Item);
 
             // fromProc suppresses the weapon's own item procs (this is a cast-on-strike, not a cast).
             //
@@ -173,7 +203,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             // procs and Echo Cast recasts. Cascade FAILS CLOSED without this: an unwrapped cast simply
             // never cascades, with no error and no log line.
             attacker.CastClassAbilityProc(() =>
-                attacker.CreateSpellProjectiles(spell, target, damageEvent.Weapon, false, fromProc: true, suppressPetAssist: true));
+                attacker.CreateSpellProjectiles(spell, target, damageEvent.Weapon, false, fromProc: true, suppressPetAssist: true),
+                procDamageScale,
+                damageEvent.OriginalDamageType);   // Volatile Elements: the re-typed hit's original type, for the proc's rend max
 
             // A landed war proc feeds Spellsurge (design section 5e). Sundermark deliberately does not.
             attacker.AddSpellsurgeStack();

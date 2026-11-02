@@ -45,6 +45,11 @@ namespace ACE.Server.Tests
         /// <summary>Bakes nothing, by far the common case - matches DatSetupEffectScale's 0f for DefaultScript == 0.</summary>
         private static float NoEffectScale(uint setupId) => 0f;
 
+        /// <summary>The ordinary answer: the body draws something (or could not be read - fail open).</summary>
+        private static bool DrawsSomething(uint setupId, uint clothingBaseId) => false;
+
+        private static bool DrawsNothing(uint setupId, uint clothingBaseId) => true;
+
         /// <summary>
         /// A token built from an in-memory weenie. WeenieType.Gem's SetEphemeralValues touches neither
         /// the database nor the dat files, which is what lets these tests run without either.
@@ -147,10 +152,12 @@ namespace ACE.Server.Tests
         private static bool Valid(bool isCreature = true, bool isPlayer = false, bool isPet = false,
                                   WeenieType weenieType = WeenieType.Creature, bool attackable = true,
                                   uint setupId = ValidSetup, Func<uint, float> effectScale = null,
-                                  float maxEffectScale = MaxEffectScale)
+                                  float maxEffectScale = MaxEffectScale, uint wcid = DonorWcid,
+                                  uint clothingBaseId = 0, Func<uint, uint, bool> drawsNothing = null)
         {
             return MuleFormToken.IsValidAttunementTarget(isCreature, isPlayer, isPet, weenieType, attackable, setupId,
-                Height, effectScale ?? NoEffectScale, maxEffectScale, out _);
+                clothingBaseId, wcid, Height, effectScale ?? NoEffectScale, drawsNothing ?? DrawsSomething,
+                maxEffectScale, out _);
         }
 
         [TestMethod]
@@ -204,7 +211,7 @@ namespace ACE.Server.Tests
         public void ValidTarget_RefusalIsTheOneSpecString()
         {
             MuleFormToken.IsValidAttunementTarget(true, true, false, WeenieType.Creature, true, ValidSetup,
-                Height, NoEffectScale, MaxEffectScale, out var refusal);
+                0, DonorWcid, Height, NoEffectScale, DrawsSomething, MaxEffectScale, out var refusal);
 
             Assert.AreEqual("The effigy cannot take that shape.", refusal);
         }
@@ -234,7 +241,7 @@ namespace ACE.Server.Tests
         public void ValidTarget_RefusalStringForAnOversizedEffectScale()
         {
             MuleFormToken.IsValidAttunementTarget(true, false, false, WeenieType.Creature, true, ValidSetup,
-                Height, setupId => MaxEffectScale + 1f, MaxEffectScale, out var refusal);
+                0, DonorWcid, Height, setupId => MaxEffectScale + 1f, DrawsSomething, MaxEffectScale, out var refusal);
 
             StringAssert.Contains(refusal, MuleFormToken.CannotTakeThatShapeMessage);
         }
@@ -451,6 +458,116 @@ namespace ACE.Server.Tests
             token.Name = "Beast Effigy (Tusker Guard)";
 
             Assert.AreEqual("Beast Effigy", MuleFormToken.GetBaseName(token));
+        }
+
+        // ---------------- draws-nothing gate ----------------
+
+        [TestMethod]
+        public void ValidTarget_RefusesABodyThatDrawsNothing()
+        {
+            Assert.IsFalse(Valid(drawsNothing: DrawsNothing));
+        }
+
+        [TestMethod]
+        public void ValidTarget_RefusalStringForABodyThatDrawsNothing()
+        {
+            MuleFormToken.IsValidAttunementTarget(true, false, false, WeenieType.Creature, true, ValidSetup,
+                0, DonorWcid, Height, NoEffectScale, DrawsNothing, MaxEffectScale, out var refusal);
+
+            Assert.AreEqual(MuleFormToken.CannotTakeThatShapeMessage, refusal);
+        }
+
+        [TestMethod]
+        public void ValidTarget_AcceptsABodyThatDrawsNothing_WhenTheDonorHasAStandIn()
+        {
+            // The stand-in is what makes the Dark Sarcophagus visible, so it stays attunable.
+            Assert.IsTrue(MuleFormStandIn.Has(MuleFormStandIn.DarkSarcophagusWcid));
+            Assert.IsTrue(Valid(wcid: MuleFormStandIn.DarkSarcophagusWcid, drawsNothing: DrawsNothing));
+        }
+
+        [TestMethod]
+        public void ValidTarget_AStandInIsKeyedByWcid_NotBySetup()
+        {
+            // A different wcid wearing the very same invisible body is still refused.
+            Assert.IsFalse(Valid(wcid: MuleFormStandIn.DarkSarcophagusWcid + 1, drawsNothing: DrawsNothing));
+        }
+
+        [TestMethod]
+        public void ValidTarget_PassesTheSetupAndClothingBaseToTheDrawsNothingDelegate()
+        {
+            // The pair matters: a bare Setup that is empty can be visible through the parts its
+            // ClothingBase swaps in, so the delegate must be asked about both.
+            uint askedSetup = 0, askedClothing = 0;
+
+            var ok = Valid(setupId: ValidSetup, clothingBaseId: 0x100003ED, drawsNothing: (s, c) =>
+            {
+                askedSetup = s;
+                askedClothing = c;
+                return false;
+            });
+
+            Assert.IsTrue(ok);
+            Assert.AreEqual(ValidSetup, askedSetup);
+            Assert.AreEqual(0x100003EDu, askedClothing);
+        }
+
+        [TestMethod]
+        public void ValidTarget_NullDrawsNothingDelegate_SkipsTheCheck()
+        {
+            Assert.IsTrue(MuleFormToken.IsValidAttunementTarget(true, false, false, WeenieType.Creature, true, ValidSetup,
+                0, DonorWcid, Height, NoEffectScale, null, MaxEffectScale, out _));
+        }
+
+        [TestMethod]
+        public void DatSetupDrawsNothing_UnknownAnswer_FailsOpenAndIsNotCached()
+        {
+            // null from the compute delegate means the dat read threw. That must read as "not
+            // invisible" (attunable) and must not be pinned for the process lifetime.
+            const uint setupId = 0x02001111;
+            const uint clothingBase = 0x10001111;
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, clothingBase);
+
+            var callCount = 0;
+            bool? Compute(uint s, uint c)
+            {
+                callCount++;
+                return callCount == 1 ? (bool?)null : true;
+            }
+
+            var first = MuleFormToken.GetOrComputeDrawsNothing(setupId, clothingBase, Compute);
+            var second = MuleFormToken.GetOrComputeDrawsNothing(setupId, clothingBase, Compute);
+
+            Assert.IsFalse(first, "an unreadable body must not be reported as drawing nothing");
+            Assert.IsTrue(second, "the failure was not cached, so the retry reached the compute delegate");
+            Assert.AreEqual(2, callCount);
+
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, clothingBase);
+        }
+
+        [TestMethod]
+        public void DatSetupDrawsNothing_KnownAnswerIsCached_PerSetupAndClothingBasePair()
+        {
+            const uint setupId = 0x02002222;
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, 0);
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, 0x10002222);
+
+            var callCount = 0;
+            bool? Compute(uint s, uint c)
+            {
+                callCount++;
+                return c == 0;   // empty bare, visible once the ClothingBase is worn
+            }
+
+            Assert.IsTrue(MuleFormToken.GetOrComputeDrawsNothing(setupId, 0, Compute));
+            Assert.IsTrue(MuleFormToken.GetOrComputeDrawsNothing(setupId, 0, Compute));
+            Assert.AreEqual(1, callCount, "a known answer is memoized");
+
+            Assert.IsFalse(MuleFormToken.GetOrComputeDrawsNothing(setupId, 0x10002222, Compute),
+                "the same Setup under a different ClothingBase is a different question");
+            Assert.AreEqual(2, callCount);
+
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, 0);
+            MuleFormToken.ClearDrawsNothingCacheForTest(setupId, 0x10002222);
         }
 
         // ---------------- tunable registration ----------------

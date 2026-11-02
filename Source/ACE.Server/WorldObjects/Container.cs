@@ -11,6 +11,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
+using ACE.Server.Knots;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.GameEvent.Events;
@@ -218,7 +219,14 @@ namespace ACE.Server.WorldObjects
             if (includeSidePacks)
             {
                 foreach (var sidePack in Inventory.Values.OfType<Container>())
+                {
+                    // Knots: the Pouch's slots are not free for automatic placement (see TryAddToInventory), so
+                    // a pre-check must not count them, or it would promise room the add then cannot find.
+                    if (KnotItems.IsPouch(sidePack))
+                        continue;
+
                     freeSlots += (sidePack.ItemCapacity ?? 0) - sidePack.CountPackItems();
+                }
             }
 
             return freeSlots;
@@ -534,6 +542,13 @@ namespace ACE.Server.WorldObjects
 
                         foreach (var sidePack in containers)
                         {
+                            // Knots: a Knotting Pouch never receives an automatically placed item, Fibers included;
+                            // it only takes Fibers the player moves in by hand (an explicit move names the Pouch
+                            // and adds to it directly, never through this loop). Skipping it here makes every
+                            // caller behave exactly as if the Pouch were not there.
+                            if (KnotItems.IsPouch(sidePack))
+                                continue;
+
                             if (sidePack.TryAddToInventory(worldObject, out container, placementPosition, true))
                             {
                                 EncumbranceVal += (worldObject.EncumbranceVal ?? 0);

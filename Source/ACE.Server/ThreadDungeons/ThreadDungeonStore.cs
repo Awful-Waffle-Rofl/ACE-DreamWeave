@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Text.Json;
 
 using ACE.Entity.Enum;
+using ACE.Server.Knots;
 using ACE.Server.PuzzleGates;
 using ACE.Server.ThreadDungeons.Defs;
 using ACE.Server.Managers;
@@ -87,18 +88,44 @@ namespace ACE.Server.ThreadDungeons
 
         private static readonly IReadOnlyList<PuzzleSiteDef> EmptyPuzzleSites = new List<PuzzleSiteDef>();
 
+        /// <summary>
+        /// Every valid pinnacle from pinnacles.json (Docs/Knots/KNOTS-DESIGN.md section 8), disabled ones
+        /// included. Empty, never null: a missing or unreadable file is a diagnostic plus an empty list.
+        /// Consumers that pick or name a pinnacle read <see cref="EnabledPinnacles"/>, so a disabled pinnacle is
+        /// absent to them.
+        /// </summary>
+        public IReadOnlyList<PinnacleDef> Pinnacles { get; }
+
+        /// <summary>The pinnacles with enabled = true: the pool for random selection and Pattern drops.</summary>
+        public IReadOnlyList<PinnacleDef> EnabledPinnacles => Pinnacles.Where(p => p.Enabled).ToList();
+
+        /// <summary>One pinnacle by key (enabled or not), or null.</summary>
+        public PinnacleDef GetPinnacle(string key)
+            => key == null ? null : Pinnacles.FirstOrDefault(p => string.Equals(p.Key, key, StringComparison.Ordinal));
+
+        /// <summary>
+        /// Validated weak-point heights per species-table family id (weak-points.json). Empty, never null: a
+        /// missing or unreadable file is a diagnostic plus an empty dictionary. A family with no row here gets
+        /// no weak point (<see cref="DungeonWeakPoint"/>).
+        /// </summary>
+        public IReadOnlyDictionary<string, WeakPointFamilyDef> WeakPoints { get; }
+
         public IReadOnlyList<string> Diagnostics { get; }
 
         public static readonly ThreadDungeonStore Empty = new ThreadDungeonStore(
             new Dictionary<string, DungeonEntryDef>(), new List<BossEntryDef>(), new Dictionary<string, ModifierDef>(),
             new List<XpLadderRungDef>(), AttunementDef.Empty, new Dictionary<string, DungeonClearanceEntryDef>(),
-            new Dictionary<string, IReadOnlyList<PuzzleSiteDef>>(), new List<string>());
+            new Dictionary<string, IReadOnlyList<PuzzleSiteDef>>(), new List<PinnacleDef>(), new List<string>(),
+            new Dictionary<string, WeakPointFamilyDef>());
 
         private ThreadDungeonStore(Dictionary<string, DungeonEntryDef> dungeons, List<BossEntryDef> bosses,
             Dictionary<string, ModifierDef> modifiers, List<XpLadderRungDef> ladder, AttunementDef attunement,
             Dictionary<string, DungeonClearanceEntryDef> clearance, Dictionary<string, IReadOnlyList<PuzzleSiteDef>> puzzleSites,
-            List<string> diagnostics)
+            List<PinnacleDef> pinnacles,
+            List<string> diagnostics,
+            Dictionary<string, WeakPointFamilyDef> weakPoints)
         {
+            WeakPoints = weakPoints;
             Dungeons = dungeons;
             Bosses = bosses;
             this.modifiers = modifiers;
@@ -106,6 +133,7 @@ namespace ACE.Server.ThreadDungeons
             Attunement = attunement;
             Clearance = clearance;
             PuzzleSites = puzzleSites;
+            Pinnacles = pinnacles;
             Diagnostics = diagnostics;
         }
 
@@ -131,10 +159,36 @@ namespace ACE.Server.ThreadDungeons
         /// Content/dungeons/dynamic/puzzle-gates.json. Trailing and optional on the same terms as
         /// <paramref name="clearanceJson"/>: null or empty means "no puzzle sites".
         /// </param>
+        /// <param name="pinnaclesJson">
+        /// Content/dungeons/dynamic/pinnacles.json (Knots). Trailing and optional on the same terms: null or
+        /// empty means "no pinnacles". Parsed and linted by <see cref="PinnacleRegistry"/>.
+        /// </param>
+        /// <param name="outdoorJsonById">
+        /// outdoor/&lt;id&gt;.json file text keyed by site id (the file stem). Only index rows of kind "outdoor"
+        /// read it; null or empty means no outdoor files, which drops every outdoor row with a diagnostic.
+        /// </param>
+        /// <param name="outdoorWarningBandM">
+        /// The warning band in metres (dynamic_dungeons_outdoor_warning_band_m). A parameter, not a
+        /// PropertyManager read, so Parse stays pure; <see cref="Load"/> passes the live tunable.
+        /// </param>
+        /// <param name="outdoorDropMinInsideM">
+        /// dynamic_dungeons_outdoor_drop_min_inside_m: the entry (drop) must be at least this far inside the
+        /// circle. Injected for the same reason as the band.
+        /// </param>
+        /// <param name="outdoorContainmentMarginM">
+        /// dynamic_dungeons_outdoor_containment_margin_m: the boss anchor must be at least this far inside the
+        /// circle (it is exempt from the warning band only). Injected like the band.
+        /// </param>
         public static ThreadDungeonStore Parse(string indexJson, string bossesJson, string modifiersJson, IDictionary<string, string> dungeonJsonByStem,
-            IEnumerable<string> preDiagnostics = null, string attunementJson = null, string clearanceJson = null, string puzzleGatesJson = null)
+            IEnumerable<string> preDiagnostics = null, string attunementJson = null, string clearanceJson = null, string puzzleGatesJson = null,
+            string pinnaclesJson = null, IDictionary<string, string> outdoorJsonById = null,
+            double outdoorWarningBandM = OutdoorSiteTunables.DefaultWarningBandM,
+            double outdoorDropMinInsideM = OutdoorSiteTunables.DefaultDropMinInsideM,
+            double outdoorContainmentMarginM = OutdoorSiteTunables.DefaultContainmentMarginM,
+            string weakPointsJson = null)
         {
             dungeonJsonByStem ??= new Dictionary<string, string>();
+            outdoorJsonById ??= new Dictionary<string, string>();
 
             var diagnostics = preDiagnostics == null ? new List<string>() : new List<string>(preDiagnostics);
             var dungeons = new Dictionary<string, DungeonEntryDef>();
@@ -268,6 +322,19 @@ namespace ACE.Server.ThreadDungeons
             foreach (var d in index.Dungeons)
             {
                 if (string.IsNullOrEmpty(d.Id)) { diagnostics.Add("index.json: dungeon with empty id"); continue; }
+
+                // Outdoor rows take their own branch: no 0xLLLL.json, the file is outdoor/<id>.json. Everything
+                // below this block is the dungeon path and is unchanged.
+                if (string.IsNullOrEmpty(d.Kind)) d.Kind = DungeonEntryDef.KindDungeon;
+                if (d.Kind != DungeonEntryDef.KindDungeon && d.Kind != DungeonEntryDef.KindOutdoor)
+                { diagnostics.Add($"index.json: dungeon '{d.Id}' has unknown kind '{d.Kind}' (expected dungeon or outdoor)"); continue; }
+                if (d.IsOutdoor)
+                {
+                    if (!ParseOutdoorSiteSafe(d, outdoorJsonById, outdoorWarningBandM, outdoorDropMinInsideM, outdoorContainmentMarginM, dungeons, diagnostics)) continue;
+                    dungeons[d.Id] = d;
+                    continue;
+                }
+
                 if (!TryParseLandblockHex(d.LandblockHex, out var lb))
                 { diagnostics.Add($"index.json: dungeon '{d.Id}' has unparseable landblock '{d.LandblockHex}'"); continue; }
                 d.Landblock = lb;
@@ -326,7 +393,61 @@ namespace ACE.Server.ThreadDungeons
 
             var puzzleSites = ParsePuzzleSites(puzzleGatesJson, dungeons, diagnostics);
 
-            return new ThreadDungeonStore(dungeons, bosses, modifiers, ladder, attunement, clearance, puzzleSites, diagnostics);
+            var pinnacles = PinnacleRegistry.Parse(pinnaclesJson, diagnostics);
+
+            var weakPoints = ParseWeakPoints(weakPointsJson, diagnostics);
+
+            return new ThreadDungeonStore(dungeons, bosses, modifiers, ladder, attunement, clearance, puzzleSites, pinnacles, diagnostics, weakPoints);
+        }
+
+        /// <summary>
+        /// weak-points.json -> family id -> weak-point heights. Fail-open: every problem is a diagnostic and
+        /// drops only the offending row (or the whole file, for an empty file or an unsupported version), and
+        /// a family with no surviving row simply gets no weak point. Dropped here, not repaired: a row with an
+        /// unknown height would otherwise be silently read as <c>random</c>.
+        ///   - empty text or a missing file: "weak-points.json: empty" (the attunement.json precedent). NULL text is
+        ///     "not supplied" and is silent, unlike attunement.json: <see cref="Load"/> always passes a string (empty
+        ///     for a missing file), so the server still reports it, while the many Parse call sites that predate
+        ///     this file keep their own diagnostic-count assertions;
+        ///   - a family id that is not [a-z0-9_]+;
+        ///   - a duplicate family (the first row stands);
+        ///   - a height or bossHeight that is not high, medium, low or random.
+        /// </summary>
+        private static Dictionary<string, WeakPointFamilyDef> ParseWeakPoints(string weakPointsJson, List<string> diagnostics)
+        {
+            var weakPoints = new Dictionary<string, WeakPointFamilyDef>(StringComparer.Ordinal);
+
+            if (weakPointsJson == null)
+                return weakPoints;
+
+            var file = Deserialize<WeakPointFileDef>(weakPointsJson, "weak-points.json", diagnostics);
+
+            if (file == null)
+                return weakPoints;
+
+            if (!VersionSupported(file.Version, "weak-points.json", diagnostics))
+                return weakPoints;
+
+            file.Families ??= new List<WeakPointFamilyDef>();
+
+            foreach (var row in file.Families)
+            {
+                if (row == null || string.IsNullOrEmpty(row.Family) || !row.Family.All(c => (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+                { diagnostics.Add($"weak-points.json: family id '{row?.Family}' must match [a-z0-9_]+"); continue; }
+
+                if (weakPoints.ContainsKey(row.Family))
+                { diagnostics.Add($"weak-points.json: duplicate family '{row.Family}'"); continue; }
+
+                if (!DungeonWeakPoint.TryParseHeight(row.Height, out _))
+                { diagnostics.Add($"weak-points.json: family '{row.Family}' has unknown height '{row.Height}' (expected high, medium, low or random)"); continue; }
+
+                if (row.BossHeight != null && !DungeonWeakPoint.TryParseHeight(row.BossHeight, out _))
+                { diagnostics.Add($"weak-points.json: family '{row.Family}' has unknown bossHeight '{row.BossHeight}' (expected high, medium, low or random)"); continue; }
+
+                weakPoints[row.Family] = row;
+            }
+
+            return weakPoints;
         }
 
         /// <summary>
@@ -380,6 +501,9 @@ namespace ACE.Server.ThreadDungeons
 
                 if (clearance.ContainsKey(c.Id))
                 { diagnostics.Add($"clearance.json: duplicate clearance row id '{c.Id}'"); continue; }
+
+                if (dungeons.TryGetValue(c.Id, out var outdoorRow) && outdoorRow.IsOutdoor)
+                { diagnostics.Add($"clearance.json: row '{c.Id}' names an outdoor site; outdoor sites carry no clearance row; skipped"); continue; }
 
                 if (!dungeons.TryGetValue(c.Id, out var indexed))
                 {
@@ -440,6 +564,12 @@ namespace ACE.Server.ThreadDungeons
                 if (!dungeons.TryGetValue(dungeonId, out var dungeon))
                 {
                     diagnostics.Add($"puzzle-gates.json: dungeon '{dungeonId}' is not in index.json; its sites are skipped");
+                    continue;
+                }
+
+                if (dungeon.IsOutdoor)
+                {
+                    diagnostics.Add($"puzzle-gates.json: '{dungeonId}' names an outdoor site; outdoor sites carry no puzzle gates; its sites are skipped");
                     continue;
                 }
 
@@ -888,6 +1018,278 @@ namespace ACE.Server.ThreadDungeons
             return Enum.IsDefined(typeof(MaterialType), (uint)value);
         }
 
+        /// <summary>The outdoor id rule: lowercase [a-z0-9_]+, "ow_" prefix, at most 16 characters (the analytics dungeon_id column is VARCHAR(16)).</summary>
+        public const int MaxOutdoorIdLength = 16;
+
+        /// <summary>Test seam: invoked with the site id at the start of <see cref="ParseOutdoorSite"/>, so a test can make it throw and reach the wrapper's catch path. Null in production.</summary>
+        internal static Action<string> OutdoorParseHook;
+        public const string OutdoorIdPrefix = "ow_";
+        public const double MinExitGapM = 5.0;
+        public const double MaxExitGapM = 10.0;
+
+        /// <summary>Slack on the exit-not-further-out check, so a sideways exit hand-written at 3 decimals still loads.</summary>
+        public const double ExitRadialToleranceM = 0.25;
+
+        /// <summary>The walk-in exit portal wcid; outdoor runs place exactly one CLICK-ONLY exit (1003604), so an outdoor row may not name this.</summary>
+        public const uint WalkInExitPortalWcid = 1003601;
+
+        internal static bool IsValidOutdoorId(string id, out string problem)
+        {
+            problem = null;
+            if (!DungeonGemSpec.IsIdent(id)) problem = "must be lowercase [a-z0-9_]+";
+            else if (!id.StartsWith(OutdoorIdPrefix, StringComparison.Ordinal)) problem = $"must start with '{OutdoorIdPrefix}'";
+            else if (id.Length > MaxOutdoorIdLength) problem = $"is {id.Length} characters; the limit is {MaxOutdoorIdLength}";
+            return problem == null;
+        }
+
+        /// <summary>Wraps <see cref="ParseOutdoorSite"/> so a throw becomes a diagnostic and a dropped site.</summary>
+        internal static bool ParseOutdoorSiteSafe(DungeonEntryDef d, IDictionary<string, string> files, double warningBandM, double dropMinInsideM,
+            double containmentMarginM, Dictionary<string, DungeonEntryDef> dungeons, List<string> diagnostics)
+        {
+            // The loader's contract is a diagnostic and a dropped site, never a throw: a null nested object in a
+            // hand-edited file must not take the whole store (and server start) down.
+            try
+            {
+                return ParseOutdoorSite(d, files, warningBandM, dropMinInsideM, containmentMarginM, dungeons, diagnostics);
+            }
+            catch (Exception ex)
+            {
+                diagnostics.Add($"outdoor/{d.Id}.json: malformed - {ex.GetType().Name}: {ex.Message}; site dropped");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Open World Threads (WP3a hardening): true when every footprint landblock is reachable from the first one through
+        /// 8-neighbour steps (dx and dy each at most 1) that stay inside the footprint. A footprint in two pieces would
+        /// put a bare buffer or unrelated landblock between run landblocks, which the run's lifecycle never covers. An
+        /// empty or single-landblock footprint is connected. Pure.
+        /// </summary>
+        internal static bool IsEightConnected(IReadOnlyList<ushort> footprint)
+        {
+            if (footprint == null || footprint.Count <= 1)
+                return true;
+
+            var all = new HashSet<ushort>(footprint);
+            var seen = new HashSet<ushort> { footprint[0] };
+            var queue = new Queue<ushort>();
+            queue.Enqueue(footprint[0]);
+
+            while (queue.Count > 0)
+            {
+                var lb = queue.Dequeue();
+                int x = lb >> 8, y = lb & 0xFF;
+
+                foreach (var other in all)
+                {
+                    if (seen.Contains(other))
+                        continue;
+
+                    if (Math.Abs((other >> 8) - x) <= 1 && Math.Abs((other & 0xFF) - y) <= 1)
+                    {
+                        seen.Add(other);
+                        queue.Enqueue(other);
+                    }
+                }
+            }
+
+            return seen.Count == all.Count;
+        }
+
+        /// <summary>
+        /// Validates one kind="outdoor" index row against outdoor/&lt;id&gt;.json and, on success, merges the file
+        /// into <paramref name="d"/> (Landblock, Entry, Points, BossAnchor, Outdoor). Returns false after adding
+        /// ONE diagnostic naming the first failed lint; the caller then drops the row, never half-loading it.
+        /// The lints are listed in Content/dungeons/dynamic/outdoor/README.md.
+        /// </summary>
+        internal static bool ParseOutdoorSite(DungeonEntryDef d, IDictionary<string, string> files, double warningBandM, double dropMinInsideM,
+            double containmentMarginM, Dictionary<string, DungeonEntryDef> dungeons, List<string> diagnostics)
+        {
+            OutdoorParseHook?.Invoke(d.Id);
+            var id = d.Id;
+            if (!IsValidOutdoorId(id, out var idProblem))
+            { diagnostics.Add($"index.json: outdoor site id '{id}' {idProblem}"); return false; }
+
+            var label = $"outdoor/{id}.json";
+            if (!files.TryGetValue(id, out var text))
+            { diagnostics.Add($"index.json: outdoor site '{id}' has no site file {label}"); return false; }
+
+            var f = Deserialize<OutdoorSiteFileDef>(text, label, diagnostics);
+            if (f == null) return false;
+            if (!VersionSupported(f.Version, label, diagnostics)) return false;
+            if (f.Id != id)
+            { diagnostics.Add($"{label}: id '{f.Id}' does not match the index row '{id}'"); return false; }
+
+            // ---- footprint and primary ----
+            if (!TryParseLandblockHex(f.PrimaryHex, out var primary))
+            { diagnostics.Add($"{label}: primary '{f.PrimaryHex}' is not a landblock"); return false; }
+            f.Footprint ??= new List<string>();
+            var footprint = new List<ushort>();
+            foreach (var hex in f.Footprint)
+            {
+                if (!TryParseLandblockHex(hex, out var fl))
+                { diagnostics.Add($"{label}: footprint entry '{hex}' is not a landblock"); return false; }
+                if (footprint.Contains(fl))
+                { diagnostics.Add($"{label}: duplicate footprint landblock 0x{fl:X4}"); return false; }
+                footprint.Add(fl);
+            }
+            if (!footprint.Contains(primary))
+            { diagnostics.Add($"{label}: primary 0x{primary:X4} is not in the footprint"); return false; }
+            if (!IsEightConnected(footprint))
+            { diagnostics.Add($"{label}: the footprint is not 8-connected (every landblock must touch another one, edge or corner, so the group is one piece)"); return false; }
+
+            if (!string.IsNullOrEmpty(d.LandblockHex))
+            {
+                if (!TryParseLandblockHex(d.LandblockHex, out var indexLb) || indexLb != primary)
+                { diagnostics.Add($"index.json: outdoor site '{id}' landblock '{d.LandblockHex}' disagrees with {label} primary 0x{primary:X4}"); return false; }
+            }
+
+            // ---- circle ----
+            var circle = f.Circle;
+            if (circle == null || !TryParseLandblockHex(circle.LandblockHex, out var circleLb))
+            { diagnostics.Add($"{label}: circle is missing or its landblock is not a landblock"); return false; }
+            circle.Landblock = circleLb;
+            if (!(circle.Radius > 0) || double.IsInfinity(circle.Radius) || double.IsNaN(circle.X) || double.IsNaN(circle.Y))
+            { diagnostics.Add($"{label}: circle radius must be a finite number > 0"); return false; }
+            foreach (var tile in OutdoorSiteGeometry.BoundingBoxLandblocks(circle))
+                if (tile < 0 || !footprint.Contains((ushort)tile))
+                {
+                    diagnostics.Add($"{label}: the circle's bounding box is not inside the footprint (tile {(tile < 0 ? "off the landblock grid" : "0x" + tile.ToString("X4"))} is not listed)");
+                    return false;
+                }
+
+            // ---- entry, exit, boss anchor, points: positions and landblocks ----
+            if (!OutdoorSiteGeometry.TryParsePositionText(f.Entry, out var entryCell, out var ex, out var ey, out _))
+            { diagnostics.Add($"{label}: entry '{f.Entry}' is not '0xLLLLCCCC x y z ...'"); return false; }
+            if (!OutdoorSiteGeometry.TryParsePositionText(f.Exit, out var exitCell, out var exitX, out var exitY, out _))
+            { diagnostics.Add($"{label}: exit '{f.Exit}' is not '0xLLLLCCCC x y z ...'"); return false; }
+            if (f.BossAnchor == null)
+            { diagnostics.Add($"{label}: no bossAnchor"); return false; }
+            f.Points ??= new List<DungeonSpawnPointDef>();
+            if (f.Points.Count == 0)
+            { diagnostics.Add($"{label}: no points"); return false; }
+            if (f.Points.Any(p => p == null))
+            { diagnostics.Add($"{label}: points contains a null entry"); return false; }
+
+            if (!footprint.Contains((ushort)(entryCell >> 16)))
+            { diagnostics.Add($"{label}: the entry is outside the footprint landblocks"); return false; }
+            if (!footprint.Contains((ushort)(exitCell >> 16)))
+            { diagnostics.Add($"{label}: the exit is outside the footprint landblocks"); return false; }
+            if (!footprint.Contains((ushort)(f.BossAnchor.Cell >> 16)))
+            { diagnostics.Add($"{label}: the boss anchor is outside the footprint landblocks"); return false; }
+            if (f.Points.Any(p => !footprint.Contains((ushort)(p.Cell >> 16))))
+            { diagnostics.Add($"{label}: a point is outside the footprint landblocks"); return false; }
+
+            if ((ushort)(entryCell >> 16) != primary)
+            { diagnostics.Add($"{label}: primary 0x{primary:X4} is not the entry's landblock 0x{entryCell >> 16:X4}"); return false; }
+
+            // ---- warning band ----
+            // ALL circle distances here are HORIZONTAL (global XY from the centre); z never enters.
+            var entryPos = new OutdoorPos((ushort)(entryCell >> 16), ex, ey);
+            var entryEdge = OutdoorSiteGeometry.DistanceToEdge(circle, entryPos);
+            if (entryEdge < dropMinInsideM)
+            {
+                diagnostics.Add($"{label}: the entry is {entryEdge.ToString("0.##", CultureInfo.InvariantCulture)} m inside the circle; it must be at least {dropMinInsideM.ToString("0.##", CultureInfo.InvariantCulture)} m (drop_min_inside_m)");
+                return false;
+            }
+
+            // The exit portal sits 5-10 m from the drop and never further out than it (R5).
+            var exitPos = new OutdoorPos((ushort)(exitCell >> 16), exitX, exitY);
+            var exitGap = OutdoorSiteGeometry.HorizontalDistance(entryPos, exitPos);
+            if (exitGap < MinExitGapM || exitGap > MaxExitGapM)
+            {
+                diagnostics.Add($"{label}: the exit is {exitGap.ToString("0.##", CultureInfo.InvariantCulture)} m from the entry; it must be {MinExitGapM}-{MaxExitGapM} m");
+                return false;
+            }
+            if (OutdoorSiteGeometry.DistanceToEdge(circle, exitPos) < entryEdge - ExitRadialToleranceM)
+            {
+                diagnostics.Add($"{label}: the exit is further from the circle centre than the entry (beyond the {ExitRadialToleranceM} m tolerance); it must be level with or toward the centre");
+                return false;
+            }
+            // The boss anchor is exempt from the warning band but must still be inside the circle by the containment margin.
+            var bossEdge = OutdoorSiteGeometry.DistanceToEdge(circle, new OutdoorPos((ushort)(f.BossAnchor.Cell >> 16), f.BossAnchor.X, f.BossAnchor.Y));
+            if (bossEdge < containmentMarginM)
+            {
+                diagnostics.Add($"{label}: the boss anchor is {bossEdge.ToString("0.##", CultureInfo.InvariantCulture)} m inside the circle; it must be at least the containment margin ({containmentMarginM.ToString("0.##", CultureInfo.InvariantCulture)} m)");
+                return false;
+            }
+
+            for (var i = 0; i < f.Points.Count; i++)
+            {
+                var p = f.Points[i];
+                if (p.Kind != "outdoor" && p.Kind != "interior")
+                { diagnostics.Add($"{label}: point {i} kind '{p.Kind}' must be outdoor or interior"); return false; }
+                var edge = OutdoorSiteGeometry.DistanceToEdge(circle, new OutdoorPos((ushort)(p.Cell >> 16), p.X, p.Y));
+                if (edge < warningBandM)
+                {
+                    diagnostics.Add($"{label}: point {i} is {edge.ToString("0.##", CultureInfo.InvariantCulture)} m inside the circle; non-boss points must be at least the warning band ({warningBandM.ToString("0.##", CultureInfo.InvariantCulture)} m) inside");
+                    return false;
+                }
+            }
+
+            // ---- areas ----
+            f.Include ??= new List<OutdoorAreaDef>();
+            f.Exclude ??= new List<OutdoorAreaDef>();
+            foreach (var (list, name) in new[] { (f.Include, "include"), (f.Exclude, "exclude") })
+                for (var i = 0; i < list.Count; i++)
+                {
+                    var a = list[i];
+                    var hasCircle = a?.Circle != null;
+                    var hasPoly = a?.Polygon != null;
+                    var ok = a != null && hasCircle != hasPoly
+                        && (!hasCircle || (a.Circle.R > 0 && !double.IsInfinity(a.Circle.R)))
+                        && (!hasPoly || (a.Polygon.Count >= 3 && a.Polygon.All(v => v != null && v.Count == 2)));
+                    if (!ok)
+                    { diagnostics.Add($"{label}: {name}[{i}] must be exactly one of a circle (r > 0) or a polygon (3+ [gx, gy] vertices)"); return false; }
+                }
+
+            // Every non-boss OUTDOOR point must be somewhere a creature may stand (include / exclude); the boss is exempt.
+            // Interior points keep the circle and band checks above but skip this one: an exclude polygon drawn around
+            // a building footprint must not drop that building's interior points.
+            var shape = new OutdoorSiteDef { Circle = circle, Include = f.Include, Exclude = f.Exclude };
+            for (var i = 0; i < f.Points.Count; i++)
+            {
+                var p = f.Points[i];
+                if (p.Kind == "outdoor" && !OutdoorSiteGeometry.InIncludeExclude(shape, new OutdoorPos((ushort)(p.Cell >> 16), p.X, p.Y)))
+                { diagnostics.Add($"{label}: point {i} is outside the include areas or inside an exclude area"); return false; }
+            }
+
+            // ---- index-row checks shared with dungeons ----
+            if (d.ExitPortalWcid == 0)
+            { diagnostics.Add($"index.json: outdoor site '{id}' has exitPortalWcid 0"); return false; }
+            if (d.ExitPortalWcid == WalkInExitPortalWcid)
+            { diagnostics.Add($"index.json: outdoor site '{id}' names the walk-in exit {WalkInExitPortalWcid}; outdoor runs use the click-only exit (1003604)"); return false; }
+            if (dungeons.ContainsKey(id))
+            { diagnostics.Add($"index.json: duplicate dungeon id '{id}'"); return false; }
+
+            // Per-site level range (R3): the index row's own minLevel/maxLevel. An omitted field reads as 0, which
+            // for an outdoor row means the 1-500 default rather than "never rolls". The run-ceiling diagnostic is a
+            // dungeon-only check: a site may deliberately cap below it. An inverted range still reports.
+            if (d.MinLevel <= 0) d.MinLevel = 1;
+            if (d.MaxLevel <= 0) d.MaxLevel = DungeonGemSpec.MaxRunLevel;
+            if (d.MinLevel > d.MaxLevel)
+                diagnostics.Add($"index.json: dungeon '{id}' minLevel {d.MinLevel} exceeds maxLevel {d.MaxLevel}; no gem level can roll it");
+
+            d.Landblock = primary;
+            if (string.IsNullOrEmpty(d.LandblockHex)) d.LandblockHex = $"0x{primary:X4}";
+            d.Entry = f.Entry;
+            d.Points = f.Points;
+            d.BossAnchor = f.BossAnchor;
+            d.Outdoor = new OutdoorSiteDef
+            {
+                Primary = primary,
+                Footprint = footprint,
+                Circle = circle,
+                Exit = f.Exit,
+                Include = f.Include,
+                Exclude = f.Exclude,
+                InteriorBuildings = f.InteriorBuildings ?? new List<OutdoorInteriorBuildingDef>(),
+                TargetPoints = f.TargetPoints,
+                Seed = f.Seed,
+            };
+            return true;
+        }
+
         private static bool VersionSupported(int version, string fileName, List<string> diagnostics)
         {
             if (version == SupportedVersion)
@@ -966,7 +1368,75 @@ namespace ACE.Server.ThreadDungeons
             }
 
             return Parse(ReadOrEmpty("index.json"), ReadOrEmpty("bosses.json"), ReadOrEmpty("modifiers.json"), byStem, diagnostics,
-                attunementJson: ReadOrEmpty("attunement.json"), clearanceJson: ReadOrEmpty("clearance.json"), puzzleGatesJson: ReadOrEmpty("puzzle-gates.json"));
+                attunementJson: ReadOrEmpty("attunement.json"), clearanceJson: ReadOrEmpty("clearance.json"), puzzleGatesJson: ReadOrEmpty("puzzle-gates.json"),
+                pinnaclesJson: ReadOrEmpty("pinnacles.json"), outdoorJsonById: ReadOutdoorFiles(folder, diagnostics),
+                outdoorWarningBandM: ReadWarningBand(), outdoorDropMinInsideM: ReadDropMinInside(), outdoorContainmentMarginM: ReadContainmentMargin(),
+                weakPointsJson: ReadOrEmpty("weak-points.json"));
+        }
+
+        /// <summary>outdoor/*.json keyed by file stem (the site id). A missing outdoor folder is normal (no sites).</summary>
+        private static Dictionary<string, string> ReadOutdoorFiles(string folder, List<string> diagnostics)
+        {
+            var byId = new Dictionary<string, string>(StringComparer.Ordinal);
+            var dir = Path.Combine(folder, "outdoor");
+            if (!Directory.Exists(dir)) return byId;
+
+            string[] files;
+            try { files = Directory.GetFiles(dir, "*.json"); }
+            catch (Exception ex) { diagnostics.Add($"outdoor: could not enumerate - {ex.Message}"); return byId; }
+
+            foreach (var path in files)
+            {
+                var stem = Path.GetFileNameWithoutExtension(path);
+                try { byId[stem] = File.ReadAllText(path); }
+                catch (Exception ex) { diagnostics.Add($"outdoor/{stem}.json: could not read - {ex.Message}"); }
+            }
+            return byId;
+        }
+
+        /// <summary>
+        /// The live drop_min_inside_m tunable, or the default when PropertyManager is not available (unit tests
+        /// that call Load on the shipped folder never initialise it). Only Load reads it; Parse takes it as a parameter.
+        /// </summary>
+        private static double ReadDropMinInside()
+        {
+            try
+            {
+                var v = OutdoorSiteTunables.DropMinInsideM;
+                return v >= 0 && !double.IsNaN(v) && !double.IsInfinity(v) ? v : OutdoorSiteTunables.DefaultDropMinInsideM;
+            }
+            catch (Exception)
+            {
+                return OutdoorSiteTunables.DefaultDropMinInsideM;
+            }
+        }
+
+        /// <summary>The live containment_margin_m tunable, with the same fallback as <see cref="ReadDropMinInside"/>.</summary>
+        private static double ReadContainmentMargin()
+        {
+            try
+            {
+                var v = OutdoorSiteTunables.ContainmentMarginM;
+                return v >= 0 && !double.IsNaN(v) && !double.IsInfinity(v) ? v : OutdoorSiteTunables.DefaultContainmentMarginM;
+            }
+            catch (Exception)
+            {
+                return OutdoorSiteTunables.DefaultContainmentMarginM;
+            }
+        }
+
+        /// <summary>The live warning_band_m tunable, with the same fallback as <see cref="ReadDropMinInside"/>.</summary>
+        private static double ReadWarningBand()
+        {
+            try
+            {
+                var band = OutdoorSiteTunables.WarningBandM;
+                return band >= 0 && !double.IsNaN(band) && !double.IsInfinity(band) ? band : OutdoorSiteTunables.DefaultWarningBandM;
+            }
+            catch (Exception)
+            {
+                return OutdoorSiteTunables.DefaultWarningBandM;
+            }
         }
 
         /// <summary>

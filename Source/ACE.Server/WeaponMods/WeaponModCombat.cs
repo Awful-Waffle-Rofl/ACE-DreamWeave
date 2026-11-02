@@ -126,7 +126,8 @@ namespace ACE.Server.WeaponMods
             if (fraction == null || double.IsNaN(fraction.Value) || fraction.Value <= 0.0)
                 return 0.0;
 
-            return WeaponModValue.MagnitudeFromFraction(definition, fraction.Value, scale);
+            // the weapon is the carrier, so a per-item ceiling (Defensive Weapon) resolves against it
+            return WeaponModValue.MagnitudeFromFraction(definition, fraction.Value, scale, weapon);
         }
 
         // ---------------- conditions ----------------
@@ -176,18 +177,20 @@ namespace ACE.Server.WeaponMods
         }
 
         /// <summary>
-        /// Arcane Defender's virtual-shield damage multiplier: a flat armor level, reduced by the attacker's
-        /// IgnoreShield term, run through the same <see cref="SkillFormula.CalcArmorMod"/> the equipped-shield
-        /// path ends on. 1.0 when the modifier is absent, which is exactly what a shieldless defender already
-        /// returned.
+        /// The NO-SHIELD virtual-shield damage multiplier (Defensive Weapon, formerly Arcane Defender, plus the
+        /// ward shield): a flat armor level, reduced by the attacker's IgnoreShield term, run through the same
+        /// <see cref="SkillFormula.CalcArmorMod"/> the equipped-shield path ends on. 1.0 when the level is
+        /// absent, which is exactly what a shieldless defender already returned. (The name predates the
+        /// 2026-10-25 rename and is kept so the no-shield row reads the same in every caller.)
         ///
         /// NO SHIELD-SKILL CAP, deliberately, and this is the one place it differs from the equipped-shield
-        /// path. That cap is half the Shield skill (or the full skill when specialized), and a caster's Shield
-        /// skill is untrained and effectively zero - applying it here would clamp the row to nothing on
-        /// precisely the build the row exists for.
+        /// path. That cap is half the Shield skill (or the full skill when specialized), and a shieldless
+        /// build's Shield skill is usually untrained and effectively zero - applying it here would clamp the
+        /// row to nothing on precisely the build the row exists for.
         ///
-        /// At the catalog MaxRoll of 25 and an untouched ignoreShieldMod of 1.0 this is
-        /// 66.667 / (25 + 66.667) = 0.7273 (SkillFormula.ArmorMod is 200/3).
+        /// At an armor level of 200 (Defensive Weapon's full ceiling) and an untouched ignoreShieldMod of 1.0
+        /// this is 66.667 / (200 + 66.667) = 0.25; at 100 (the one-handed melee ceiling) it is
+        /// 66.667 / 166.667 = 0.40 (SkillFormula.ArmorMod is 200/3).
         /// </summary>
         public static float ArcaneShieldMod(double armorLevel, float ignoreShieldMod)
         {

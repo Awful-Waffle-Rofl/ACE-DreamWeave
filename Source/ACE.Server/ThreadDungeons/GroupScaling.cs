@@ -42,7 +42,8 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// The solo snapshot. RosterSize 1, every multiplier exactly 1.0, the damage bonus 0.
         /// GroupMaxMonsters is 0: a solo run has no group count cap, and no solo path reads it. LootHoldMinutes is
-        /// 0: a solo run is never held for loot.
+        /// 0 here, but a solo run IS held for loot (owner ruling 2026-10-10): its hold lives on ThreadDungeonRun.LootHold,
+        /// stamped by TryStart, so this shared snapshot stays the one Solo instance.
         /// </summary>
         public static readonly GroupScaling Solo = new GroupScaling(1, 1.0, 1.0, 0, 0, 1.0, 1.0, 0);
 
@@ -306,9 +307,9 @@ namespace ACE.Server.ThreadDungeons
             return groupMaxMonsters > int.MaxValue ? int.MaxValue : (int)groupMaxMonsters;
         }
 
-        /// <summary>Clamps dynamic_dungeons_group_loot_hold_minutes for <see cref="Compute"/>: negative reads as
+        /// <summary>Clamps dynamic_dungeons_group_loot_hold_minutes for <see cref="Compute"/> and for a solo run's own hold (ThreadDungeonManager.TryStart): negative reads as
         /// <see cref="DefaultLootHoldMinutes"/>, and a value past int.MaxValue saturates.</summary>
-        private static int SanitiseLootHold(long lootHoldMinutes)
+        internal static int SanitiseLootHold(long lootHoldMinutes)
         {
             if (lootHoldMinutes < 0)
                 return DefaultLootHoldMinutes;

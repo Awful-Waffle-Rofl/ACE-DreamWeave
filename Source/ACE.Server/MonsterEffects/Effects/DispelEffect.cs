@@ -1,8 +1,13 @@
+using System.Collections.Generic;
+using System.Linq;
+
 using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
+using ACE.Entity.Models;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WorldObjects.Managers;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.MonsterEffects.Effects
@@ -69,6 +74,17 @@ namespace ACE.Server.MonsterEffects.Effects
             Apply(caster, target, spec);
         }
 
+        /// <summary>
+        /// The attacker-side exemption (EnchantmentManager.CreatureDispelExempt) runs BEFORE SelectDispellable,
+        /// and only here: SelectDispellable is shared with the player Dispelling Edge and the weapon-mod steal,
+        /// which must keep taking those buffs.
+        /// </summary>
+        internal static List<PropertiesEnchantmentRegistry> SelectStrippable(IEnumerable<PropertiesEnchantmentRegistry> candidates, Creature attacker)
+        {
+            return DispellingEdgeAbility.SelectDispellable(
+                EnchantmentManager.ApplyCreatureDispelExemption(candidates, attacker).ToList());
+        }
+
         private static void Apply(Creature attacker, Creature defender, MonsterEffectSpec spec)
         {
             var chance = spec.GetDouble("chance", 0.0);
@@ -84,8 +100,7 @@ namespace ACE.Server.MonsterEffects.Effects
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > clamped)
                 return;
 
-            var dispellable = DispellingEdgeAbility.SelectDispellable(
-                defender.EnchantmentManager.GetEnchantments_TopLayer(EnchantmentTypeFlags.Beneficial));
+            var dispellable = SelectStrippable(defender.EnchantmentManager.GetEnchantments_TopLayer(EnchantmentTypeFlags.Beneficial), attacker);
 
             if (dispellable.Count == 0)
                 return;

@@ -17,9 +17,9 @@ namespace ACE.Server.Tests
     ///
     /// SKIPPED, and why: SpellbladeAbility, RunebladeAbility, SundermarkAbility and DispellingEdgeAbility
     /// each call player.GetClassAbilityScaling for their affinity rider BEFORE reaching the gear read, and
-    /// TauntAbility.GetReadout does the same for its Loyalty rider. Player's static initializer cannot run
+    /// Player's static initializer cannot run
     /// under this test host (project constraint - see CLAUDE.md's "Player statics untestable" note), so
-    /// those five cannot be invoked here at all, with or without the gear term. Their arithmetic is covered
+    /// those four cannot be invoked here at all, with or without the gear term. Their arithmetic is covered
     /// through their pure Chance()/EffectiveDuration() helpers in SpellswordVanguardEquipmentModTests.
     /// </summary>
     [TestClass]
@@ -42,7 +42,7 @@ namespace ACE.Server.Tests
             var readout = ability.GetReadout(null, 3);
 
             Assert.IsTrue(readout.HasValue);
-            Assert.AreEqual(2.4, readout.Skill, 1e-9); // class_ability_resonance_per_stack_r3 default 0.024
+            Assert.AreEqual(3.6, readout.Skill, 1e-9); // class_ability_resonance_per_stack_r3 default 0.036
             Assert.AreEqual(0.0, readout.Affinity, 1e-9);
             Assert.AreEqual(0.0, readout.Gear, 1e-9, "no Player, therefore no equipped items, therefore no gear");
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
@@ -58,8 +58,8 @@ namespace ACE.Server.Tests
             var ability = new ResonanceAbility();
 
             Assert.AreEqual(1.2, ability.GetReadout(null, 1).Skill, 1e-9);
-            Assert.AreEqual(1.8, ability.GetReadout(null, 2).Skill, 1e-9);
-            Assert.AreEqual(2.4, ability.GetReadout(null, 3).Skill, 1e-9);
+            Assert.AreEqual(2.4, ability.GetReadout(null, 2).Skill, 1e-9);
+            Assert.AreEqual(3.6, ability.GetReadout(null, 3).Skill, 1e-9);
 
             // unowned reports nothing on either column
             var unowned = ability.GetReadout(null, 0);
@@ -77,7 +77,7 @@ namespace ACE.Server.Tests
             var readout = ability.GetReadout(null, 1);
 
             Assert.IsTrue(readout.HasValue);
-            Assert.AreEqual(2.0, readout.Skill, 1e-9); // class_ability_spellsurge_per_stack default 0.02
+            Assert.AreEqual(0.67, readout.Skill, 1e-9); // class_ability_spellsurge_per_stack_r1 default 0.0067
             Assert.AreEqual(0.0, readout.Affinity, 1e-9);
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
@@ -85,6 +85,17 @@ namespace ACE.Server.Tests
             Assert.AreEqual("proc chance", readout.Label);
             Assert.AreEqual("/stack", readout.Per);
             Assert.IsFalse(readout.Capped);
+        }
+
+        [TestMethod]
+        public void Spellsurge_Readout_TracksTheRankLadder()
+        {
+            // Spellsword pass 2026-10-24 (ladder retuned): 0.67/1.33/2 percentage points per stack by rank
+            var ability = new SpellsurgeAbility();
+
+            Assert.AreEqual(0.67, ability.GetReadout(null, 1).Skill, 1e-9);
+            Assert.AreEqual(1.33, ability.GetReadout(null, 2).Skill, 1e-9);
+            Assert.AreEqual(2.0, ability.GetReadout(null, 3).Skill, 1e-9);
         }
 
         [TestMethod]
@@ -107,7 +118,7 @@ namespace ACE.Server.Tests
             var readout = ability.GetReadout(null, 1);
 
             Assert.IsTrue(readout.HasValue);
-            Assert.AreEqual(14.0, readout.Skill, 1e-9); // class_ability_spellstorm_chance default 0.14
+            Assert.AreEqual(5.0, readout.Skill, 1e-9); // class_ability_spellstorm_chance_r1 default 0.05
             Assert.AreEqual(0.0, readout.Affinity, 1e-9, "this entry carries no affinity rider by design");
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
@@ -115,6 +126,17 @@ namespace ACE.Server.Tests
             Assert.AreEqual("proc", readout.Label);
             Assert.IsNull(readout.Per);
             Assert.IsFalse(readout.Capped, "no rider means no cap can ever bite");
+        }
+
+        [TestMethod]
+        public void Spellstorm_Readout_TracksTheRankLadder()
+        {
+            // Spellsword pass 2026-10-24 (ladder retuned): 5/10/15% by rank
+            var ability = new SpellstormAbility();
+
+            Assert.AreEqual(5.0, ability.GetReadout(null, 1).Skill, 1e-9);
+            Assert.AreEqual(10.0, ability.GetReadout(null, 2).Skill, 1e-9);
+            Assert.AreEqual(15.0, ability.GetReadout(null, 3).Skill, 1e-9);
         }
 
         [TestMethod]
@@ -136,7 +158,7 @@ namespace ACE.Server.Tests
             var readout = ability.GetReadout(null, 1);
 
             Assert.IsTrue(readout.HasValue);
-            Assert.AreEqual(25.0, readout.Skill, 1e-9); // class_ability_cascade_chance default 0.25
+            Assert.AreEqual(5.0, readout.Skill, 1e-9); // class_ability_cascade_chance_r1 default 0.05
             Assert.AreEqual(0.0, readout.Affinity, 1e-9);
             Assert.AreEqual(0.0, readout.Gear, 1e-9);
             Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
@@ -144,6 +166,19 @@ namespace ACE.Server.Tests
             Assert.AreEqual("chain", readout.Label);
             Assert.IsNull(readout.Per);
             Assert.IsFalse(readout.Capped);
+        }
+
+        [TestMethod]
+        public void Cascade_Readout_TracksTheRankLadder_WithANeutralAffinityForANullPlayer()
+        {
+            // Spellsword pass 2026-10-24: 5/10/15% by rank; no Player means the neutral 1.0 affinity
+            var ability = new CascadeAbility();
+
+            Assert.AreEqual(5.0, ability.GetReadout(null, 1).Skill, 1e-9);
+            Assert.AreEqual(10.0, ability.GetReadout(null, 2).Skill, 1e-9);
+            Assert.AreEqual(15.0, ability.GetReadout(null, 3).Skill, 1e-9);
+            Assert.AreEqual(0.0, ability.GetReadout(null, 3).Affinity, 1e-9);
+            Assert.IsNull(ability.GetReadout(null, 3).CapNote);
         }
 
         [TestMethod]

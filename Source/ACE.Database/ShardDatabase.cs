@@ -850,7 +850,7 @@ namespace ACE.Database
         }
 
 
-        public PossessedBiotas GetPossessedBiotasInParallel(uint id)
+        public virtual PossessedBiotas GetPossessedBiotasInParallel(uint id)
         {
             var inventory = GetInventoryInParallel(id, true);
 

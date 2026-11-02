@@ -287,6 +287,73 @@ namespace ACE.Server.Tests
             Console.WriteLine("[TELEPORT_ABANDONED] reason=disconnect " + line);
 
             StringAssert.Contains(line, "kind=login pending=101s from=none to=0xA9B40019/0x00000000 lb=none lbLoaded=n/a net=unavailable");
+            Assert.IsFalse(line.Contains("creates="), "no network, no arrival-cost fields");
+        }
+
+        // ---- arrival cost ----
+
+        private static TeleportWatch ArrivalWatch()
+        {
+            var watch = PortalWatchWithBaseline();
+            watch.NetAtStart.CreateObjectsEnqueued = 500;
+            watch.NetAtStart.BytesSent = 2_000_000;
+            return watch;
+        }
+
+        [TestMethod]
+        public void FormatFields_CarriesArrivalCost_AsDeltasAndAPeak()
+        {
+            var watch = ArrivalWatch();
+            var now = new DateTime(2026, 10, 4, 22, 35, 59, DateTimeKind.Utc).Ticks;
+
+            var snapshot = SnapshotAt(now);
+            snapshot.CreateObjectsEnqueued = 812;
+            snapshot.BytesSent = 2_131_072;
+            snapshot.PeakInflight = 287;
+
+            var line = TeleportWatchRules.FormatFields("Gabz", 0x50000ABC, watch, 61, 0x01F5, 1, true, snapshot, "PingRequest", 41, now);
+
+            Console.WriteLine("[TELEPORT_ABANDONED] reason=disconnect " + line);
+
+            StringAssert.Contains(line, " retained=2 creates=+312 bytesOut=+131072 peakInflight=287 extraSelfPositions=");
+            Assert.IsFalse(line.Contains("paced="), "pacing off: no pacer fields");
+        }
+
+        [TestMethod]
+        public void FormatFields_WhenPaced_CarriesThePacerDepths()
+        {
+            var watch = ArrivalWatch();
+            var now = new DateTime(2026, 10, 4, 22, 35, 59, DateTimeKind.Utc).Ticks;
+
+            var snapshot = SnapshotAt(now);
+            snapshot.CreateObjectsEnqueued = 812;
+            snapshot.BytesSent = 2_131_072;
+            snapshot.PeakInflight = 128;
+            snapshot.PacingEnabled = true;
+            snapshot.PacerHeld = 3;
+            snapshot.PacerHeldBytes = 1392;
+            snapshot.PacerPeakHeld = 214;
+
+            var line = TeleportWatchRules.FormatFields("Gabz", 0x50000ABC, watch, 4, 0x01F5, 1, true, snapshot, "PingRequest", 41, now);
+
+            Console.WriteLine("[TELEPORT_ARRIVAL_COST] " + line);
+
+            StringAssert.Contains(line, " peakInflight=128 paced=true pacerHeld=3 pacerHeldBytes=1392 pacerPeakHeld=214 extraSelfPositions=");
+        }
+
+        [TestMethod]
+        public void ArrivalCost_LogsOnlyAtOrAboveTheCreateThreshold()
+        {
+            var watch = ArrivalWatch();
+            var snapshot = SnapshotAt(DateTime.UtcNow.Ticks);
+
+            snapshot.CreateObjectsEnqueued = 500 + TeleportWatchRules.ArrivalCostMinCreates - 1;
+            Assert.IsFalse(TeleportWatchRules.ShouldLogArrivalCost(watch, snapshot), "one short of the threshold");
+
+            snapshot.CreateObjectsEnqueued = 500 + TeleportWatchRules.ArrivalCostMinCreates;
+            Assert.IsTrue(TeleportWatchRules.ShouldLogArrivalCost(watch, snapshot), "at the threshold, measured since the window start");
+
+            Assert.IsFalse(TeleportWatchRules.ShouldLogArrivalCost(watch, default), "no network, no line");
         }
     }
 }

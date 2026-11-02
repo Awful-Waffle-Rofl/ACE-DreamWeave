@@ -28,6 +28,32 @@ namespace ACE.Server.Tests
         public int GetOwnerProfileCalls;
         public uint LastOwnerProfileGuid;
 
+        /// <summary>What ListPublished answers next. Defaults to Ok with an empty directory.</summary>
+        public DirectoryResult NextDirectory = new DirectoryResult(SheetOutcome.Ok, new SheetDirectory());
+
+        public int ListPublishedCalls;
+
+        /// <summary>When set, ListPublished throws (the route's catch must answer 500).</summary>
+        public volatile bool ThrowOnDirectory;
+
+        /// <summary>When set, every ListPublished blocks here after counting itself, so a test can hold the route's in-flight slots.</summary>
+        public ManualResetEventSlim DirectoryGate;
+
+        /// <summary>Released once per ListPublished call that has entered (before any gate wait).</summary>
+        public readonly SemaphoreSlim DirectoryEntered = new SemaphoreSlim(0);
+
+        public DirectoryResult ListPublished()
+        {
+            Interlocked.Increment(ref ListPublishedCalls);
+            DirectoryEntered.Release();
+            DirectoryGate?.Wait(System.TimeSpan.FromSeconds(10));
+
+            if (ThrowOnDirectory)
+                throw new System.InvalidOperationException("directory failed");
+
+            return NextDirectory;
+        }
+
         public int GetSheetCalls;
         public int GetLinkCalls;
         public int EnableCalls;

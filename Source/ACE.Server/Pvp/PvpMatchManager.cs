@@ -111,11 +111,29 @@ namespace ACE.Server.Pvp
             }
         }
 
-        /// <summary>The forfeit a logout reports. Pure, so the shape is pinned by a test.</summary>
-        public static PvpIntent LogoutForfeit(uint characterId, Guid matchId, DateTime utcNow)
+        /// <summary>
+        /// The forfeit a logout reports. Pure, so the shape is pinned by a test. <paramref name="serverCaused"/> marks a logout the server or
+        /// staff forced (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): still a forfeit, never a deserter strike.
+        /// </summary>
+        public static PvpIntent LogoutForfeit(uint characterId, Guid matchId, DateTime utcNow, bool serverCaused = false)
         {
-            return new PvpIntent(PvpIntentKind.Forfeit, characterId, matchId, ParticipantExit.ForfeitLogout, utcNow);
+            return new PvpIntent(PvpIntentKind.Forfeit, characterId, matchId, ParticipantExit.ForfeitLogout, utcNow, ServerCaused: serverCaused);
         }
+
+        /// <summary>
+        /// Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): the player of a held seat is back in the world. Pure, so
+        /// the shape is pinned by a test. ExitReason is a placeholder the coordinator never reads for this kind.
+        /// </summary>
+        public static PvpIntent Reconnected(uint characterId, Guid matchId, DateTime utcNow)
+        {
+            return new PvpIntent(PvpIntentKind.Reconnected, characterId, matchId, ParticipantExit.ForfeitLogout, utcNow);
+        }
+
+        /// <summary>
+        /// The Live battleground match whose seat is held for <paramref name="characterId"/> (their rejoin grace), or null; null before
+        /// <see cref="Initialize"/>. World thread (the login path).
+        /// </summary>
+        public static Guid? GracedMatchOf(uint characterId) => coordinator?.GracedMatchOf(characterId);
 
         /// <summary>Battleground spawn protection ended early (the player attacked or cast a harmful spell). Pure, so the shape is pinned by a test.</summary>
         public static PvpIntent SpawnProtectionEnded(uint characterId, Guid matchId, DateTime utcNow)
@@ -177,7 +195,15 @@ namespace ACE.Server.Pvp
             if (player == null)
                 return new PvpJoinResult(PvpJoinRefusal.Offline, modeKey);
 
-            return coordinator?.Join(player.Guid.Full, modeKey, duo, templateKey, group) ?? new PvpJoinResult(PvpJoinRefusal.ArenaDisabled, modeKey);
+            var result = coordinator?.Join(player.Guid.Full, modeKey, duo, templateKey, group) ?? new PvpJoinResult(PvpJoinRefusal.ArenaDisabled, modeKey);
+
+            // The one entry point of every queue join (/arena join 1v1, 2v2, duo, tugak, bg, bg group): teach the free level 7 War/Life
+            // spells now so the player can organize their spell bar while waiting, and before the template apply captures the spellbook
+            // (pvp_match_grant_spells; Docs/Pvp/TEMPLATES.md "Free spells"). Only a join that queued; idempotent.
+            if (result.Refusal == PvpJoinRefusal.None)
+                player.GrantPvpMatchSpells();
+
+            return result;
         }
 
         // ---------------- PvP Template Facets (world thread) ----------------
@@ -193,15 +219,33 @@ namespace ACE.Server.Pvp
 
         public static string TemplateLabel(string key) => coordinator?.TemplateLabel(key) ?? key;
 
+        /// <summary>The catalog definitions of every offered template, for the /pvphue audit. Read only.</summary>
+        public static IReadOnlyList<ACE.Server.Pvp.Templates.PvpTemplateDefinition> OfferedTemplateDefinitions() =>
+            coordinator?.OfferedTemplateDefinitions() ?? new List<ACE.Server.Pvp.Templates.PvpTemplateDefinition>();
+
+        /// <summary>The parsed catalog definition for a template key, or null. Read only.</summary>
+        public static ACE.Server.Pvp.Templates.PvpTemplateDefinition TemplateDefinition(string key) => coordinator?.TemplateDefinition(key);
+
+
         /// <summary>The template a character fought their latest match on, on a ladder, as a label; null when unknown.</summary>
         public static string LatestTemplateLabel(uint characterId, string ladder) => coordinator?.LatestTemplateLabel(characterId, ladder);
 
         /// <summary>Re-reads every pvp_template row (after an admin change). The catalog swaps in on a later tick.</summary>
         public static void ReloadTemplates() => coordinator?.BeginLoadTemplates();
 
-        public static PvpLeaveResult Leave(Player player)
+        /// <summary>
+        /// Pushes the player's /arena norematch choice onto their waiting queue unit, if they have one. True when they were queued.
+        /// A player not queued simply has the choice read from their property at the next join.
+        /// </summary>
+        public static bool SetRefuseUnpaidRematch(Player player, bool refuse)
         {
-            return player == null || coordinator == null ? new PvpLeaveResult(PvpLeaveOutcome.NotQueued) : coordinator.Leave(player.Guid.Full);
+            return player != null && coordinator != null && coordinator.SetRefuseUnpaidRematch(player.Guid.Full, refuse);
+        }
+
+        /// <summary>/arena leave: <paramref name="modeKey"/> null leaves the match flow or every queue; a room key leaves just that queue.</summary>
+        public static PvpLeaveResult Leave(Player player, string modeKey = null)
+        {
+            return player == null || coordinator == null ? new PvpLeaveResult(PvpLeaveOutcome.NotQueued) : coordinator.Leave(player.Guid.Full, modeKey);
         }
 
         public static PvpAnswerResult Accept(Player player)
@@ -234,6 +278,18 @@ namespace ACE.Server.Pvp
         /// <summary>Null while ratings are loading or unavailable.</summary>
         public static IReadOnlyList<PvpRatingView> GetTop(string ladder, int count) => coordinator?.GetTop(ladder, count);
 
+        /// <summary>
+        /// The highest stored Peak of a character across every ladder it has played (PvpRatingStore.PeakAcrossLadders), or 0 before
+        /// <see cref="Initialize"/> or while ratings are loading or unavailable. Read by the prestige purchase gate (PvpPrestigeGate).
+        /// </summary>
+        public static int PeakRatingAcrossLadders(uint characterId) => coordinator?.Ratings.PeakAcrossLadders(characterId) ?? 0;
+
+        /// <summary>
+        /// A character's stored Wins on the shared battleground ladder (BattlegroundModes.LadderKey), or 0 before <see cref="Initialize"/>
+        /// or while ratings are loading or unavailable. Read by the prestige purchase gate (PvpPrestigeGate).
+        /// </summary>
+        public static int BattlegroundLadderWins(uint characterId) => coordinator?.Ratings.WinsOn(characterId, Battlegrounds.BattlegroundModes.LadderKey) ?? 0;
+
         /// <summary>Loading, Available or Unavailable, so PR D can tell "no record" from "no ratings at all".</summary>
         public static PvpRatingStoreState RatingsState => coordinator?.Ratings.State ?? PvpRatingStoreState.Loading;
 
@@ -242,6 +298,13 @@ namespace ACE.Server.Pvp
         public static PvpCancelResult Cancel(Guid matchId) => coordinator?.Cancel(matchId) ?? new PvpCancelResult(PvpCancelOutcome.NotFound);
 
         public static int ClearQueue(string modeKey) => coordinator?.ClearQueue(modeKey) ?? 0;
+
+        /// <summary>/arenaadmin deserter: null before <see cref="Initialize"/>.</summary>
+        public static PvpDeserterStatus DeserterStatus(uint characterId, PvpDeserterRecord stored) => coordinator?.DeserterStatus(characterId, stored);
+
+        /// <summary>/arenaadmin deserter clear: null before <see cref="Initialize"/>.</summary>
+        public static PvpDeserterClearResult ClearDeserter(uint characterId, string characterName, string adminName, PvpDeserterRecord stored) =>
+            coordinator?.ClearDeserter(characterId, characterName, adminName, stored);
 
         /// <summary>The accept popup's reply (<see cref="Confirmation_PvpArenaAccept"/>), on the world thread.</summary>
         internal static void AnswerAcceptPopup(uint characterId, Guid matchId, bool accepted)

@@ -84,12 +84,19 @@ namespace ACE.Server.Pvp
         /// <summary>
         /// The pure time-limit resolver (Docs/Pvp/DESIGN.md "Modes" table's Timeout column, added per
         /// code review on PR #1396). Returns null before the limit. At or past it: 1v1/2v2
-        /// (survivorsShareFirst=false) always resolves to an unrated draw, whoever (if anyone) is still
-        /// alive; FFA (survivorsShareFirst=true) has every still-alive team share 1st, with already
-        /// (fully-)eliminated teams keeping the placement <see cref="Evaluate"/> would have given them,
-        /// rated per the mode's own TimeoutRated.
+        /// (rankSurvivors=false) always resolves to an unrated draw, whoever (if anyone) is still
+        /// alive. Tugak Brawl (rankSurvivors=true) ranks the still-alive teams by
+        /// <paramref name="damageByTeam"/>, the enemy-player damage each team dealt this match, descending
+        /// (owner ruling G1, 2026-10-15). Equal damage shares a placement the same way a same-tick batch of
+        /// deaths does: one more than the number of survivors with strictly more damage. A team missing from
+        /// the map (or a null map) counts as 0, so with no ledger every survivor ties for 1st, the old rule.
+        /// The best-placed survivors are the winners, exactly as the last team standing is in
+        /// <see cref="Evaluate"/>. Already (fully-)eliminated teams keep the placement <see cref="Evaluate"/>
+        /// would have given them; every one of those is worse than any survivor's (a combat placement is
+        /// the teams alive after that elimination plus 1, and every survivor was among them; a forfeit is
+        /// the team count). Rated per the mode's own TimeoutRated.
         /// </summary>
-        public MatchOutcome ResolveTimeout(IMatchView m, DateTime utcNow, int timeLimitSeconds, bool survivorsShareFirst, bool rated)
+        public MatchOutcome ResolveTimeout(IMatchView m, DateTime utcNow, int timeLimitSeconds, bool rankSurvivors, bool rated, IReadOnlyDictionary<int, long> damageByTeam = null)
         {
             if (m.LiveSinceUtc == null)
                 return null;
@@ -101,7 +108,7 @@ namespace ACE.Server.Pvp
 
             var totalTeams = m.Teams.Count;
 
-            if (!survivorsShareFirst)
+            if (!rankSurvivors)
             {
                 var drawPlacements = Enumerable.Repeat(1, totalTeams).ToArray();
                 return new MatchOutcome(new HashSet<int>(), drawPlacements, IsDraw: true, Rated: false, Reason: EndReason.Timeout);
@@ -110,10 +117,15 @@ namespace ACE.Server.Pvp
             var aliveTeamIndexes = Enumerable.Range(0, totalTeams).Except(_eliminatedTeamIndexes).ToList();
             var placements = BuildEliminatedPlacements(totalTeams);
 
-            foreach (var teamIndex in aliveTeamIndexes)
-                placements[teamIndex] = 1;
+            long DamageOf(int teamIndex) => damageByTeam != null && damageByTeam.TryGetValue(teamIndex, out var d) ? d : 0L;
 
-            var winningTeams = new HashSet<int>(aliveTeamIndexes);
+            foreach (var teamIndex in aliveTeamIndexes)
+            {
+                var damage = DamageOf(teamIndex);
+                placements[teamIndex] = 1 + aliveTeamIndexes.Count(other => DamageOf(other) > damage);
+            }
+
+            var winningTeams = new HashSet<int>(aliveTeamIndexes.Where(teamIndex => placements[teamIndex] == 1));
 
             return new MatchOutcome(winningTeams, placements, IsDraw: false, Rated: rated, Reason: EndReason.Timeout);
         }

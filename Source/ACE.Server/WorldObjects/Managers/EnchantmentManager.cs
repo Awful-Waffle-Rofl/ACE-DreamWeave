@@ -5,9 +5,11 @@ using System.Linq;
 
 using ACE.Common;
 using ACE.Common.Extensions;
+using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
+using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
 using ACE.Server.Managers;
@@ -35,7 +37,8 @@ namespace ACE.Server.WorldObjects.Managers
     /// Longevity (WeaponModId.Longevity) is wired at both duration sites - the refresh path in Add() and
     /// BuildEntry() - immediately after the pre-existing AugmentationIncreasedSpellDuration term, which is
     /// the precedent this follows (same guard shape, same "!isWeaponSpell && spell.DotDuration == 0"-style
-    /// scoping, here expressed as "caster == WorldObject" for a self-cast rather than a DoT exclusion). Both
+    /// scoping, here expressed as IsLongevitySelfTarget for a self-cast rather than a DoT exclusion: the caster itself, or an
+    /// item currently equipped by the caster, so a bane cast on the caster's own worn armor counts too). Both
     /// sites are required: leaving BuildEntry unwired would make Longevity dead on the first cast of a buff,
     /// and leaving the refresh path unwired would make it dead on every re-cast of one already active. See
     /// WeaponModRegistry.cs's Tier B v4 class remarks and Longevity's row comment for the full context.
@@ -151,7 +154,7 @@ namespace ACE.Server.WorldObjects.Managers
         /// <summary>
         /// Add/update an enchantment in this object's registry
         /// </summary>
-        public virtual AddEnchantmentResult Add(Spell spell, WorldObject caster, WorldObject weapon, bool equip = false, bool isWeaponSpell = false)
+        public virtual AddEnchantmentResult Add(Spell spell, WorldObject caster, WorldObject weapon, bool equip = false, bool isWeaponSpell = false, bool procSourced = false)
         {
             var result = new AddEnchantmentResult();
 
@@ -168,6 +171,7 @@ namespace ACE.Server.WorldObjects.Managers
 
                 result.Enchantment = newEntry;
                 result.StackType = StackType.Initial;
+                ProcDotMarks.Set(newEntry, procSourced);
                 return result;
             }
 
@@ -215,11 +219,14 @@ namespace ACE.Server.WorldObjects.Managers
                 // Longevity (WeaponModId.Longevity): extends duration on a self-cast beneficial enchantment.
                 // caster == WorldObject is "the caster cast this on themselves" - the same test the class
                 // remarks on Player_WeaponMods.cs use for a single-item read, here applied to identify a
-                // self-target rather than a carrier item. !isWeaponSpell excludes a wand's built-in cast, the
+                // self-target rather than a carrier item. A bane the caster casts on armor they are WEARING
+                // (WorldObject is the armor, found in the caster's EquippedObjects) counts as self too, so it stays in sync
+                // with their self buffs; items merely in the pack do not (see IsLongevitySelfTarget).
+                // !isWeaponSpell excludes a wand's built-in cast, the
                 // same exclusion the AugmentationIncreasedSpellDuration term two lines above already carries -
                 // a wand's self-targeting beneficial spell must not additionally benefit from a weapon mod
                 // rolled on that same wand.
-                if (caster is Player longevityCaster && caster == WorldObject && !isWeaponSpell && spell.IsBeneficial)
+                if (caster is Player longevityCaster && IsLongevitySelfTarget(longevityCaster.Guid, WorldObject.Guid, longevityCaster.EquippedObjects) && !isWeaponSpell && spell.IsBeneficial)
                     duration *= 1.0f + (float)longevityCaster.GetCasterOnlyModValue(WeaponModId.Longevity);
 
                 // Malediction (Blood Mage T2): a refresh recomputes the duration from the spell rather than
@@ -232,6 +239,11 @@ namespace ACE.Server.WorldObjects.Managers
                     duration = MaledictionAbility.ExtendDuration(duration, maledictionRefreshDuration);
                 }
 
+                // Upgraded Knot cloak: a cloak proc refresh keys on the wearer, whichever cloak built the entry, so a
+                // Cloaked in Skill proc refresh takes the magnitude of the cloak casting now (Cloak.RefreshedProcStatModValue).
+                // Every other refresh, including every other cloak proc, keeps its original StatModValue, as before.
+                refreshSpell.StatModValue = Cloak.RefreshedProcStatModValue(weapon, spell.Id, refreshSpell.StatModValue, spell.StatModVal);
+
                 var timeRemaining = refreshSpell.Duration + refreshSpell.StartTime;
 
                 if (duration > timeRemaining)
@@ -243,6 +255,9 @@ namespace ACE.Server.WorldObjects.Managers
                 result.Enchantment = refreshSpell;
             }
             WorldObject.ChangesDetected = true;
+
+            // FORK: latest application wins, new layer or refresh alike (see ProcDotMarks).
+            ProcDotMarks.Set(result.Enchantment, procSourced);
 
             // output message is from StackType,
             // which is the largest of the combined StackTypes
@@ -274,9 +289,9 @@ namespace ACE.Server.WorldObjects.Managers
                     entry.Duration *= CustomAugmentations.SpellDurationMultiplier(player.AugmentationIncreasedSpellDuration, player.AugmentationSpellDurationCustom, CustomAugBroker.SpellDurationBonus);
 
                 // Longevity (WeaponModId.Longevity): extends duration on a self-cast beneficial enchantment.
-                // See the refresh-path comment above (Add) for the caster == WorldObject self-cast test and
-                // why !isWeaponSpell is required.
-                if (caster is Player longevityCaster && caster == WorldObject && !isWeaponSpell && spell.IsBeneficial)
+                // See the refresh-path comment above (Add) for the self-cast test (the caster, or armor the caster
+                // is wearing - IsLongevitySelfTarget) and why !isWeaponSpell is required.
+                if (caster is Player longevityCaster && IsLongevitySelfTarget(longevityCaster.Guid, WorldObject.Guid, longevityCaster.EquippedObjects) && !isWeaponSpell && spell.IsBeneficial)
                     entry.Duration *= 1.0f + (float)longevityCaster.GetCasterOnlyModValue(WeaponModId.Longevity);
             }
             else
@@ -303,6 +318,11 @@ namespace ACE.Server.WorldObjects.Managers
             entry.StatModType = spell.StatModType;
             entry.StatModKey = spell.StatModKey;
             entry.StatModValue = spell.StatModVal;
+
+            // Upgraded Knot cloak: a cloak casting its own ProcSpell may carry its own magnitude
+            // (PropertyFloat.CloakProcStatModValue). Unstamped cloaks and every other caster keep the spell's value.
+            // The refresh branch in Add() applies the same rule (Cloak.RefreshedProcStatModValue).
+            entry.StatModValue = Cloak.ProcStatModValue(weapon, spell.Id, entry.StatModValue);
 
             if (spell.IsBeneficial) // should "server" data be fixed or is this the better way to do this?
                 entry.StatModType |= EnchantmentTypeFlags.Beneficial;
@@ -344,6 +364,10 @@ namespace ACE.Server.WorldObjects.Managers
             {
                 entry.HasSpellSetId = true;
                 entry.SpellSetId = (EquipmentSet)caster.EquipmentSetId;
+
+                // SetBonusMaxLevel (upgraded Knot cloak): past the dat's top tier, the top tier keeps scaling with the
+                // set level. Exactly 1.0 - and so untouched - for every set item that does not carry the property.
+                entry.StatModValue = WorldObject.ApplySetSpellScale(entry.StatModValue, WorldObject.GetSpellSetScale(caster, WorldObject));
             }
 
             return entry;
@@ -722,10 +746,50 @@ namespace ACE.Server.WorldObjects.Managers
         }
 
         /// <summary>
+        /// Long-duration progression / quest buffs that a NON-PLAYER creature's dispel must never strip. Player-cast
+        /// dispels are unaffected. A static set on purpose (no tunable). Ids are the dat spell ids; each name is
+        /// confirmed against tools/loot-catalog/loot-catalog.json (spell id -> name) and, where an enum member
+        /// exists, ACE.Entity.Enum.SpellId:
+        ///   3810 AsheronsBenediction, 3811 BlackmoorsFavor (SpellId.cs, the Augmentation Gem spells),
+        ///   4024 AsheronsLesserBenediction (SpellId.cs; AugmentationCommands.cs:523 applies it as an enchantment),
+        ///   3953 Carraida's Benediction (loot-catalog.json:3888; SpellId.CarraidasBenediction, the equipment-set buff),
+        ///   3204 Blazing Heart (Content/sql/weenies/1002824 Burning Coal.sql:29 and :75, "+50 max health for 4 hours"),
+        ///   5451 Luminous Vitality (tools/loot-catalog/loot-catalog.json:5385; no SpellId member; no Content/ file in this repo references spell 5451, grant source is retail world data not checked),
+        ///   5204 AetheriaProcDamageBoost (Surge of Destruction), 5206 AetheriaProcDamageReduction (Surge of Protection),
+        ///   5208 AetheriaProcHealthOverTime (Surge of Regeneration) - the self-targeted surges per Aetheria.SurgeTargetSelf.
+        /// </summary>
+        internal static readonly IReadOnlySet<uint> CreatureDispelExempt = new HashSet<uint>
+        {
+            (uint)SpellId.AsheronsBenediction,
+            (uint)SpellId.BlackmoorsFavor,
+            (uint)SpellId.AsheronsLesserBenediction,
+            (uint)SpellId.CarraidasBenediction,
+            3204, // Blazing Heart (Burning Coal)
+            5451, // Luminous Vitality
+            (uint)SpellId.AetheriaProcDamageBoost,
+            (uint)SpellId.AetheriaProcDamageReduction,
+            (uint)SpellId.AetheriaProcHealthOverTime,
+        };
+
+        /// <summary>
+        /// Drops <see cref="CreatureDispelExempt"/> enchantments from the dispel candidates when the caster is a
+        /// non-player creature; any other caster (player, item, unknown) leaves the candidates unchanged.
+        /// </summary>
+        public static IEnumerable<PropertiesEnchantmentRegistry> ApplyCreatureDispelExemption(IEnumerable<PropertiesEnchantmentRegistry> candidates, WorldObject caster)
+        {
+            if (!(caster is Creature) || caster is Player)
+                return candidates;
+
+            return candidates.Where(e => !CreatureDispelExempt.Contains((uint)e.SpellId));
+        }
+
+        /// <summary>
         /// Selects a list of spells to dispel
         /// </summary>
         /// <param name="spell">The dispel spell</param>
-        public List<SpellEnchantment> SelectDispel(Spell spell)
+        /// <param name="caster">Who cast the dispel (null = unknown, treated as non-creature). A non-player creature
+        /// caster cannot strip <see cref="CreatureDispelExempt"/> progression buffs.</param>
+        public List<SpellEnchantment> SelectDispel(Spell spell, WorldObject caster = null)
         {
             // NOTE: in the default 16PY db,
             // there are a lot of dispels where the actual #s do not match up with the spell descriptions...
@@ -754,6 +818,9 @@ namespace ACE.Server.WorldObjects.Managers
 
             // no dispel for enchantments from item sources (and vitae)
             filtered = filtered.Where(e => e.Duration != -1);
+
+            // a monster's dispel must not strip long-duration progression buffs
+            filtered = ApplyCreatureDispelExemption(filtered, caster);
 
             // PvP dispel vuln lock (D1): after a recent PK attack, a player-cast vulnerability debuff on the
             // target cannot be dispelled away. No-op outside PvP / with the lever off.
@@ -1500,14 +1567,32 @@ namespace ACE.Server.WorldObjects.Managers
             }
 
             // apply damage over time (DoTs)
-            if (dots.Count > 0)
-                ApplyDamageTick(dots, DamageType.Undef);
+            //
+            // ONE HEARTBEAT IS ONE HIT FOR REFLECT (owner ruling 2026-10-17). The three ticks below are
+            // separate pre-write dispatches, so without the pass a creature's fire DoT would arm Reflect's
+            // immunity window and the same creature's nether DoT, a few lines later in the same heartbeat,
+            // would be blocked by it. The pass makes every tick here decide against the window as it stood
+            // BEFORE the heartbeat and arm it at most once. Closed in a finally so a throwing tick cannot
+            // leave the player stuck in a pass.
+            var dotPassPlayer = WorldObject as Player;
 
-            if (netherDots.Count > 0)
-                ApplyDamageTick(netherDots, DamageType.Nether);
+            dotPassPlayer?.BeginReflectDotPass();
 
-            if (aetheriaDots.Count > 0)
-                ApplyDamageTick(aetheriaDots, DamageType.Undef, true);
+            try
+            {
+                if (dots.Count > 0)
+                    ApplyDamageTick(dots, DamageType.Undef);
+
+                if (netherDots.Count > 0)
+                    ApplyDamageTick(netherDots, DamageType.Nether);
+
+                if (aetheriaDots.Count > 0)
+                    ApplyDamageTick(aetheriaDots, DamageType.Undef, true);
+            }
+            finally
+            {
+                dotPassPlayer?.EndReflectDotPass();
+            }
 
             // apply healing over time (HoTs)
             if (heals.Count > 0)
@@ -1549,6 +1634,10 @@ namespace ACE.Server.WorldObjects.Managers
             else
                 creature.DamageHistory.Add(creature, DamageType.Health, (uint)-healAmount);
 
+            // class ability: Hemomancy - a heal-over-time tick is a real heal; the APPLIED delta counts.
+            if (healAmount > 0 && creature is Player hotHealedPlayer)
+                hotHealedPlayer.OnHealthRestored((uint)healAmount, false);
+
             if (creature is Player player)
                 player.SendMessage($"You receive {Math.Abs(healAmount)} points of periodic {((healAmount >= 0) ? "healing" : "harm")}.", PropertyManager.GetBool("aetheria_heal_color").Item ? ChatMessageType.Broadcast : ChatMessageType.Combat);
 
@@ -1570,6 +1659,29 @@ namespace ACE.Server.WorldObjects.Managers
             => damageType == DamageType.Nether && sourceIsPlayer && !isPlayerPairIncludingSelf;
 
         /// <summary>
+        /// Pure gate for the Focus spell damage bonus on a DoT tick (magic_damage_per_focus_point): a player caster, a
+        /// non-player target, not an Aetheria DoT, and an enchantment whose latest application was not a proc.
+        /// </summary>
+        internal static bool ShouldApplyFocusDotMod(bool sourceIsPlayer, bool targetIsPlayer, bool aetheria, bool procSourced)
+            => sourceIsPlayer && !targetIsPlayer && !aetheria && !procSourced;
+
+        /// <summary>
+        /// Longevity self-target test, pure on guids and the caster's runtime equipment so it is testable without a
+        /// live Player: true when the enchantment's owner IS the caster, or is an item currently in the caster's
+        /// EquippedObjects (a bane cast on worn armor). Items merely in the caster's pack are not equipped, and the
+        /// persisted WielderId is deliberately not consulted - it can be stale (see Player_Facets.cs).
+        /// </summary>
+        internal static bool IsLongevitySelfTarget(ObjectGuid casterGuid, ObjectGuid ownerGuid, IReadOnlyDictionary<ObjectGuid, WorldObject> casterEquipped)
+            => casterGuid == ownerGuid || (casterEquipped != null && casterEquipped.ContainsKey(ownerGuid));
+
+        /// <summary>
+        /// Open World Threads R12, pure: true when a DoT tick on a creature bound to an outdoor run's perimeter had at least one
+        /// contribution refused and none left, so the tick must call nothing. False for an unbound creature, whatever the counts.
+        /// </summary>
+        internal static bool OutdoorTickFullyRefused(bool hasPerimeter, int refused, int contributed)
+            => hasPerimeter && refused > 0 && contributed == 0;
+
+        /// <summary>
         /// Applies 1 tick of damage from a DoT spell
         /// </summary>
         /// <param name="enchantments">The damage over time (DoT) spells</param>
@@ -1583,6 +1695,9 @@ namespace ACE.Server.WorldObjects.Managers
             var contributions = new List<KeyValuePair<WorldObject, float>>();
 
             var targetPlayer = WorldObject as Player;
+
+            // Open World Threads R12: how many contributions the outdoor perimeter refused this tick (see the early return below the loop).
+            var outdoorRefused = 0;
 
             // Accumulate the RAW, UNCAPPED tick. This loop used to clamp its running total to the victim's
             // current Health as it went, and latch an `isDead` flag to break out once it had. That clamp was
@@ -1614,6 +1729,15 @@ namespace ACE.Server.WorldObjects.Managers
                 if (damager == null)
                 {
                     //Console.WriteLine($"{WorldObject.Name}.ApplyDamageTick() - couldn't find damager {enchantment.CasterObjectId:X8}");
+                    continue;
+                }
+
+                // Open World Threads R12: the combined tick reaches TakeDamage with no source, so the caster is judged
+                // here, per contribution, at its position NOW: a player (or a player's pet) past an outdoor run's circle
+                // contributes nothing. One null check for every other target.
+                if (creature.P_OutdoorPerimeter != null && creature.RefusesOutdoorPerimeterDamage(damager))
+                {
+                    outdoorRefused++;
                     continue;
                 }
 
@@ -1675,11 +1799,22 @@ namespace ACE.Server.WorldObjects.Managers
                 if (ShouldApplyWitheringVoidDotMod(damageType, sourcePlayer != null, PvpClassifier.IsPlayerPairIncludingSelf(damager, WorldObject)))
                     tickAmount *= sourcePlayer.GetWitheringVoidDotMod();
 
-                // class ability: Hemomancy scales the caster's DoT tick damage, EVERY school - unlike
-                // Withering above, not gated by damageType. PvE only: the tick's TARGET must not be a
-                // Player, matching Withering's own PvP carve-out at this site.
+                // class ability: Hemomancy's heal-armed damage buff scales the caster's DoT ticks, EVERY
+                // school - unlike Withering above, not gated by damageType. 1.0 unless the caster's buff is
+                // live. PvE only: the tick's TARGET must not be a Player, matching Withering's own PvP
+                // carve-out at this site.
                 if (sourcePlayer != null && targetPlayer == null)
-                    tickAmount *= sourcePlayer.GetHemomancyDotMod();
+                {
+                    tickAmount *= sourcePlayer.GetHemomancyDamageMod();
+
+                    // Berserk Rage (Berserker T3): the DoT leg of its enraged x1.5 (1.0 unless raging).
+                    tickAmount *= sourcePlayer.GetBerserkRageDamageMod();
+
+                    // FORK: Focus spell damage (magic_damage_per_focus_point), the caster's buffed Focus at TICK time.
+                    // Not for Aetheria, and not for a DoT whose latest application was a proc (ProcDotMarks).
+                    if (ShouldApplyFocusDotMod(true, false, aetheria, ProcDotMarks.IsProcSourced(enchantment)))
+                        tickAmount *= sourcePlayer.GetFocusSpellDamageMod();
+                }
 
                 if (PvpClassifier.IsPlayerPairIncludingSelf(damager, WorldObject))
                 {
@@ -1720,6 +1855,12 @@ namespace ACE.Server.WorldObjects.Managers
 
                 contributions.Add(new KeyValuePair<WorldObject, float>(damager, tickAmount));
             }
+
+            // Open World Threads R12: a run creature's tick whose every contribution was refused lands nothing at all - no
+            // TakeDamageOverTime(0), so no hit sound and no splatter broadcast. Scoped to a bound creature; every other
+            // target (the PvP suppression paths included) keeps its existing behaviour.
+            if (OutdoorTickFullyRefused(creature.P_OutdoorPerimeter != null, outdoorRefused, contributions.Count))
+                return;
 
             // Group the contributions per damager, in LAST-CONTRIBUTION order, and freeze that order for
             // everything below - the total, the split, the DamageHistory writes and the per-damager combat
@@ -1765,7 +1906,15 @@ namespace ACE.Server.WorldObjects.Managers
             {
                 var beforeAbsorb = (uint)Math.Round(damageTotal);
 
-                damageTotal = targetPlayer.ApplyPreWriteDamageClassAbilities(null, damageType, beforeAbsorb, isDamageOverTime: true);
+                // The tick has no single source, so the enemy-creature share (Reflect's immunity window, via
+                // PreWriteDamageContext.SpellDamageFromEnemyCreature) is summed here from the per-caster
+                // contributions, through the SAME predicate the dispatch uses for a sourced hit.
+                var enemyCreatureShare = ClassAbilityAttackerFilter.EnemyCreatureShareOfTick(
+                    contributions.Select(c => (ClassAbilityAttackerFilter.EnemyCreature(c.Key, targetPlayer) != null, c.Value)),
+                    beforeAbsorb);
+
+                damageTotal = targetPlayer.ApplyPreWriteDamageClassAbilities(null, damageType, beforeAbsorb, isDamageOverTime: true,
+                    isSpell: true, enemyCreatureSpellDamage: enemyCreatureShare);
             }
 
             // CREDIT ACCOUNTING IS CLAMPED, THE VITAL WRITE IS NOT. UpdateVitalDelta floors Health at zero
@@ -1782,10 +1931,24 @@ namespace ACE.Server.WorldObjects.Managers
 
             // Before the tick is applied, as it was before: TakeDamageOverTime's death path resolves the
             // killer through DamageHistory.LastDamager.
-            for (var i = 0; i < entries.Count; i++)
-                creature.DamageHistory.Add(entries[i].Key, damageType, credits[i]);
+            // Group Thread contribution summary: these credits are recorded BEFORE the write and before a monster's ward
+            // runs inside TakeDamage, so for a run creature the tick is staged here and credited from the write itself
+            // (ThreadContributionHook.BeginDotTick). Skipped, allocating nothing, for every creature outside an open group
+            // Thread ledger: non-Thread combat, solo runs, and leftover monsters in a Cleared or Ended run.
+            if (creature.P_DungeonRun is { IsContributionOpen: true })
+                ACE.Server.ThreadDungeons.ThreadContributionHook.BeginDotTick(creature, entries.Select(e => e.Key).ToList(), rawAmounts);
 
-            creature.TakeDamageOverTime(damageTotal, damageType);
+            try
+            {
+                for (var i = 0; i < entries.Count; i++)
+                    creature.DamageHistory.Add(entries[i].Key, damageType, credits[i]);
+
+                creature.TakeDamageOverTime(damageTotal, damageType);
+            }
+            finally
+            {
+                ACE.Server.ThreadDungeons.ThreadContributionHook.EndDotTick(creature);
+            }
 
             if (!creature.IsAlive) return;
 
@@ -1804,27 +1967,6 @@ namespace ACE.Server.WorldObjects.Managers
 
                     if (creature.IsAlive)
                         creature.EmoteManager.OnDamage(damageSourcePlayer);
-
-                    // class ability: Hemomancy heals the caster for a flat fraction of THIS tick's own
-                    // APPLIED damage (post overkill-clamp - the same `amount` DamageHistory and the notify
-                    // call above just used), never the raw uncapped roll. PvE only: targetPlayer == null
-                    // was already required to earn the tick bonus above, and this reuses that same
-                    // constraint rather than re-deriving it. Rank-gated (0.0 at rank 0) and NOT
-                    // affinity-scaled - see HemomancyAbility's doc comment. Skipped on a killing tick along
-                    // with everything else in this loop, since the method returns before reaching it once
-                    // the target dies.
-                    if (targetPlayer == null && amount > 0)
-                    {
-                        var healFraction = damageSourcePlayer.GetHemomancyHealFraction();
-
-                        if (healFraction > 0.0)
-                        {
-                            var healAmount = (int)Math.Round(amount * healFraction);
-
-                            if (healAmount > 0)
-                                damageSourcePlayer.UpdateVitalDelta(damageSourcePlayer.Health, healAmount);
-                        }
-                    }
                 }
             }
         }

@@ -6,6 +6,12 @@ namespace ACE.Server.Network
 {
     public class ServerPacketFragment : PacketFragment
     {
+        /// <summary>
+        /// Set only on a message's LAST piece: that message's outbound ring index, so the packet's sequence can be noted
+        /// on the ring entry when the packet is stamped. 0 otherwise. Diagnostics only; never serialized.
+        /// </summary>
+        public long RingIndex;
+
         public ServerPacketFragment(byte[] data)
         {
             Data = data;

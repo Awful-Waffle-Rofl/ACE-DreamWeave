@@ -23,7 +23,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "riposte",
             DisplayName = "Riposte",
             Description = "When you Parry a melee attack, counter with a free weapon strike at 40/70/100% damage by rank. " +
-                          "The counter is a real hit, so Poison Weapon and Acid Proc apply. Requires Parry.",
+                          "The counter is a real hit, so Poison Weapon and Acid Proc apply, scaled to the counter's damage. Requires Parry.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,

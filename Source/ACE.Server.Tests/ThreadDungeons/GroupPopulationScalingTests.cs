@@ -153,6 +153,9 @@ namespace ACE.Server.Tests.ThreadDungeons
         // that test write "{Name}\t{Hash(fp)}\t{draws}" for each scenario to a scratch file instead of
         // asserting, run it alone, paste the new BaseHash/BaseDraws values below, restore the assertions, and
         // say in the commit that the solo baseline moved and why.
+        // Moved once more with the boss-health-max change (boss health takes the greatest health_mult, not the
+        // product): hardy16min40 and curve40 carry hardy beside the curated boss's boss_guarded 1.5, so their
+        // bossHp changed; the other five scenarios and every draw count are byte-identical.
         // The LASTING equivalence check is Explicit_solo_snapshot_builds_the_same_plan_as_no_group_argument:
         // it compares no group argument against GroupScaling.Solo and a roster of one on the current code, so
         // it keeps proving "solo takes no group path" after the frozen hashes are regenerated.
@@ -179,13 +182,13 @@ namespace ACE.Server.Tests.ThreadDungeons
                 BaseHash = "bb30265d303a3fd7a51bdd204f285f78f6a86964ff1ebc3362dfe259166a1a75", BaseDraws = 30 };
             yield return new SoloScenario { Name = "hardy16min40", Spec = Spec(("hardy", 1.6)), Points = 16, Health = TrashHealthOf, Seed = 17,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, trashHealthFloorRatio: 0.5, healthCurveEnabled: false, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "565c5e9d23840b99d586e51a1658bc004625217dd1d402cb65366154c0990fb9", BaseDraws = 58 };
+                BaseHash = "a0526eda304b3874ff1832a871cb62a2408c4704492ce3d13b217dfe340e9db3", BaseDraws = 58 };
             yield return new SoloScenario { Name = "capped50", Spec = Spec(), Points = 50, Health = HealthOf, Seed = 3,
                 Limits = g => new DungeonPopulationLimits(8, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, healthCurveEnabled: false, minMonsters: 0, modifierLevelExponent: 0.0, group: g),
                 BaseHash = "9f4eff7a4fc1e826e6c12d7f102c6a13150d11bf10bbc3bbf65037d54545a67a", BaseDraws = 60 };
             yield return new SoloScenario { Name = "curve40", Spec = Spec(("hardy", 1.3)), Points = 40, Health = TrashHealthOf, Seed = 5,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, trashHealthFloorRatio: 0.5, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
-                BaseHash = "c314e0e81f150bde693a840e3cf052d65830d3ddc2f41fb7a1c0fd814cd58a8e", BaseDraws = 82 };
+                BaseHash = "67d43970b987cfb51c49cb24fc4817ca0eed25f6a2871fb02fcc44c7c18ca7d6", BaseDraws = 82 };
             yield return new SoloScenario { Name = "legacyBoss40", Spec = Spec(), Points = 40, Health = TrashHealthOf, Seed = 9,
                 Limits = g => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, bossNormalize: false, minMonsters: 40, modifierLevelExponent: 0.0, group: g),
                 BaseHash = "25b9294347d9f36e48385cd8f27e867c99eb8d1795f2e28aeb071c99ae36463c", BaseDraws = 82 };
@@ -480,9 +483,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Legacy_boss_target_call_site_uses_the_group_aware_floor_ratio()
         {
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs");
-            var body = PooledLootSourceText.MethodBody(src, "private static PlaceOutcome TryPlaceOnce(ThreadDungeonRun run, Landblock landblock, DungeonSpawnPlan plan, DungeonSpawnPlanEntry entry,");
+            // The boss health block moved from TryPlaceOnce into PrepareForPlacement (archetype-uplift extraction); the group
+            // comes from the run, or Solo when an offline caller passes no run.
+            var body = PooledLootSourceText.MethodBody(src, "internal static void PrepareForPlacement(ThreadDungeonRun run, Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan,");
 
-            StringAssert.Contains(body, "DungeonRewardMath.BossHealthTarget(baseMax, hpMult, observedMaxNonBoss, LegacyBossFloorRatio(plan, run.Group.Effort));");
+            StringAssert.Contains(body, "var group = run?.Group ?? GroupScaling.Solo;");
+            StringAssert.Contains(body, "var groupEffort = options != null && run == null ? options.GroupEffort : group.Effort;");
+            StringAssert.Contains(body, "DungeonRewardMath.BossHealthTarget(baseMax, hpMult, observedMaxNonBoss, LegacyBossFloorRatio(plan, groupEffort));");
         }
 
         [TestMethod]
@@ -525,12 +532,16 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var body = TryPopulateBody();
 
-            // "group: run.Group," since 2026-10-08: the run ceiling raise appended four named arguments after it
-            // (healthCurveTopLevel, reachUp, statCurve, defenseCurveRateAbove375), so it is no longer the last.
-            var limitsArg = body.IndexOf("group: run.Group,", StringComparison.Ordinal);
+            // The limits are built by ReadLimits(run.Group) since the archetype-uplift extraction; ReadLimits hands its
+            // `group` parameter to the limits ("group: group,"), so the lock-time snapshot still reaches them.
+            var limitsArg = body.IndexOf("ReadLimits(run.Group)", StringComparison.Ordinal);
+            var readLimits = PooledLootSourceText.MethodBody(PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs"),
+                "internal static DungeonPopulationLimits ReadLimits(GroupScaling group)");
+            StringAssert.Contains(readLimits, "group: group,");
             var build = body.IndexOf("plan = DungeonPopulationBuilder.Build(", StringComparison.Ordinal);
             var resolve = body.IndexOf("run.MarkGroupResolved(plan.GroupCountActual, plan.GroupHealthMult);", StringComparison.Ordinal);
-            var queue = body.IndexOf("var queue = new Queue<DungeonSpawnPlanEntry>(plan.Entries);", StringComparison.Ordinal);
+            // The placement queue is the per-landblock group queue since Open World Threads WP3b (one group for a dungeon).
+            var queue = body.IndexOf("var placementGroups = new Queue<(Landblock Block, Queue<DungeonSpawnPlanEntry> Entries)>();", StringComparison.Ordinal);
 
             Assert.IsTrue(limitsArg >= 0 && limitsArg < build, "the limits must carry run.Group, read from the lock-time snapshot");
             Assert.IsTrue(resolve > build, "MarkGroupResolved runs after the plan is built");
@@ -546,7 +557,8 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             // The rating stamp lives in TryPlaceOnce, which TryPlace calls once per candidate point.
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonSpawner.cs");
-            var body = PooledLootSourceText.MethodBody(src, "private static PlaceOutcome TryPlaceOnce(ThreadDungeonRun run, Landblock landblock, DungeonSpawnPlan plan, DungeonSpawnPlanEntry entry,");
+            // (Moved into PrepareForPlacement by the archetype-uplift extraction; TryPlaceOnce calls it.)
+            var body = PooledLootSourceText.MethodBody(src, "internal static void PrepareForPlacement(ThreadDungeonRun run, Creature creature, DungeonSpawnPlanEntry entry, DungeonSpawnPlan plan,");
 
             StringAssert.Contains(body, "var dr = StampedDamageRating(plan, isBoss);");
             Assert.IsFalse(body.Contains("var dr = isBoss ? plan.BossDamageRating : plan.DamageRating;"), "the pre-group stamp would drop the bonus");

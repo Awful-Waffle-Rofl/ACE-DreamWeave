@@ -27,12 +27,7 @@ namespace ACE.Server.WorldObjects
 
         public bool GetCharacterOption(CharacterOption option)
         {
-            var option1 = option.GetCharacterOptions1Attribute();
-
-            if (option1 != null)
-                return GetCharacterOptions1(option1.Option);
-
-            return GetCharacterOptions2(option.GetCharacterOptions2Attribute().Option);
+            return option.IsSet(Character.CharacterOptions1, Character.CharacterOptions2);
         }
 
         private bool GetCharacterOptions1(CharacterOptions1 option)

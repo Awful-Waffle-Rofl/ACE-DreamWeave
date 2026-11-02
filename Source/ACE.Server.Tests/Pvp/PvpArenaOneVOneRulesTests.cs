@@ -287,6 +287,77 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyDmgModBg(SeededPlayer(Binding(bg, 0, PvpMatchState.Live)), SeededPlayer(Binding(bg, 1, PvpMatchState.Live)), 100.0f));
         }
 
+        // ================= pvp_bg_ring_dmg (AM1, battleground ring) =================
+
+        [TestMethod]
+        public void BgRingDmg_PureFunction_AppliesOnlyToARingInSameLiveBattleground()
+        {
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(false, true, 2.0, 100.0f), "not in same battleground: unchanged");
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, false, 2.0, 100.0f), "not a ring (a bolt): unchanged");
+            Assert.AreEqual(200.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, 2.0, 100.0f), "ring in same battleground: scaled");
+            Assert.AreEqual(50.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, 0.5, 100.0f), "ring in same battleground: scaled down");
+            Assert.AreEqual(0.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, 0.0, 100.0f), "0 is a real setting");
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, double.NaN, 100.0f), "NaN: unchanged");
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, double.PositiveInfinity, 100.0f), "infinite: unchanged");
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(true, true, -1.0, 100.0f), "negative: unchanged");
+        }
+
+        /// <summary>
+        /// DISCRIMINATES: a ring in a Live battleground match of any mode reads the battleground ring mod (school-blind: the entry takes no
+        /// school, so a Life ring like Curse of Raven Fury passes); a non-ring in a battleground, and a ring in any arena mode, a not-Live
+        /// battleground, two different battleground matches, no match, a self hit or a creature target (a crystal), never do. The Tugak ring
+        /// entry and the battleground ring entry never both scale one ring: each stays out of the other's mode.
+        /// </summary>
+        [TestMethod]
+        public void BgRingDmg_ChokePointEntry_ScalesRingsInLiveBattlegroundsOnly_AndNeverWithTheFfaRingEntry()
+        {
+            PvpTunables.DialSource = () => PvpTunables.Defaults with { FfaRingDmg = 3.0, DmgModFfa = 7.0, DmgMod1v1 = 5.0 };
+            ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.DialSource = () => ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.Defaults with { RingDmg = 0.5, DmgMod = 9.0 };
+
+            foreach (var key in new[] { ACE.Server.Pvp.Battlegrounds.BattlegroundModes.KothModeKey, ACE.Server.Pvp.Battlegrounds.BattlegroundModes.AttackDefendModeKey, "bg_future" })
+            {
+                var bg = NewMatch(key);
+                var a = SeededPlayer(Binding(bg, 0, PvpMatchState.Live));
+                var d = SeededPlayer(Binding(bg, 1, PvpMatchState.Live));
+
+                Assert.AreEqual(50.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(a, d, true, 100.0f), $"{key}: ring scaled by the battleground ring mod only");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(a, d, false, 100.0f), $"{key}: a bolt is unchanged");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyFfaRingDmg(a, d, true, 100.0f), $"{key}: the Tugak ring entry stays out of a battleground");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(a, a, true, 100.0f), $"{key}: self hit unchanged");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(a, TestCreatures.CreateDefender(), true, 100.0f), $"{key}: a creature (a crystal) is unchanged");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(TestCreatures.CreateDefender(), d, true, 100.0f), $"{key}: a creature source is unchanged");
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(SeededPlayer(Binding(bg, 0, PvpMatchState.Countdown)), SeededPlayer(Binding(bg, 1, PvpMatchState.Countdown)), true, 100.0f), $"{key}: not Live");
+            }
+
+            foreach (var key in new[] { ArenaMapCatalog.OneVOneKey, ArenaMapCatalog.TwoVTwoKey, ArenaMapCatalog.FfaKey })
+            {
+                var arena = NewMatch(key);
+                Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(SeededPlayer(Binding(arena, 0, PvpMatchState.Live)), SeededPlayer(Binding(arena, 1, PvpMatchState.Live)), true, 100.0f), $"arena {key}: the battleground ring mod stays out");
+            }
+
+            // The Tugak ring entry still scales an FFA ring by its own dial, and only that one.
+            var ffa = NewMatch(ArenaMapCatalog.FfaKey);
+            Assert.AreEqual(300.0f, PvpArenaOneVOneRules.ApplyFfaRingDmg(SeededPlayer(Binding(ffa, 0, PvpMatchState.Live)), SeededPlayer(Binding(ffa, 1, PvpMatchState.Live)), true, 100.0f), "a Tugak ring is scaled by pvp_arena_ffa_ring_dmg alone");
+
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(SeededPlayer(), SeededPlayer(), true, 100.0f), "no match (open world): unchanged");
+
+            var koth1 = NewMatch(ACE.Server.Pvp.Battlegrounds.BattlegroundModes.KothModeKey);
+            var koth2 = NewMatch(ACE.Server.Pvp.Battlegrounds.BattlegroundModes.KothModeKey);
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(SeededPlayer(Binding(koth1, 0, PvpMatchState.Live)), SeededPlayer(Binding(koth2, 1, PvpMatchState.Live)), true, 100.0f), "two different battleground matches: unchanged");
+        }
+
+        [TestMethod]
+        public void BgRingDmg_DefaultIsTheIdentity()
+        {
+            ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.DialSource = () => ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.Defaults;
+
+            var bg = NewMatch(ACE.Server.Pvp.Battlegrounds.BattlegroundModes.KothModeKey);
+
+            Assert.AreEqual(1.0, ACE.Server.Pvp.Battlegrounds.BattlegroundTunables.Defaults.RingDmg);
+            Assert.AreEqual(1.0, ACE.Server.Managers.DefaultPropertyManager.DefaultDoubleProperties["pvp_bg_ring_dmg"].Item, "the PropertyManager default matches the dial default");
+            Assert.AreEqual(100.0f, PvpArenaOneVOneRules.ApplyBgRingDmg(SeededPlayer(Binding(bg, 0, PvpMatchState.Live)), SeededPlayer(Binding(bg, 1, PvpMatchState.Live)), true, 100.0f));
+        }
+
         // ================= pvp_arena_healkit_skill_cap_1v1 (HK1) =================
 
         /// <summary>DISCRIMINATES: a target bound to a Live 1v1 match gets its boost capped; 2v2 and no-match do not.</summary>

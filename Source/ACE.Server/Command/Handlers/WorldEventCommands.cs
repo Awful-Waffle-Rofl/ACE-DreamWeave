@@ -33,15 +33,17 @@ namespace ACE.Server.Command.Handlers
 
         // TECH-DESIGN 5.3, one line per subcommand collapsed onto one usage string per CommandHandlerAttribute.
         private const string Usage =
-            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--dry] [--teaser <seconds>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
-            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--min-duration <seconds>] [--teaser <seconds>] [--dry] | " +
+            "start random [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] [--boss <id>] [--hazard <random|none|wisps|balls|rain>] [--dry] [--teaser <seconds>] (rolls whichever axes are not pinned by a flag; an unpinned family rolls a PAIR) | " +
+            "start <preset> [--here | --anchor <name>] [--source <id>] [--family <id>[,<id2>]] [--boss <id> (required for kill_boss; auto = a named boss bound to either composed family, random named boss if none bound)] [--goal <id>] [--reward <id>] [--hazard <random|none|wisps|balls|rain>] [--min-duration <seconds>] [--teaser <seconds>] [--dry] | " +
             "stop [fail|abort] | " +
             "status | " +
             "list [axes|families|presets] | " +
             "reload | " +
             "properties [substring] (every world_events_ server property, one chat line each; '*' marks a non-default value) | " +
             "simulate [--players <n>] [--level <L>] [--source <id>] [--family <id>[,<id2>]] [--goal <id>] | " +
-            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list";
+            "scene <sourceId> [--players <n>] [--yaw <deg>] | scene clear [<n>] | scene list | " +
+            "settings [describe [group|all|set|<name>]] | settings check <name> <value> | settings set <name> <value> | settings reset <name|group|all> | settings export <name> [--all] | settings import <name> [--merge] (global-scope tuning of typed world_events_ properties) | " +
+            "hold settings [group|all|set|<key>] | hold check <key> <value> | hold set <key> <value> | hold reset <key|group|all> | hold export <name> [--all] | hold import <name> [--merge] (the Hold goal's own tuning; never writes a global key)";
 
         private const string DisabledMessage = "World events are disabled (world_events_enabled).";
 
@@ -53,7 +55,9 @@ namespace ACE.Server.Command.Handlers
             {
                 if (parameters == null || parameters.Length == 0)
                 {
-                    Reply(session, Usage);
+                    foreach (var piece in WrapChatLine(Usage, 240))
+                        Reply(session, piece);
+
                     return;
                 }
 
@@ -94,8 +98,17 @@ namespace ACE.Server.Command.Handlers
                         HandleScene(session, rest);
                         break;
 
+                    case "settings":
+                        HandleSettings(session, rest);
+                        break;
+
+                    case "hold":
+                        HandleHold(session, rest);
+                        break;
+
                     default:
-                        Reply(session, Usage);
+                        foreach (var piece in WrapChatLine(Usage, 240))
+                            Reply(session, piece);
                         break;
                 }
             }
@@ -171,6 +184,7 @@ namespace ACE.Server.Command.Handlers
                 AnchorLabel = anchorLabel,
                 Invoker = session.Player.Name,
                 DryRun = parsed.Dry,
+                Hazard = parsed.Hazard,
                 MinDurationSeconds = parsed.MinDurationSeconds,
                 Random = parsed.Random,
                 TeaserLeadSeconds = parsed.TeaserLeadSeconds
@@ -328,6 +342,153 @@ namespace ACE.Server.Command.Handlers
                 var mark = changed ? "* " : "";
 
                 Reply(session, $"{mark}{row.key} = {row.current} (default {row.@default}) - {row.description}");
+            }
+        }
+
+        /// <summary>
+        /// "/worldevent settings ...": the scoped settings registry. This command is the Global-scope admin surface, so it can only
+        /// write Global rows; a goal's rows are reached by that goal's own command with its own scope (WorldEventSettingsService).
+        /// One chat line per reply entry so the client does not truncate a combined block.
+        /// </summary>
+        internal static void HandleSettings(Session session, string[] args)
+        {
+            foreach (var line in SettingsReplies(SettingsService(), SettingsCaller, args, session))
+                foreach (var piece in WrapChatLine(line, 240))
+                    Reply(session, piece);
+        }
+
+        /// <summary>
+        /// "/worldevent hold ...": the Hold goal's settings, through the same <see cref="SettingsReplies"/> path as the global command
+        /// but at <see cref="HoldCaller"/> scope, so it lists, writes, resets, exports and imports Hold rows only and refuses a global key.
+        /// </summary>
+        internal static void HandleHold(Session session, string[] args)
+        {
+            foreach (var line in HoldReplies(SettingsService(), args, session))
+                foreach (var piece in WrapChatLine(line, 240))
+                    Reply(session, piece);
+        }
+
+        /// <summary>The scope "/worldevent hold" writes as: the Hold goal's.</summary>
+        internal static readonly SettingScope HoldCaller = WorldEventSettingsRegistry.HoldScope;
+
+        /// <summary>The reply lines of "/worldevent hold &lt;args&gt;": "settings" is the listing; the rest are the settings subcommands unchanged.</summary>
+        internal static List<string> HoldReplies(WorldEventSettingsService service, string[] args, Session session)
+        {
+            var sub = args == null || args.Length == 0 ? "settings" : args[0].ToLowerInvariant();
+            var rest = args == null ? new string[0] : args.Skip(1).ToArray();
+
+            if (sub == "settings")
+                return SettingsReplies(service, HoldCaller, new[] { "describe" }.Concat(rest).ToArray(), session);
+
+            if (sub == "describe")
+                return SettingsReplies(service, HoldCaller, args, session);
+
+            switch (sub)
+            {
+                case "check":
+                case "set":
+                case "reset":
+                case "export":
+                case "import":
+                    return SettingsReplies(service, HoldCaller, args, session);
+
+                default:
+                    return SettingsReplies(service, HoldCaller, new[] { "?" }, session);
+            }
+        }
+
+        /// <summary>The scope "/worldevent settings" writes as. Global only: a goal's rows are reached by that goal's own command.</summary>
+        internal static readonly SettingScope SettingsCaller = SettingScope.Global;
+
+        /// <summary>Test seam: the service the command runs against (default: the shipped registry over PropertyManager).</summary>
+        internal static Func<WorldEventSettingsService> SettingsService = () => WorldEventSettingsService.Default;
+
+        /// <summary>
+        /// Reads "&lt;name&gt; [flag]" with the flag in ANY position: every argument starting with "-" must be the one allowed flag,
+        /// and the name is the single remaining argument (a name that starts with "-" is therefore never taken as a name).
+        /// </summary>
+        internal static bool TakePresetArgs(string[] args, string flag, out string name, out bool flagged)
+        {
+            name = null;
+            flagged = false;
+
+            foreach (var a in args ?? new string[0])
+            {
+                if (a.StartsWith("-", StringComparison.Ordinal))
+                {
+                    if (!a.Equals(flag, StringComparison.OrdinalIgnoreCase))
+                        return false;
+
+                    flagged = true;
+                }
+                else if (name == null)
+                    name = a;
+                else
+                    return false;
+            }
+
+            return name != null;
+        }
+
+        /// <summary>Splits a reply at spaces into pieces of at most <paramref name="max"/> characters (the client cuts a chat line at 255).</summary>
+        internal static List<string> WrapChatLine(string line, int max)
+        {
+            var pieces = new List<string>();
+            var rest = line ?? "";
+
+            while (rest.Length > max)
+            {
+                var cut = rest.LastIndexOf(' ', max);
+
+                if (cut <= 0)
+                    cut = max;
+
+                pieces.Add(rest.Substring(0, cut));
+                rest = rest.Substring(cut).TrimStart();
+            }
+
+            pieces.Add(rest);
+            return pieces;
+        }
+
+        internal static List<string> SettingsReplies(WorldEventSettingsService service, SettingScope caller, string[] args, Session session)
+        {
+            var use = caller.IsGlobal
+                ? "Use: /worldevent settings [describe [group|all|set|name]] | check <name> <value> | set <name> <value> | reset <name|group|all> | export <name> [--all] | import <name> [--merge]"
+                : $"Use: /worldevent {caller.GoalType} settings [group|all|set|key] | check <key> <value> | set <key> <value> | reset <key|group|all> | export <name> [--all] | import <name> [--merge]";
+
+            // The global command lists every row, as it always has; a goal command lists and checks only its own scope.
+            var listScope = caller.IsGlobal ? null : caller;
+
+            var sub = args == null || args.Length == 0 ? "describe" : args[0].ToLowerInvariant();
+            var rest = args == null ? new string[0] : args.Skip(1).ToArray();
+
+            switch (sub)
+            {
+                case "describe":
+                    return service.DescribeLines(listScope, rest.Length > 0 ? rest[0] : null);
+
+                case "check":
+                    return rest.Length < 2 ? new List<string> { use } : new List<string> { service.CheckReply(listScope, rest[0], string.Join(" ", rest.Skip(1))) };
+
+                case "set":
+                    return rest.Length < 2 ? new List<string> { use } : new List<string> { service.Set(caller, rest[0], string.Join(" ", rest.Skip(1)), session).Reply };
+
+                case "reset":
+                    return new List<string> { service.Reset(caller, rest.Length > 0 ? rest[0] : null, session).Reply };
+
+                case "export":
+                    return TakePresetArgs(rest, "--all", out var exportName, out var exportAll)
+                        ? new List<string> { service.Export(caller, exportName, exportAll).Reply }
+                        : new List<string> { use };
+
+                case "import":
+                    return TakePresetArgs(rest, "--merge", out var importName, out var importMerge)
+                        ? new List<string> { service.Import(caller, importName, importMerge, session).Reply }
+                        : new List<string> { use };
+
+                default:
+                    return new List<string> { use };
             }
         }
 
@@ -749,6 +910,10 @@ namespace ACE.Server.Command.Handlers
             public string BossId { get; set; }
             public string GoalId { get; set; }
             public string RewardId { get; set; }
+
+            /// <summary>"--hazard &lt;x&gt;", lowercased: random | none | wisps | balls | rain. Null when the flag was not passed (the source default).</summary>
+            public string Hazard { get; set; }
+
             public bool Dry { get; set; }
 
             /// <summary>
@@ -868,6 +1033,19 @@ namespace ACE.Server.Command.Handlers
                         if (!TryTakeValue(args, ref i, flag, out var rewardId, out error))
                             return false;
                         result.RewardId = rewardId.ToLowerInvariant();
+                        break;
+
+                    case "--hazard":
+                        if (!TryTakeValue(args, ref i, flag, out var hazardRaw, out error))
+                            return false;
+
+                        if (!WorldEventHazards.TryNormalizeRequest(hazardRaw, out var hazardWord, out var hazardError) || hazardWord == null)
+                        {
+                            error = $"--hazard must be one of {string.Join(", ", WorldEventHazards.RequestWords)}";
+                            return false;
+                        }
+
+                        result.Hazard = hazardWord;
                         break;
 
                     case "--min-duration":

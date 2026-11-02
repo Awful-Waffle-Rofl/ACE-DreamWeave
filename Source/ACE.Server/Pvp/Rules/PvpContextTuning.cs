@@ -524,6 +524,42 @@ namespace ACE.Server.Pvp.Rules
             }
         }
 
+        /// <summary>
+        /// PURE. The WeaponType a physical hit is categorized by. A stored <paramref name="weaponType"/> wins. Otherwise
+        /// (PropertyInt.WeaponType absent: many retail launcher rows, including 24199 Weeping Bow, 24201 Weeping
+        /// Crossbow and 24197 Weeping Atlatl, carry none, and so do many retail thrown weapons, 187 of 317
+        /// WeenieType.Missile rows) a MissileLauncher is read from its AmmoType (arrow family = Bow, bolt family =
+        /// Crossbow, atlatl family = Thrown), and a WeenieType.Missile or any item whose DefaultCombatStyle is
+        /// ThrownWeapon (<paramref name="isThrownCombatStyle"/>: the Generic tavern throwables such as chalice 142) is
+        /// Thrown. Undef when nothing matches. The legacy-skill fallback in WeaponCategory cannot cover these, because
+        /// Resolve has already passed the skill through ConvertToMoASkill, which maps every retired missile skill to
+        /// MissileWeapons for a player attacker.
+        /// </summary>
+        public static WeaponType InferMissileWeaponType(WeaponType weaponType, WeenieType weenieType, AmmoType? ammoType, bool isThrownCombatStyle)
+        {
+            if (weaponType != WeaponType.Undef)
+                return weaponType;
+
+            if (weenieType == WeenieType.MissileLauncher && ammoType.HasValue)
+            {
+                var ammo = ammoType.Value;
+
+                if ((ammo & (AmmoType.Arrow | AmmoType.ArrowCrystal | AmmoType.ArrowChorizite)) != 0)
+                    return WeaponType.Bow;
+
+                if ((ammo & (AmmoType.Bolt | AmmoType.BoltCrystal | AmmoType.BoltChorizite)) != 0)
+                    return WeaponType.Crossbow;
+
+                if ((ammo & (AmmoType.Atlatl | AmmoType.AtlatlCrystal | AmmoType.AtlatlChorizite)) != 0)
+                    return WeaponType.Thrown;
+            }
+
+            if (weenieType == WeenieType.Missile || isThrownCombatStyle)
+                return WeaponType.Thrown;
+
+            return WeaponType.Undef;
+        }
+
         /// <summary>PURE. War for the War Magic school, None for everything else (void and life projectiles get no context key).</summary>
         public static PvpCombatCategory SpellCategory(MagicSchool school)
             => school == MagicSchool.WarMagic ? PvpCombatCategory.War : PvpCombatCategory.None;
@@ -678,7 +714,10 @@ namespace ACE.Server.Pvp.Rules
                 var hasWeapon = weapon != null;
 
                 var weaponSkill = hasWeapon ? interaction.Attacker.ConvertToMoASkill(weapon.WeaponSkill) : Skill.None;
-                var weaponType = hasWeapon ? weapon.W_WeaponType : WeaponType.Undef;
+                // a missile weapon with no stored WeaponType (retail Weeping launchers, thrown weapons) is read from
+                // its AmmoType / WeenieType / combat style instead, or it would fall to None and no bow / crossbow /
+                // thrown key applies. Safe on a melee hit too: WeaponCategory never puts a melee hit in a missile category.
+                var weaponType = hasWeapon ? InferMissileWeaponType(weapon.W_WeaponType, weapon.WeenieType, weapon.AmmoType, weapon.IsThrownWeapon) : WeaponType.Undef;
                 var highestMelee = !hasWeapon && !profile.IsMissile ? HighestMeleeSource(interaction.Attacker) : Skill.None;
 
                 category = WeaponCategory(hasWeapon, weaponSkill, weaponType, profile.IsMissile, highestMelee);

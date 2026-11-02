@@ -50,6 +50,30 @@ namespace ACE.Server.Pvp
         private readonly IPvpResultSink sink;
         private readonly Func<DateTime> clock;
         private readonly Func<PvpArenaDials> dialSource;
+
+        /// <summary>The repeat-pairing dials (pvp_arena_pair_paid_cap and friends), read when a match forms.</summary>
+        private readonly Func<PvpPairingDials> pairingDialSource;
+
+        /// <summary>Paid-match counts per opposing account pair per arena day. In memory: a restart resets it (accepted). World thread only.</summary>
+        private readonly PvpPairLedger pairLedger = new PvpPairLedger();
+        private readonly PvpPairAudit pairAudit = new PvpPairAudit();
+        private readonly Action<string> auditSink;
+
+        /// <summary>
+        /// Per account key, the account keys of that account's most recent 1v1 / 2v2 opponents, oldest first (at most
+        /// pvp_arena_mm_recent_opponents, a repeat moves to the newest end). Fed by <see cref="RecordPairings"/> under the same
+        /// gating as the pair-cap count; read by the matchmaker's fresh-opponent tiers. In memory: a restart resets it. World thread only.
+        /// </summary>
+        private readonly Dictionary<uint, List<uint>> recentOpponents = new Dictionary<uint, List<uint>>();
+
+        /// <summary>Test seam (InternalsVisibleTo, ACE.Server.csproj:15): the pair ledger's count for two accounts, whatever day it is stored on.</summary>
+        internal int PairCountForTest(uint accountA, uint accountB) => pairLedger.CountFor(accountA, accountB, int.MinValue);
+
+        /// <summary>Test seam (InternalsVisibleTo, ACE.Server.csproj:15): a copy of an account's recent-opponent ring, oldest first; empty when it has none.</summary>
+        internal IReadOnlyList<uint> RecentOpponentsForTest(uint account) => recentOpponents.TryGetValue(account, out var ring) ? ring.ToList() : new List<uint>();
+
+        /// <summary>True while the matchmaking pairing-dial read is failing, so the error is logged once per failure episode.</summary>
+        private bool pairingReadFailing;
         private readonly ConcurrentQueue<PvpIntent> intents;
 
         /// <summary>
@@ -61,6 +85,7 @@ namespace ACE.Server.Pvp
 
         private readonly IPvpArenaCrierAnnouncer arenaAnnouncer;
         private readonly PvpArenaCrier arenaCrier = new PvpArenaCrier();
+        private readonly BgBonusCrier bgBonusCrier = new BgBonusCrier();
         private readonly ConcurrentQueue<DbResult> dbResults = new ConcurrentQueue<DbResult>();
 
         private readonly Dictionary<string, Room> rooms = new Dictionary<string, Room>(StringComparer.OrdinalIgnoreCase);
@@ -110,6 +135,12 @@ namespace ACE.Server.Pvp
 
         private readonly Func<BattlegroundDials> bgDialSource;
 
+        /// <summary>The pvp_conduct_* settings (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"); the sampler reads the engage radius from it.</summary>
+        private readonly Func<PvpConductDials> conductDialSource;
+
+        /// <summary>The conduct dials read for THIS tick's sampler pass: read once, by the first match that samples, and cleared when the tick starts.</summary>
+        private PvpConductDials conductDialsThisTick;
+
         /// <summary>Set when a battleground match forms; the next Arena Crier tick reads and clears it (a fill-window new-episode signal).</summary>
         private bool bgMatchFormedSinceCrierTick;
 
@@ -138,6 +169,26 @@ namespace ACE.Server.Pvp
         /// instance, like <see cref="LayoutResolver"/>.
         /// </summary>
         internal Func<bool> AttackDefendSwapSides { get; set; } = () => ACE.Common.ThreadSafeRandom.Next(0, 1) == 1;
+
+        /// <summary>
+        /// The team-colour coin (Docs/Pvp/TEMPLATES.md "Team hue"), drawn ONCE per match when it forms and read through
+        /// <see cref="PvpTeamColours.Assign(string, int, int, bool)"/>: in a two-team mode true makes team 0 Red, in Tugak Brawl true
+        /// makes everyone Red; Attack/Defend ignores it. ThreadSafeRandom.Next is inclusive at both ends. Tests swap it per instance.
+        /// </summary>
+        internal Func<bool> TeamColourCoin { get; set; } = () => ACE.Common.ThreadSafeRandom.Next(0, 1) == 1;
+
+        /// <summary>
+        /// The team hue dials (Docs/Pvp/TEMPLATES.md "Team hue"), read through ONCE per dispatch, next to where the arena masks are
+        /// taken, and fixed for the match. Tests swap it per instance; production reads the pvp_team_hue_* settings.
+        /// </summary>
+        internal Func<PvpTeamHueDials> TeamHueDials { get; set; } = PvpTeamHueSettings.Snapshot;
+
+        /// <summary>
+        /// The random source of the Tugak Brawl palette draw (Docs/Pvp/TEMPLATES.md "Team hue"): returns an integer in [0, n). It
+        /// shuffles the pool once per dispatch (<see cref="PvpTeamHue.FfaPaletteDeck"/>). ThreadSafeRandom.Next is inclusive at both
+        /// ends, hence n - 1. Tests swap it per instance for a deterministic draw.
+        /// </summary>
+        internal Func<int, int> TeamHueRandom { get; set; } = n => ACE.Common.ThreadSafeRandom.Next(0, Math.Max(0, n - 1));
 
         /// <summary>
         /// The Attack/Defend content guard: true when the crystal weenie of this wcid resolves in the world cache. The built-in picker
@@ -227,9 +278,12 @@ namespace ACE.Server.Pvp
         /// default) uses the built-in <see cref="BattlegroundModePicker"/> rotation with the template filter. A result outside the list
         /// falls back to the first.
         /// </param>
+        /// <param name="conductDialSource">The pvp_conduct_* settings (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"); defaults to <see cref="PvpConductTunables.DialSource"/>.</param>
         public PvpMatchCoordinator(IPvpPlayerGateway players, IPvpMatchSpaces spaces, IPvpResultSink sink, Func<DateTime> clock, Func<PvpArenaDials> dialSource, ConcurrentQueue<PvpIntent> intents, IPvpArenaCrierAnnouncer arenaAnnouncer = null,
-            Func<BattlegroundDials> bgDialSource = null, Func<IReadOnlyList<PvpModeDefinition>, PvpModeDefinition> bgModePicker = null)
+            Func<BattlegroundDials> bgDialSource = null, Func<IReadOnlyList<PvpModeDefinition>, PvpModeDefinition> bgModePicker = null,
+            Func<PvpPairingDials> pairingDialSource = null, Func<PvpConductDials> conductDialSource = null, Action<string> auditSink = null)
         {
+            this.conductDialSource = conductDialSource ?? (() => PvpConductTunables.DialSource());
             this.players = players ?? throw new ArgumentNullException(nameof(players));
             this.spaces = spaces ?? throw new ArgumentNullException(nameof(spaces));
             this.sink = sink ?? throw new ArgumentNullException(nameof(sink));
@@ -239,11 +293,14 @@ namespace ACE.Server.Pvp
             this.arenaAnnouncer = arenaAnnouncer ?? new LivePvpArenaCrierAnnouncer();
 
             this.bgDialSource = bgDialSource ?? (() => BattlegroundTunables.DialSource());
+            this.pairingDialSource = pairingDialSource ?? (() => PvpPairingTunables.DialSource());
+            this.auditSink = auditSink ?? (msg => ACE.Server.Managers.PlayerManager.BroadcastToAuditChannel("Arena", msg));
             bgModePickerOverride = bgModePicker;
             bgPlayers = players as IBattlegroundPlayerGateway;
             bgSpaces = spaces as IBattlegroundMatchSpaces;
             objectiveSpaces = spaces as IObjectiveMatchSpaces;
             teamFellowships = players as IPvpTeamFellowshipGateway;
+            conductGateway = players as IPvpConductGateway;
 
             foreach (var key in new[] { ArenaMapCatalog.OneVOneKey, ArenaMapCatalog.TwoVTwoKey, ArenaMapCatalog.FfaKey })
                 rooms[key] = new Room(key);
@@ -281,6 +338,21 @@ namespace ACE.Server.Pvp
             sink.LoadTemplates((rows, status) => dbResults.Enqueue(DbResult.TemplatesLoaded(rows, status)));
         }
 
+        /// <summary>Test seam: receives each catalog parse warning as well as the log. Null in production.</summary>
+        internal Action<string> TemplateWarnSink { get; set; }
+
+        /// <summary>Builds the catalog from <paramref name="rows"/> and logs what is offered.</summary>
+        private void RebuildTemplateCatalog(List<PvpTemplateRecord> rows, string why)
+        {
+            templateCatalog = PvpTemplateCatalog.Build(rows, line =>
+            {
+                log.Warn($"[PVPTEMPLATE] {line}");
+                TemplateWarnSink?.Invoke(line);
+            });
+
+            log.Info($"[PVPTEMPLATE] template catalog loaded ({why}): {templateCatalog.Count} row(s); offered: {string.Join("; ", PvpTemplateCatalog.ModeKeys.Select(k => $"{k} [{string.Join(",", templateCatalog.Offered(k).Select(e => e.Key))}]"))}");
+        }
+
         /// <summary>Queues the boot read behind /top's template column: each character's latest stamped template per ladder.</summary>
         public void BeginLoadLatestTemplates()
         {
@@ -296,6 +368,8 @@ namespace ACE.Server.Pvp
         {
             var now = clock();
             var dials = Dials();
+
+            conductDialsThisTick = null;
 
             DrainDbResults();
             DrainIntents(now);
@@ -322,6 +396,8 @@ namespace ACE.Server.Pvp
             foreach (var id in lockouts.Where(kvp => kvp.Value <= now).Select(kvp => kvp.Key).ToList())
                 lockouts.Remove(id);
 
+            PruneDeserterRecords(now);
+
             RunMatchmaking(now, dials);
             RunArenaCrier(now, dials);
         }
@@ -337,15 +413,22 @@ namespace ACE.Server.Pvp
             var matchFormed = bgMatchFormedSinceCrierTick;
             bgMatchFormedSinceCrierTick = false;
 
+            // The Double Marks announcements are the point of that feature, so they are NOT behind pvp_arena_crier_enabled.
+            RunBgBonusCrier(now, dials);
+
             if (!dials.CrierEnabled)
                 return;
 
             var snapshots = new List<CrierQueueSnapshot>(rooms.Count);
 
+            // Multi-queue: a unit whose member holds a seat in a pending match is paused, so it is not counted.
+            var held = HeldCharacters();
+
             foreach (var room in rooms.Values)
             {
                 var enabled = ModeEnabled(room.ModeKey, dials);
-                var count = room.PlayerCount;
+                var eligible = EligibleUnits(room, held);
+                var count = eligible.Sum(u => u.Ids.Count);
                 int needed;
                 int? fillSecondsLeft = null;
                 DateTime? fillCloseUtc = null;
@@ -366,7 +449,7 @@ namespace ACE.Server.Pvp
                     if (count >= bg.MinPlayers && count < bg.MaxPlayers && !BgMatchmakingHeld(room, now, dials, bg))
                     {
                         var close = BattlegroundMatchmaker.FillWindowCloseUtc(
-                            room.Units.OrderBy(u => u.QueuedAtUtc).ThenBy(u => u.EntrantId).Select(u => (u.Ids.Count, u.QueuedAtUtc)), bg);
+                            eligible.OrderBy(u => u.QueuedAtUtc).ThenBy(u => u.EntrantId).Select(u => (u.Ids.Count, u.QueuedAtUtc)), bg);
 
                         if (close.HasValue)
                         {
@@ -378,7 +461,7 @@ namespace ACE.Server.Pvp
                 }
                 else if (room.ModeKey == ArenaMapCatalog.FfaKey)
                 {
-                    var waited = count > 0 ? now - room.Units.Min(u => u.QueuedAtUtc) : TimeSpan.Zero;
+                    var waited = count > 0 ? now - eligible.Min(u => u.QueuedAtUtc) : TimeSpan.Zero;
                     needed = Math.Max(0, ArenaMapCatalog.FfaDecayedTargetSize(waited, dials) - count);
                 }
                 else
@@ -394,6 +477,28 @@ namespace ACE.Server.Pvp
 
             if (lines.Count > 0)
                 arenaAnnouncer.Announce(lines, dials.CrierSenderName);
+        }
+
+        /// <summary>
+        /// The Double Marks window lines (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"): the pure <see cref="BgBonusCrier"/> decides, this sends.
+        /// Gated by the arena master switch (pvp_arena_enabled), pvp_bg_bonus_enabled and the battleground room being playable, never by pvp_arena_crier_enabled. A throw is logged and costs only that tick.
+        /// </summary>
+        private void RunBgBonusCrier(DateTime now, PvpArenaDials dials)
+        {
+            try
+            {
+                var bg = BgDials();
+                var enabled = dials.Enabled && bg.BonusEnabled && ModeEnabled(BattlegroundModes.RoomKey, dials);
+                var (spans, zone) = BgBonusConfig.Resolve(bg);
+                var lines = bgBonusCrier.Tick(now, enabled, spans, zone, bg.BonusWarnMinutes);
+
+                if (lines.Count > 0)
+                    arenaAnnouncer.Announce(lines, dials.CrierSenderName);
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PVP] the Double Marks Crier threw; skipping this tick", ex);
+            }
         }
 
         /// <summary>The live dials, with the coordinator's own clamps: accept at or under 30 s, FFA seats at most the map's.</summary>
@@ -723,8 +828,7 @@ namespace ACE.Server.Pvp
                         }
 
                         templateReadFailed = false;
-                        templateCatalog = PvpTemplateCatalog.Build(r.TemplateRows, line => log.Warn($"[PVPTEMPLATE] {line}"));
-                        log.Info($"[PVPTEMPLATE] template catalog loaded ({r.TemplateStatus}): {templateCatalog.Count} row(s); offered: {string.Join("; ", PvpTemplateCatalog.ModeKeys.Select(k => $"{k} [{string.Join(",", templateCatalog.Offered(k).Select(e => e.Key))}]"))}");
+                        RebuildTemplateCatalog(r.TemplateRows, $"{r.TemplateStatus}");
                         break;
 
                     case DbResultKind.LatestTemplatesLoaded:
@@ -773,6 +877,13 @@ namespace ACE.Server.Pvp
                     continue;
                 }
 
+                // Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): honoured only for a Live match, checked inside.
+                if (intent.Kind == PvpIntentKind.Reconnected)
+                {
+                    HandleReconnected(m, intent, now);
+                    continue;
+                }
+
                 if (m == null || !(m.Match.State == PvpMatchState.Staging || m.Match.State == PvpMatchState.Countdown || m.Match.State == PvpMatchState.Live))
                 {
                     log.Info($"[PVP] {intent.Kind} intent for 0x{intent.CharacterId:X8} in match {intent.MatchId} ignored: the match is {(m == null ? "gone" : m.Match.State.ToString())}");
@@ -804,7 +915,22 @@ namespace ACE.Server.Pvp
                     continue;
                 }
 
-                MarkOut(m, seat, intent.ExitReason, now, intent.KillerId);
+                // Battleground rejoin: a logout from a Live battleground holds the seat instead of forfeiting it, when TryBeginGrace allows.
+                // Every other forfeit, and every arena logout, takes MarkOut exactly as before.
+                // A seat the walkout poll already held (it saw them offline before this intent arrived) is the same departure: the grace keeps
+                // running from the poll. A server-caused intent still forfeits it below (the poll could not know the cause); a logout while
+                // on the way back in is a second departure, and TryBeginGrace refuses it (one grace per seat).
+                if (intent.Kind == PvpIntentKind.Forfeit && intent.ExitReason == ParticipantExit.ForfeitLogout)
+                {
+                    if (seat.IsAway && !seat.Rejoining && !intent.ServerCaused)
+                        continue;
+
+                    if (TryBeginGrace(m, seat, now, intent.ServerCaused, intent.OccurredAtUtc))
+                        continue;
+                }
+
+                // Deserter lockout: a logout the server or staff forced is still a forfeit, never a strike.
+                MarkOut(m, seat, intent.ExitReason, now, intent.KillerId, intent.ServerCaused ? PvpDeparture.StaffOrServerLogoff : null);
             }
         }
 
@@ -874,6 +1000,9 @@ namespace ACE.Server.Pvp
                 return;
             }
 
+            // Performance stats: the ledger's own destroyed set, read lock-free by the damage hook on landblock threads.
+            m.Match.Performance?.MarkCrystalDestroyed(index);
+
             m.Match.ScoreBoard.TryGetValue(CrystalWinCondition.AttackerTeam, out var destroyed);
 
             log.Info($"[PVP] match {m.Id}: crystal {index} destroyed (killer 0x{intent.KillerId:X8}); {destroyed} of {m.Plan?.Count ?? 0} down");
@@ -940,10 +1069,153 @@ namespace ACE.Server.Pvp
             || PlayableBgModes(bg).Count == 0
             || MatchCapReached(dials, bg);
 
+        // ---------------- multi-queue (pvp_arena_multi_queue_enabled; Docs/Pvp/DESIGN.md "Joining the queue") ----------------
+
+        /// <summary>
+        /// The fixed order rooms are matched in each pass, so when one player's units are ready in two rooms on the same tick the
+        /// earlier room wins: battlegrounds, then Tugak Brawl, then 2v2, then 1v1. Dictionary order is not a contract.
+        /// </summary>
+        private static readonly string[] RoomOrder = { BattlegroundModes.RoomKey, ArenaMapCatalog.FfaKey, ArenaMapCatalog.TwoVTwoKey, ArenaMapCatalog.OneVOneKey };
+
+        /// <summary>Every room in <see cref="RoomOrder"/>, then any room the order does not name.</summary>
+        private IEnumerable<Room> OrderedRooms() =>
+            RoomOrder.Where(rooms.ContainsKey).Select(k => rooms[k])
+                .Concat(rooms.Values.Where(r => !RoomOrder.Contains(r.ModeKey, StringComparer.OrdinalIgnoreCase)));
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): true makes the matchmaking loop read every unit, held or not, so a test can prove the
+        /// <see cref="FormMatch"/> already-held guard on its own. Production never sets it.
+        /// </summary>
+        internal bool DisableHoldFilterForTest { get; set; }
+
+        private static bool IsActive(MatchRuntime m) => m.Match.State != PvpMatchState.Closed && m.Match.State != PvpMatchState.Canceled;
+
+        /// <summary>
+        /// Every character holding a seat in a match that is not Closed or Canceled (AwaitingAccept through Resolving). Their queue units
+        /// in other rooms are HELD: matchmaking and every count skip them. Read fresh for each decision, so a match formed earlier in the
+        /// same pass holds its players for the rest of the pass.
+        /// </summary>
+        private HashSet<uint> HeldCharacters()
+        {
+            var held = new HashSet<uint>();
+
+            foreach (var m in matches)
+                if (IsActive(m))
+                    held.UnionWith(m.Seats.Keys);
+
+            return held;
+        }
+
+        /// <summary>The room's units with no held member: the only units matchmaking and the queue counts ever read.</summary>
+        private static List<QueuedUnit> EligibleUnits(Room room, HashSet<uint> held) => room.Units.Where(u => !u.Ids.Any(held.Contains)).ToList();
+
+        private static int EligibleCount(Room room, HashSet<uint> held) => room.Units.Where(u => !u.Ids.Any(held.Contains)).Sum(u => u.Ids.Count);
+
+        /// <summary>The rooms (in <see cref="RoomOrder"/>) where <paramref name="characterId"/> has a queue unit.</summary>
+        private List<string> QueuedRoomKeys(uint characterId) =>
+            OrderedRooms().Where(r => r.Units.Any(u => u.Ids.Contains(characterId))).Select(r => r.ModeKey).ToList();
+
+        /// <summary>
+        /// Removes <paramref name="characterId"/> from every queue, except <paramref name="exceptRoom"/> when given. A solo unit goes;
+        /// a duo or battleground group shrinks to its other members as a NEW unit (<see cref="QueuedUnit.Subset"/>, keeping its queue
+        /// time and place), and each remaining member hears <paramref name="partnerText"/> ({name}, {mode}). Returns the room keys
+        /// the character was removed from, in <see cref="RoomOrder"/>. The caller tells the character.
+        /// </summary>
+        private List<string> WithdrawFromAllQueues(uint characterId, string partnerText, string why, string exceptRoom = null)
+        {
+            var withdrawn = new List<string>();
+
+            foreach (var room in OrderedRooms())
+            {
+                if (exceptRoom != null && string.Equals(room.ModeKey, exceptRoom, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!ShrinkOut(room, characterId, partnerText))
+                    continue;
+
+                withdrawn.Add(room.ModeKey);
+            }
+
+            if (withdrawn.Count > 0)
+                log.Info($"[PVP] 0x{characterId:X8} withdrawn from the {string.Join(", ", withdrawn)} queue(s) ({why})");
+
+            return withdrawn;
+        }
+
+        /// <summary>
+        /// Takes <paramref name="characterId"/> out of every unit of <paramref name="room"/> that holds it; a multi-member unit is replaced
+        /// in place by the Subset of its other members, who hear <paramref name="partnerText"/>. True when anything was removed.
+        /// </summary>
+        private bool ShrinkOut(Room room, uint characterId, string partnerText)
+        {
+            var removed = false;
+
+            for (var i = room.Units.Count - 1; i >= 0; i--)
+            {
+                var unit = room.Units[i];
+
+                if (!unit.Ids.Contains(characterId))
+                    continue;
+
+                removed = true;
+
+                var rest = unit.Ids.Where(id => id != characterId).ToList();
+
+                if (rest.Count == 0)
+                {
+                    room.Units.RemoveAt(i);
+                    continue;
+                }
+
+                // A NEW unit object (a QueuedUnit belongs to exactly one room, and a match may still hold the old one for a requeue).
+                room.Units[i] = unit.Subset(rest);
+
+                if (partnerText != null)
+                    SendAll(rest, PvpArenaText.Fill(partnerText, ("name", unit.NameOf(characterId)), ("mode", PvpArenaText.ModeLabel(room.ModeKey))));
+            }
+
+            if (removed)
+                room.LastFfaCountAnnounced = -1;
+
+            return removed;
+        }
+
+        /// <summary>
+        /// Ruling 4: a queued player who is offline is dropped from every queue, silently for them; the rest of a duo or group stay
+        /// queued (a smaller unit, same queue time) and hear <see cref="PvpArenaText.PartnerOffline"/>.
+        /// </summary>
+        private void PruneOfflineQueuedUnits()
+        {
+            var offline = new HashSet<uint>();
+
+            foreach (var room in rooms.Values)
+                foreach (var unit in room.Units)
+                    foreach (var id in unit.Ids)
+                        if (!offline.Contains(id) && !players.IsOnline(id))
+                            offline.Add(id);
+
+            foreach (var id in offline)
+                WithdrawFromAllQueues(id, PvpArenaText.PartnerOffline, "offline");
+        }
+
+        /// <summary>
+        /// The player caused a pre-placement failure (declined, or did not answer in time): they leave every queue, and hear
+        /// <paramref name="selfText"/> naming them when there were any.
+        /// </summary>
+        private void WithdrawForPlayerFault(uint characterId, string selfText, string why)
+        {
+            var withdrawn = WithdrawFromAllQueues(characterId, PvpArenaText.PartnerLeftGroup, why);
+
+            if (withdrawn.Count > 0)
+                players.Send(characterId, PvpArenaText.Fill(selfText, ("modes", PvpArenaText.ModeList(withdrawn))));
+        }
+
         private void RunMatchmaking(DateTime now, PvpArenaDials dials)
         {
             if (!dials.Enabled)
                 return;
+
+            PruneOfflineQueuedUnits();
 
             if (Ratings.State == PvpRatingStoreState.Loading)
             {
@@ -956,9 +1228,12 @@ namespace ACE.Server.Pvp
                 return;
             }
 
-            foreach (var room in rooms.Values)
+            // The matches-full notice reaches each player at most once per pass, however many rooms they wait in.
+            var notifiedFullThisPass = new HashSet<uint>();
+
+            foreach (var room in OrderedRooms())
             {
-                if (!ModeEnabled(room.ModeKey, dials) || room.Units.Count == 0)
+                if (!ModeEnabled(room.ModeKey, dials) || EligibleCount(room, HeldCharacters()) == 0)
                 {
                     room.LastFfaCountAnnounced = -1;
                     continue;
@@ -991,52 +1266,184 @@ namespace ACE.Server.Pvp
 
                 var matchmaker = mode.Matchmaker();
 
-                while (room.Units.Count > 0)
+                // Fresh-opponent matchmaking (1v1 / 2v2 only): one dial snapshot per pass. A throwing read leaves the probe null,
+                // which is the legacy first-valid-candidate matchmaking.
+                long recentK = 0;
+                Func<QueueEntrant, QueueEntrant, (bool Recent, IReadOnlyList<bool> UnpaidA, IReadOnlyList<bool> UnpaidB)> probe = null;
+
+                if (room.ModeKey == ArenaMapCatalog.OneVOneKey || room.ModeKey == ArenaMapCatalog.TwoVTwoKey)
                 {
+                    try
+                    {
+                        var pairing = pairingDialSource();
+
+                        recentK = Math.Max(0, pairing.MmRecentOpponents);
+                        // With Marks off nothing is paid, so no rematch is "unpaid": a cap of 0 makes every pairing paid.
+                        probe = BuildPairingProbe(dials.BloodEnabled ? pairing.PaidCap : 0, ArenaDayOf(now, dials));
+                        pairingReadFailing = false;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Once per failure episode, not per room per tick; a later good read re-arms it.
+                        if (!pairingReadFailing)
+                            log.Error("[PVP] could not read the pairing dials for matchmaking; matching without fresh-opponent tiers", ex);
+
+                        pairingReadFailing = true;
+                        recentK = 0;
+                        probe = null;
+                    }
+                }
+
+                // Units that refused an unpaid pairing at ANY point this pass, with the refusing members: told after the pass, and
+                // only if still waiting (a unit matched later in the pass is not "waiting for a fresh opponent").
+                var refusedThisPass = new Dictionary<Guid, HashSet<uint>>();
+
+                while (true)
+                {
+                    // Rebuilt every iteration: a match formed in an earlier room, or earlier in this one, holds its players now.
+                    var eligible = DisableHoldFilterForTest ? room.Units.ToList() : EligibleUnits(room, HeldCharacters());
+
+                    if (eligible.Count == 0)
+                        break;
+
                     // The battleground cap counts inside the global one (Docs/Pvp/BATTLEGROUNDS.md "Settings").
                     if (MatchCapReached(dials, isBg ? bg : null))
                     {
-                        // Queued players stay queued; each unit hears it once.
-                        foreach (var unit in room.Units.Where(u => !u.NotifiedFull))
+                        // Queued players stay queued; each unit hears it once, and each player at most once per pass.
+                        foreach (var unit in eligible.Where(u => !u.NotifiedFull))
                         {
                             unit.NotifiedFull = true;
-                            SendAll(unit.Ids, PvpArenaText.MatchesFull);
+                            SendAll(unit.Ids.Where(notifiedFullThisPass.Add).ToList(), PvpArenaText.MatchesFull);
                         }
 
                         break;
                     }
 
-                    var waiting = room.Units.Select(u => ToEntrant(u, mode, now, dials)).ToList();
+                    var waiting = eligible.Select(u => ToEntrant(u, mode, now, dials, recentK)).ToList();
                     var ctx = new MatchmakingContext(now, dials.MmWindowInitial, dials.MmWindowGrowthPerMinute, dials.MmWindowMax, dials.DuoVsSoloAfterSeconds,
-                        dials.FfaTargetPlayers, dials.FfaMinPlayers, dials.FfaMaxPlayers, dials.FfaMinDecaySeconds, dials.BlockSameIp, bg);
+                        dials.FfaTargetPlayers, dials.FfaMinPlayers, dials.FfaMaxPlayers, dials.FfaMinDecaySeconds, dials.BlockSameIp, bg,
+                        Probe: probe, OnRefusedUnpaid: (id, members) =>
+                        {
+                            if (!refusedThisPass.TryGetValue(id, out var set))
+                                refusedThisPass[id] = set = new HashSet<uint>();
+
+                            set.UnionWith(members);
+                        });
 
                     var proposal = matchmaker.TryForm(waiting, ctx);
 
                     if (proposal == null)
                         break;
 
-                    FormMatch(room, isBg ? PickBgMode(bgModes, room, proposal) : mode, proposal, now, dials, bg);
+                    if (!FormMatch(room, isBg ? PickBgMode(bgModes, room, proposal) : mode, proposal, now, dials, bg))
+                        break;
                 }
+
+                NotifyWaitingForFreshOpponent(room, refusedThisPass);
 
                 if (room.ModeKey == ArenaMapCatalog.FfaKey)
                     AnnounceFfaLobby(room, now, dials);
             }
         }
 
-        private QueueEntrant ToEntrant(QueuedUnit u, PvpModeDefinition mode, DateTime now, PvpArenaDials dials)
+        /// <summary>
+        /// Tells each unit that refused an unpaid pairing this pass, once, that it is waiting for a fresh opponent. Only units STILL in
+        /// the room are told, and only their refusing members.
+        /// </summary>
+        private void NotifyWaitingForFreshOpponent(Room room, IReadOnlyDictionary<Guid, HashSet<uint>> refused)
+        {
+            foreach (var kv in refused)
+            {
+                var unit = room.Units.FirstOrDefault(u => u.EntrantId == kv.Key);
+
+                if (unit == null || unit.NotifiedRefusal)
+                    continue;
+
+                unit.NotifiedRefusal = true;
+                SendAll(unit.Ids.Where(kv.Value.Contains).ToList(), PvpArenaText.WaitingForFreshOpponent);
+            }
+        }
+        private QueueEntrant ToEntrant(QueuedUnit u, PvpModeDefinition mode, DateTime now, PvpArenaDials dials, long recentK = 0)
         {
             var ratings = u.Ids.Select(id => Ratings.Read(id, mode.LadderKey, now, dials).Rating).ToList();
 
             // IpKey stays the first member's (what every arena matchmaker reads); IpKeys and MonarchIds carry each
             // member's own, which only the battleground matchmaker reads (same-IP split, clanmate split).
+            // AccountKeys, RecentOpponents (the union over the unit's members, newest K only) and RefuseUnpaidRematch (any member)
+            // feed the fresh-opponent tiers of the 1v1 / 2v2 matchmakers; no other matchmaker reads them.
+            var accountKeys = u.AccountKeys();
+            var recent = new List<uint>();
+
+            if (recentK > 0)
+            {
+                foreach (var account in accountKeys)
+                    if (recentOpponents.TryGetValue(account, out var ring))
+                        foreach (var opponent in ring.Skip(Math.Max(0, ring.Count - (int)Math.Min(recentK, int.MaxValue))))
+                            if (!recent.Contains(opponent))
+                                recent.Add(opponent);
+            }
+
             return new QueueEntrant(u.EntrantId, u.Ids, ratings, u.IpOf(u.Ids[0]), u.QueuedAtUtc,
                 MonarchIds: u.Ids.Select(u.MonarchOf).ToList(),
-                IpKeys: u.Ids.Select(u.IpOf).ToList());
+                IpKeys: u.Ids.Select(u.IpOf).ToList(),
+                AccountKeys: accountKeys,
+                RecentOpponents: recent,
+                RefuseUnpaidRematch: u.RefusesUnpaidRematch,
+                RefuseByMember: u.Ids.Select(u.RefusalOf).ToList());
         }
 
+        /// <summary>
+        /// The fresh-opponent probe for the 1v1 / 2v2 matchmakers: whether two entrants are recent opponents, and whether each side
+        /// would be flagged <see cref="Seat.UnpaidRematch"/> by the pair ledger if they met now (the same test
+        /// <see cref="DecideUnpaidRematches"/> applies at formation). Pure reads of the ledger.
+        /// </summary>
+        private Func<QueueEntrant, QueueEntrant, (bool Recent, IReadOnlyList<bool> UnpaidA, IReadOnlyList<bool> UnpaidB)> BuildPairingProbe(long cap, int day)
+        {
+            return (a, b) =>
+            {
+                var aKeys = a.AccountKeys ?? Array.Empty<uint>();
+                var bKeys = b.AccountKeys ?? Array.Empty<uint>();
+
+                var recent = aKeys.Any(k => b.RecentOpponents != null && b.RecentOpponents.Contains(k))
+                    || bKeys.Any(k => a.RecentOpponents != null && a.RecentOpponents.Contains(k));
+
+                // Per member: a member is unpaid when ITS account is at the cap against any account on the other side.
+                IReadOnlyList<bool> unpaidA = aKeys.Select(k => pairLedger.IsUnpaidRematch(k, bKeys, day, cap)).ToList();
+                IReadOnlyList<bool> unpaidB = bKeys.Select(k => pairLedger.IsUnpaidRematch(k, aKeys, day, cap)).ToList();
+
+                return (recent, unpaidA, unpaidB);
+            };
+        }
+        /// <summary>
+        /// Updates the /arena norematch choice of a character already waiting in a queue (a unit not yet in a match). Returns true
+        /// when the character was found queued. A newly-set choice clears the unit's once-only waiting notice so it can be told again.
+        /// </summary>
+        public bool SetRefuseUnpaidRematch(uint characterId, bool refuse)
+        {
+            var found = false;
+
+            foreach (var room in rooms.Values)
+            {
+                foreach (var unit in room.Units.Where(u => u.Ids.Contains(characterId)))
+                {
+                    unit.SetRefusal(characterId, refuse);
+                    found = true;
+                }
+            }
+
+            // A unit inside a forming match is requeued as the SAME QueuedUnit object on a decline / cancel, so the choice made
+            // meanwhile must reach those units too or the requeue would restore the stale one.
+            foreach (var m in matches)
+                foreach (var unit in m.Units.Where(u => u.Ids.Contains(characterId)))
+                    unit.SetRefusal(characterId, refuse);
+
+            return found;
+        }
         private void AnnounceFfaLobby(Room room, DateTime now, PvpArenaDials dials)
         {
-            var count = room.PlayerCount;
+            // Held units (a member's match is pending elsewhere) are neither counted nor told.
+            var eligible = EligibleUnits(room, HeldCharacters());
+            var count = eligible.Sum(u => u.Ids.Count);
 
             if (count == 0 || count == room.LastFfaCountAnnounced)
                 return;
@@ -1044,17 +1451,30 @@ namespace ACE.Server.Pvp
             room.LastFfaCountAnnounced = count;
 
             // The same formula LobbyMatchmaker forms at, so the line never promises a size the matchmaker disagrees with.
-            var oldest = room.Units.Min(u => u.QueuedAtUtc);
+            var oldest = eligible.Min(u => u.QueuedAtUtc);
             var needed = ArenaMapCatalog.FfaDecayedTargetSize(now - oldest, dials);
 
             var text = PvpArenaText.Fill(PvpArenaText.FfaLobbyProgress, ("count", count), ("needed", needed));
 
-            foreach (var unit in room.Units)
+            foreach (var unit in eligible)
                 SendAll(unit.Ids, text);
         }
 
-        private void FormMatch(Room room, PvpModeDefinition mode, MatchProposal proposal, DateTime now, PvpArenaDials dials, BattlegroundDials bg = null)
+        /// <summary>
+        /// Forms a match from <paramref name="proposal"/>. False (nothing formed) only when a proposed character is already held in another
+        /// pending match: matchmaking reads <see cref="EligibleUnits"/>, so that is a bug, logged as an error, and the room's pass stops.
+        /// </summary>
+        private bool FormMatch(Room room, PvpModeDefinition mode, MatchProposal proposal, DateTime now, PvpArenaDials dials, BattlegroundDials bg = null)
         {
+            var heldNow = HeldCharacters();
+            var alreadyHeld = proposal.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId).Where(heldNow.Contains).ToList();
+
+            if (alreadyHeld.Count > 0)
+            {
+                log.Error($"[PVP] the {room.ModeKey} matchmaker proposed {string.Join(", ", alreadyHeld.Select(id => $"0x{id:X8}"))}, already seated in another pending match; nothing formed");
+                return false;
+            }
+
             if (IsBgRoom(room))
                 bgMatchFormedSinceCrierTick = true;
 
@@ -1132,6 +1552,17 @@ namespace ACE.Server.Pvp
                     m.Match.ScoreBoard[team.TeamIndex] = 0;
                     m.Match.TeamKills[team.TeamIndex] = 0;
                 }
+
+                // Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): built ONCE, here, with every seat of the match, before any
+                // player is bound, so its membership never changes while landblock threads read it. Collection only.
+                m.Match.Performance = BattlegroundPerformanceLedger.ForTeams(teams);
+            }
+            else if (mode.ModeKey == ArenaMapCatalog.FfaKey)
+            {
+                // Conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): Tugak Brawl keeps the same ledger, built the same way, so its
+                // damage, killshots and engaged seconds are collected. Its player damage also ranks the survivors at a timeout
+                // (Docs/Pvp/DESIGN.md "Win condition"). 1v1 and 2v2 stay ledger-less.
+                m.Match.Performance = BattlegroundPerformanceLedger.ForTeams(teams);
             }
 
             foreach (var team in teams)
@@ -1143,24 +1574,27 @@ namespace ACE.Server.Pvp
                 }
             }
 
+            // Team colours (Docs/Pvp/TEMPLATES.md "Team hue"): the coin is drawn ONCE, here, and every later colour read (the
+            // freeze, the accept re-check, the team names) derives from it, so a match never changes colour once it has formed.
+            m.ColourCoin = FlipTeamColourCoin();
+            AssignTeamColours(m);
+
+            DecideUnpaidRematches(m, dials);
+
             // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Team fellowships"): decided ONCE, here, from the same dials snapshot
             // the mode was built from, so every binding of the match (Staging onward) carries the same flag.
             DecideTeamFellowships(m, bg);
 
             // PvP Template Facets: the ONE kit-warm path. The kit is issued at entry; warming each template's kit
             // weenies off-thread now, ahead of the accept window and staging, means that issue does no synchronous
-            // world-database read. A warm still in flight only means the apply reads the weenie itself.
-            foreach (var key in m.Seats.Values.Select(s => s.TemplateKey).Where(k => k != null).Distinct())
-            {
-                var definition = templateCatalog?.Get(key)?.Definition;
-
-                if (definition != null)
-                    WarmKit(definition);
-            }
+            // world-database read. A warm still in flight only means the apply reads the weenie itself. The warm is of the
+            // catalog definition; the team hue is applied to a copy at dispatch and changes no weenie, so the same warm serves every hue.
+            foreach (var definition in ResolveForMatchForm(m).Distinct())
+                WarmKit(definition);
 
             matches.Add(m);
 
-            log.Info($"[PVP] match {m.Id} ({m.ModeKey}) formed on map {map.MapKey}: {string.Join(" vs ", teams.Select(t => string.Join("+", t.Members.Select(p => m.Seats[p.CharacterId].Name + "(" + p.RatingAtStart + ", " + (m.Seats[p.CharacterId].TemplateKey ?? "-") + ")"))))}; accept by {m.AcceptDeadlineUtc:HH:mm:ss}");
+            log.Info($"[PVP] match {m.Id} ({m.ModeKey}) formed on map {map.MapKey}: {string.Join(" vs ", teams.Select(t => string.Join("+", t.Members.Select(p => m.Seats[p.CharacterId].Name + "(" + p.RatingAtStart + ", " + (m.Seats[p.CharacterId].TemplateKey ?? "-") + ", " + PvpTeamColours.Token(m.Seats[p.CharacterId].Colour) + ")"))))}; accept by {m.AcceptDeadlineUtc:HH:mm:ss}");
 
             var modeLabel = PvpArenaText.ModeLabel(m.ModeKey);
             var popup = PvpArenaText.Fill(PvpArenaText.AcceptPopup, ("mode", modeLabel), ("map", map.DisplayName));
@@ -1174,6 +1608,218 @@ namespace ACE.Server.Pvp
                     players.Send(seat.Id, fallback);
                 }
             }
+
+            return true;
+        }
+
+        /// <summary>
+        /// The repeat-pairing cap (Docs/Pvp/DESIGN.md "Repeat-pairing cap"), decided ONCE at formation for a 1v1 or 2v2 match: the
+        /// arena day is measured from this match's own dials snapshot, and a seat is flagged <see cref="Seat.UnpaidRematch"/> when
+        /// ANY of its cross-team account pairs has already reached pvp_arena_pair_paid_cap paid matches that day. Decided per
+        /// player, so a 2v2 partner who rotates cannot reset the count. Tugak, battlegrounds and FFA are not covered. A throwing
+        /// dial read leaves every seat paid (logged).
+        /// </summary>
+        private void DecideUnpaidRematches(MatchRuntime m, PvpArenaDials dials)
+        {
+            if (m.ModeKey != ArenaMapCatalog.OneVOneKey && m.ModeKey != ArenaMapCatalog.TwoVTwoKey)
+                return;
+
+            try
+            {
+                var cap = pairingDialSource().PaidCap;
+
+                m.PairDay = ArenaDayOf(m.Match.CreatedAtUtc, dials);
+
+                if (cap <= 0)
+                    return;
+
+                foreach (var seat in m.Seats.Values)
+                {
+                    var mine = seat.Unit.AccountOf(seat.Id);
+                    var opponents = m.Seats.Values.Where(o => o.TeamIndex != seat.TeamIndex).Select(o => o.Unit.AccountOf(o.Id)).ToList();
+
+                    seat.UnpaidRematch = pairLedger.IsUnpaidRematch(mine, opponents, m.PairDay.Value, cap);
+                }
+
+                if (m.Seats.Values.Any(s => s.UnpaidRematch))
+                    log.Info($"[PVP] match {m.Id}: unpaid rematch (pair cap {cap}) for {string.Join(", ", m.Seats.Values.Where(s => s.UnpaidRematch).Select(s => s.Name))}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: the repeat-pairing check threw; every seat stays paid", ex);
+
+                foreach (var seat in m.Seats.Values)
+                    seat.UnpaidRematch = false;
+            }
+        }
+
+        /// <summary>The arena day (the Blood reset zone and hour) that <paramref name="utc"/> falls on.</summary>
+        private static int ArenaDayOf(DateTime utc, PvpArenaDials dials)
+        {
+            var unix = (uint)Math.Max(0, new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds());
+
+            return PvpArenaRewards.DayIndex(unix, PvpArenaRewards.ResolveZone(dials.BloodResetTimezone), dials.BloodResetHour);
+        }
+
+        /// <summary>
+        /// Counts a Live, non-same-IP 1v1 / 2v2 match against every cross-team account pair on the day it FORMED (forfeits count; a
+        /// match that never went Live or was canceled does not). Each account pair counts at most once per match. Saturates at the cap. Once per match.
+        /// </summary>
+        private void RecordPairings(MatchRuntime m, bool sameIpOpponents)
+        {
+            if (m.PairCounted || !m.PairDay.HasValue || sameIpOpponents || !m.Match.LiveSinceUtc.HasValue)
+                return;
+
+            m.PairCounted = true;
+
+            try
+            {
+                var pairing = pairingDialSource();
+                var cap = pairing.PaidCap;
+
+                // A pair counts at most once per match, even when two seats on one team share an account (or two opposing seats do).
+                var pairs = new HashSet<(uint Low, uint High)>();
+
+                foreach (var a in m.Seats.Values)
+                    foreach (var b in m.Seats.Values)
+                        if (a.TeamIndex < b.TeamIndex)
+                            pairs.Add(PvpPairLedger.KeyOf(a.Unit.AccountOf(a.Id), b.Unit.AccountOf(b.Id)));
+
+                foreach (var pair in pairs)
+                {
+                    pairLedger.Record(pair.Low, pair.High, m.PairDay.Value, cap);
+
+                    // The matchmaker's recent-opponent ring, fed per deduped pair under the same gating as the count above.
+                    PushRecentOpponent(pair.Low, pair.High, pairing.MmRecentOpponents);
+                    PushRecentOpponent(pair.High, pair.Low, pairing.MmRecentOpponents);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: counting the repeat pairing threw; the pairing is not counted", ex);
+            }
+        }
+
+        /// <summary>
+        /// The alternating-result audit (Docs/Pvp/DESIGN.md "Alternating-result audit"): for a 1v1 / 2v2 match that went Live
+        /// (same-IP included, this is for staff review), feeds the result to <see cref="PvpPairAudit"/> and posts its line, if any,
+        /// through the audit sink. Reports only; never touches a payout, rating or queue. A throw is logged and Resolve carries on.
+        /// </summary>
+        private void AuditAlternation(MatchRuntime m, MatchOutcome outcome, DateTime now)
+        {
+            if ((m.ModeKey != ArenaMapCatalog.OneVOneKey && m.ModeKey != ArenaMapCatalog.TwoVTwoKey) || !m.Match.LiveSinceUtc.HasValue)
+                return;
+
+            try
+            {
+                var d = pairingDialSource();
+
+                if (!d.AuditEnabled)
+                    return;
+
+                var teams = m.Seats.Values.GroupBy(s => s.TeamIndex).OrderBy(g => g.Key)
+                    .Select(g => new AuditTeam(
+                        g.Select(s => PvpPairLedger.AccountKey(s.Unit.AccountOf(s.Id), s.Id)).ToList(),
+                        g.Select(s => s.Name).ToList(),
+                        g.Where(s => IsForfeit(s.Participant.ExitReason)).Select(s => s.Name).ToList()))
+                    .ToList();
+
+                var teamIndexes = m.Seats.Values.Select(s => s.TeamIndex).Distinct().OrderBy(i => i).ToList();
+                int? winner = null;
+
+                if (!outcome.IsDraw && outcome.WinningTeams.Count == 1)
+                    winner = teamIndexes.IndexOf(outcome.WinningTeams.Single());
+
+                if (winner < 0)
+                    winner = null;
+
+                var line = pairAudit.Record(now, teams, winner, now - m.Match.LiveSinceUtc.Value, teams.Any(t => t.Forfeited.Count > 0), d.AuditWindowHours, d.AuditMinSwaps);
+
+                if (line != null)
+                    auditSink(line);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: the alternating-result audit threw; the match result is unaffected", ex);
+            }
+        }
+
+        /// <summary>
+        /// Appends <paramref name="opponent"/> to <paramref name="account"/>'s recent-opponent ring: a repeat moves to the newest
+        /// end, and only the newest <paramref name="keep"/> are kept. A <paramref name="keep"/> of 0 or less is off (the ring is dropped).
+        /// </summary>
+        private void PushRecentOpponent(uint account, uint opponent, long keep)
+        {
+            if (keep <= 0)
+            {
+                recentOpponents.Remove(account);
+                return;
+            }
+
+            if (account == opponent)
+                return;
+
+            if (!recentOpponents.TryGetValue(account, out var ring))
+                recentOpponents[account] = ring = new List<uint>();
+
+            ring.Remove(opponent);
+            ring.Add(opponent);
+
+            var max = (int)Math.Min(keep, int.MaxValue);
+
+            if (ring.Count > max)
+                ring.RemoveRange(0, ring.Count - max);
+        }
+
+        /// <summary>The team-colour coin; a throwing flip reads as true (logged), so the match still forms with colours.</summary>
+        private bool FlipTeamColourCoin()
+        {
+            try
+            {
+                return TeamColourCoin?.Invoke() ?? true;
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PVP] the team colour coin threw; using true", ex);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Sets every seat's colour from the match's one coin and its CURRENT teams (so a Tugak re-index never changes the answer: Tugak
+        /// gives every seat the same colour), then hands the team colours to an objective handler that names teams by them.
+        /// </summary>
+        private static void AssignTeamColours(MatchRuntime m)
+        {
+            var teamCount = m.Match.Teams.Count;
+
+            foreach (var seat in m.Seats.Values)
+                seat.Colour = PvpTeamColours.Assign(m.ModeKey, teamCount, seat.TeamIndex, m.ColourCoin);
+
+            if (m.TickHandler is ITeamColourAware aware)
+            {
+                var byTeam = m.Seats.Values.GroupBy(s => s.TeamIndex).ToDictionary(g => g.Key, g => g.First().Colour);
+                aware.BindTeamColours(byTeam);
+            }
+        }
+
+        /// <summary>The definition each seat would wear now, for the kit warm.</summary>
+        private List<PvpTemplateDefinition> ResolveForMatchForm(MatchRuntime m)
+        {
+            var worn = new List<PvpTemplateDefinition>();
+
+            if (templateCatalog == null)
+                return worn;
+
+            foreach (var key in m.Seats.Values.Where(s => s.TemplateKey != null).Select(s => s.TemplateKey).Distinct())
+            {
+                var entry = templateCatalog.Get(key);
+
+                if (entry?.Definition != null)
+                    worn.Add(entry.Definition);
+            }
+
+            return worn;
         }
 
         /// <summary>The Attack/Defend coin flip; a throwing flip keeps the proposal's order (logged).</summary>
@@ -1214,7 +1860,7 @@ namespace ACE.Server.Pvp
             m.WinCondition = new CrystalWinCondition(plan.Count, m.ObjectiveTimeLimitSeconds);
             m.ScoreTarget = plan.Count;
 
-            log.Info($"[PVP] match {m.Id} ({m.ModeKey}): attackers are team 0 ({(sidesSwapped ? "the proposal's second team, by the coin flip" : "the proposal's first team")}); {plan.Count} crystal(s), {(plan.Sequence != null ? "in sequence" : "any order")}, at {plan.HealthPerCrystal} health for {plan.AttackerCount} attacker(s) [{string.Join(", ", plan.Crystals.Select(c => $"#{c.Index} {c.Site.Name} ({c.Compass})"))}]; time limit {m.ObjectiveTimeLimitSeconds} s");
+            log.Info($"[PVP] match {m.Id} ({m.ModeKey}): attackers are team 0 ({(sidesSwapped ? "the proposal's second team, by the coin flip" : "the proposal's first team")}); {plan.Count} crystal(s), {(plan.Sequence != null ? "in sequence" : "any order")}, at {plan.HealthPerCrystal} health for {plan.AttackerCount} attacker(s) [{string.Join(", ", plan.Crystals.Select(c => $"#{c.Index} {c.Site.Name} ({c.Compass})"))}]; time limit {m.ObjectiveTimeLimitSeconds} s; engaged-defender reduction {CrystalDefenderReduction.DescribeDials(m.Match.DefenderReduction)}");
 
             return plan;
         }
@@ -1280,6 +1926,7 @@ namespace ACE.Server.Pvp
                     players.AbortAcceptPrompt(seat.Id, m.Id);
                     players.Send(seat.Id, PvpArenaText.AcceptTimeoutSelf);
                     LockOut(seat.Id, now, dials, "did not accept in time");
+                    WithdrawForPlayerFault(seat.Id, PvpArenaText.RemovedOnTimeout, $"did not accept match {m.Id} in time");
                 }
 
                 FailAllOrNothing(m, late.Select(s => s.Id).ToHashSet(), now, "accept timeout");
@@ -1294,6 +1941,7 @@ namespace ACE.Server.Pvp
                 seat.Answer = AcceptAnswer.TimedOut;
                 players.AbortAcceptPrompt(seat.Id, m.Id);
                 players.Send(seat.Id, PvpArenaText.AcceptTimeoutSelf);
+                WithdrawForPlayerFault(seat.Id, PvpArenaText.RemovedOnTimeout, $"did not accept match {m.Id} in time");
             }
 
             var accepted = m.Seats.Values.Where(s => s.Answer == AcceptAnswer.Accepted).Select(s => s.Id).ToList();
@@ -1410,8 +2058,14 @@ namespace ACE.Server.Pvp
             if (ineligible.Count > 0)
             {
                 foreach (var id in denylisted)
+                {
                     if (players.IsOnline(id))
                         players.Send(id, PvpArenaText.Denylisted);
+
+                    // Multi-queue: a denylisted player leaves every queue too, so a held entry elsewhere cannot pop (and cancel) a
+                    // second match. Denylisted already told them; no further line.
+                    WithdrawFromAllQueues(id, PvpArenaText.PartnerLeftGroup, $"denylisted before placement in match {m.Id}");
+                }
 
                 if (m.Mode.Accept is AcceptPolicy.AllOrNothingPolicy)
                 {
@@ -1474,6 +2128,11 @@ namespace ACE.Server.Pvp
 
             m.Space = allocation.Space;
             log.Info($"[PVP] match {m.Id}: space allocated, instance 0x{m.Space.Instance:X8}");
+
+            // Performance stats: the crystals' sites are only placeable once the space exists. Bound here, once, before anyone is bound to
+            // the match, from the plan and the formation snapshot's pvp_bg_ad_kill_range, so "near" means what the kill chip means.
+            if (m.Plan != null && m.BgDials != null)
+                m.Match.Performance?.BindCrystals(new CrystalProximityFrame(m.Plan.Crystals, m.Plan.Sequence, m.Space.LandblockId, m.Space.Instance, m.BgDials.AdKillRange));
         }
 
         /// <summary>
@@ -1877,7 +2536,8 @@ namespace ACE.Server.Pvp
         {
             foreach (var seat in m.Seats.Values)
             {
-                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue)
+                // A seat held for its player (the rejoin grace, or a rejoin on its way in) is AdvanceGraces' to judge, never the poll's.
+                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.IsAway)
                     continue;
 
                 var presence = players.GetPresence(seat.Id, m.Space.Instance);
@@ -1893,7 +2553,7 @@ namespace ACE.Server.Pvp
 
                 if (presence == PvpPresence.Elsewhere)
                     MarkOut(m, seat, ParticipantExit.ForfeitLeft, now, 0);
-                else if (presence == PvpPresence.Offline)
+                else if (presence == PvpPresence.Offline && !TryBeginGrace(m, seat, now, serverCaused: false, departedAtUtc: now))
                     MarkOut(m, seat, ParticipantExit.ForfeitLogout, now, 0);
             }
         }
@@ -1922,6 +2582,7 @@ namespace ACE.Server.Pvp
         private void Dispatch(MatchRuntime m, DateTime now, PvpArenaDials dials)
         {
             m.Masks = dials;
+            m.HueDials = SnapshotHueDials();
 
             // PvP Template Facets: the third template check, and the freeze. Each seat's template is resolved from the
             // catalog one last time and its parsed definition copied onto the seat, so every binding of the match
@@ -1935,14 +2596,17 @@ namespace ACE.Server.Pvp
                 // not be re-fitted to.
                 if (!m.Seats.TryGetValue(assignment.Participant.CharacterId, out var seat))
                     continue;
-                var exitTo = players.GetCurrentPosition(seat.Id);
+
+                // The stamped exit is the gateway's exit point, never simply where the player stands: a player pulled out of a Thread is
+                // recorded as away from it and exits to the Thread's outer stamp (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread").
+                var exitTo = players.GetExitPoint(seat.Id);
 
                 if (exitTo == null)
                 {
                     // Went offline between allocation and now. Never bound, so no hook reports it: record it here.
                     log.Warn($"[PVP] match {m.Id}: {seat.Name} is offline at placement; recorded as a logout forfeit");
                     seat.Dispatched = true;
-                    MarkOut(m, seat, ParticipantExit.ForfeitLogout, now, 0);
+                    MarkOut(m, seat, ParticipantExit.ForfeitLogout, now, 0, PvpDeparture.OfflineAtPlacement);
                     continue;
                 }
 
@@ -1965,6 +2629,18 @@ namespace ACE.Server.Pvp
             }
 
             m.Dispatched = true;
+
+            // Multi-queue: placement is the moment a player leaves their other queues (the seat marked offline at placement included).
+            // A duo or group they were in elsewhere stays queued without them.
+            var placedLabel = PvpArenaText.ModeLabel(m.ModeKey);
+
+            foreach (var seat in m.Seats.Values.Where(s => s.Dispatched).ToList())
+            {
+                var withdrawn = WithdrawFromAllQueues(seat.Id, PvpArenaText.PartnerWithdrawn, $"placed in {m.ModeKey} match {m.Id}");
+
+                if (withdrawn.Count > 0)
+                    players.Send(seat.Id, PvpArenaText.Fill(PvpArenaText.RemovedOnPlacement, ("mode", placedLabel), ("modes", PvpArenaText.ModeList(withdrawn))));
+            }
         }
 
         /// <summary>
@@ -1980,11 +2656,64 @@ namespace ACE.Server.Pvp
 
             var withdrawn = new List<uint>();
 
+            // Colours are re-derived from the match's coin AFTER any Tugak re-index (DropSeats), so each seat's colour matches its
+            // team as it stands at dispatch. For every mode that can re-index this changes nothing (Tugak is one colour for all).
+            AssignTeamColours(m);
+
+            // Team hue: the kit each seat wears is the catalog definition dressed in the seat's team hue, built once per (template, hue)
+            // for this match from the dials taken at dispatch. The catalog's own definitions are never changed.
+            var hueRule = PvpTeamColours.RuleFor(m.ModeKey);
+            var hueDials = m.HueDials ?? SnapshotHueDials();
+            var dressed = new Dictionary<(string TemplateKey, KitHue Hue), HueApplyResult>();
+            var hueSummary = new List<string>();
+            var hueSkips = new List<string>();
+
+            // Tugak Brawl (owner ruling 2026-10-16): each seat wears its OWN palette from the FFA pool, drawn without repeats, so the
+            // kit is dressed per seat and not cached per (template, hue). With no usable pool Tugak keeps the older one coin-flipped
+            // Red or Blue for everyone (the cached path below).
+            PvpTeamHue.FfaPaletteDeck ffaDeck = null;
+
+            if (hueRule == PvpColourRule.Tugak && hueDials.Enabled)
+            {
+                if (hueDials.FfaPalettes != null && hueDials.FfaPalettes.Count > 0)
+                    ffaDeck = new PvpTeamHue.FfaPaletteDeck(hueDials.FfaPalettes, TeamHueRandom);
+                else
+                    log.Warn($"[PVPTEMPLATE] match {m.Id} ({m.ModeKey}) the Tugak palette pool pvp_team_hue_ffa_palettes has no valid entry; falling back to one coin-flipped Red or Blue for everyone");
+            }
+
             foreach (var seat in m.Seats.Values)
             {
                 if (TemplatesEnabled() && templateCatalog != null && seat.TemplateKey != null && templateCatalog.TryGetOffered(seat.TemplateKey, m.ModeKey, out var entry))
                 {
-                    seat.Template = entry.Definition;
+                    if (ffaDeck != null)
+                    {
+                        var palette = ffaDeck.Next();
+                        var seatResult = PvpTeamHue.Apply(entry.Definition, KitHue.Neutral, PvpTeamHue.FfaSeatDials(hueDials, palette, hueDials.FfaShade),
+                            players.ClothingPalettes, players.ClothingPaletteIcon);
+
+                        hueSummary.Add($"{entry.Key}/ffa palette {palette} for {seat.Name}: {seatResult.AppliedCount} piece(s) dressed, {seatResult.Skipped.Count} kept their own look");
+                        hueSkips.AddRange(seatResult.Skipped.Select(s => $"{entry.Key}/ffa palette {palette} for {seat.Name}, {s.Name} (wcid {s.WeenieClassId}): {s.Detail}"));
+
+                        seat.Template = seatResult.Definition ?? entry.Definition;
+                        seat.TemplateLabel = entry.Label;
+                        continue;
+                    }
+
+                    var hue = PvpTeamHue.KitHueFor(hueRule, m.Match.Teams.Count, seat.Colour);
+
+                    if (!dressed.TryGetValue((entry.Key, hue), out var result))
+                    {
+                        result = PvpTeamHue.Apply(entry.Definition, hue, hueDials, players.ClothingPalettes, players.ClothingPaletteIcon, players.WorldLookSource);
+                        dressed[(entry.Key, hue)] = result;
+
+                        if (hueDials.Enabled)
+                        {
+                            hueSummary.Add($"{entry.Key}/{PvpTeamHue.Token(hue)}: {result.AppliedCount} piece(s) dressed, {result.Skipped.Count} kept their own look");
+                            hueSkips.AddRange(result.Skipped.Select(s => $"{entry.Key}/{PvpTeamHue.Token(hue)} {s.Name} (wcid {s.WeenieClassId}): {s.Detail}"));
+                        }
+                    }
+
+                    seat.Template = result.Definition ?? entry.Definition;
                     seat.TemplateLabel = entry.Label;
                     continue;
                 }
@@ -1997,10 +2726,31 @@ namespace ACE.Server.Pvp
                 log.Warn($"[PVP] match {m.Id}: {seat.Name}'s template {seat.TemplateKey ?? "(none)"} is not offered for {m.ModeKey} at dispatch; removing the seat without fault");
             }
 
+            log.Info(hueDials.Enabled
+                ? $"[PVPTEMPLATE] match {m.Id} ({m.ModeKey}) team hue: {(hueSummary.Count > 0 ? string.Join("; ", hueSummary) : "no template dressed")}"
+                : $"[PVPTEMPLATE] match {m.Id} ({m.ModeKey}) team hue is OFF: every kit keeps its own look");
+
+            foreach (var skip in hueSkips)
+                log.Warn($"[PVPTEMPLATE] match {m.Id} ({m.ModeKey}) team hue kept the own look of {skip}");
+
             if (withdrawn.Count == 0)
                 return true;
 
             return RemoveSeatsNoFault(m, withdrawn, now, "template not offered at dispatch");
+        }
+
+        /// <summary>One read of the team hue dials; a throwing source reads as the compiled defaults, never as "off" by accident.</summary>
+        private PvpTeamHueDials SnapshotHueDials()
+        {
+            try
+            {
+                return TeamHueDials?.Invoke() ?? PvpTeamHueSettings.Snapshot();
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"[PVPTEMPLATE] the team hue settings could not be read ({ex.Message}); using the defaults");
+                return PvpTeamHueSettings.Snapshot();
+            }
         }
 
         /// <summary>
@@ -2069,6 +2819,14 @@ namespace ACE.Server.Pvp
         /// </summary>
         private void HandleEntryFailed(MatchRuntime m, PvpIntent intent, DateTime now)
         {
+            // Battleground rejoin: the template entry of a seat coming back into a Live match (HandleReconnected) failed.
+            if (m != null && m.Match.State == PvpMatchState.Live && m.Seats.TryGetValue(intent.CharacterId, out var rejoining) && rejoining.Rejoining
+                && !rejoining.Participant.ExitReason.HasValue)
+            {
+                HandleRejoinEntryFailed(m, rejoining, intent, now);
+                return;
+            }
+
             if (m == null || m.Match.State != PvpMatchState.Staging)
             {
                 log.Warn($"[PVP] entry-failed intent for 0x{intent.CharacterId:X8} in match {intent.MatchId} ignored: the match is {(m == null ? "gone" : m.Match.State.ToString())}");
@@ -2097,6 +2855,7 @@ namespace ACE.Server.Pvp
             seat.EntryFailed = true;
             seat.Exited = true;
             seat.RetryEntryAtUtc = null;
+            EndParticipation(m, seat);
 
             if (intent.Retryable)
                 players.Send(seat.Id, ACE.Server.Pvp.Templates.PvpTemplateText.ApplyBusy);
@@ -2127,17 +2886,23 @@ namespace ACE.Server.Pvp
 
                 seat.RetryEntryAtUtc = null;
 
-                if (!seat.Dispatched || seat.Exited || seat.SeenInInstance || seat.Participant.ExitReason.HasValue || seat.Spawn == null)
+                // A battleground seat coming back into a Live match (HandleReconnected) has been seen in the instance before; it is
+                // re-sent with a Live binding. Every other seat is a Staging entry, exactly as before.
+                if (!seat.Dispatched || seat.Exited || (seat.SeenInInstance && !seat.Rejoining) || seat.Participant.ExitReason.HasValue || seat.Spawn == null)
                     continue;
 
-                players.EnterAndTeleport(seat.Id, Binding(m, seat, PvpMatchState.Staging), seat.ExitTo, seat.Spawn);
-                log.Info($"[PVP] match {m.Id}: {seat.Name} re-sent to apply template {seat.Template?.Key} (busy retry)");
+                players.EnterAndTeleport(seat.Id, Binding(m, seat, seat.Rejoining ? PvpMatchState.Live : PvpMatchState.Staging), seat.ExitTo, seat.Spawn);
+                log.Info($"[PVP] match {m.Id}: {seat.Name} re-sent to apply template {seat.Template?.Key} (busy retry{(seat.Rejoining ? ", rejoin" : "")})");
             }
         }
 
-        /// <summary>The seat's team spawn room (cells and footprint) to carry on its binding while it is protected in room mode; null otherwise.</summary>
+        /// <summary>
+        /// The seat's own team spawn room (cells and footprint), carried on EVERY binding of a layout that has rooms, not only while the seat
+        /// is protected in room mode: protection reads it only behind ProtectedInRoom, and the respawn-zone refill needs it for the whole match.
+        /// Null on a layout without rooms and for an arena seat.
+        /// </summary>
         private static SpawnRoomArea SeatRoom(MatchRuntime m, Seat seat)
-            => seat.ProtectedInRoom ? m.Layout?.SpawnRoomAreaFor(seat.TeamIndex) : null;
+            => m.Layout?.SpawnRoomAreaFor(seat.TeamIndex);
 
         /// <summary>
         /// Grants the seat spawn protection (Docs/Pvp/BATTLEGROUNDS.md "Spawn protection"): on a layout with spawn rooms the seat is protected
@@ -2283,6 +3048,7 @@ namespace ACE.Server.Pvp
 
                 // PvP Template Facets: the arena announcement names each fighter's template.
                 SendActive(m, BuildLineupLine(m));
+                NotifyUnpaidRematches(m);
 
                 // Attack/Defend: an attacker who left before Live left the crystals sized for them; reconciled once, here (ruling 12).
                 ReconcileCrystalsToAttackers(m, "attacker(s) left before Live");
@@ -2346,12 +3112,15 @@ namespace ACE.Server.Pvp
 
             m.TickHandler.OnTick(m.Match, now);
 
+            // Conduct signals: Tugak Brawl (the one arena mode with a ledger) is sampled like a battleground; 1v1 and 2v2 are skipped inside.
+            RunConductSampler(m, now);
+
             // Being anywhere but the match instance while Live is a forfeit (every active participant was seen in the
             // instance before Countdown began, so the poll's arrival rule never spares anyone here).
             PollWalkouts(m, now);
 
             var limit = TimeLimitFor(m.ModeKey, dials);
-            var survivorsShareFirst = m.Mode.TeamCountRange.Max > 2;
+            var rankSurvivors = m.Mode.TeamCountRange.Max > 2;
             var elapsed = (now - m.Match.LiveSinceUtc.Value).TotalSeconds;
 
             // A kill always wins first, in regulation and in overtime alike.
@@ -2360,14 +3129,19 @@ namespace ACE.Server.Pvp
             // Overtime (Docs/Pvp/DESIGN.md "Overtime"): at the regulation limit with no winner, and overtime on,
             // the match goes to overtime instead of timing out. Entered once; its values are snapshotted then.
             if (outcome == null && !m.OvertimeSinceUtc.HasValue && elapsed >= limit && OvertimeOn(dials))
-                EnterOvertime(m, now, limit, elapsed, survivorsShareFirst, dials);
+                EnterOvertime(m, now, limit, elapsed, rankSurvivors, dials);
 
             // The hard end: regulation alone, or regulation + overtime once overtime has started. The pure
             // ResolveTimeout is unchanged - it simply gets the larger limit. With overtime off this is exactly the
             // old path. ResolveTimeout lives on EliminationWinCondition, the one win condition every v1 mode shares.
             var hardLimit = m.OvertimeSinceUtc.HasValue ? m.OvertimeHardLimitSeconds : limit;
 
-            outcome ??= (m.WinCondition as EliminationWinCondition)?.ResolveTimeout(m.Match, now, hardLimit, survivorsShareFirst, m.Mode.TimeoutRated);
+            // Tugak Brawl ranks its survivors by the enemy-player damage in its conduct ledger (owner ruling G1, 2026-10-15). Built only on
+            // the tick the timeout can resolve: no outcome yet, a ranking mode, and the hard limit reached (the same comparison ResolveTimeout
+            // makes). 1v1 and 2v2 carry no ledger and never rank.
+            var damageByTeam = outcome == null && rankSurvivors && elapsed >= hardLimit ? m.Match.Performance?.PlayerDamageByTeam() : null;
+
+            outcome ??= (m.WinCondition as EliminationWinCondition)?.ResolveTimeout(m.Match, now, hardLimit, rankSurvivors, m.Mode.TimeoutRated, damageByTeam);
 
             if (outcome != null)
             {
@@ -2405,7 +3179,15 @@ namespace ACE.Server.Pvp
         /// </summary>
         private void AdvanceObjectiveLive(MatchRuntime m, DateTime now, PvpArenaDials dials)
         {
+            // Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): arrivals, busy re-sends and expiries of held seats,
+            // first, so an expired seat is out before anything below (and the win condition) reads the match.
+            AdvanceGraces(m, now);
+            RetryBusyEntries(m, now);
+
             AdvanceRespawns(m, now);
+
+            // After the pen state machine, so a respawn confirmed this tick has already reset its seat's idle clock.
+            RunConductSampler(m, now);
 
             m.TickHandler.OnTick(m, now);
 
@@ -2434,9 +3216,9 @@ namespace ACE.Server.Pvp
         }
 
         /// <summary>
-        /// A Live battleground death (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 2): the death and the kill are credited (the
-        /// killer's team kill too, only against the other team; a drain death names the victim as their own killer, so
-        /// it credits nobody), everyone hears it, the seat goes to DyingToPen with its respawn time, and the binding is
+        /// A Live battleground death (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 2): the death is credited, and the kill, the
+        /// killer's team kill and the killshot performance stat only against the other team (a teamkill credits no kill; a
+        /// drain death names the victim as their own killer, so it credits nobody), everyone hears it, the seat goes to DyingToPen with its respawn time, and the binding is
         /// republished with Respawning set. ExitReason stays null: the seat is still active. A second death intent while
         /// the seat is already respawning is logged and ignored.
         /// </summary>
@@ -2454,12 +3236,16 @@ namespace ACE.Server.Pvp
 
             if (killerId != 0 && killerId != seat.Id && m.Seats.TryGetValue(killerId, out var killer))
             {
-                killer.Kills++;
-
                 if (killer.TeamIndex != seat.TeamIndex)
                 {
+                    // Only an enemy kill is a kill: a teamkill used to raise the killer's saved kill count too.
+                    killer.Kills++;
+
                     m.Match.TeamKills.TryGetValue(killer.TeamIndex, out var kills);
                     m.Match.TeamKills[killer.TeamIndex] = kills + 1;
+
+                    // Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): the same counted-once point as the team kill.
+                    CreditKillshot(m, killer, deathPosition);
 
                     // Attack/Defend (Docs/Pvp/ATTACK-DEFEND.md "Kill chip and heal"): an enemy kill near the vulnerable crystal chips or
                     // heals it. Same counted-once point as the team kill above; suicides, teamkills and kills by no player never get here.
@@ -2485,6 +3271,47 @@ namespace ACE.Server.Pvp
             players.PublishBinding(seat.Id, Binding(m, seat, m.Match.State));
 
             log.Info($"[PVP] match {m.Id}: {seat.Name} died ({(killerId != 0 && killerId != seat.Id ? $"killer 0x{killerId:X8}" : "no killer")}); to the pen, respawn at {seat.RespawnAtUtc:HH:mm:ss}; team kills [{string.Join(",", m.Match.TeamKills.OrderBy(k => k.Key).Select(k => k.Key + ":" + k.Value))}]");
+
+            // Conduct (Docs/Pvp/BATTLEGROUNDS.md "Conduct"): after the pen transition, so a feeder removed here is DyingToPen and ExitSeat
+            // leaves their trip home to the death return.
+            CheckFeeding(m, seat, now);
+        }
+
+        /// <summary>
+        /// Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): one cross-team killshot for <paramref name="killer"/>,
+        /// classified by where the VICTIM died. Attack/Defend: near or far the vulnerable crystal (the ledger's crystal frame, the same
+        /// <see cref="CrystalProximity"/> rule as the kill chip). King of the Hill: near the hill when the death lies inside the zone the
+        /// handler scores now, widened by pvp_bg_perf_koth_near_margin from the formation snapshot. Called only from
+        /// <see cref="HandleBattlegroundDeath"/>, after the cross-team check. Collection only; best effort.
+        /// </summary>
+        private void CreditKillshot(MatchRuntime m, Seat killer, Position deathPosition)
+        {
+            var perf = m.Match.Performance;
+
+            if (perf == null)
+                return;
+
+            try
+            {
+                var nearCrystal = perf.IsNearVulnerableCrystal(deathPosition);
+                var nearHill = false;
+                var onHill = false;
+
+                if (m.ModeKey == BattlegroundModes.KothModeKey && m.BgDials != null && m.Space != null && deathPosition != null && deathPosition.Instance == m.Space.Instance
+                    && (m.TickHandler as IObjectiveModeHandler)?.MarkerZone is KothZone zone)
+                {
+                    nearHill = BattlegroundPerformanceLedger.IsNearHill(zone, m.BgDials.KothPerfNearMargin, deathPosition.PositionX, deathPosition.PositionY, deathPosition.PositionZ);
+
+                    // PvP dailies (Usurper): the victim was standing ON the hill, the same zone with no margin.
+                    onHill = BattlegroundPerformanceLedger.IsOnHill(zone, deathPosition.PositionX, deathPosition.PositionY, deathPosition.PositionZ);
+                }
+
+                perf.CreditKillshot(killer.Id, nearCrystal, nearHill, onHill);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: crediting {killer.Name}'s killshot to the performance stats threw", ex);
+            }
         }
 
         /// <summary>
@@ -2503,7 +3330,8 @@ namespace ACE.Server.Pvp
 
             foreach (var seat in m.Seats.Values)
             {
-                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState == BgSeatState.None)
+                // A held seat (offline, or on its way back in) is never advanced: HandleReconnected resets its pen state.
+                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState == BgSeatState.None || seat.IsAway)
                     continue;
 
                 if (seat.BgState == BgSeatState.Respawning)
@@ -2610,6 +3438,10 @@ namespace ACE.Server.Pvp
                 {
                     seat.BgState = BgSeatState.None;
                     seat.RespawnAtUtc = null;
+
+                    // Conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): a confirmed respawn restarts the seat's idle clock.
+                    seat.LastActiveUtc = now;
+
                     log.Info($"[PVP] match {m.Id}: {seat.Name} respawn confirmed at {target.Label} (attempt {seat.RespawnAttempts})");
                     ClearRespawnIssue(seat);
 
@@ -2693,7 +3525,7 @@ namespace ACE.Server.Pvp
 
             foreach (var seat in m.Seats.Values)
             {
-                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState != BgSeatState.None)
+                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState != BgSeatState.None || seat.IsAway)
                     continue;
 
                 var sample = bgPlayers.SampleZone(seat.Id, m.Space.Instance);
@@ -2703,6 +3535,820 @@ namespace ACE.Server.Pvp
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// The conduct sampler (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"), once per Live tick of a match carrying a ledger (every battleground
+        /// and Tugak Brawl), acting about once a second (<see cref="PvpConductSampler.SampleIntervalSeconds"/>): every active, dispatched seat's
+        /// last-active time moves by <see cref="PvpConductSampler.Step"/>, and each engaged seat earns the sampled seconds of EngagedSeconds in
+        /// the ledger (at most <see cref="PvpConductSampler.MaxCreditSeconds"/> per sample). A seat's clock starts when the match went Live.
+        /// After a pass that sampled, <see cref="EnforceIdle"/> warns and removes idle seats (Docs/Pvp/BATTLEGROUNDS.md "Conduct"). The
+        /// sampling itself is best effort: a throw is logged, nobody is judged on that pass, and the match carries on.
+        /// </summary>
+        private void RunConductSampler(MatchRuntime m, DateTime now)
+        {
+            var perf = m.Match.Performance;
+
+            if (perf == null || bgPlayers == null || m.Space == null || m.Match.State != PvpMatchState.Live)
+                return;
+
+            PvpConductDials conduct = null;
+            var sampled = false;
+
+            try
+            {
+                var liveSince = m.Match.LiveSinceUtc ?? now;
+
+                // The sample clock starts when the match went Live; whole seconds are due, the remainder carries.
+                var seconds = PvpConductSampler.DueSeconds(m.ConductAnchorUtc ?? liveSince, now, out var anchor);
+
+                m.ConductAnchorUtc = anchor;
+
+                if (seconds <= 0)
+                    return;
+
+                var kothZone = m.ModeKey == BattlegroundModes.KothModeKey && m.BgDials != null ? (m.TickHandler as IObjectiveModeHandler)?.MarkerZone : null;
+                var inputs = new List<ConductSeatInput>();
+
+                foreach (var seat in m.Seats.Values)
+                {
+                    // A held seat is not sampled: its clock is reset when its player stands in the match again (CompleteRejoin).
+                    if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.IsAway)
+                        continue;
+
+                    seat.LastActiveUtc ??= liveSince;
+
+                    var inPen = seat.BgState != BgSeatState.None;
+                    var sample = inPen ? null : bgPlayers.SampleZone(seat.Id, m.Space.Instance);
+                    var onObjective = !inPen && sample != null && OnConductObjective(m, perf, kothZone, sample);
+
+                    inputs.Add(new ConductSeatInput(seat.Id, seat.TeamIndex, inPen, sample, onObjective, seat.LastActiveUtc.Value));
+                }
+
+                // One read of the conduct dials per sampler pass (every match of this tick shares it), not one per match.
+                conduct = ConductDials();
+
+                var credit = Math.Min(seconds, PvpConductSampler.MaxCreditSeconds);
+
+                foreach (var outcome in PvpConductSampler.Step(m.Id, now, seconds, conduct.EngageRadius, inputs))
+                {
+                    if (!m.Seats.TryGetValue(outcome.CharacterId, out var seat))
+                        continue;
+
+                    seat.LastActiveUtc = outcome.LastActiveUtc;
+                    seat.ConductStanding = outcome.Standing;
+
+                    if (outcome.Engaged)
+                        perf.CreditEngagedSeconds(outcome.CharacterId, credit);
+                }
+
+                sampled = true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: the conduct sampler threw; the match is unaffected", ex);
+            }
+
+            // Outside the sampler's best-effort try: a removal is the ordinary MarkOut exit, exactly as /arena leave runs it.
+            if (sampled)
+                EnforceIdle(m, now, conduct);
+        }
+
+        /// <summary>The conduct dials for this tick: read once, by the first caller of the tick, and shared by every match.</summary>
+        private PvpConductDials ConductDials() => conductDialsThisTick ??= conductDialSource() ?? PvpConductTunables.Defaults;
+
+        /// <summary>
+        /// Idle enforcement (Docs/Pvp/BATTLEGROUNDS.md "Conduct"), after a sampler pass: for every active, dispatched seat in pen state None,
+        /// idle = now - last active. At pvp_conduct_idle_warn_seconds the seat gets ONE warning for the idle stretch (re-armed once its idle
+        /// time falls back below the warning, i.e. it was active again); at pvp_conduct_idle_remove_seconds it is removed through
+        /// <see cref="MarkOut"/> as <see cref="ParticipantExit.ForfeitInactive"/>. A seat in the pen cycle is never judged here, and its clock
+        /// is frozen there and reset at the confirmed respawn, so a respawn timer of any length never removes anyone.
+        /// </summary>
+        private void EnforceIdle(MatchRuntime m, DateTime now, PvpConductDials conduct)
+        {
+            if (conduct == null || !conduct.IdleEnabled || m.Match.State != PvpMatchState.Live)
+                return;
+
+            var due = new List<Seat>();
+
+            foreach (var seat in m.Seats.Values)
+            {
+                if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState != BgSeatState.None || !seat.LastActiveUtc.HasValue || seat.IsAway)
+                    continue;
+
+                // Only a seat this pass saw STANDING is judged. A frozen seat (dead, teleporting) could otherwise cross the threshold on
+                // sub-second phase drift, and one that left the instance or went offline belongs to the walkout poll (ForfeitLeft /
+                // ForfeitLogout), not to an inactivity removal with a teleport. IdleWarned is left as it is.
+                if (!seat.ConductStanding)
+                    continue;
+
+                var idle = (now - seat.LastActiveUtc.Value).TotalSeconds;
+
+                if (idle < conduct.IdleWarnSeconds)
+                {
+                    seat.IdleWarned = false;
+                    continue;
+                }
+
+                if (idle >= conduct.IdleRemoveSeconds)
+                {
+                    due.Add(seat);
+                    continue;
+                }
+
+                if (!seat.IdleWarned)
+                {
+                    seat.IdleWarned = true;
+
+                    var left = Math.Max(1L, conduct.IdleRemoveSeconds - (long)Math.Floor(idle));
+
+                    players.Send(seat.Id, PvpArenaText.Fill(PvpArenaText.IdleWarning, ("seconds", left)));
+                    log.Info($"[PVP] match {m.Id}: {seat.Name} idle {idle:0}s; warned ({left}s to removal)");
+                }
+            }
+
+            foreach (var seat in due)
+            {
+                // A removal earlier in this loop can end nothing mid-loop (the win condition is evaluated by the caller), but it is
+                // still re-checked: never remove a seat twice, never remove from a match that has stopped being Live.
+                if (m.Match.State != PvpMatchState.Live)
+                    break;
+
+                log.Info($"[PVP] match {m.Id}: {seat.Name} idle {(now - seat.LastActiveUtc.Value).TotalSeconds:0}s; removing for inactivity");
+                RemoveForConduct(m, seat, ParticipantExit.ForfeitInactive, now);
+            }
+        }
+
+        /// <summary>
+        /// Feeding (Docs/Pvp/BATTLEGROUNDS.md "Conduct"), called from <see cref="HandleBattlegroundDeath"/> once the seat is on its way to the
+        /// pen: with pvp_conduct_feed_enabled on, a seat with at least pvp_conduct_feed_min_deaths deaths whose contribution C
+        /// (<see cref="PvpContribution"/>, measured against its own team) is BELOW pvp_conduct_feed_max_share is removed as
+        /// <see cref="ParticipantExit.ForfeitFeeding"/>. A seat with no C (nothing on its team to compare against) is never judged. Battlegrounds
+        /// only: a Tugak Brawl death already ends that player's match.
+        /// </summary>
+        private void CheckFeeding(MatchRuntime m, Seat seat, DateTime now)
+        {
+            var conduct = ConductDials();
+
+            if (conduct == null || !conduct.FeedEnabled || seat.Participant.ExitReason.HasValue || m.Match.State != PvpMatchState.Live || m.Match.Performance == null)
+                return;
+
+            if (seat.Deaths < conduct.FeedMinDeaths)
+                return;
+
+            double? c;
+
+            try
+            {
+                var dials = PerformanceDials.From(m.BgDials ?? BgDials());
+                var all = PvpContribution.Compute(m.ModeKey, BuildPerformanceSeats(m, m.Match.Performance), dials);
+
+                c = all.TryGetValue(seat.Id, out var mine) ? mine.Contribution : null;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: computing {seat.Name}'s contribution for the feeding check threw; not judged", ex);
+                return;
+            }
+
+            if (!c.HasValue || !(c.Value < conduct.FeedMaxShare))
+                return;
+
+            log.Info($"[PVP] match {m.Id}: {seat.Name} at {seat.Deaths} deaths with contribution {c.Value:0.###} (< {conduct.FeedMaxShare:0.###}); removing for feeding");
+            RemoveForConduct(m, seat, ParticipantExit.ForfeitFeeding, now);
+        }
+
+        /// <summary>
+        /// The one conduct removal: the ordinary <see cref="MarkOut"/> exit (idempotent per seat), then <see cref="ConductRemoved"/> once, only
+        /// when this call is what took the seat out.
+        /// </summary>
+        private void RemoveForConduct(MatchRuntime m, Seat seat, ParticipantExit how, DateTime now)
+        {
+            if (seat.Participant.ExitReason.HasValue)
+                return;
+
+            // A throwing seam inside the exit (a send, the return teleport) must not stop the next due seat or swallow the hook: the
+            // seat is out once its ExitReason is set, which happens before any seam is called.
+            try
+            {
+                MarkOut(m, seat, how, now, 0);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: removing {seat.Name} ({how}) threw part-way; ExitReason is {seat.Participant.ExitReason?.ToString() ?? "unset"}", ex);
+            }
+
+            if (seat.Participant.ExitReason != how)
+                return;
+
+            var hook = ConductRemoved;
+
+            if (hook == null)
+                return;
+
+            try
+            {
+                hook(seat.Id, how);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: a conduct-removal listener threw for {seat.Name} ({how})", ex);
+            }
+        }
+
+        /// <summary>
+        /// Fired on the world thread once per conduct removal (Docs/Pvp/BATTLEGROUNDS.md "Conduct") with the character id and the exit
+        /// (<see cref="ParticipantExit.ForfeitInactive"/> or <see cref="ParticipantExit.ForfeitFeeding"/>), after the seat is already out.
+        /// Nothing in production listens: the deserter lockout is decided in <see cref="MarkOut"/> itself, for every exit. Tests listen. A
+        /// throwing listener is logged and ignored.
+        /// </summary>
+        internal event Action<uint, ParticipantExit> ConductRemoved;
+
+        // =====================================================================================================
+        // Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): battlegrounds only
+        // =====================================================================================================
+
+        /// <summary>
+        /// How long a rejoin may take to land after the coordinator sent it (HandleReconnected) before the held seat is given up. A busy
+        /// template entry pending its re-send (EntryBusyRetryWindowSeconds) waits on that instead.
+        /// </summary>
+        public const double RejoinArrivalTimeoutSeconds = 30;
+
+        /// <summary>
+        /// How long after a grace began its window may still slide while the player is seen standing in the match instance: the logout
+        /// intent fires at the head of LogOut, up to the PK logout delay (about 20 s) before the player actually leaves, and the window
+        /// should run from the real disconnect (<see cref="AdvanceGraces"/>). Bounded, so a player who never leaves cannot hold a seat
+        /// outside every check forever: past this the window simply runs.
+        /// </summary>
+        public const double MaxLogoutLingerSeconds = 60;
+
+        /// <summary>A battleground match: an objective mode from the battleground room. Every arena mode (1v1, 2v2, Tugak Brawl) is not one.</summary>
+        private static bool IsBattlegroundMatch(MatchRuntime m) =>
+            m.Mode.IsObjective && string.Equals(m.RoomKey, BattlegroundModes.RoomKey, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// THE ONE ENTRY to the rejoin grace, called from both places a logout reaches the coordinator: the intent drain (the logout
+        /// hook's forfeit intent) and the walkout poll's offline branch (the backstop). True when the seat is now held instead of
+        /// forfeited: the match is Live, it is a battleground (<see cref="IsBattlegroundMatch"/>), pvp_bg_rejoin_grace_seconds is above 0,
+        /// the logout is not one the server or staff forced and the server is not shutting down, and the seat has not used its grace
+        /// already (ONE grace per seat per match: a second logout forfeits at once). False leaves the caller to forfeit exactly as before,
+        /// which is every arena logout, every logout before Live and every server-caused one. <paramref name="departedAtUtc"/> is when
+        /// the logout happened (the intent's own time; the poll passes now): an intent drained just after the Live flip for a drop that
+        /// happened before it is a dodge, not a Live logout, and is refused.
+        /// </summary>
+        private bool TryBeginGrace(MatchRuntime m, Seat seat, DateTime now, bool serverCaused, DateTime departedAtUtc)
+        {
+            if (m.Match.State != PvpMatchState.Live || !IsBattlegroundMatch(m))
+                return false;
+
+            if (!m.Match.LiveSinceUtc.HasValue || departedAtUtc < m.Match.LiveSinceUtc.Value)
+                return false;
+
+            if (!seat.Dispatched || seat.Exited || seat.Participant.ExitReason.HasValue || seat.GraceUsed)
+                return false;
+
+            if (serverCaused || ServerShuttingDown())
+                return false;
+
+            var seconds = BgDials().RejoinGraceSeconds;
+
+            if (seconds <= 0)
+                return false;
+
+            seat.GraceUsed = true;
+            seat.GraceSeconds = seconds;
+            seat.GraceBeganUtc = now;
+            seat.GraceUntilUtc = now.AddSeconds(seconds);
+            seat.Rejoining = false;
+            seat.RejoinIssuedAtUtc = null;
+            seat.ProtectedUntilUtc = null;
+            seat.ProtectedInRoom = false;
+            seat.IdleWarned = false;
+
+            log.Info($"[PVP] match {m.Id}: {seat.Name} (0x{seat.Id:X8}) logged out during Live; seat held for {seconds} s (until {seat.GraceUntilUtc:HH:mm:ss})");
+
+            SendAll(m.Seats.Values.Where(s => s.Dispatched && s.Id != seat.Id).Select(s => s.Id), BattlegroundText.SeatHeld(seat.Name, seconds));
+            return true;
+        }
+
+        /// <summary>A held seat stops being held (it is back in, or it is going out).</summary>
+        private static void ClearAway(Seat seat)
+        {
+            seat.GraceUntilUtc = null;
+            seat.Rejoining = false;
+            seat.RejoinIssuedAtUtc = null;
+        }
+
+        /// <summary>A held seat is given up: the ordinary logout forfeit, deserter strike included unless <paramref name="departure"/> says otherwise.</summary>
+        private void ForfeitAwaySeat(MatchRuntime m, Seat seat, DateTime now, PvpDeparture? departure, string why)
+        {
+            log.Info($"[PVP] match {m.Id}: {seat.Name}'s held seat is given up ({why}); logout forfeit{(departure.HasValue ? $" ({departure.Value})" : "")}");
+            MarkOut(m, seat, ParticipantExit.ForfeitLogout, now, 0, departure);
+        }
+
+        /// <summary>
+        /// Once per Live battleground tick, before anything else reads the match: every held seat is judged.
+        ///   - On its way back in (<see cref="Seat.Rejoining"/>): standing in the instance completes the rejoin
+        ///     (<see cref="CompleteRejoin"/>); a busy template entry waiting on its re-send waits; otherwise, not in after
+        ///     <see cref="RejoinArrivalTimeoutSeconds"/>, the seat is given up (a strike only when the player is offline again).
+        ///   - Still offline: at the end of the grace, the ordinary logout forfeit.
+        /// </summary>
+        private void AdvanceGraces(MatchRuntime m, DateTime now)
+        {
+            if (m.Space == null)
+                return;
+
+            foreach (var seat in m.Seats.Values.ToList())
+            {
+                if (!seat.IsAway || seat.Participant.ExitReason.HasValue)
+                    continue;
+
+                if (seat.Rejoining)
+                {
+                    var presence = players.GetPresence(seat.Id, m.Space.Instance);
+
+                    if (presence == PvpPresence.InInstance)
+                    {
+                        CompleteRejoin(m, seat, now);
+                        continue;
+                    }
+
+                    if (seat.RetryEntryAtUtc.HasValue)
+                        continue;
+
+                    if (seat.RejoinIssuedAtUtc.HasValue && (now - seat.RejoinIssuedAtUtc.Value).TotalSeconds >= RejoinArrivalTimeoutSeconds)
+                    {
+                        if (presence != PvpPresence.Offline)
+                            players.Send(seat.Id, BattlegroundText.RejoinFailedYou);
+
+                        ForfeitAwaySeat(m, seat, now, presence == PvpPresence.Offline ? null : PvpDeparture.SpaceFailure, $"the rejoin did not land within {RejoinArrivalTimeoutSeconds} s ({presence})");
+                    }
+
+                    continue;
+                }
+
+                // The logout intent can precede the real disconnect by the PK logout delay: while the player still stands in the
+                // instance the window slides, so it runs from the moment they actually leave (bounded by MaxLogoutLingerSeconds).
+                if (seat.GraceBeganUtc.HasValue && (now - seat.GraceBeganUtc.Value).TotalSeconds <= MaxLogoutLingerSeconds
+                    && players.GetPresence(seat.Id, m.Space.Instance) == PvpPresence.InInstance)
+                {
+                    seat.GraceUntilUtc = now.AddSeconds(seat.GraceSeconds);
+                    continue;
+                }
+
+                if (now >= seat.GraceUntilUtc.Value)
+                    ForfeitAwaySeat(m, seat, now, null, "the rejoin grace ran out");
+            }
+        }
+
+        /// <summary>
+        /// A Reconnected intent: the player of a held seat is back online (a NEW Player object). Honoured only while the match is Live and
+        /// the seat is held and not already on its way in. The new Player is admitted to the match realm (<see cref="IPvpMatchSpaces.AdmitLate"/>),
+        /// the seat's pen state is reset, a team spawn is picked (the respawn round-robin), and the ordinary placement runs with a Live
+        /// binding and the seat's stored exit: the template is applied first, then the bind and the teleport (the same sequence a
+        /// dispatch uses). The seat stays held until <see cref="AdvanceGraces"/> sees them in the instance. A space that cannot admit them,
+        /// or a layout with no spawn for the team, gives the seat up without a strike (not the player's fault).
+        /// </summary>
+        private void HandleReconnected(MatchRuntime m, PvpIntent intent, DateTime now)
+        {
+            if (m == null || m.Match.State != PvpMatchState.Live)
+            {
+                log.Info($"[PVP] reconnect of 0x{intent.CharacterId:X8} for match {intent.MatchId} ignored: the match is {(m == null ? "gone" : m.Match.State.ToString())}");
+                return;
+            }
+
+            if (!m.Seats.TryGetValue(intent.CharacterId, out var seat) || !seat.IsAway || seat.Rejoining || seat.Exited || seat.Participant.ExitReason.HasValue)
+            {
+                log.Info($"[PVP] reconnect of 0x{intent.CharacterId:X8} in match {m.Id} ignored: not a held seat");
+                return;
+            }
+
+            if (!players.IsOnline(seat.Id))
+            {
+                log.Info($"[PVP] match {m.Id}: {seat.Name} reconnected but is offline again; the grace keeps running");
+                return;
+            }
+
+            bool admitted;
+
+            try
+            {
+                admitted = m.Space != null && spaces.AdmitLate(m.Space, seat.Id);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: admitting {seat.Name} back into the instance threw", ex);
+                admitted = false;
+            }
+
+            if (!admitted)
+            {
+                players.Send(seat.Id, BattlegroundText.RejoinFailedYou);
+                ForfeitAwaySeat(m, seat, now, PvpDeparture.SpaceFailure, "the instance could not admit them again");
+                return;
+            }
+
+            m.RespawnCounters.TryGetValue(seat.TeamIndex, out var counter);
+            m.RespawnCounters[seat.TeamIndex] = counter + 1;
+            var point = BattlegroundMapCatalog.RespawnSpawn(m.Layout, seat.TeamIndex, counter);
+
+            if (point == null)
+            {
+                log.Error($"[PVP] match {m.Id}: no team spawn for team {seat.TeamIndex} on {m.Map.MapKey} to put {seat.Name} back at");
+                players.Send(seat.Id, BattlegroundText.RejoinFailedYou);
+                ForfeitAwaySeat(m, seat, now, PvpDeparture.SpaceFailure, "no team spawn");
+                return;
+            }
+
+            // Whatever pen state the seat left in (a logout while dying or waiting in the pen) is dropped: the rejoin is a fresh spawn.
+            seat.BgState = BgSeatState.None;
+            seat.RespawnAtUtc = null;
+            seat.LastPenCountdownShown = int.MaxValue;
+            ClearRespawnIssue(seat);
+            seat.ProtectedUntilUtc = null;
+            seat.ProtectedInRoom = false;
+            seat.AwaitingDeathReturn = false;
+
+            seat.Spawn = ArenaSpawnPosition.Build(m.Map, point, m.Space.Instance);
+            seat.Rejoining = true;
+            seat.RejoinIssuedAtUtc = now;
+            seat.EntryBusySinceUtc = null;
+            seat.RetryEntryAtUtc = null;
+
+            players.EnterAndTeleport(seat.Id, Binding(m, seat, PvpMatchState.Live), seat.ExitTo, seat.Spawn);
+
+            if (m.TeamFellowship && teamFellowships != null && !seat.TeamFellowshipReleased)
+            {
+                try
+                {
+                    teamFellowships.Readmit(m.Id, seat.TeamIndex, seat.Id);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[PVP] match {m.Id}: putting {seat.Name} back in the team fellowship threw", ex);
+                }
+            }
+
+            log.Info($"[PVP] match {m.Id}: {seat.Name} reconnected; admitted again and sent to apply template {seat.Template?.Key}, then spawn {point.Label} on team {seat.TeamIndex}");
+        }
+
+        /// <summary>
+        /// A held seat's player is standing in the instance again: no longer held, the idle clock restarts now (so idle enforcement does
+        /// not count the time they were away), they are protected as after a respawn, the binding is republished, and everyone is told.
+        /// </summary>
+        private void CompleteRejoin(MatchRuntime m, Seat seat, DateTime now)
+        {
+            ClearAway(seat);
+            seat.EntryBusySinceUtc = null;
+            seat.RetryEntryAtUtc = null;
+            seat.SeenInInstance = true;
+            seat.LastActiveUtc = now;
+            seat.IdleWarned = false;
+            seat.ConductStanding = false;
+
+            GrantSpawnProtection(m, seat, now);
+            players.PublishBinding(seat.Id, Binding(m, seat, m.Match.State));
+
+            players.Send(seat.Id, BattlegroundText.RejoinedYou);
+
+            var vulnerable = (m.TickHandler as IObjectiveModeHandler)?.VulnerableLine();
+
+            if (vulnerable != null)
+                players.Send(seat.Id, vulnerable);
+
+            SendAll(m.Seats.Values.Where(s => s.Dispatched && s.Id != seat.Id).Select(s => s.Id), BattlegroundText.Rejoined(seat.Name));
+
+            log.Info($"[PVP] match {m.Id}: {seat.Name} rejoined; idle clock reset, spawn protection granted");
+        }
+
+        /// <summary>
+        /// The rejoin entry of a held seat failed (HandleEntryFailed). A busy player is re-sent for the usual short window
+        /// (<see cref="EntryBusyRetryWindowSeconds"/>); otherwise the held seat is given up: a strike when the player caused it (busy past
+        /// the window, a pack too full for the kit), none otherwise.
+        /// </summary>
+        private void HandleRejoinEntryFailed(MatchRuntime m, Seat seat, PvpIntent intent, DateTime now)
+        {
+            if (intent.Retryable)
+            {
+                seat.EntryBusySinceUtc ??= now;
+
+                if ((now - seat.EntryBusySinceUtc.Value).TotalSeconds < EntryBusyRetryWindowSeconds)
+                {
+                    seat.RetryEntryAtUtc = now.AddSeconds(EntryBusyRetryIntervalSeconds);
+                    log.Info($"[PVP] match {m.Id}: {seat.Name} was busy at the rejoin template entry; retrying in {EntryBusyRetryIntervalSeconds} s");
+                    return;
+                }
+            }
+
+            seat.RetryEntryAtUtc = null;
+
+            if (intent.Retryable)
+                players.Send(seat.Id, ACE.Server.Pvp.Templates.PvpTemplateText.ApplyBusy);
+
+            players.Send(seat.Id, BattlegroundText.RejoinFailedYou);
+
+            ForfeitAwaySeat(m, seat, now, intent.PlayerCaused ? null : PvpDeparture.SpaceFailure, $"the rejoin template entry failed{(intent.PlayerCaused ? " (player caused)" : "")}");
+        }
+
+        /// <summary>The player's match participation has ended (Thread return): the gateway is told once per seat.</summary>
+        private void EndParticipation(MatchRuntime m, Seat seat)
+        {
+            if (seat.ParticipationEnded || !seat.Dispatched)
+                return;
+
+            seat.ParticipationEnded = true;
+
+            try
+            {
+                players.OnParticipationEnded(seat.Id, m.Space?.Instance ?? 0);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] ending the participation of {seat.Name} (0x{seat.Id:X8}) threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// The Live battleground match <paramref name="characterId"/> holds a seat in (its rejoin grace, not yet on its way back in), or
+        /// null. Read by the login path (world thread) to report <see cref="PvpIntentKind.Reconnected"/> and to leave a Thread away entry
+        /// for after the rejoin.
+        /// </summary>
+        public Guid? GracedMatchOf(uint characterId)
+        {
+            var m = FindMatchOf(characterId);
+
+            if (m == null || m.Match.State != PvpMatchState.Live || !m.Seats.TryGetValue(characterId, out var seat))
+                return null;
+
+            return seat.IsAway && !seat.Rejoining && !seat.Exited && !seat.Participant.ExitReason.HasValue ? m.Id : (Guid?)null;
+        }
+
+        /// <summary>Test seam: the seat's rejoin grace end, or null when it is not held.</summary>
+        internal DateTime? GraceUntilForTest(uint characterId) =>
+            FindMatchOf(characterId) is MatchRuntime m && m.Seats.TryGetValue(characterId, out var seat) ? seat.GraceUntilUtc : null;
+
+        /// <summary>Test seam: the seat is on its way back in.</summary>
+        internal bool IsRejoiningForTest(uint characterId) =>
+            FindMatchOf(characterId) is MatchRuntime m && m.Seats.TryGetValue(characterId, out var seat) && seat.Rejoining;
+
+        // =====================================================================================================
+        // Deserter lockout (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): battlegrounds and Tugak Brawl only
+        // =====================================================================================================
+
+        /// <summary>The optional conduct seam: the player gateway itself, when it implements it. Null means strikes lock out in memory only.</summary>
+        private readonly IPvpConductGateway conductGateway;
+
+        /// <summary>
+        /// Per character, the newest deserter record this coordinator knows: written at each strike (so the lockout holds at once, before the
+        /// property write lands), and seeded at join from the stored record on the player facts when that one is newer. World thread only.
+        /// A restart loses it; the stored record then carries the lockout.
+        /// </summary>
+        private readonly Dictionary<uint, PvpDeserterRecord> deserterRecords = new Dictionary<uint, PvpDeserterRecord>();
+
+        /// <summary>
+        /// True once the final shutdown has begun (ServerManager.ShutdownInProgress, set before the logoff cascade is queued): those logout
+        /// forfeits are not desertions. An announced countdown (ShutdownInitiated alone) does NOT count, so a leave during it still strikes.
+        /// Tests swap it.
+        /// </summary>
+        internal Func<bool> ServerShuttingDown { get; set; } = () => ACE.Server.Managers.ServerManager.ShutdownInProgress;
+
+        /// <summary>Test seam: the deserter record the coordinator holds for a character, or null.</summary>
+        internal PvpDeserterRecord DeserterRecordForTest(uint characterId) => deserterRecords.TryGetValue(characterId, out var r) ? r : null;
+
+        private PvpConductDials DeserterDials() => PvpConductTunables.Clamp(conductDialSource() ?? PvpConductTunables.Defaults);
+
+        /// <summary>The newer of the in-memory record and the stored one on <paramref name="facts"/> (by last strike time), remembered.</summary>
+        private PvpDeserterRecord MergeDeserterFacts(PvpPlayerFacts facts) =>
+            MergeDeserterRecord(facts.CharacterId, new PvpDeserterRecord(facts.DeserterStrikes, facts.DeserterLastStrikeAt, facts.DeserterLockoutUntil));
+
+        /// <summary>
+        /// The newer of the in-memory record and <paramref name="stored"/> (by last strike time; a stored record with no time is ignored),
+        /// remembered. Null when neither exists.
+        /// </summary>
+        private PvpDeserterRecord MergeDeserterRecord(uint characterId, PvpDeserterRecord stored)
+        {
+            deserterRecords.TryGetValue(characterId, out var known);
+
+            if (stored != null && stored.LastStrikeAt > 0 && (known == null || stored.LastStrikeAt > known.LastStrikeAt))
+            {
+                known = stored;
+                deserterRecords[characterId] = known;
+            }
+
+            return known;
+        }
+
+        /// <summary>
+        /// /arenaadmin deserter: the effective record (in memory or <paramref name="stored"/>, whichever is newer; <see cref="PvpDeserterRecord.None"/>
+        /// when neither exists), the strike count after decay as of now, and the lockout seconds left. World thread.
+        /// </summary>
+        public PvpDeserterStatus DeserterStatus(uint characterId, PvpDeserterRecord stored)
+        {
+            var record = MergeDeserterRecord(characterId, stored) ?? PvpDeserterRecord.None;
+            var now = PvpDeserterRules.ToUnix(clock());
+            var dials = DeserterDials();
+
+            return new PvpDeserterStatus(
+                record,
+                PvpDeserterLadder.Decayed(record.Strikes, record.LastStrikeAt, now, dials.DeserterDecayDays),
+                PvpDeserterLadder.SecondsRemaining(record, now, dials));
+        }
+
+        /// <summary>
+        /// /arenaadmin deserter &lt;character&gt; clear: zero strikes and lockout, held in memory at once and stored through the conduct seam (online
+        /// or offline, the same dispatcher as a strike). The cleared record carries NOW as its time, so it is newer than any stored strike
+        /// still landing and wins every merge. One audit line names the admin. World thread.
+        /// </summary>
+        public PvpDeserterClearResult ClearDeserter(uint characterId, string characterName, string adminName, PvpDeserterRecord stored = null)
+        {
+            var cleared = new PvpDeserterRecord(0, PvpDeserterRules.ToUnix(clock()), 0);
+
+            var before = MergeDeserterRecord(characterId, stored);
+            deserterRecords[characterId] = cleared;
+
+            var persisted = false;
+
+            try
+            {
+                if (conductGateway != null)
+                {
+                    conductGateway.PersistDeserterRecord(characterId, cleared);
+                    persisted = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] clearing {characterName}'s deserter record: storing it threw; the in-memory clear still holds", ex);
+            }
+
+            var line = $"{PvpPairAudit.Tag} {adminName} cleared the deserter record of {characterName} (0x{characterId:X8}); was strikes {before?.Strikes ?? 0}, locked until {before?.LockoutUntil ?? 0}{(persisted ? "" : " (in memory only: nothing was stored)")}";
+
+            log.Info($"[PVP] {line}");
+
+            try
+            {
+                auditSink(line);
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PVP] the deserter clear audit line threw", ex);
+            }
+
+            return new PvpDeserterClearResult(cleared, persisted);
+        }
+
+        /// <summary>How often (at most) <see cref="PruneDeserterRecords"/> sweeps the in-memory records.</summary>
+        public const double DeserterPruneIntervalSeconds = 600;
+
+        /// <summary>
+        /// A record is kept at least this long after its last strike (or clear), so a clear or strike whose storage write is still being
+        /// retried (at most 10 attempts 30 s apart) is never dropped in favour of the stale stored record.
+        /// </summary>
+        public const long DeserterPruneMinAgeSeconds = 3600;
+
+        private DateTime? lastDeserterPruneUtc;
+
+        /// <summary>
+        /// Called from the tick; acts at most once per <see cref="DeserterPruneIntervalSeconds"/>. Drops every in-memory record whose lockout
+        /// has ended, whose strikes have fully decayed, and whose last strike is at least <see cref="DeserterPruneMinAgeSeconds"/> old. Such
+        /// a record changes nothing: the next strike or join treats a missing record as zero strikes and no lockout.
+        /// </summary>
+        private void PruneDeserterRecords(DateTime now)
+        {
+            if (lastDeserterPruneUtc.HasValue && (now - lastDeserterPruneUtc.Value).TotalSeconds < DeserterPruneIntervalSeconds)
+                return;
+
+            lastDeserterPruneUtc = now;
+
+            if (deserterRecords.Count == 0)
+                return;
+
+            try
+            {
+                var nowUnix = PvpDeserterRules.ToUnix(now);
+                var dials = DeserterDials();
+
+                foreach (var id in deserterRecords.Where(kvp => IsSpent(kvp.Value, nowUnix, dials)).Select(kvp => kvp.Key).ToList())
+                    deserterRecords.Remove(id);
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PVP] pruning the deserter records threw", ex);
+            }
+        }
+
+        private static bool IsSpent(PvpDeserterRecord r, long nowUnix, PvpConductDials dials) =>
+            r.LockoutUntil <= nowUnix
+            && nowUnix - r.LastStrikeAt >= DeserterPruneMinAgeSeconds
+            && PvpDeserterLadder.Decayed(r.Strikes, r.LastStrikeAt, nowUnix, dials.DeserterDecayDays) == 0;
+
+        /// <summary>
+        /// The join check: seconds of deserter lockout left for a battleground or Tugak Brawl join, else 0. Any other room, or the switch
+        /// off, is never refused. Reads the in-memory record and the stored one, whichever is newer.
+        /// </summary>
+        private long DeserterSecondsRemaining(PvpPlayerFacts facts, string roomKey, DateTime now)
+        {
+            var record = MergeDeserterFacts(facts);
+
+            if (record == null || !PvpDeserterRules.InScope(roomKey))
+                return 0;
+
+            return PvpDeserterLadder.SecondsRemaining(record, PvpDeserterRules.ToUnix(now), DeserterDials());
+        }
+
+        /// <summary>
+        /// Called from <see cref="MarkOut"/> once the seat is out. A departure the exit table calls a strike, from a Live battleground or Tugak
+        /// Brawl match, outside a server shutdown, advances the ladder: the new record is held in memory at once (the lockout is immediate) and
+        /// handed to the conduct seam to store. Returns the record, or null for no strike. Never throws: a failure is logged and the exit goes on.
+        /// </summary>
+        private PvpDeserterRecord ApplyDeserterStrike(MatchRuntime m, Seat seat, ParticipantExit how, PvpDeparture? overrideDeparture, DateTime now)
+        {
+            try
+            {
+                if (m.Match.State != PvpMatchState.Live || !PvpDeserterRules.InScope(m.RoomKey))
+                    return null;
+
+                var departure = overrideDeparture ?? PvpDeserterRules.DepartureOf(how);
+
+                if (ServerShuttingDown())
+                    departure = PvpDeparture.ServerShutdown;
+
+                if (PvpDeserterRules.Classify(departure) != PvpDeserterVerdict.Strike)
+                    return null;
+
+                var nowUnix = PvpDeserterRules.ToUnix(now);
+                deserterRecords.TryGetValue(seat.Id, out var known);
+                known ??= PvpDeserterRecord.None;
+
+                var next = PvpDeserterLadder.Next(known.Strikes, known.LastStrikeAt, nowUnix, DeserterDials());
+
+                if (next == null)
+                    return null;
+
+                deserterRecords[seat.Id] = next;
+
+                log.Info($"[PVP] match {m.Id}: {seat.Name} (0x{seat.Id:X8}) deserter strike {next.Strikes} ({departure}); locked out of battlegrounds and Tugak Brawl for {next.LockoutUntil - nowUnix} s");
+
+                try
+                {
+                    conductGateway?.PersistDeserterRecord(seat.Id, next);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[PVP] match {m.Id}: storing {seat.Name}'s deserter record threw; the in-memory lockout still holds", ex);
+                }
+
+                return next;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: the deserter check for {seat.Name} ({how}) threw", ex);
+                return null;
+            }
+        }
+
+        /// <summary>The strike line, only to a player still online, and only when the strike carries a lockout (a 0-minute length says nothing).</summary>
+        private void TellDeserterStrike(Seat seat, PvpDeserterRecord strike)
+        {
+            var seconds = strike.LockoutUntil - strike.LastStrikeAt;
+
+            if (seconds <= 0 || !players.IsOnline(seat.Id))
+                return;
+
+            players.Send(seat.Id, PvpArenaText.Fill(PvpArenaText.DeserterStruck, ("duration", PvpArenaText.LockoutDurationPhrase(seconds))));
+        }
+
+        /// <summary>
+        /// The conduct sampler's objective test for one standing sample: King of the Hill inside the scored zone widened by the formation
+        /// snapshot's pvp_bg_perf_koth_near_margin; Attack/Defend near the vulnerable crystal by the ledger's own rule. False for anything else.
+        /// </summary>
+        private static bool OnConductObjective(MatchRuntime m, BattlegroundPerformanceLedger perf, KothZone? kothZone, BattlegroundZoneSample sample)
+        {
+            if (!sample.InInstance || sample.IsDead || sample.IsTeleporting)
+                return false;
+
+            if (kothZone.HasValue)
+                return PvpConductSampler.OnKothObjective(kothZone.Value, m.BgDials.KothPerfNearMargin, sample);
+
+            if (perf.Crystals == null)
+                return false;
+
+            var at = new Position(((m.Space.LandblockId & 0xFFFF) << 16) | 0x0001, (float)sample.X, (float)sample.Y, (float)sample.Z, 0f, 0f, 0f, 1f, m.Space.Instance);
+
+            return perf.IsNearVulnerableCrystal(at) == true;
+        }
+
+        /// <summary>
+        /// Conduct signals: when the seat of <paramref name="characterId"/> was last active (see <see cref="RunConductSampler"/>), or null when
+        /// it has no clock (not in a sampled Live match, or not sampled yet). World thread. Diagnostics, tests and the later enforcement.
+        /// </summary>
+        internal DateTime? ConductLastActiveUtc(uint characterId)
+        {
+            foreach (var m in matches)
+                if (m.Seats.TryGetValue(characterId, out var seat) && !seat.Exited)
+                    return seat.LastActiveUtc;
+
+            return null;
         }
 
         /// <summary>The Attack/Defend health sample (cosmetic): the placed crystals' health, or empty before they are placed or without the seam.</summary>
@@ -2738,7 +4384,7 @@ namespace ACE.Server.Pvp
             if (bgPlayers == null || m.Space == null || !m.Seats.TryGetValue(characterId, out var seat))
                 return;
 
-            if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState != BgSeatState.None)
+            if (!seat.Dispatched || seat.Participant.ExitReason.HasValue || seat.BgState != BgSeatState.None || seat.IsAway)
                 return;
 
             bgPlayers.DrainVitals(characterId, m.Id, m.Space.Instance, health, stamina, mana, lethal);
@@ -2755,7 +4401,7 @@ namespace ACE.Server.Pvp
         /// second if the limit was lowered mid-round below the time already played, so overtime always runs its
         /// full length. The hard end is that start plus the overtime duration.
         /// </summary>
-        private void EnterOvertime(MatchRuntime m, DateTime now, int limit, double elapsed, bool survivorsShareFirst, PvpArenaDials dials)
+        private void EnterOvertime(MatchRuntime m, DateTime now, int limit, double elapsed, bool rankSurvivors, PvpArenaDials dials)
         {
             var regulationEnd = Math.Max(limit, (int)Math.Floor(elapsed));
 
@@ -2772,7 +4418,7 @@ namespace ACE.Server.Pvp
             var healingFactor = Rules.PvpRules.SanitizeMod(m.OvertimeHealingMod);
             var ramp = Rules.PvpRules.OvertimeRampMultiplier(m.OvertimeRampPerMinute, 60) - 1.0;
 
-            SendActive(m, PvpArenaText.OvertimeAnnouncement(m.OvertimeSeconds, healingFactor, ramp, survivorsShareFirst));
+            SendActive(m, PvpArenaText.OvertimeAnnouncement(m.OvertimeSeconds, healingFactor, ramp, rankSurvivors));
         }
 
         /// <summary>
@@ -2788,11 +4434,17 @@ namespace ACE.Server.Pvp
         ///   - ForfeitLeft: already outside by their own recall or portal. Exited now, never teleported.
         ///   - ForfeitCommand: still standing in the arena. Exited and returned now.
         ///   - ForfeitLogout: offline. Player.LogOut runs ExitPvpMatch itself, and the 9075 login restore is the backstop.
+        ///
+        /// Deserter lockout: <paramref name="departure"/> names the exit for the deserter table when it differs from what
+        /// <paramref name="how"/> stands for (a server-caused eject recorded as a forfeit); null takes <see cref="PvpDeserterRules.DepartureOf"/>.
         /// </summary>
-        private void MarkOut(MatchRuntime m, Seat seat, ParticipantExit how, DateTime now, uint killerId)
+        private void MarkOut(MatchRuntime m, Seat seat, ParticipantExit how, DateTime now, uint killerId, PvpDeparture? departure = null)
         {
             if (seat.Participant.ExitReason.HasValue)
                 return;
+
+            // A held seat that goes out (its grace ran out, its rejoin failed, or any other exit) is no longer held.
+            ClearAway(seat);
 
             m.WinCondition.OnParticipantOut(m.Match, seat.Participant, how);
 
@@ -2808,10 +4460,20 @@ namespace ACE.Server.Pvp
                 {
                     killer.Kills++;
                     line = PvpArenaText.Fill(PvpArenaText.Elimination, ("victim", seat.Name), ("killer", killer.Name));
+
+                    // Conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): a Tugak Brawl elimination is the killer's killshot in the
+                    // ledger. Arena matches only (a battleground death credits its killshot in HandleBattlegroundDeath), Live only, and only
+                    // across teams; 1v1 and 2v2 carry no ledger, so this is Tugak alone.
+                    if (!m.Mode.IsObjective && m.Match.State == PvpMatchState.Live && killer.TeamIndex != seat.TeamIndex)
+                        m.Match.Performance?.CreditKillshot(killer.Id, null, false);
                 }
                 else
                     line = PvpArenaText.Fill(PvpArenaText.EliminationNoKiller, ("victim", seat.Name));
             }
+            else if (how == ParticipantExit.ForfeitInactive)
+                line = PvpArenaText.Fill(PvpArenaText.RemovedInactive, ("name", seat.Name));
+            else if (how == ParticipantExit.ForfeitFeeding)
+                line = PvpArenaText.Fill(PvpArenaText.RemovedFeeding, ("name", seat.Name));
             else
                 line = PvpArenaText.Fill(PvpArenaText.Forfeit, ("name", seat.Name));
 
@@ -2821,6 +4483,10 @@ namespace ACE.Server.Pvp
             if ((m.Match.State == PvpMatchState.Staging || m.Match.State == PvpMatchState.Countdown)
                 && (how == ParticipantExit.ForfeitLeft || how == ParticipantExit.ForfeitLogout))
                 LockOut(seat.Id, now, Dials(), $"left match {m.Id} during {m.Match.State}");
+
+            // Deserter lockout: decided after the win condition has recorded the exit (so a seat already out can never be struck twice) and
+            // before the sends, the binding publish and the exit seams below, so a failing one of those never skips the strike.
+            var deserterStrike = ApplyDeserterStrike(m, seat, how, departure, now);
 
             SendAll(m.Seats.Where(kvp => kvp.Value.Dispatched).Select(kvp => kvp.Key), line);
 
@@ -2845,7 +4511,22 @@ namespace ACE.Server.Pvp
                 case ParticipantExit.ForfeitLogout:
                     ExitSeat(m, seat, "logout forfeit", teleport: false);
                     break;
+
+                // Conduct removals (Docs/Pvp/BATTLEGROUNDS.md "Conduct"): returned like /arena leave. A seat dying on its way to the pen
+                // (a feeding removal is decided at the death) is never teleported here: ExitSeat leaves it to the death return.
+                case ParticipantExit.ForfeitInactive:
+                    players.Send(seat.Id, PvpArenaText.RemovedInactiveYou);
+                    ExitSeat(m, seat, "removed for inactivity", teleport: true);
+                    break;
+
+                case ParticipantExit.ForfeitFeeding:
+                    players.Send(seat.Id, PvpArenaText.RemovedFeedingYou);
+                    ExitSeat(m, seat, "removed for feeding", teleport: true);
+                    break;
             }
+
+            if (deserterStrike != null)
+                TellDeserterStrike(seat, deserterStrike);
         }
 
         /// <summary>
@@ -2940,6 +4621,9 @@ namespace ACE.Server.Pvp
 
             seat.Exited = true;
 
+            // Thread return (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): every exit ends the player's participation, once.
+            EndParticipation(m, seat);
+
             // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 8): a seat still dying on its way to the pen is NEVER
             // teleported by the coordinator, whatever the caller asked - ReturnToExit would clear the stamp the death
             // teleport needs and drop the player at Sanctuary. It is exited without a teleport and awaits its death
@@ -2983,6 +4667,7 @@ namespace ACE.Server.Pvp
                 {
                     ReleaseTeamFellowship(m, seat, "offline after dying");
                     seat.Exited = true;
+                    EndParticipation(m, seat);
                     log.Info($"[PVP] match {m.Id}: {seat.Name} went offline after dying; the logout path exits them");
                 }
                 else if (presence == PvpPresence.Elsewhere)
@@ -3139,6 +4824,17 @@ namespace ACE.Server.Pvp
         private static string NameWithTemplate(Seat seat) => seat.TemplateLabel != null ? $"{seat.Name} ({seat.TemplateLabel})" : seat.Name;
 
         /// <summary>
+        /// The repeat-pairing cap's one-line notice (<see cref="PvpArenaText.UnpaidRematchNotice"/>) to each flagged seat still in
+        /// the match when it goes Live.
+        /// </summary>
+        private void NotifyUnpaidRematches(MatchRuntime m)
+        {
+            foreach (var seat in m.Seats.Values)
+                if (seat.UnpaidRematch && seat.Dispatched && !seat.Participant.ExitReason.HasValue)
+                    players.Send(seat.Id, PvpArenaText.UnpaidRematchNotice);
+        }
+
+        /// <summary>
         /// The arena announcement sent to every fighter when the match goes Live: each team's members with their
         /// templates, teams separated by "vs". FFA lists everyone.
         /// </summary>
@@ -3148,12 +4844,106 @@ namespace ACE.Server.Pvp
 
             string lineup;
 
+            // Team colours (Docs/Pvp/TEMPLATES.md "Team hue"): a two-team lineup tags each side with its colour; Tugak Brawl,
+            // where everyone wears the same colour, gets no tag.
             if (m.Mode.TeamCountRange.Max > 2)
                 lineup = string.Join(", ", active.OrderBy(s => s.TeamIndex).Select(NameWithTemplate));
             else
-                lineup = string.Join(" vs ", active.GroupBy(s => s.TeamIndex).OrderBy(g => g.Key).Select(g => string.Join(" and ", g.Select(NameWithTemplate))));
+                lineup = string.Join(" vs ", active.GroupBy(s => s.TeamIndex).OrderBy(g => g.Key)
+                    .Select(g => PvpArenaText.LineupTeam(LineupTeamTag(m, g.Key, g.First().Colour), string.Join(" and ", g.Select(NameWithTemplate)))));
+
+            if (m.Seats.Values.Any(s => s.UnpaidRematch))
+                lineup += PvpArenaText.UnpaidRematchTag;
 
             return PvpArenaText.Fill(PvpArenaText.Lineup, ("mode", PvpArenaText.ModeLabel(m.ModeKey)), ("lineup", lineup));
+        }
+
+        /// <summary>
+        /// One side's tag on a two-team lineup: "Attackers (Red)" where the mode keeps its own team names (Attack/Defend), "Red team"
+        /// everywhere else (1v1, 2v2, King of the Hill).
+        /// </summary>
+        private static string LineupTeamTag(MatchRuntime m, int teamIndex, PvpTeamColour colour)
+        {
+            if (PvpTeamColours.RuleFor(m.ModeKey) == PvpColourRule.AttackDefend && m.TickHandler is IObjectiveModeHandler handler)
+                return PvpArenaText.LineupModeTeamTag(handler.TeamName(teamIndex), colour);
+
+            return PvpArenaText.LineupColourTeamTag(colour);
+        }
+
+        /// <summary>
+        /// Splits the seats into the winners and everyone else (forfeiters included, even on the winning team). Shared by the
+        /// Discord line and the Arena Crier result line so the two never group differently.
+        /// </summary>
+        private static (List<Seat> Winners, List<Seat> Losers) SplitResultSeats(MatchRuntime m, MatchOutcome outcome)
+        {
+            var winners = new List<Seat>();
+            var losers = new List<Seat>();
+
+            foreach (var seat in m.Seats.Values)
+            {
+                var forfeited = IsForfeit(seat.Participant.ExitReason);
+                var won = outcome.WinningTeams.Contains(seat.TeamIndex) && !forfeited;
+
+                (won ? winners : losers).Add(seat);
+            }
+
+            return (winners, losers);
+        }
+
+        /// <summary>
+        /// A side's name on the Crier result line: "Red team" (1v1 prints bare names, so null), or the mode's own team name
+        /// ("Attackers", "Defenders") where it keeps one.
+        /// </summary>
+        private static string ResultTeamLabel(MatchRuntime m, Seat seat)
+        {
+            if (m.ModeKey == ArenaMapCatalog.OneVOneKey)
+                return null;
+
+            if (PvpTeamColours.RuleFor(m.ModeKey) == PvpColourRule.AttackDefend && m.TickHandler is IObjectiveModeHandler handler)
+                return handler.TeamName(seat.TeamIndex);
+
+            return PvpArenaText.LineupColourTeamTag(seat.Colour);
+        }
+
+        private static PvpResultSide ResultSide(MatchRuntime m, IReadOnlyList<Seat> seats)
+            => new PvpResultSide(seats.Count > 0 ? ResultTeamLabel(m, seats[0]) : null, seats.Select(s => s.Name).ToList());
+
+        /// <summary>The one-line /lfg result the Arena Crier posts for a resolved match (see <see cref="PvpMatchResultLine"/>).</summary>
+        private static string BuildMatchResultCrierLine(MatchRuntime m, MatchOutcome outcome)
+        {
+            var modeLabel = PvpArenaText.ModeLabel(m.ModeKey);
+            var (winners, losers) = SplitResultSeats(m, outcome);
+
+            if (m.Mode.TeamCountRange.Max > 2)
+            {
+                if (outcome.IsDraw)
+                    return PvpMatchResultLine.Build(modeLabel, PvpResultKind.Draw);
+
+                return winners.Count == 0
+                    ? PvpMatchResultLine.Build(modeLabel, PvpResultKind.NoWinner)
+                    : PvpMatchResultLine.Build(modeLabel, PvpResultKind.FfaWin, new[] { new PvpResultSide(null, winners.Select(s => s.Name).ToList()) }, losers.Count);
+            }
+
+            if (outcome.IsDraw)
+            {
+                var sides = m.Seats.Values.GroupBy(s => s.TeamIndex).OrderBy(g => g.Key).Select(g => ResultSide(m, g.ToList())).ToList();
+
+                return PvpMatchResultLine.Build(modeLabel, PvpResultKind.Draw, sides);
+            }
+
+            if (winners.Count == 0)
+                return PvpMatchResultLine.Build(modeLabel, PvpResultKind.NoWinner);
+
+            // The losing side is the seats on the non-winning teams. A forfeiter from the winning team is on NEITHER side (it would
+            // otherwise print under the losing team's label); the Discord line keeps its own grouping. No losing side = no winner line.
+            var losingSeats = losers.Where(s => !outcome.WinningTeams.Contains(s.TeamIndex)).ToList();
+
+            if (losingSeats.Count == 0)
+                return PvpMatchResultLine.Build(modeLabel, PvpResultKind.NoWinner);
+
+            var loserSide = ResultSide(m, losingSeats);
+
+            return PvpMatchResultLine.Build(modeLabel, PvpResultKind.Win, new[] { ResultSide(m, winners), loserSide });
         }
 
         private static string BuildMatchResultDiscordMessage(MatchRuntime m, MatchOutcome outcome)
@@ -3166,16 +4956,9 @@ namespace ACE.Server.Pvp
                 return $"[Arena] {modeLabel} match ended in a draw: {everyone}.";
             }
 
-            var winners = new List<string>();
-            var losers = new List<string>();
-
-            foreach (var seat in m.Seats.Values)
-            {
-                var forfeited = IsForfeit(seat.Participant.ExitReason);
-                var won = outcome.WinningTeams.Contains(seat.TeamIndex) && !forfeited;
-
-                (won ? winners : losers).Add(NameWithTemplate(seat));
-            }
+            var (winnerSeats, loserSeats) = SplitResultSeats(m, outcome);
+            var winners = winnerSeats.Select(NameWithTemplate).ToList();
+            var losers = loserSeats.Select(NameWithTemplate).ToList();
 
             var winnersText = winners.Count > 0 ? string.Join(", ", winners) : "(none)";
             var losersText = losers.Count > 0 ? string.Join(", ", losers) : "(none)";
@@ -3214,6 +4997,13 @@ namespace ACE.Server.Pvp
 
             SetState(m, PvpMatchState.Resolving, now, $"{outcome.Reason}, winners [{string.Join(",", outcome.WinningTeams)}], placements [{string.Join(",", outcome.Placements)}], draw {outcome.IsDraw}, rated {rated}{(sameIpOpponents ? " (same-IP opponents)" : "")}");
 
+            // Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): a seat still held when the match is decided is a
+            // participant like any other (no ExitReason, so not a forfeit): its team result, rating and payout below are a present seat's.
+            var held = m.Seats.Values.Where(s => s.IsAway && !s.Participant.ExitReason.HasValue).Select(s => s.Name).ToList();
+
+            if (held.Count > 0)
+                log.Info($"[PVP] match {m.Id}: resolved with {held.Count} seat(s) held for a rejoin, scored as present: {string.Join(", ", held)}");
+
 
             // The match is decided: a pre-Live resolve (a walkout in Staging or Countdown) must not wall the survivors in until CloseNow.
             // CloseNow keeps its own call as an idempotent backstop.
@@ -3221,10 +5011,20 @@ namespace ACE.Server.Pvp
 
             Publish(m, PvpMatchState.Resolving);
 
+            IReadOnlyDictionary<uint, SeatPerformanceModifier> perfModifiers = null;
+            IReadOnlyDictionary<uint, double> appliedPerf = null;
+
             if (m.Mode.IsObjective)
             {
                 // Battlegrounds: their own result line (never the FFA timeout text), and the team score to the log only.
                 log.Info($"[PVP] match {m.Id} ({m.ModeKey}): final score [{string.Join(",", m.Match.ScoreBoard.OrderBy(s => s.Key).Select(s => s.Key + ":" + s.Value))}], team kills [{string.Join(",", m.Match.TeamKills.OrderBy(k => k.Key).Select(k => k.Key + ":" + k.Value))}], target {m.ScoreTarget}");
+
+                // The stats first, on their own, so they are in the log whatever happens to the rating below.
+                LogPerformance(m);
+
+                // Rating and performance (Docs/Pvp/BATTLEGROUNDS.md): each seat's performance modifier from the ledger, read when the match
+                // resolves. Null (every modifier 0, so the deltas are exactly team Elo) when pvp_bg_perf_enabled is off or there is no ledger.
+                perfModifiers = BuildPerformanceModifiers(m);
 
                 // The mode's own result line (Docs/Pvp/ATTACK-DEFEND.md "Mode seam"): King of the Hill returns exactly the score win,
                 // timeout draw and timeout win it always sent; Attack/Defend its attackers' and defenders' lines; null for anything else.
@@ -3233,8 +5033,14 @@ namespace ACE.Server.Pvp
                 if (objectiveLine != null)
                     SendAll(m.PlacedIds, objectiveLine);
             }
-            else if (outcome.Reason == EndReason.Timeout)
-                SendAll(m.PlacedIds, outcome.IsDraw ? PvpArenaText.TimeUpDraw : PvpArenaText.TimeUpFfa);
+            else
+            {
+                // Conduct signals: a Tugak Brawl ledger is logged like a battleground's (a no-op for 1v1 and 2v2, which carry none).
+                LogPerformance(m);
+
+                if (outcome.Reason == EndReason.Timeout)
+                    SendAll(m.PlacedIds, outcome.IsDraw ? PvpArenaText.TimeUpDraw : PvpArenaText.TimeUpFfa);
+            }
 
             // Ratings: decay-on-read inputs, each player's own K, the forfeiter's S = 0 in a two-team mode.
             var views = m.Seats.Values.ToDictionary(s => s.Id, s => Ratings.Read(s.Id, m.Mode.LadderKey, now, dials));
@@ -3246,11 +5052,23 @@ namespace ACE.Server.Pvp
                 {
                     var v = views[p.CharacterId];
                     var k = EloRating.SelectK(v.Games, dials.RatingProvisionalGames, dials.RatingKProvisional, dials.RatingKEstablished);
-                    return new RatedPlayer(p.CharacterId, v.Rating, k, p.IpKey, ForceZeroScore: twoTeam && IsForfeit(p.ExitReason));
+                    var perf = perfModifiers != null && perfModifiers.TryGetValue(p.CharacterId, out var pm) ? pm.Modifier : 0.0;
+                    return new RatedPlayer(p.CharacterId, v.Rating, k, p.IpKey, ForceZeroScore: twoTeam && IsForfeit(p.ExitReason), PerformanceModifier: perf);
                 }).ToList())).ToList();
 
-                deltas = m.Mode.Rating.Deltas(ratedTeams, outcome);
+                if (m.Mode.Rating is PerformanceTeamEloModel performanceModel)
+                {
+                    var computed = performanceModel.Compute(ratedTeams, outcome);
+                    deltas = computed.Deltas;
+                    appliedPerf = computed.AppliedModifiers;
+                }
+                else
+                    deltas = m.Mode.Rating.Deltas(ratedTeams, outcome);
             }
+
+            // Rating and performance: a second line per seat with P, m and the modifier the rating applied, once it is known.
+            if (perfModifiers != null)
+                LogPerformanceModifiers(m, perfModifiers, appliedPerf);
 
             var participantRecords = new List<PvpMatchParticipantRecord>();
             var upserts = new List<PvpRatingRecord>();
@@ -3318,7 +5136,15 @@ namespace ACE.Server.Pvp
                     players.Send(seat.Id, won ? PvpArenaText.Win : PvpArenaText.Loss);
 
                 if (before.HasValue)
-                    players.Send(seat.Id, PvpArenaText.Fill(PvpArenaText.RatingChange, ("ladder", ladderLabel), ("before", before.Value), ("after", after.Value), ("delta", (after.Value - before.Value).ToString("+0;-0;+0"))));
+                {
+                    // Rating and performance: the applied modifier as a signed whole percent, only when it moved the change.
+                    var perfPct = appliedPerf != null && appliedPerf.TryGetValue(seat.Id, out var applied) ? BattlegroundPerformanceModifier.ChatPercent(applied) : null;
+                    var deltaText = (after.Value - before.Value).ToString("+0;-0;+0");
+
+                    players.Send(seat.Id, perfPct != null
+                        ? PvpArenaText.Fill(PvpArenaText.RatingChangePerformance, ("ladder", ladderLabel), ("before", before.Value), ("after", after.Value), ("delta", deltaText), ("perf", perfPct))
+                        : PvpArenaText.Fill(PvpArenaText.RatingChange, ("ladder", ladderLabel), ("before", before.Value), ("after", after.Value), ("delta", deltaText)));
+                }
                 else
                     players.Send(seat.Id, PvpArenaText.Unrated);
             }
@@ -3374,11 +5200,17 @@ namespace ACE.Server.Pvp
                 log.Error($"[PVP] match {m.Id}: the Discord feed post failed; the match result above was already saved", ex);
             }
 
+            AuditAlternation(m, outcome, now);
+
             // The arena Blood payout (Docs/Pvp/DESIGN.md "Rewards"). AFTER the save, for the same reason as the Discord
             // post: nothing in it may ever stand between a decided match and its saved result. Never in the Discord
             // text either - the feed carries no reward text.
             if (m.Mode.PaysBlood)
+            {
+                // Counted BEFORE the payout so a throw in the payout cannot skip it (RecordPairings is idempotent via PairCounted).
+                RecordPairings(m, sameIpOpponents);
                 PayArenaBlood(m, outcome, dials, twoTeam, sameIpOpponents);
+            }
             else if (m.Mode.IsObjective)
                 PayBattlegroundMarks(m, outcome, dials, twoTeam, sameIpOpponents);
             else
@@ -3388,6 +5220,363 @@ namespace ACE.Server.Pvp
                 m.BloodPaid = true;
                 log.Info($"[PVP] match {m.Id}: no Blood paid ({m.ModeKey} does not pay)");
             }
+
+            // PvP dailies (PvpDailyCatalog): each eligible seat's facts, built once here beside the payouts and applied on the player's
+            // own action chain. Last, and guarded on its own, so nothing in it can stand between the match and its save or its payout.
+            DispatchDailyFacts(m, outcome, twoTeam, sameIpOpponents);
+
+            // The Arena Crier result line on /lfg. Very last, after the save, the result sends, the payout and the daily facts, in its own
+            // try/catch: a failure here must never reach any of them. Only a match that went Live is announced (a walkout during Staging or
+            // Countdown posts nothing publicly). Gated by pvp_arena_enabled and pvp_arena_crier_results_enabled, never by
+            // pvp_arena_crier_enabled (same as the Double Marks lines).
+            try
+            {
+                if (dials.Enabled && dials.CrierResultsEnabled && m.Match.LiveSinceUtc.HasValue)
+                    arenaAnnouncer.Announce(new[] { BuildMatchResultCrierLine(m, outcome) }, dials.CrierSenderName);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: the Crier result announcement failed; the match result above was already saved", ex);
+            }
+        }
+
+        /// <summary>
+        /// Test seam: runs the daily facts dispatch of an already-resolved match again, with the arguments Resolve used, as a second
+        /// Resolve (or any later path) would. The <see cref="MatchRuntime.DailyFactsDispatched"/> guard must make it a no-op.
+        /// </summary>
+        internal void RedispatchDailyFactsForTest(Guid matchId)
+        {
+            var m = matches.FirstOrDefault(x => x.Id == matchId);
+
+            if (m?.Outcome == null)
+                return;
+
+            var twoTeam = m.Mode.TeamCountRange.Max == 2;
+            var sameIpOpponents = twoTeam && dialSource().BlockSameIp == false && HasCrossTeamSameIp(m);
+
+            DispatchDailyFacts(m, m.Outcome, twoTeam, sameIpOpponents);
+        }
+
+        /// <summary>
+        /// The PvP daily facts of a resolved match (PvpMatchFacts), exactly once per match: guarded by
+        /// <see cref="MatchRuntime.DailyFactsDispatched"/>, set before the first dispatch. A seat gets facts only when the shared
+        /// <see cref="PvpRewardEligibility"/> rule passes - the same rule as the Blood and Marks payouts (went Live, no same-IP
+        /// opponents, no forfeit, no unpaid rematch, not withheld by the contribution floor) - and NOT gated on pvp_arena_blood_enabled,
+        /// which switches the currency payout only. The one exception: a seat that forfeited a Live 1v1 gets the minimal forfeit fact
+        /// (<see cref="PvpMatchFacts.ForfeitOf"/>), which only resets GladiatorsStreak. The peak rating is read from the rating store here, on the world thread. Each seat
+        /// has its own try/catch; the whole thing is best effort.
+        /// </summary>
+        private void DispatchDailyFacts(MatchRuntime m, MatchOutcome outcome, bool twoTeam, bool sameIpOpponents)
+        {
+            if (m.DailyFactsDispatched)
+            {
+                log.Warn($"[PVP] match {m.Id}: daily facts already dispatched; not dispatching again");
+                return;
+            }
+
+            m.DailyFactsDispatched = true;
+
+            try
+            {
+                var wentLive = m.Match.LiveSinceUtc.HasValue;
+
+                if (!wentLive || sameIpOpponents)
+                {
+                    log.Info($"[PVP] match {m.Id}: no daily facts ({(!wentLive ? "the match never went Live" : "same-IP opponents")})");
+                    return;
+                }
+
+                // When this is the floor's first evaluation, the payout never reached it (the master switch is off, the mode pays nothing,
+                // or the payout threw first), so no seat is owed Marks and a below-floor seat is logged "below floor", not "WITHHELD".
+                var floor = EvaluateContributionFloor(m, amountFor: _ => 0);
+                var stats = m.Match.Performance?.Snapshot().ToDictionary(s => s.CharacterId) ?? new Dictionary<uint, SeatPerformanceSnapshot>();
+                var mode = PvpMatchFacts.ModeOf(m.ModeKey);
+                var sent = new List<string>();
+
+                foreach (var seat in m.Seats.Values)
+                {
+                    try
+                    {
+                        var forfeited = IsForfeit(seat.Participant.ExitReason);
+                        var exclusion = PvpRewardEligibility.Evaluate(wentLive, sameIpOpponents, forfeited, seat.UnpaidRematch, BelowFloor(floor, seat.Id));
+
+                        if (exclusion != PvpRewardExclusion.None)
+                        {
+                            // A Live 1v1 forfeit (same-IP matches already returned above) is a loss for GladiatorsStreak only: the
+                            // forfeiter gets the minimal forfeit fact, which resets the streak and advances nothing else. Without it a
+                            // forfeit would dodge the reset a loss gets. Every other exclusion gets nothing.
+                            if (exclusion == PvpRewardExclusion.Forfeited && mode == PvpDailyMode.OneVOne)
+                            {
+                                players.ApplyDailyFacts(PvpMatchFacts.ForfeitOf(m.Id, seat.Id, seat.TeamIndex));
+                                sent.Add($"{seat.Name} forfeit (streak reset only)");
+                                continue;
+                            }
+
+                            sent.Add($"{seat.Name} skipped ({exclusion})");
+                            continue;
+                        }
+
+                        var won = !outcome.IsDraw && outcome.WinningTeams.Contains(seat.TeamIndex);
+                        var result = PvpArenaRewards.ResultFor(outcome.IsDraw, twoTeam, won, outcome.Placements[seat.TeamIndex]);
+                        stats.TryGetValue(seat.Id, out var s);
+
+                        // 1v1 only: the one opponent's repeat-pairing ACCOUNT key (never the character), for ProvingGround and GladiatorsStreak.
+                        uint? opponentAccount = null;
+
+                        if (mode == PvpDailyMode.OneVOne)
+                        {
+                            var opponents = m.Seats.Values.Where(o => o.TeamIndex != seat.TeamIndex).ToList();
+
+                            if (opponents.Count == 1)
+                                opponentAccount = opponents[0].Unit.AccountOf(opponents[0].Id);
+                        }
+
+                        var facts = new PvpMatchFacts(
+                            MatchId: m.Id,
+                            CharacterId: seat.Id,
+                            Mode: mode,
+                            TeamIndex: seat.TeamIndex,
+                            Result: result,
+                            Kills: seat.Kills,
+                            HillSeconds: s.HillSeconds,
+                            CrystalDamage: s.CrystalDamage,
+                            KillshotsNearCrystal: s.KillshotsNearCrystal,
+                            KillshotsOnHill: s.KillshotsOnHill,
+                            OpponentAccount: opponentAccount,
+                            PeakRating: Ratings.PeakAcrossLadders(seat.Id));
+
+                        players.ApplyDailyFacts(facts);
+                        sent.Add($"{seat.Name} {result.ToString().ToLowerInvariant()}");
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[PVP] match {m.Id}: building the daily facts for {seat.Name} (0x{seat.Id:X8}) threw; nobody gets them twice", ex);
+                    }
+                }
+
+                log.Info($"[PVP] match {m.Id}: daily facts dispatched: {string.Join("; ", sent)}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: dispatching the daily facts threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): one "[PVP] match &lt;id&gt; perf:" line per seat at Resolve,
+        /// written through <see cref="PerformanceLogSink"/> (the log by default). Reads the ledger only; nothing here touches a rating,
+        /// a score or a payout. Written BEFORE the rating is computed, so the stats survive anything that goes wrong there. Best effort: a
+        /// throw is logged and Resolve carries on.
+        /// </summary>
+        private void LogPerformance(MatchRuntime m)
+        {
+            var perf = m.Match.Performance;
+
+            if (perf == null)
+                return;
+
+            try
+            {
+                foreach (var s in perf.Snapshot())
+                {
+                    var name = m.Seats.TryGetValue(s.CharacterId, out var seat) ? seat.Name : "?";
+                    var line = BattlegroundPerformanceLedger.FormatLogLine(m.Id, name, s);
+
+                    if (PerformanceLogSink != null)
+                        PerformanceLogSink(line);
+                    else
+                        log.Info(line);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: writing the performance stats threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Rating and performance (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance"): one "[PVP] match &lt;id&gt; perf_mod:" line per seat after
+        /// the rating is computed, through <see cref="PerformanceLogSink"/>: P, m before the team's zero-sum pass, and the modifier the rating
+        /// applied ("-" when the match was unrated). Best effort: a throw is logged and Resolve carries on.
+        /// </summary>
+        private void LogPerformanceModifiers(MatchRuntime m, IReadOnlyDictionary<uint, SeatPerformanceModifier> modifiers, IReadOnlyDictionary<uint, double> applied)
+        {
+            try
+            {
+                foreach (var mod in modifiers.Values.OrderBy(x => x.TeamIndex).ThenBy(x => x.CharacterId))
+                {
+                    var name = m.Seats.TryGetValue(mod.CharacterId, out var seat) ? seat.Name : "?";
+                    var line = BattlegroundPerformanceLedger.FormatModifierLine(m.Id, name, mod.CharacterId, mod.TeamIndex, mod.Score, mod.Modifier,
+                        applied != null && applied.TryGetValue(mod.CharacterId, out var a) ? a : (double?)null);
+
+                    if (PerformanceLogSink != null)
+                        PerformanceLogSink(line);
+                    else
+                        log.Info(line);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: writing the performance modifiers threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Rating and performance (Docs/Pvp/BATTLEGROUNDS.md): every seat's performance modifier from the ledger, by the pure
+        /// <see cref="BattlegroundPerformanceModifier.Modifiers"/> under the pvp_bg_perf_* settings read now. A seat is a forfeiter by the same rule the
+        /// rating uses (<see cref="IsForfeit"/>) and eligible only once dispatched. Null when pvp_bg_perf_enabled is off, there is no ledger, or
+        /// the computation throws (logged): the deltas are then exactly team Elo.
+        /// </summary>
+        private IReadOnlyDictionary<uint, SeatPerformanceModifier> BuildPerformanceModifiers(MatchRuntime m)
+        {
+            var ledger = m.Match.Performance;
+
+            if (ledger == null)
+                return null;
+
+            try
+            {
+                PerformanceModifierFaultForTest?.Invoke(m.Id);
+
+                var dials = PerformanceDials.From(BgDials());
+
+                if (dials == null || !dials.Enabled)
+                    return null;
+
+                return BattlegroundPerformanceModifier.Modifiers(m.ModeKey, BuildPerformanceSeats(m, ledger), dials);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: computing the performance modifiers threw; rating this match on team Elo alone", ex);
+                return null;
+            }
+        }
+
+        /// <summary>Test seam: called inside <see cref="EvaluateContributionFloor"/>'s try (floor on), so a test can make it throw. Null in production.</summary>
+        internal Action<Guid> ContributionFloorFaultForTest { get; set; }
+
+        /// <summary>
+        /// Every seat of the match with its final ledger counters (zeros when the ledger has no row), as the performance modifier, the
+        /// contribution floor and the feeding check all read them: a forfeiter by <see cref="IsForfeit"/>, dispatched from the seat.
+        /// </summary>
+        private static List<PerformanceSeat> BuildPerformanceSeats(MatchRuntime m, BattlegroundPerformanceLedger ledger)
+        {
+            var stats = ledger.Snapshot().ToDictionary(s => s.CharacterId);
+            var seats = new List<PerformanceSeat>();
+
+            foreach (var team in m.Match.Teams)
+                foreach (var p in team.Members)
+                {
+                    var dispatched = m.Seats.TryGetValue(p.CharacterId, out var seat) && seat.Dispatched;
+                    var s = stats.TryGetValue(p.CharacterId, out var snap) ? snap : new SeatPerformanceSnapshot(p.CharacterId, team.TeamIndex, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+                    seats.Add(new PerformanceSeat(p.CharacterId, team.TeamIndex, s, p.IpKey, IsForfeit(p.ExitReason), dispatched));
+                }
+
+            return seats;
+        }
+
+        /// <summary>Test seam: called inside <see cref="BuildPerformanceModifiers"/>'s try, so a test can make it throw. Null in production.</summary>
+        internal Action<Guid> PerformanceModifierFaultForTest { get; set; }
+
+        /// <summary>Test seam: receives each performance line instead of the log. Null in production.</summary>
+        internal Action<string> PerformanceLogSink { get; set; }
+
+        /// <summary>
+        /// Contribution floor (Docs/Pvp/BATTLEGROUNDS.md "Contribution floor"): each non-forfeiting seat's decision from the final ledger and the
+        /// pvp_conduct_floor_* dials read now, logged next to the perf lines. Empty (nobody withheld) when the floor is off, there is no ledger
+        /// (1v1, 2v2) or the computation throws (logged): a fault never costs a player their pay. amountFor says how many Marks each seat is
+        /// owed, so a below-floor seat owed 0 is logged "below floor" rather than "WITHHELD"; it is read only by the FIRST call of a match,
+        /// the one that evaluates and logs (the payout when it reaches the floor, otherwise the daily facts).
+        /// </summary>
+        private IReadOnlyDictionary<uint, FloorDecision> EvaluateContributionFloor(MatchRuntime m, Func<uint, int> amountFor)
+        {
+            // Decided once per match at Resolve: the payout and the PvP daily facts both read it, and it logs its lines only once.
+            if (m.FloorDecisions == null)
+                m.FloorDecisions = EvaluateContributionFloorNow(m, amountFor);
+
+            return m.FloorDecisions;
+        }
+
+        private static bool BelowFloor(IReadOnlyDictionary<uint, FloorDecision> floor, uint characterId) => floor.TryGetValue(characterId, out var fd) && fd.BelowFloor;
+
+        private IReadOnlyDictionary<uint, FloorDecision> EvaluateContributionFloorNow(MatchRuntime m, Func<uint, int> amountFor)
+        {
+            var empty = new Dictionary<uint, FloorDecision>();
+            var ledger = m.Match.Performance;
+
+            if (ledger == null)
+                return empty;
+
+            try
+            {
+                var conduct = conductDialSource() ?? PvpConductTunables.Defaults;
+
+                if (!conduct.FloorEnabled)
+                    return empty;
+
+                ContributionFloorFaultForTest?.Invoke(m.Id);
+
+                // The Live duration at Resolve scales the absolute threshold (a match the opponents forfeit early cannot withhold the winners).
+                var liveSeconds = m.Match.LiveSinceUtc.HasValue ? (m.ResolvedAtUtc - m.Match.LiveSinceUtc.Value).TotalSeconds : 0.0;
+                var decisions = PvpConductFloor.Evaluate(m.ModeKey, BuildPerformanceSeats(m, ledger), conduct, PerformanceDials.From(BgDials()), liveSeconds);
+
+                foreach (var d in decisions.Values.OrderBy(x => x.CharacterId))
+                {
+                    var name = m.Seats.TryGetValue(d.CharacterId, out var seat) ? seat.Name : "?";
+                    // With nothing owed (a 0 amount) the seat is not WITHHELD anything: the floor is still evaluated (the dailies engine reads it), the log just says so.
+                    var line = PvpConductFloor.FormatLogLine(m.Id, name, d, nothingOwed: amountFor != null && amountFor(d.CharacterId) <= 0);
+
+                    if (PerformanceLogSink != null)
+                        PerformanceLogSink(line);
+                    else
+                        log.Info(line);
+                }
+
+                return decisions;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] match {m.Id}: evaluating the contribution floor threw; nobody is withheld", ex);
+                return empty;
+            }
+        }
+
+        /// <summary>A seat's payout inputs, computed once per payout by <see cref="ComputeSeatPayouts"/>.</summary>
+        private readonly record struct SeatPayout(bool Forfeited, PvpBloodResult Result, int Amount);
+
+        /// <summary>Test seam: called inside <see cref="ComputeSeatPayouts"/>'s per-seat try, so a test can make one seat's computation throw. Null in production.</summary>
+        internal Action<uint> SeatPayoutFaultForTest { get; set; }
+
+        /// <summary>
+        /// Each seat's forfeit, result and base amount (before the contribution floor), computed ONCE per payout: the floor's
+        /// amountFor and the pay loop both read this one table, so the amount rule is written once. Each seat has its own try/catch:
+        /// a seat whose computation throws is logged and left out (it is paid nothing), and no other seat is affected - in particular
+        /// the floor still runs for everyone else.
+        /// </summary>
+        private Dictionary<uint, SeatPayout> ComputeSeatPayouts(MatchRuntime m, MatchOutcome outcome, bool twoTeam, string currency, Func<Seat, bool, PvpBloodResult, int> amountOf)
+        {
+            var pays = new Dictionary<uint, SeatPayout>();
+
+            foreach (var seat in m.Seats.Values)
+            {
+                try
+                {
+                    SeatPayoutFaultForTest?.Invoke(seat.Id);
+
+                    var forfeited = IsForfeit(seat.Participant.ExitReason);
+                    var won = !outcome.IsDraw && outcome.WinningTeams.Contains(seat.TeamIndex) && !forfeited;
+                    var result = PvpArenaRewards.ResultFor(outcome.IsDraw, twoTeam, won, outcome.Placements[seat.TeamIndex]);
+
+                    pays[seat.Id] = new SeatPayout(forfeited, result, amountOf(seat, forfeited, result));
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[PVP] match {m.Id}: computing the {currency} amount for {seat.Name} (0x{seat.Id:X8}) threw; that seat is paid nothing", ex);
+                }
+            }
+
+            return pays;
         }
 
         /// <summary>
@@ -3418,19 +5607,37 @@ namespace ACE.Server.Pvp
             }
 
             var bg = BgDials();
-            var grant = new PvpBloodGrant(m.Id, bg.MarksDailyCap, dials.BloodResetTimezone, dials.BloodResetHour, PvpBloodLedgerKind.Battleground);
+            // Decided by when the match went LIVE, not when it resolves (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows").
+            var bonus = BgBonusConfig.IsBonusMatch(bg, m.Match.LiveSinceUtc.Value) ? PvpArenaRewards.SanitizeBonusMultiplier(bg.BonusMultiplier) : 1.0;
+            var grant = new PvpBloodGrant(m.Id, bg.MarksDailyCap, dials.BloodResetTimezone, dials.BloodResetHour, PvpBloodLedgerKind.Battleground, bonus > 1.0);
             var paid = new List<string>();
+            var seatPays = ComputeSeatPayouts(m, outcome, twoTeam, "Marks", (s, forfeited, result) =>
+                PvpArenaRewards.BgMarksFor(result, forfeited, wentLive, sameIpOpponents, dials.BloodEnabled, bg, withheld: false, bonusMultiplier: bonus));
+            var floor = EvaluateContributionFloor(m, id => seatPays.TryGetValue(id, out var sp) ? sp.Amount : 0);
 
             foreach (var seat in m.Seats.Values)
             {
+                // A seat whose amount could not be computed was logged by ComputeSeatPayouts and is paid nothing; nobody else is affected.
+                if (!seatPays.TryGetValue(seat.Id, out var pay))
+                    continue;
+
                 try
                 {
-                    var forfeited = IsForfeit(seat.Participant.ExitReason);
-                    var won = !outcome.IsDraw && outcome.WinningTeams.Contains(seat.TeamIndex) && !forfeited;
-                    var result = PvpArenaRewards.ResultFor(outcome.IsDraw, twoTeam, won, outcome.Placements[seat.TeamIndex]);
-                    var amount = PvpArenaRewards.BgMarksFor(result, forfeited, wentLive, sameIpOpponents, dials.BloodEnabled, bg);
+                    var forfeited = pay.Forfeited;
+                    var result = pay.Result;
+                    var baseAmount = pay.Amount;
+                    // The shared eligibility rule (PvpRewardEligibility, also read by the PvP daily facts). A positive base already means
+                    // Live, no same-IP, no forfeit; a battleground seat is never an unpaid rematch; so this is exactly the floor test.
+                    // The floor is evaluated even at a 0 base amount (the daily facts read it too); nothing is owed then, so only the log notes it.
+                    var belowFloor = BelowFloor(floor, seat.Id);
+                    var exclusion = PvpRewardEligibility.Evaluate(wentLive, sameIpOpponents, forfeited, seat.UnpaidRematch, belowFloor);
+                    var withheld = baseAmount > 0 && exclusion == PvpRewardExclusion.BelowContributionFloor;
+                    var amount = withheld ? 0 : baseAmount;
 
-                    paid.Add($"{seat.Name} {(forfeited ? "forfeit" : result.ToString().ToLowerInvariant())} {amount}");
+                    if (withheld)
+                        players.Send(seat.Id, PvpArenaText.ContributionFloorWithheld);
+
+                    paid.Add($"{seat.Name} {(forfeited ? "forfeit" : result.ToString().ToLowerInvariant())} {amount}{(withheld ? " (withheld: contribution floor)" : belowFloor ? " (below floor)" : "")}");
 
                     if (amount > 0)
                         players.GrantArenaBlood(seat.Id, amount, grant);
@@ -3441,7 +5648,7 @@ namespace ACE.Server.Pvp
                 }
             }
 
-            log.Info($"[PVP] match {m.Id}: Marks granted before the battleground daily cap: {string.Join("; ", paid)}");
+            log.Info($"[PVP] match {m.Id}: Marks granted before the battleground daily cap{(bonus > 1.0 ? $" (Double Marks window, x{bonus})" : "")}: {string.Join("; ", paid)}");
         }
 
         /// <summary>
@@ -3472,17 +5679,37 @@ namespace ACE.Server.Pvp
 
             var grant = new PvpBloodGrant(m.Id, dials.BloodDailyCap, dials.BloodResetTimezone, dials.BloodResetHour);
             var paid = new List<string>();
+            var seatPays = ComputeSeatPayouts(m, outcome, twoTeam, "Blood", (s, forfeited, result) =>
+                PvpArenaRewards.BloodFor(result, forfeited, wentLive, sameIpOpponents, dials, withheld: s.UnpaidRematch));
+            var floor = EvaluateContributionFloor(m, id => seatPays.TryGetValue(id, out var sp) ? sp.Amount : 0);
 
             foreach (var seat in m.Seats.Values)
             {
+                // A seat whose amount could not be computed was logged by ComputeSeatPayouts and is paid nothing; nobody else is affected.
+                if (!seatPays.TryGetValue(seat.Id, out var pay))
+                    continue;
+
                 try
                 {
-                    var forfeited = IsForfeit(seat.Participant.ExitReason);
-                    var won = !outcome.IsDraw && outcome.WinningTeams.Contains(seat.TeamIndex) && !forfeited;
-                    var result = PvpArenaRewards.ResultFor(outcome.IsDraw, twoTeam, won, outcome.Placements[seat.TeamIndex]);
-                    var amount = PvpArenaRewards.BloodFor(result, forfeited, wentLive, sameIpOpponents, dials);
+                    var forfeited = pay.Forfeited;
+                    var result = pay.Result;
+                    var amount = pay.Amount;
 
-                    paid.Add($"{seat.Name} {(forfeited ? "forfeit" : result.ToString().ToLowerInvariant())} {amount}");
+                    // Contribution floor: gated here, not in BloodFor. A withheld seat makes no grant call, so it never consumes the daily cap.
+                    // An unpaid rematch already has amount 0 from BloodFor above, so the floor never fires (or messages) on top of it.
+                    // The shared eligibility rule (PvpRewardEligibility, also read by the PvP daily facts). A positive amount already means
+                    // Live, no same-IP, no forfeit and no unpaid rematch, so this is exactly the floor test. belowFloor alone only annotates the log.
+                    var belowFloor = BelowFloor(floor, seat.Id);
+                    var exclusion = PvpRewardEligibility.Evaluate(wentLive, sameIpOpponents, forfeited, seat.UnpaidRematch, belowFloor);
+                    var withheld = amount > 0 && exclusion == PvpRewardExclusion.BelowContributionFloor;
+
+                    if (withheld)
+                    {
+                        amount = 0;
+                        players.Send(seat.Id, PvpArenaText.ContributionFloorWithheld);
+                    }
+
+                    paid.Add($"{seat.Name} {(forfeited ? "forfeit" : seat.UnpaidRematch ? "unpaid-rematch" : result.ToString().ToLowerInvariant())} {amount}{(withheld ? " (withheld: contribution floor)" : belowFloor ? " (below floor)" : "")}");
 
                     if (amount > 0)
                         players.GrantArenaBlood(seat.Id, amount, grant);
@@ -3591,6 +5818,8 @@ namespace ACE.Server.Pvp
                 case ParticipantExit.ForfeitLogout: return "logout";
                 case ParticipantExit.ForfeitLeft: return "left";
                 case ParticipantExit.ForfeitCommand: return "command";
+                case ParticipantExit.ForfeitInactive: return "inactive";
+                case ParticipantExit.ForfeitFeeding: return "feeding";
                 default: return null;
             }
         }
@@ -3633,6 +5862,8 @@ namespace ACE.Server.Pvp
             var now = clock();
             var dials = Dials();
 
+            conductDialsThisTick = null;
+
             var facts = players.GetFacts(characterId);
 
             if (facts == null)
@@ -3641,13 +5872,29 @@ namespace ACE.Server.Pvp
             if (duo && key != ArenaMapCatalog.TwoVTwoKey)
                 return new PvpJoinResult(PvpJoinRefusal.DuoNotSupportedForMode, key);
 
+            // pvp_bg_group_join_enabled (owner ruling 2026-10-15): refused before Admit and before anything is queued, for every
+            // member whoever issues it. This is the ONLY place a multi-member battleground unit is created (the sole QueuedUnit
+            // built from a fellowship for bg; duo is 2v2-only above), so the gate covers every caller. A premade ALREADY queued
+            // when the setting is turned off is deliberately left alone: nothing here touches room.Units.
+            // It sits ABOVE the wrong-mode check so "/arena join 2v2 group" does not answer "Use /arena join bg group", which
+            // would advertise the disabled feature.
+            if (group && !BgDials().GroupJoinEnabled)
+                return new PvpJoinResult(PvpJoinRefusal.GroupJoinDisabled, key);
+
             if (group && key != BattlegroundModes.RoomKey)
                 return new PvpJoinResult(PvpJoinRefusal.GroupNotSupportedForMode, key);
 
             var refusal = Admit(facts, key, now, dials, out var lockoutSeconds, out var queuedMode);
 
             if (refusal != PvpJoinRefusal.None)
-                return new PvpJoinResult(refusal, queuedMode ?? key, LockoutSecondsRemaining: lockoutSeconds, MinLevel: dials.MinLevel);
+            {
+                // Multi-queue on: AlreadyQueued can only mean this same room, which has its own line (the enum stays AlreadyQueued).
+                var detail = refusal == PvpJoinRefusal.AlreadyQueued && dials.MultiQueueEnabled
+                    ? PvpArenaText.Fill(PvpArenaText.AlreadyQueuedSameMode, ("mode", PvpArenaText.ModeLabel(queuedMode ?? key)))
+                    : null;
+
+                return new PvpJoinResult(refusal, queuedMode ?? key, LockoutSecondsRemaining: lockoutSeconds, Detail: detail);
+            }
 
             var templateRefused = CheckJoinTemplate(facts, key, templateKey, out var chosenTemplate);
 
@@ -3734,9 +5981,13 @@ namespace ACE.Server.Pvp
             room.Units.Add(unit);
             room.LastFfaCountAnnounced = -1;
 
-            log.Info($"[PVP] {string.Join(" + ", unit.Ids.Select(id => unit.NameOf(id) + (unit.TemplateOf(id) != null ? " [" + unit.TemplateOf(id) + "]" : "")))} joined the {key} queue{(duo ? " as a pair" : group ? $" as a group of {unit.Ids.Count}" : "")}; {room.PlayerCount} waiting");
+            // Held units (a member's match is pending elsewhere) are not counted as waiting.
+            var waitingCount = EligibleCount(room, HeldCharacters());
+            var queuedModes = QueuedRoomKeys(characterId);
 
-            return new PvpJoinResult(PvpJoinRefusal.None, key, room.PlayerCount, partnerName, TemplateKey: chosenTemplate, TemplateLabel: TemplateLabel(chosenTemplate));
+            log.Info($"[PVP] {string.Join(" + ", unit.Ids.Select(id => unit.NameOf(id) + (unit.TemplateOf(id) != null ? " [" + unit.TemplateOf(id) + "]" : "")))} joined the {key} queue{(duo ? " as a pair" : group ? $" as a group of {unit.Ids.Count}" : "")}; {waitingCount} waiting{(queuedModes.Count > 1 ? $"; now queued in {string.Join(", ", queuedModes)}" : "")}");
+
+            return new PvpJoinResult(PvpJoinRefusal.None, key, waitingCount, partnerName, TemplateKey: chosenTemplate, TemplateLabel: TemplateLabel(chosenTemplate), QueuedModeKeys: queuedModes);
         }
 
         /// <summary>
@@ -3796,6 +6047,7 @@ namespace ACE.Server.Pvp
             if (templateCatalog == null || key == null || !templateCatalog.TryGetOffered(key, modeKey, out var entry))
                 return PvpArenaText.Fill(PvpArenaText.TemplateWithdrawn, ("template", key ?? "(none)"), ("mode", PvpArenaText.ModeLabel(modeKey)));
 
+            // The team hue changes only the look of worn pieces, never the item count, so the catalog definition is the room check.
             var room = players.CheckTemplateRoom(characterId, entry.Definition);
 
             if (room != null)
@@ -3825,7 +6077,12 @@ namespace ACE.Server.Pvp
         private PvpJoinRefusal Admit(PvpPlayerFacts facts, string modeKey, DateTime now, PvpArenaDials dials, out int lockoutSeconds, out string queuedMode)
         {
             lockoutSeconds = 0;
-            queuedMode = rooms.Values.FirstOrDefault(r => r.Units.Any(u => u.Ids.Contains(facts.CharacterId)))?.ModeKey;
+
+            // pvp_arena_multi_queue_enabled: on, "already queued" means already in THIS room (one entry per room); off, in any room.
+            // AlreadyInMatch is unchanged either way, so a player cannot add queues while a match they hold a seat in is pending.
+            queuedMode = dials.MultiQueueEnabled
+                ? (rooms.TryGetValue(modeKey, out var thisRoom) && thisRoom.Units.Any(u => u.Ids.Contains(facts.CharacterId)) ? thisRoom.ModeKey : null)
+                : rooms.Values.FirstOrDefault(r => r.Units.Any(u => u.Ids.Contains(facts.CharacterId)))?.ModeKey;
 
             var request = new PvpAdmissionRequest(
                 ArenaEnabled: dials.Enabled,
@@ -3839,14 +6096,10 @@ namespace ACE.Server.Pvp
                 IsTeleporting: facts.IsTeleporting,
                 AlreadyQueued: queuedMode != null,
                 AlreadyInMatch: FindMatchOf(facts.CharacterId) != null,
-                CharacterLevel: facts.Level,
-                MinLevel: dials.MinLevel,
+                HasClearedThread: facts.HasClearedThread,
                 IsDenylisted: PvpArenaDenylistTunables.IsDenylisted(facts.CharacterId),
                 IsTemplateAccount: facts.IsTemplateAccount,
-                IsPvpTemplated: facts.IsPvpTemplated,
-                // The PK facet is required only for a room whose modes all opted out of templates (none today).
-                RequiresPkFacet: !RoomTemplated(modeKey),
-                OnPkFacet: facts.OnPkFacet);
+                IsPvpTemplated: facts.IsPvpTemplated);
 
             var refusal = PvpAdmission.Evaluate(request);
 
@@ -3859,6 +6112,15 @@ namespace ACE.Server.Pvp
                 return PvpJoinRefusal.DeclineLockout;
             }
 
+            // Deserter lockout (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): battlegrounds and Tugak Brawl only.
+            var deserterSeconds = DeserterSecondsRemaining(facts, modeKey, now);
+
+            if (deserterSeconds > 0)
+            {
+                lockoutSeconds = (int)Math.Min(int.MaxValue, deserterSeconds);
+                return PvpJoinRefusal.DeserterLockout;
+            }
+
             return PvpJoinRefusal.None;
         }
 
@@ -3869,7 +6131,6 @@ namespace ACE.Server.Pvp
                 case PvpAdmissionRefusal.ArenaDisabled: return PvpJoinRefusal.ArenaDisabled;
                 case PvpAdmissionRefusal.ModeDisabled: return PvpJoinRefusal.ModeDisabled;
                 case PvpAdmissionRefusal.AlreadyInInstance: return PvpJoinRefusal.AlreadyInInstance;
-                case PvpAdmissionRefusal.NotOnPkFacet: return PvpJoinRefusal.NotOnPkFacet;
                 case PvpAdmissionRefusal.InRespite: return PvpJoinRefusal.InRespite;
                 case PvpAdmissionRefusal.ActivePkTimer: return PvpJoinRefusal.ActivePkTimer;
                 case PvpAdmissionRefusal.IsOlthoi: return PvpJoinRefusal.IsOlthoi;
@@ -3878,7 +6139,7 @@ namespace ACE.Server.Pvp
                 case PvpAdmissionRefusal.IsTeleporting: return PvpJoinRefusal.IsTeleporting;
                 case PvpAdmissionRefusal.AlreadyQueued: return PvpJoinRefusal.AlreadyQueued;
                 case PvpAdmissionRefusal.AlreadyInMatch: return PvpJoinRefusal.AlreadyInMatch;
-                case PvpAdmissionRefusal.BelowMinLevel: return PvpJoinRefusal.BelowMinLevel;
+                case PvpAdmissionRefusal.NoThreadCleared: return PvpJoinRefusal.NoThreadCleared;
                 case PvpAdmissionRefusal.Denylisted: return PvpJoinRefusal.Denylisted;
                 case PvpAdmissionRefusal.TemplateAccount: return PvpJoinRefusal.TemplateAccount;
                 case PvpAdmissionRefusal.TemplateLocked: return PvpJoinRefusal.TemplateLocked;
@@ -3894,13 +6155,12 @@ namespace ACE.Server.Pvp
                 case PvpJoinRefusal.None: return null;
                 case PvpJoinRefusal.ArenaDisabled: return PvpArenaText.Disabled;
                 case PvpJoinRefusal.ModeDisabled: return PvpArenaText.Fill(PvpArenaText.ModeDisabled, ("mode", PvpArenaText.ModeLabel(r.ModeKey)));
-                case PvpJoinRefusal.AlreadyQueued: return PvpArenaText.Fill(PvpArenaText.AlreadyQueued, ("mode", PvpArenaText.ModeLabel(r.ModeKey)));
+                case PvpJoinRefusal.AlreadyQueued: return r.Detail ?? PvpArenaText.Fill(PvpArenaText.AlreadyQueued, ("mode", PvpArenaText.ModeLabel(r.ModeKey)));
                 case PvpJoinRefusal.AlreadyInMatch: return PvpArenaText.AlreadyInMatch;
                 case PvpJoinRefusal.AlreadyInInstance: return PvpArenaText.InInstance;
-                case PvpJoinRefusal.NotOnPkFacet: return PvpArenaText.NotOnPkFacet;
                 case PvpJoinRefusal.InRespite:
                 case PvpJoinRefusal.ActivePkTimer: return PvpArenaText.RecentPvp;
-                case PvpJoinRefusal.BelowMinLevel: return PvpArenaText.Fill(PvpArenaText.TooLow, ("level", r.MinLevel));
+                case PvpJoinRefusal.NoThreadCleared: return PvpArenaText.NoThreadCleared;
                 case PvpJoinRefusal.Denylisted: return PvpArenaText.Denylisted;
                 case PvpJoinRefusal.IsOlthoi: return PvpArenaText.Olthoi;
                 case PvpJoinRefusal.IsMule: return PvpArenaText.Mule;
@@ -3916,50 +6176,94 @@ namespace ACE.Server.Pvp
                 case PvpJoinRefusal.TemplatesDisabled: return PvpArenaText.TemplatesDisabled;
                 case PvpJoinRefusal.TemplatesUnavailable: return PvpArenaText.TemplatesUnavailable;
                 case PvpJoinRefusal.NoTemplateChosen: return PvpArenaText.NoTemplateChosen;
-                case PvpJoinRefusal.TemplateNotOffered: return PvpArenaText.Fill(PvpArenaText.TemplateNotOffered, ("template", r.TemplateKey ?? "(none)"), ("mode", PvpArenaText.ModeLabel(r.ModeKey)));
+                case PvpJoinRefusal.TemplateNotOffered: return r.Detail ?? PvpArenaText.Fill(PvpArenaText.TemplateNotOffered, ("template", r.TemplateKey ?? "(none)"), ("mode", PvpArenaText.ModeLabel(r.ModeKey)));
                 case PvpJoinRefusal.TemplateNoRoom: return r.Detail ?? PvpArenaText.CannotJoinNow;
+                case PvpJoinRefusal.GroupJoinDisabled: return BattlegroundText.GroupJoinDisabled;
                 case PvpJoinRefusal.GroupNotSupportedForMode: return BattlegroundText.GroupNotSupportedForMode;
                 case PvpJoinRefusal.GroupNeedsFellowship: return PvpArenaText.Fill(BattlegroundText.GroupNeedsFellowship, ("max", r.GroupMax));
                 case PvpJoinRefusal.GroupMemberIneligible: return PvpArenaText.Fill(BattlegroundText.GroupMemberIneligible, ("member", r.PartnerName));
+                case PvpJoinRefusal.DeserterLockout: return PvpArenaText.Fill(PvpArenaText.DeserterLockout, ("remaining", PvpArenaText.DeserterRemainingPhrase(r.LockoutSecondsRemaining)));
                 default: return PvpArenaText.CannotJoinNow;
             }
         }
 
-        public PvpLeaveResult Leave(uint characterId)
+        /// <summary>
+        /// /arena leave. With no <paramref name="modeKey"/> the MATCH is checked first (multi-queue: a held player's queues must not
+        /// shadow a pending match): a pending match is declined, a placed one needs the confirmation. Otherwise every queue is left
+        /// (a duo or group leaves together, as before). With <paramref name="modeKey"/> (a room key) only that queue is left, whatever
+        /// the player's match state; NotInMode when they are not in it.
+        /// </summary>
+        public PvpLeaveResult Leave(uint characterId, string modeKey = null)
         {
-            foreach (var room in rooms.Values)
+            if (modeKey != null)
             {
-                var unit = room.Units.FirstOrDefault(u => u.Ids.Contains(characterId));
+                var key = modeKey.Trim().ToLowerInvariant();
 
-                if (unit == null)
-                    continue;
+                if (!rooms.TryGetValue(key, out var only))
+                    return new PvpLeaveResult(PvpLeaveOutcome.NotInMode, key);
 
-                room.Units.Remove(unit);
-                room.LastFfaCountAnnounced = -1;
+                var left = LeaveRoom(only, characterId, out var onlyPartner);
 
-                var partner = unit.Ids.Count > 1 ? unit.NameOf(unit.Ids.First(id => id != characterId)) : null;
-                log.Info($"[PVP] {string.Join(" + ", unit.Names)} left the {room.ModeKey} queue");
-
-                return new PvpLeaveResult(PvpLeaveOutcome.LeftQueue, room.ModeKey, partner);
+                return left
+                    ? new PvpLeaveResult(PvpLeaveOutcome.LeftQueue, only.ModeKey, onlyPartner, ModeKeys: new[] { only.ModeKey })
+                    : new PvpLeaveResult(PvpLeaveOutcome.NotInMode, only.ModeKey);
             }
 
             var m = FindMatchOf(characterId);
 
-            if (m == null)
-                return new PvpLeaveResult(PvpLeaveOutcome.NotQueued);
-
-            if (m.Match.State == PvpMatchState.AwaitingAccept || (m.Match.State == PvpMatchState.Staging && !m.Dispatched))
+            if (m != null)
             {
-                DeclineBeforePlacement(m, characterId, fromPopup: false);
-                return new PvpLeaveResult(PvpLeaveOutcome.DeclinedMatch, m.ModeKey);
+                if (m.Match.State == PvpMatchState.AwaitingAccept || (m.Match.State == PvpMatchState.Staging && !m.Dispatched))
+                {
+                    DeclineBeforePlacement(m, characterId, fromPopup: false);
+                    return new PvpLeaveResult(PvpLeaveOutcome.DeclinedMatch, m.ModeKey);
+                }
+
+                var seat = m.Seats[characterId];
+
+                if (!(seat.Participant.ExitReason.HasValue || m.Match.State == PvpMatchState.Resolving))
+                    return new PvpLeaveResult(PvpLeaveOutcome.InMatchNeedsConfirm, m.ModeKey, MatchId: m.Id);
+
+                // Already out of the match: fall through, so any queue they still hold can be left.
+                if (QueuedRoomKeys(characterId).Count == 0)
+                    return new PvpLeaveResult(PvpLeaveOutcome.NotQueued, m.ModeKey);
             }
 
-            var seat = m.Seats[characterId];
+            var leftKeys = new List<string>();
+            string partner = null;
 
-            if (seat.Participant.ExitReason.HasValue || m.Match.State == PvpMatchState.Resolving)
-                return new PvpLeaveResult(PvpLeaveOutcome.NotQueued, m.ModeKey);
+            foreach (var room in OrderedRooms())
+            {
+                if (LeaveRoom(room, characterId, out var roomPartner))
+                {
+                    leftKeys.Add(room.ModeKey);
+                    partner ??= roomPartner;
+                }
+            }
 
-            return new PvpLeaveResult(PvpLeaveOutcome.InMatchNeedsConfirm, m.ModeKey, MatchId: m.Id);
+            if (leftKeys.Count == 0)
+                return new PvpLeaveResult(PvpLeaveOutcome.NotQueued);
+
+            return new PvpLeaveResult(PvpLeaveOutcome.LeftQueue, leftKeys[0], partner, ModeKeys: leftKeys);
+        }
+
+        /// <summary>Removes the unit holding <paramref name="characterId"/> from <paramref name="room"/> (a duo or group leaves together). True when there was one.</summary>
+        private bool LeaveRoom(Room room, uint characterId, out string partner)
+        {
+            partner = null;
+
+            var unit = room.Units.FirstOrDefault(u => u.Ids.Contains(characterId));
+
+            if (unit == null)
+                return false;
+
+            room.Units.Remove(unit);
+            room.LastFfaCountAnnounced = -1;
+
+            partner = unit.Ids.Count > 1 ? unit.NameOf(unit.Ids.First(id => id != characterId)) : null;
+            log.Info($"[PVP] {string.Join(" + ", unit.Names)} left the {room.ModeKey} queue");
+
+            return true;
         }
 
         public PvpAnswerResult Accept(uint characterId) => Answer(characterId, null, true, fromPopup: false);
@@ -3994,7 +6298,8 @@ namespace ACE.Server.Pvp
 
             if (accepted)
             {
-                // The PK facet is no longer re-checked here (owner ruling 2026-10-03: any facet may queue).
+                // The PK facet is no longer re-checked here (owner ruling 2026-10-03: any facet may queue; owner ruling 2026-10-15:
+                // one Thread clear replaces the level and PK facet requirements, for every mode).
                 //
                 // PvP Template Facets: the template is re-validated at the moment of accept (the second of three
                 // checks: join, accept, dispatch), because an admin can disable it or change its modes after the join,
@@ -4003,13 +6308,6 @@ namespace ACE.Server.Pvp
                 // lockout; a full pack is, so it locks out like any other decline. A facts-less (offline) player is
                 // left to the ordinary offline handling at BeginStaging.
                 var facts = players.GetFacts(characterId);
-
-                // A mode that opted out of templates keeps the PK facet re-check this accept used to make.
-                if (facts != null && !m.Mode.Templated && !facts.OnPkFacet)
-                {
-                    DeclineBeforePlacement(m, characterId, fromPopup, PvpArenaText.NotOnPkFacet);
-                    return new PvpAnswerResult(PvpAnswerOutcome.Declined, m.Id);
-                }
 
                 if (facts != null)
                 {
@@ -4036,12 +6334,19 @@ namespace ACE.Server.Pvp
         {
             var now = clock();
             var dials = Dials();
+
+            conductDialsThisTick = null;
             var seat = m.Seats[characterId];
 
             seat.Answer = AcceptAnswer.Declined;
             log.Info($"[PVP] match {m.Id}: {seat.Name} declined{(fromPopup ? "" : " (chat)")} during {m.Match.State}{(lockOut ? "" : " (no lockout)")}");
 
             players.Send(characterId, declineText ?? PvpArenaText.YouDeclined);
+
+            // Multi-queue: a player-caused decline (lockOut) leaves every queue; a template an admin withdrew (lockOut false) is no
+            // fault of theirs, so their other queues are kept.
+            if (lockOut)
+                WithdrawForPlayerFault(characterId, PvpArenaText.RemovedOnDecline, $"declined match {m.Id}");
 
             if (m.Mode.Accept is AcceptPolicy.AllOrNothingPolicy)
             {
@@ -4106,25 +6411,52 @@ namespace ACE.Server.Pvp
             return new PvpForfeitResult(PvpForfeitOutcome.Forfeited);
         }
 
-        public PvpStatusResult Status(uint characterId)
+        /// <summary>
+        /// Every queue <paramref name="characterId"/> waits in, in <see cref="RoomOrder"/>: time waited, the room's eligible (not held)
+        /// count, the template queued on, and whether the entry is held by a pending match.
+        /// </summary>
+        private List<PvpQueueEntry> QueueEntries(uint characterId, DateTime now)
         {
-            var now = clock();
+            var held = HeldCharacters();
+            var entries = new List<PvpQueueEntry>();
 
-            foreach (var room in rooms.Values)
+            foreach (var room in OrderedRooms())
             {
                 var unit = room.Units.FirstOrDefault(u => u.Ids.Contains(characterId));
 
-                if (unit != null)
-                    return new PvpStatusResult(PvpStatusKind.Queued, room.ModeKey, now - unit.QueuedAtUtc, room.PlayerCount);
+                if (unit == null)
+                    continue;
+
+                var template = unit.TemplateOf(characterId);
+
+                entries.Add(new PvpQueueEntry(room.ModeKey, now - unit.QueuedAtUtc, EligibleCount(room, held), template, TemplateLabel(template), unit.Ids.Any(held.Contains)));
             }
 
+            return entries;
+        }
+
+        /// <summary>
+        /// /arena status. The MATCH is checked first (multi-queue: a pending match is what matters, and its player's other queues are
+        /// held); <see cref="PvpStatusResult.Queues"/> carries every queue entry either way. Facet gates and suit transfer read only Kind.
+        /// </summary>
+        public PvpStatusResult Status(uint characterId)
+        {
+            var now = clock();
+            var queues = QueueEntries(characterId, now);
             var m = FindMatchOf(characterId);
 
             if (m == null)
-                return new PvpStatusResult(PvpStatusKind.Idle);
+            {
+                if (queues.Count == 0)
+                    return new PvpStatusResult(PvpStatusKind.Idle, Queues: queues);
+
+                var first = queues[0];
+
+                return new PvpStatusResult(PvpStatusKind.Queued, first.ModeKey, first.Waited, first.WaitingCount, Queues: queues);
+            }
 
             if (m.Match.State == PvpMatchState.AwaitingAccept)
-                return new PvpStatusResult(PvpStatusKind.AwaitingAccept, m.ModeKey, MapKey: m.Map?.MapKey, State: m.Match.State, MapName: m.Map?.DisplayName);
+                return new PvpStatusResult(PvpStatusKind.AwaitingAccept, m.ModeKey, MapKey: m.Map?.MapKey, State: m.Match.State, MapName: m.Map?.DisplayName, Queues: queues);
 
             TimeSpan? remaining = null;
             var overtime = false;
@@ -4143,10 +6475,10 @@ namespace ACE.Server.Pvp
             {
                 return new PvpStatusResult(PvpStatusKind.InMatch, m.ModeKey, MapKey: m.Map?.MapKey, State: m.Match.State, Remaining: remaining, MapName: m.Map?.DisplayName, Overtime: false,
                     Scores: new Dictionary<int, int>(m.Match.ScoreBoard), ScoreTarget: m.ScoreTarget,
-                    StatusLine: (m.TickHandler as IObjectiveModeHandler)?.StatusLine(m.Match.ScoreBoard, m.ScoreTarget));
+                    StatusLine: (m.TickHandler as IObjectiveModeHandler)?.StatusLine(m.Match.ScoreBoard, m.ScoreTarget), Queues: queues);
             }
 
-            return new PvpStatusResult(PvpStatusKind.InMatch, m.ModeKey, MapKey: m.Map?.MapKey, State: m.Match.State, Remaining: remaining, MapName: m.Map?.DisplayName, Overtime: overtime);
+            return new PvpStatusResult(PvpStatusKind.InMatch, m.ModeKey, MapKey: m.Map?.MapKey, State: m.Match.State, Remaining: remaining, MapName: m.Map?.DisplayName, Overtime: overtime, Queues: queues);
         }
 
         /// <summary>A character's standing on a ladder (decay applied), or null while ratings are loading or unavailable.</summary>
@@ -4294,7 +6626,7 @@ namespace ACE.Server.Pvp
                     {
                         // A battleground seat in its pen cycle is skipped: dying, dead or respawning, it is the death
                         // and respawn paths' to handle, and it keeps its issued kit through them.
-                        if (seat.Dispatched && !seat.Exited && seat.SeenInInstance && !seat.AwaitingDeathReturn && seat.BgState == BgSeatState.None && seat.Template != null)
+                        if (seat.Dispatched && !seat.Exited && seat.SeenInInstance && !seat.AwaitingDeathReturn && seat.BgState == BgSeatState.None && seat.Template != null && !seat.IsAway)
                             players.RunTemplateBackstop(seat.Id, m.Id);
                     }
                 }
@@ -4335,7 +6667,7 @@ namespace ACE.Server.Pvp
             var state = m.Match.State;
 
             if ((state == PvpMatchState.Staging || state == PvpMatchState.Countdown || state == PvpMatchState.Live) && !seat.Participant.ExitReason.HasValue)
-                MarkOut(m, seat, ParticipantExit.ForfeitCommand, now, 0);
+                MarkOut(m, seat, ParticipantExit.ForfeitCommand, now, 0, PvpDeparture.TemplateBackstopEject);
             else
                 ExitSeat(m, seat, "template backstop survivors", teleport: true);
         }
@@ -4363,6 +6695,16 @@ namespace ACE.Server.Pvp
 
             return entries.Select(e => new PvpTemplateOffer(e.Key, e.Label, e.Version, e.Enabled, e.Modes, e.Definition != null)).ToList();
         }
+
+        /// <summary>
+        /// The catalog definition of every template offered in at least one mode, ordered by key, for the /pvphue audit. These are the
+        /// catalog's own objects: callers read them and never change them.
+        /// </summary>
+        public IReadOnlyList<PvpTemplateDefinition> OfferedTemplateDefinitions() =>
+            templateCatalog?.Offered().Where(e => e.Definition != null).Select(e => e.Definition).ToList() ?? new List<PvpTemplateDefinition>();
+
+        /// <summary>The parsed catalog definition for <paramref name="key"/> (offered or not), or null. Read only, like <see cref="OfferedTemplateDefinitions"/>.</summary>
+        public PvpTemplateDefinition TemplateDefinition(string key) => templateCatalog?.Get(NormalizeTemplateKey(key))?.Definition;
 
         /// <summary>Whether <paramref name="key"/> is an enabled, parsed template offered for <paramref name="modeKey"/> right now.</summary>
         public bool IsTemplateOffered(string key, string modeKey)
@@ -4462,19 +6804,45 @@ namespace ACE.Server.Pvp
             private readonly Dictionary<uint, string> templates = new Dictionary<uint, string>();
             /// <summary>Each member's allegiance monarch at join (0 = none), for the battleground clanmate split.</summary>
             private readonly Dictionary<uint, uint> monarchs = new Dictionary<uint, uint>();
+            /// <summary>Each member's repeat-pairing account key at join (PvpPairLedger.AccountKey: the account id, or the character id when unknown).</summary>
+            private readonly Dictionary<uint, uint> accounts = new Dictionary<uint, uint>();
 
             public DateTime QueuedAtUtc { get; set; }
 
             public bool NotifiedFull { get; set; }
+
+            /// <summary>True once the unit has been told it is waiting for a fresh opponent (the /arena norematch notice); sent once per opt-in.</summary>
+            public bool NotifiedRefusal { get; set; }
+
+            /// <summary>Each member's /arena norematch choice at join (true = refuse an unpaid rematch). Absent reads as false.</summary>
+            private readonly Dictionary<uint, bool> refusals = new Dictionary<uint, bool>();
+
+            /// <summary>True when ANY member refuses unpaid rematches.</summary>
+            public bool RefusesUnpaidRematch => refusals.Values.Any(v => v);
+
+            public bool RefusalOf(uint id) => refusals.TryGetValue(id, out var refuse) && refuse;
+
+            /// <summary>Sets a member's choice. The once-only waiting notice is re-armed only on a real off-to-on change.</summary>
+            public void SetRefusal(uint id, bool refuse)
+            {
+                var was = RefusalOf(id);
+
+                refusals[id] = refuse;
+
+                if (refuse && !was)
+                    NotifiedRefusal = false;
+            }
 
             public QueuedUnit(IEnumerable<PvpPlayerFacts> members, DateTime queuedAtUtc)
             {
                 foreach (var f in members)
                 {
                     Ids.Add(f.CharacterId);
+                    refusals[f.CharacterId] = f.RefuseUnpaidRematch;
                     Names.Add(f.Name);
                     ips[f.CharacterId] = f.IpKey;
                     monarchs[f.CharacterId] = f.MonarchId;
+                    accounts[f.CharacterId] = PvpPairLedger.AccountKey(f.AccountId, f.CharacterId);
                 }
 
                 QueuedAtUtc = queuedAtUtc;
@@ -4491,6 +6859,10 @@ namespace ACE.Server.Pvp
 
             public void SetTemplate(uint id, string key) => templates[id] = key;
             public uint MonarchOf(uint id) => monarchs.TryGetValue(id, out var monarch) ? monarch : 0;
+
+            public uint AccountOf(uint id) => accounts.TryGetValue(id, out var account) ? account : id;
+
+            public List<uint> AccountKeys() => Ids.Select(AccountOf).ToList();
 
             public string NameOf(uint id)
             {
@@ -4509,7 +6881,12 @@ namespace ACE.Server.Pvp
                     copy.ips[id] = IpOf(id);
                     copy.templates[id] = TemplateOf(id);
                     copy.monarchs[id] = MonarchOf(id);
+                    copy.accounts[id] = AccountOf(id);
+                    copy.refusals[id] = RefusalOf(id);
                 }
+
+                copy.NotifiedRefusal = NotifiedRefusal;
+                copy.NotifiedFull = NotifiedFull;
 
                 return copy;
             }
@@ -4530,6 +6907,9 @@ namespace ACE.Server.Pvp
             public AcceptAnswer Answer { get; set; } = AcceptAnswer.Pending;
 
             public bool Dispatched { get; set; }
+
+            /// <summary>The repeat-pairing cap: one of this seat's cross-team account pairs was at the cap when the match formed, so the seat is paid no Marks. Rating is unaffected.</summary>
+            public bool UnpaidRematch { get; set; }
 
             /// <summary>ExitPvpMatch has been issued for this participant. Every exit path checks it, so nothing runs twice.</summary>
             public bool Exited { get; set; }
@@ -4556,6 +6936,12 @@ namespace ACE.Server.Pvp
 
             /// <summary>The template's display label at dispatch, shown beside the name on the lineup, results and /top.</summary>
             public string TemplateLabel { get; set; }
+
+            /// <summary>
+            /// The seat's team colour (Docs/Pvp/TEMPLATES.md "Team hue"): derived from the match's one coin and the seat's team
+            /// at formation, re-derived at dispatch. Picks the hue <see cref="Template"/> is dressed in, and names the team.
+            /// </summary>
+            public PvpTeamColour Colour { get; set; }
 
             /// <summary>The template apply failed at entry: never bound, never teleported, removed without fault.</summary>
             public bool EntryFailed { get; set; }
@@ -4617,6 +7003,47 @@ namespace ACE.Server.Pvp
             /// <summary>Released from the team fellowship (Docs/Pvp/BATTLEGROUNDS.md "Team fellowships"); never released twice.</summary>
             public bool TeamFellowshipReleased { get; set; }
 
+            /// <summary>
+            /// Conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): when the seat was last active, kept by the conduct sampler for every
+            /// battleground and Tugak Brawl seat. Null until the first sample after Live; reset to the confirm time on a respawn.
+            /// </summary>
+            public DateTime? LastActiveUtc { get; set; }
+
+            /// <summary>Conduct: the idle warning went out for the current idle stretch; cleared once the seat's idle time drops below the warning.</summary>
+            public bool IdleWarned { get; set; }
+
+            /// <summary>Conduct: the latest sampler pass saw the seat STANDING (ConductSeatOutcome.Standing); idle enforcement judges only then.</summary>
+            public bool ConductStanding { get; set; }
+
+            // ---- battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin") ----
+
+            /// <summary>
+            /// The seat is held for its player until this instant (their rejoin grace), or null when it is not held. Stays set while the
+            /// rejoin is on its way in, and is cleared when they stand in the match again or the seat goes out. Never set for an arena seat.
+            /// </summary>
+            public DateTime? GraceUntilUtc { get; set; }
+
+            /// <summary>The seat has had its one grace of the match; a second logout forfeits at once.</summary>
+            public bool GraceUsed { get; set; }
+
+            /// <summary>The grace length taken when it began (pvp_bg_rejoin_grace_seconds then), so the window can slide to the real disconnect.</summary>
+            public int GraceSeconds { get; set; }
+
+            /// <summary>When the grace began (the logout intent or the poll), bounding how long the window may slide (<see cref="MaxLogoutLingerSeconds"/>).</summary>
+            public DateTime? GraceBeganUtc { get; set; }
+
+            /// <summary>The player of a held seat logged back in and the placement was sent (HandleReconnected); waiting for them to land.</summary>
+            public bool Rejoining { get; set; }
+
+            /// <summary>When the rejoin placement was sent; <see cref="RejoinArrivalTimeoutSeconds"/> runs from here.</summary>
+            public DateTime? RejoinIssuedAtUtc { get; set; }
+
+            /// <summary>Held (in its grace, or on its way back in): every per-seat pass but AdvanceGraces leaves it alone.</summary>
+            public bool IsAway => GraceUntilUtc.HasValue;
+
+            /// <summary>The gateway has been told the player's participation ended (Thread return); never told twice.</summary>
+            public bool ParticipationEnded { get; set; }
+
             public Seat(PvpParticipant participant, int teamIndex, string name, QueuedUnit unit)
             {
                 Participant = participant;
@@ -4657,6 +7084,12 @@ namespace ACE.Server.Pvp
             public PvpMatch Match { get; }
 
             public Guid Id => Match.MatchId;
+
+            /// <summary>The arena day the match formed on (1v1 / 2v2 only), from the match's own dials snapshot; the day its pairings are counted on. Null for every other mode.</summary>
+            public int? PairDay { get; set; }
+
+            /// <summary>The match's pairings have been counted (once).</summary>
+            public bool PairCounted { get; set; }
 
             public string ModeKey => Match.ModeKey;
 
@@ -4700,6 +7133,9 @@ namespace ACE.Server.Pvp
 
             /// <summary>Respawns issued per team, for the round-robin spawn.</summary>
             public Dictionary<int, int> RespawnCounters { get; } = new Dictionary<int, int>();
+
+            /// <summary>The conduct sampler's clock: the instant its sampled seconds run from. Null until the first Live sample.</summary>
+            public DateTime? ConductAnchorUtc { get; set; }
 
             // ---- Attack/Defend (Docs/Pvp/ATTACK-DEFEND.md): decided once, at formation ----
 
@@ -4765,6 +7201,8 @@ namespace ACE.Server.Pvp
 
             void IBattlegroundMatchContext.ReplaceZoneMarkers(KothZone zone) => owner.ReplaceZoneMarkers(this, zone);
 
+            void IBattlegroundMatchContext.CreditObjectiveTime(uint characterId, int seconds) => Match.Performance?.CreditHillSeconds(characterId, seconds);
+
             // ---- IObjectiveMatchContext ----
 
             IReadOnlyList<CrystalHealth> IObjectiveMatchContext.SampleCrystals() => owner.SampleCrystals(this);
@@ -4801,6 +7239,9 @@ namespace ACE.Server.Pvp
             /// <summary>The dials the masks were taken from at placement; fixed for the match.</summary>
             public PvpArenaDials Masks { get; set; }
 
+            /// <summary>The team hue dials taken once at dispatch, with the masks; fixed for the match.</summary>
+            public PvpTeamHueDials HueDials { get; set; }
+
             public int LastCountdownShown { get; set; } = int.MaxValue;
 
             public bool WarnedOneMinute { get; set; }
@@ -4833,8 +7274,17 @@ namespace ACE.Server.Pvp
             /// <summary>The Blood payout has run for this match (set before the first grant). It never runs twice.</summary>
             public bool BloodPaid { get; set; }
 
+            /// <summary>The contribution floor's decisions, evaluated once at Resolve (null until then) and shared by the payout and the PvP daily facts.</summary>
+            public IReadOnlyDictionary<uint, FloorDecision> FloorDecisions { get; set; }
+
+            /// <summary>The PvP daily facts have been dispatched for this match (set before the first one goes out). They never go out twice.</summary>
+            public bool DailyFactsDispatched { get; set; }
+
             /// <summary>When the template backstop last ran for this match's participants.</summary>
             public DateTime? LastTemplateBackstopUtc { get; set; }
+
+            /// <summary>The team-colour coin, drawn once when the match formed (<see cref="TeamColourCoin"/>).</summary>
+            public bool ColourCoin { get; set; }
 
             /// <summary>Personal items the template backstop moved during this match, across every participant (gate misses).</summary>
             public int BackstopMoves { get; set; }
@@ -4883,11 +7333,14 @@ namespace ACE.Server.Pvp
 
             public PvpTemplateStoreStatus TemplateStatus { get; private init; }
 
-            public static DbResult TemplatesLoaded(List<PvpTemplateRecord> rows, PvpTemplateStoreStatus status) => new DbResult { Kind = DbResultKind.TemplatesLoaded, TemplateRows = rows, TemplateStatus = status };
+            /// <summary>One reload of the template rows (null = that read failed).</summary>
+            public static DbResult TemplatesLoaded(List<PvpTemplateRecord> rows, PvpTemplateStoreStatus status) =>
+                new DbResult { Kind = DbResultKind.TemplatesLoaded, TemplateRows = rows, TemplateStatus = status };
 
             public static DbResult LatestTemplatesLoaded(List<PvpLatestParticipantTemplateRecord> rows, PvpTemplateStoreStatus status) => new DbResult { Kind = DbResultKind.LatestTemplatesLoaded, LatestTemplates = rows, TemplateStatus = status };
 
             public static DbResult StampsSaved(Guid matchId, PvpTemplateStoreStatus status) => new DbResult { Kind = DbResultKind.StampsSaved, MatchId = matchId, TemplateStatus = status };
+
         }
     }
 }

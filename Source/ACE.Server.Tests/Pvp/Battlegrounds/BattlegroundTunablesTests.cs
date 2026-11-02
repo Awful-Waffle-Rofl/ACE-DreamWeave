@@ -19,6 +19,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         {
             var d = BattlegroundTunables.Defaults;
             yield return ("pvp_bg_enabled", d.Enabled);
+            yield return ("pvp_bg_bonus_enabled", d.BonusEnabled);
             yield return ("pvp_bg_koth_enabled", d.KothEnabled);
             yield return ("pvp_bg_split_clanmates", d.SplitClanmates);
             yield return ("pvp_bg_koth_dedupe_ip", d.KothDedupeIp);
@@ -29,6 +30,8 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             yield return ("pvp_bg_ad_enabled", d.AdEnabled);
             yield return ("pvp_bg_ad_sequential_crystals", d.AdSequentialCrystals);
             yield return ("pvp_bg_snake_draft", d.SnakeDraft);
+            yield return ("pvp_bg_group_join_enabled", d.GroupJoinEnabled);
+            yield return ("pvp_bg_perf_enabled", d.PerfEnabled);
         }
 
         private static IEnumerable<(string Key, long Value)> LongKeys()
@@ -62,10 +65,24 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             yield return ("pvp_bg_ad_alert_min_interval_seconds", d.AdAlertMinIntervalSeconds);
             yield return ("pvp_bg_ad_status_announce_seconds", d.AdStatusAnnounceSeconds);
             yield return ("pvp_bg_spawn_protection_seconds", d.SpawnProtectionSeconds);
+            yield return ("pvp_bg_rejoin_grace_seconds", d.RejoinGraceSeconds);
+            yield return ("pvp_bg_bonus_warn_minutes", d.BonusWarnMinutes);
+            yield return ("pvp_bg_spawn_refill_cooldown_seconds", ACE.Server.Pvp.PvpArenaHookSettings.SpawnRefillCooldownSecondsDefault);
             yield return ("pvp_bg_marks_win", d.MarksWin);
             yield return ("pvp_bg_marks_loss", d.MarksLoss);
             yield return ("pvp_bg_marks_draw", d.MarksDraw);
             yield return ("pvp_bg_marks_daily_cap", d.MarksDailyCap);
+            yield return ("pvp_bg_perf_cap_pct", d.PerfCapPct);
+            yield return ("pvp_bg_perf_w_ad_atk_crystal_dmg", d.PerfWeightAdAtkCrystalDmg);
+            yield return ("pvp_bg_perf_w_ad_atk_player_dmg", d.PerfWeightAdAtkPlayerDmg);
+            yield return ("pvp_bg_perf_w_ad_atk_kills", d.PerfWeightAdAtkKills);
+            yield return ("pvp_bg_perf_w_ad_def_dmg_near", d.PerfWeightAdDefDmgNear);
+            yield return ("pvp_bg_perf_w_ad_def_kills_near", d.PerfWeightAdDefKillsNear);
+            yield return ("pvp_bg_perf_w_ad_def_dmg_far", d.PerfWeightAdDefDmgFar);
+            yield return ("pvp_bg_perf_w_ad_def_kills_far", d.PerfWeightAdDefKillsFar);
+            yield return ("pvp_bg_perf_w_koth_hill_s", d.PerfWeightKothHillSeconds);
+            yield return ("pvp_bg_perf_w_koth_dmg", d.PerfWeightKothDmg);
+            yield return ("pvp_bg_perf_w_koth_kills", d.PerfWeightKothKills);
         }
 
         private static IEnumerable<(string Key, double Value)> DoubleKeys()
@@ -76,6 +93,8 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             yield return ("pvp_bg_koth_marker_spacing", d.KothMarkerSpacing);
             yield return ("pvp_bg_koth_marker_z_offset", d.KothMarkerZOffset);
             yield return ("pvp_bg_dmg_mod", d.DmgMod);
+            yield return ("pvp_bg_ring_dmg", d.RingDmg);
+            yield return ("pvp_bg_bonus_multiplier", d.BonusMultiplier);
             yield return ("pvp_bg_ad_kill_chip_pct", d.AdKillChipPercent);
             yield return ("pvp_bg_ad_kill_heal_pct", d.AdKillHealPercent);
             yield return ("pvp_bg_ad_kill_range", d.AdKillRange);
@@ -84,6 +103,9 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             yield return ("pvp_bg_ad_defender_dr_radius", d.AdDefenderDrRadius);
             yield return ("pvp_bg_ad_defender_dr_window_s", d.AdDefenderDrWindowSeconds);
             yield return ("pvp_bg_marks_scale", d.MarksScale);
+            yield return ("pvp_bg_perf_koth_near_margin", d.KothPerfNearMargin);
+            yield return ("pvp_bg_perf_gain", d.PerfGain);
+            yield return ("pvp_bg_perf_koth_near_kill_weight", d.PerfKothNearKillWeight);
         }
 
         /// <summary>The marker z offset clamps to the placeable range; NaN falls back to the default (a NaN would otherwise poison every marker z).</summary>
@@ -145,6 +167,33 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         }
 
         [TestMethod]
+        public void Defaults_MatchTheRegisteredStringDefaults()
+        {
+            var d = BattlegroundTunables.Defaults;
+
+            foreach (var (key, value) in new[] { ("pvp_bg_bonus_windows", d.BonusWindows), ("pvp_bg_bonus_timezone", d.BonusTimezone) })
+            {
+                Assert.IsTrue(DefaultPropertyManager.DefaultStringProperties.ContainsKey(key), $"{key} is not registered as a string");
+                Assert.AreEqual(DefaultPropertyManager.DefaultStringProperties[key].Item, value, $"{key}: compiled default and registered default disagree");
+            }
+        }
+
+        [TestMethod]
+        public void BonusDefaults_AreTheOwnerRuling_AndTheWarnLeadClamps()
+        {
+            var d = BattlegroundTunables.Defaults;
+
+            Assert.IsTrue(d.BonusEnabled, "new server settings default ON");
+            Assert.AreEqual("06:00-07:00,18:00-19:00", d.BonusWindows);
+            Assert.AreEqual("America/Los_Angeles", d.BonusTimezone);
+            Assert.AreEqual(2.0, d.BonusMultiplier);
+            Assert.AreEqual(15, d.BonusWarnMinutes);
+            Assert.AreEqual(0, BattlegroundTunables.Clamp(d with { BonusWarnMinutes = -5 }).BonusWarnMinutes);
+            Assert.AreEqual(180, BattlegroundTunables.Clamp(d with { BonusWarnMinutes = 9000 }).BonusWarnMinutes);
+            Assert.AreEqual(180, BattlegroundTunables.ClampBonusWarnMinutes(long.MaxValue));
+        }
+
+        [TestMethod]
         public void EveryRegisteredBgKey_IsCoveredByTheDefaultsCheck()
         {
             var covered = new HashSet<string>();
@@ -157,7 +206,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             foreach (var k in DefaultPropertyManager.DefaultLongProperties.Keys) if (k.StartsWith("pvp_bg_") && !ACE.Server.Pvp.Rules.PvpContextTuning.IsContextKey(k)) registered.Add(k);
             foreach (var k in DefaultPropertyManager.DefaultDoubleProperties.Keys) if (k.StartsWith("pvp_bg_") && !ACE.Server.Pvp.Rules.PvpContextTuning.IsContextKey(k)) registered.Add(k);
 
-            Assert.AreEqual(56, registered.Count, "the snake draft switch (pvp_bg_snake_draft) plus 31 keys (25, plus the three zone-marker settings, plus the two team fellowship switches, plus the hill-moves count) plus the seventeen Attack/Defend settings (Docs/Pvp/ATTACK-DEFEND.md 'Settings', the tenth being sequential crystals, then the three kill chip and heal settings, then the four engaged-defender settings) plus the spawn protection window (Docs/Pvp/BATTLEGROUNDS.md 'Spawn protection') plus the battleground damage mod (pvp_bg_dmg_mod) plus the five Mark of the Hopeslayer payout settings (pvp_bg_marks_*, Docs/Pvp/BATTLEGROUNDS.md 'Rewards')");
+            Assert.AreEqual(78, registered.Count, "the fourteen performance-modifier rating settings (pvp_bg_perf_enabled, _gain, _cap_pct, the ten pvp_bg_perf_w_* weights and _koth_near_kill_weight, Docs/Pvp/BATTLEGROUNDS.md 'Rating and performance') plus the performance-stats near-hill margin (pvp_bg_perf_koth_near_margin, Docs/Pvp/BATTLEGROUNDS.md 'Performance stats') plus the snake draft switch (pvp_bg_snake_draft) plus 31 keys (25, plus the three zone-marker settings, plus the two team fellowship switches, plus the hill-moves count) plus the seventeen Attack/Defend settings (Docs/Pvp/ATTACK-DEFEND.md 'Settings', the tenth being sequential crystals, then the three kill chip and heal settings, then the four engaged-defender settings) plus the spawn protection window (Docs/Pvp/BATTLEGROUNDS.md 'Spawn protection') plus the spawn-room refill cooldown (pvp_bg_spawn_refill_cooldown_seconds, Docs/Pvp/TEMPLATES.md 'Respawn zone') plus the battleground damage mod (pvp_bg_dmg_mod) plus the five Mark of the Hopeslayer payout settings (pvp_bg_marks_*, Docs/Pvp/BATTLEGROUNDS.md 'Rewards') plus the group join switch (pvp_bg_group_join_enabled) plus the battleground ring scaler (pvp_bg_ring_dmg) plus the rejoin grace (pvp_bg_rejoin_grace_seconds, Docs/Pvp/BATTLEGROUNDS.md 'Disconnect and rejoin') plus the three non-string Double Marks settings (pvp_bg_bonus_enabled, _warn_minutes, _multiplier, Docs/Pvp/BATTLEGROUNDS.md 'Double Marks windows'; the two string ones are checked by Defaults_MatchTheRegisteredStringDefaults)");
             foreach (var k in registered)
                 Assert.IsTrue(covered.Contains(k), $"{k} is registered but not asserted against BattlegroundTunables.Defaults");
         }
@@ -190,6 +239,26 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(1, BattlegroundTunables.ClampMaxPremadeSize(0, 100));
             Assert.AreEqual(1, BattlegroundTunables.ClampMaxPremadeSize(-5, 100));
             Assert.AreEqual(1, BattlegroundTunables.ClampMaxPremadeSize(6, 0));
+        }
+
+        /// <summary>
+        /// The rejoin grace clamps to 0..240 s, below the match copy's 5-minute idle unload (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and
+        /// rejoin"), and a huge setting lands on the cap rather than wrapping when narrowed to int.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(-5L, 0)]
+        [DataRow(0L, 0)]
+        [DataRow(120L, 120)]
+        [DataRow(240L, 240)]
+        [DataRow(241L, 240)]
+        [DataRow(600L, 240)]
+        [DataRow(long.MaxValue, 240)]
+        public void ClampRejoinGraceSeconds_HoldsZeroThrough240(long raw, int expected)
+        {
+            Assert.AreEqual(240, BattlegroundTunables.MaxRejoinGraceSeconds);
+            Assert.IsTrue(BattlegroundTunables.MaxRejoinGraceSeconds < ACE.Server.Entity.Landblock.UnloadInterval.TotalSeconds, "below the idle unload of an empty match copy");
+            Assert.AreEqual(expected, BattlegroundTunables.ClampRejoinGraceSeconds(raw));
+            Assert.AreEqual(expected, BattlegroundTunables.Clamp(BattlegroundTunables.Defaults with { RejoinGraceSeconds = (int)System.Math.Clamp(raw, int.MinValue, int.MaxValue) }).RejoinGraceSeconds);
         }
 
         [TestMethod]

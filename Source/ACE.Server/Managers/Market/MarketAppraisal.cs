@@ -27,6 +27,31 @@ namespace ACE.Server.Managers.Market
         public static List<string> PanelLines(Weenie weenie)
             => weenie == null ? new List<string>() : Build(new WeenieSource(weenie));
 
+        /// <summary>
+        /// Just the gear-rating panel lines ("Critical Damage Rating: +2"), in panel order, non-zero only.
+        /// This is the SAME AddRatings the full panel uses, so /mule search and the web market's search
+        /// text carry exactly the lines the appraisal shows (ItemTextSearch appends them).
+        /// </summary>
+        public static List<string> RatingLines(WorldObject item)
+        {
+            var lines = new List<string>();
+
+            if (item != null)
+                AddRatings(new ItemSource(item), lines);
+
+            return lines;
+        }
+
+        public static List<string> RatingLines(Weenie weenie)
+        {
+            var lines = new List<string>();
+
+            if (weenie != null)
+                AddRatings(new WeenieSource(weenie), lines);
+
+            return lines;
+        }
+
         /// <summary>The item's own description text, which the client draws under the panel.</summary>
         public static string Description(WorldObject item)
             => Trim(item?.GetProperty(PropertyString.LongDesc));

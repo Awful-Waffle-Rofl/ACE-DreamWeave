@@ -53,6 +53,10 @@ namespace ACE.Server.WorldObjects
             else
                 playerMsg = deathMessage.Victim;
 
+            // the killing hit never reaches the "X hits you for N" line - every damage sink returns into the death
+            // path before it - so the victim's own death line carries it. Victim only; the broadcast is unchanged.
+            playerMsg += FormatKillingBlowSuffix(DamageHistory.KillingBlow);
+
             var msgYourDeath = new GameEventVictimNotification(Session, playerMsg);
             Session.Network.EnqueueSend(msgYourDeath);
 
@@ -93,6 +97,19 @@ namespace ACE.Server.WorldObjects
             }
 
             return deathMessage;
+        }
+
+        /// <summary>
+        /// " (Killing blow: 1234 damage. You had 456/1200 health.)" for the victim's death line, or "" when the
+        /// killing hit is not known exactly (see DamageHistory.KillingBlow). The damage is the hit after every
+        /// mitigation and before the clamp to remaining health; the health is what the victim had going into it.
+        /// </summary>
+        public static string FormatKillingBlowSuffix(DamageHistoryEntry killingBlow)
+        {
+            if (killingBlow?.Thrown == null)
+                return "";
+
+            return $" (Killing blow: {killingBlow.Thrown.Value} damage. You had {-killingBlow.Amount}/{killingBlow.MaxHealth} health.)";
         }
 
         public void HandlePKDeathBroadcast(DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
@@ -197,6 +214,17 @@ namespace ACE.Server.WorldObjects
         public bool ThreadDungeonDeathInProgress => dynamicDungeonDeathInProgress;
 
         /// <summary>
+        /// Pinnacle (owner ruling 2026-10-20): true when this player was dying inside the copy of a live Pinnacle fight
+        /// AT THE MOMENT OF DEATH (PinnacleFightManager.IsInsidePinnacleCopy). Latched once in Die(), for the same reason
+        /// as dynamicDungeonDeathInProgress: CreateCorpse and CalculateDeathItems(_Olthoi) run inside the delayed dieChain,
+        /// by which time the fight may have ended or the copy unloaded. Waives vitae and item loss ONLY: the enchantment
+        /// purge still happens and the death still returns to the lifestone (never EphemeralRealmExitTo).
+        /// </summary>
+        private bool pinnacleDeathInProgress;
+
+        public bool PinnacleDeathInProgress => pinnacleDeathInProgress;
+
+        /// <summary>
         /// PvP arena (Docs/Pvp/DESIGN.md H4/H5): true when this player was bound to a match AT THE MOMENT OF
         /// DEATH. Latched once in Die(), for the same reason as the latches above: every penalty site reads it
         /// later, inside the delayed dieChain, by which time the coordinator may already have unbound the player.
@@ -241,15 +269,59 @@ namespace ACE.Server.WorldObjects
             // ActionChain, and by the time it fires the player may have teleported away, or the event may
             // have resolved, so every later read in this sequence must use the latched value, never
             // re-evaluate WorldEventManager.ProtectsDeathAt.
-            worldEventDeathInProgress = WorldEventManager.ProtectsDeathAt(Location);
+            worldEventDeathInProgress = WorldEventHooks.ProtectsDeathAt(Location);
+
+            // Presence payout: a death inside the event arena starts the presence death grace. One field read
+            // when no event runs; never throws.
+            WorldEventHooks.OnPlayerDied(this);
 
             // Threads (WaffleACE): latched here for the same reason as worldEventDeathInProgress
             // immediately above - everything that reads it runs later, inside the delayed dieChain.
             dynamicDungeonDeathInProgress = ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(Location.Instance) != null;
 
+            // Lethal Unraveling (Open World Threads R18): a death the perimeter caused earns a free re-entry, so it spends no gem entry.
+            if (dynamicDungeonDeathInProgress)
+            {
+                ACE.Server.ThreadDungeons.ThreadUnravelDeath.OnPlayerDied(Guid.Full, Location.Instance);
+
+                // Group Threads: a seated member dying in a cleared group run is told their share waits and re-entry is free.
+                ACE.Server.ThreadDungeons.ThreadDungeonManager.OnMemberDied(this, Location.Instance);
+            }
+
+            // A death is never a willing exit: drop any armed marker so neither the death's own teleport nor a recall
+            // landing after the death retires a solo Thread gem (ThreadWillingExit, owner ruling 2026-10-10).
+            ACE.Server.ThreadDungeons.ThreadWillingExit.Disarm(Guid.Full);
+
             // PvP arena (H4): latched here with the others, and the death intent reported to the coordinator.
             // With no binding (every player until C3 binds one) this is false and reports nothing.
             pvpMatchDeathInProgress = LatchPvpMatchDeath(lastDamager, out pvpMatchDeathWaiver);
+
+            // Pinnacle (WaffleACE, owner ruling 2026-10-20): a death inside a live fight's copy costs no vitae and drops
+            // no items. Latched here with the others; the enchantment purge and the lifestone destination stay the normal
+            // ones (Docs/Knots/PINNACLE-ENCOUNTER-DESIGN.md section 2). The lookup never throws, and it is wrapped here as
+            // well, so not even a type-initializer fault can escape into the death sequence (a fault reads as false).
+            try
+            {
+                pinnacleDeathInProgress = ACE.Server.Pinnacles.PinnacleFightManager.IsInsidePinnacleCopy(Location.Instance);
+            }
+            catch (Exception ex)
+            {
+                pinnacleDeathInProgress = false;
+                log.Error($"[PINNACLE] IsInsidePinnacleCopy threw for {Name}", ex);
+            }
+
+            // Pinnacle (WaffleACE): the owner of a running fight died inside its copy; the fight is held. This only
+            // enqueues onto the fight's landblock and changes nothing about this death (the penalty waiver is the latch
+            // just above). Wrapped here as well as inside, so not even a type-initializer fault can escape into the death
+            // sequence.
+            try
+            {
+                ACE.Server.Pinnacles.PinnacleFightManager.OnOwnerDied(this);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PINNACLE] OnOwnerDied threw for {Name}", ex);
+            }
 
             if (worldEventDeathInProgress)
             {
@@ -325,7 +397,9 @@ namespace ACE.Server.WorldObjects
             // (see ~:211), for the same reason: everything below runs later, inside the delayed dieChain,
             // by which point the player may have teleported out of the run's instance.
             // PvP arena match deaths (H5) accrue no vitae either, read from the latch.
+            // Pinnacle deaths (owner ruling 2026-10-20) accrue no vitae, read from the latch taken in Die().
             if (!arenaDeath && !IsPKLiteDeath(topDamager) && !IsMule && !worldEventDeathInProgress && !ThreadDungeonDeathInProgress
+                && !PinnacleDeathInProgress
                 && !PvpPlayerRules.WaivesVitae(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 InflictVitaePenalty();
 
@@ -394,8 +468,13 @@ namespace ACE.Server.WorldObjects
             // PvP arena (H5): a match death returns to the exit stamped by EnterPvpMatch, the same way
             if (wentToPen)
                 newPosition = new Position(pvpPen);
-            else if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || ThreadDungeonDeathInProgress
-                || PvpMatchDeathInProgress)
+            else if (PvpMatchDeathInProgress)
+            {
+                // The one PvP return resolver (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): back inside a Thread the player was
+                // pulled from when it still takes them, else the stamp, else home.
+                newPosition = ResolvePvpReturn("match death") ?? Instantiation ?? Location;
+            }
+            else if (SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || ThreadDungeonDeathInProgress)
             {
                 var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
                 newPosition = (exitTo != null ? new Position(exitTo) : Sanctuary) ?? Instantiation ?? Location;
@@ -432,9 +511,14 @@ namespace ACE.Server.WorldObjects
                     PvpTemplateDeathArrival(wentToPen);
 
                     // currently happens while in portal space
-                    var newHealth = (uint)Math.Round(Health.MaxValue * 0.75f);
-                    var newStamina = (uint)Math.Round(Stamina.MaxValue * 0.75f);
-                    var newMana = (uint)Math.Round(Mana.MaxValue * 0.75f);
+                    // Battlegrounds (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 3): a pen death whose match is STILL Live for the
+                    // player now (re-read here, after the arrival delay) arrives at full vitals; every other death,
+                    // including a pen death the backstop below sends home, at the standard 75%. The maximums are the
+                    // ones at this moment, read after PvpTemplateDeathArrival above.
+                    var penStillLive = wentToPen && !PvpPenBackstopNeeded(penMatch);
+                    var newHealth = PvpPlayerRules.DeathArrivalVital(Health.MaxValue, penStillLive);
+                    var newStamina = PvpPlayerRules.DeathArrivalVital(Stamina.MaxValue, penStillLive);
+                    var newMana = PvpPlayerRules.DeathArrivalVital(Mana.MaxValue, penStillLive);
 
                     var msgHealthUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Health, newHealth);
                     var msgStaminaUpdate = new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Stamina, newStamina);
@@ -457,6 +541,7 @@ namespace ACE.Server.WorldObjects
                     EndSurvivalChallengeDeath();
                     EndWaveChallengeDeath();
                     EndSpeedChallengeDeath();
+                    pinnacleDeathInProgress = false;
                     worldEventDeathInProgress = false;
                     pvpMatchDeathInProgress = false;
                     pvpMatchDeathWaiver = null;
@@ -473,7 +558,7 @@ namespace ACE.Server.WorldObjects
                 });
 
                 teleportChain.EnqueueChain();
-            }));
+            }), source: TeleportSource.Death);
         }
 
         public bool suicideInProgress;
@@ -679,7 +764,10 @@ namespace ACE.Server.WorldObjects
             // the coin calculation below, so it suppresses the half-pyreal loss as well as items, for every
             // death including PK deaths
             // PvP arena match deaths (H5) drop nothing either, read from the latch
-            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || WorldEventDeathInProgress || ThreadDungeonDeathInProgress
+            // Pinnacle deaths (owner ruling 2026-10-20) drop nothing, read from the latch; a Pinnacle copy is ephemeral, so
+            // IsOnNoDropLandblock already covers it, and the latch states the rule rather than leaning on that
+            if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock || IsPKLiteDeath(corpse.KillerId) || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress || WorldEventHooks.IsProtectedDeathInProgress(this) || ThreadDungeonDeathInProgress
+                || PinnacleDeathInProgress
                 || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 return new List<WorldObject>();
 
@@ -1247,8 +1335,23 @@ namespace ACE.Server.WorldObjects
             var allPossessions = GetAllPossessions();
             foreach (var destroyItem in allPossessions.Where(i => i.Bonded == BondedStatus.Destroy).ToList())
             {
-                TryConsumeFromInventoryWithNetworking(destroyItem, (destroyItem.StackSize ?? 1));
-                destroyedItems.Add(destroyItem);
+                // an earlier destroy-bonded container already destroyed this item with itself (Destroy() cascades into its contents)
+                if (destroyItem.IsDestroyed)
+                {
+                    destroyedItems.Add(destroyItem);
+                    continue;
+                }
+
+                // the pack consume cannot see a wielded item; unlike ManaStone's ConsumeItem route, ToCorpseOnDeath (used although the item is destroyed, not moved to the corpse) skips the dying player's stance swap and saves before Destroy() queues the remove
+                if (TryConsumeFromInventoryWithNetworking(destroyItem, (destroyItem.StackSize ?? 1)))
+                    destroyedItems.Add(destroyItem);
+                else if (TryDequipObjectWithNetworking(destroyItem.Guid, out var dequipped, DequipObjectAction.ToCorpseOnDeath))
+                {
+                    dequipped.Destroy();
+                    destroyedItems.Add(destroyItem);
+                }
+                else
+                    log.WarnFormat("Couldn't find destroy-on-death item 0x{0:X8}:{1} for player {2}", destroyItem.Guid.Full, destroyItem.Name, Name);
             }
             return destroyedItems;
         }
@@ -1287,7 +1390,7 @@ namespace ACE.Server.WorldObjects
             // pre-existing gap of the same defect class as the world-event one, closed at the same time.
             if (PropertyManager.GetBool("player_death_no_item_loss").Item || corpse.IsOnNoDropLandblock
                 || SurvivalChallengeDeathInProgress || WaveChallengeDeathInProgress || SpeedChallengeDeathInProgress
-                || WorldEventDeathInProgress || ThreadDungeonDeathInProgress
+                || WorldEventHooks.IsProtectedDeathInProgress(this) || ThreadDungeonDeathInProgress || PinnacleDeathInProgress
                 || PvpPlayerRules.WaivesItemLoss(PvpMatchDeathInProgress, pvpMatchDeathWaiver))
                 return new List<WorldObject>();
 

@@ -242,5 +242,55 @@ namespace ACE.Entity.Enum.Properties
         /// Validated against the enabled templates at join, accept and dispatch, so a stale key only refuses the join.
         /// </summary>
         PvpTemplatePreference              = 9023,
+
+        /// <summary>
+        /// Threads: on a Fragment Mold (PropertyBool.FragmentMold), the recorded component load in the
+        /// DungeonGemSpec load= format (wcid:doses,...). Absent or empty means the mold holds no imprint.
+        /// Written only by FragmentMold.cs.
+        /// </summary>
+        FragmentMoldImprint                = 9024,
+
+        /// <summary>
+        /// Knots: the key of the pinnacle (PinnacleDef.Key) a Pattern names or a Knot is bound to. Absent on an
+        /// unbound Knot.
+        /// </summary>
+        PinnacleKey                        = 9025,
+
+        /// <summary>
+        /// PvP dailies (Pvp/PvpDailyCatalog.cs, ProvingGround): on a player, the opponent ACCOUNTS defeated in 1v1 while the
+        /// PvpDailyProvingGroundCount quest is held, as v1|count|hex,hex (Pvp/PvpDailyProgress.cs PvpDailyOpponentState). Removed when the
+        /// quest is absent; a stored count that differs from the quest's current solves is stale and read as empty. Written only by
+        /// Player.ApplyPvpDailyFacts.
+        /// </summary>
+        PvpDailyProvingGroundState         = 9026,
+
+        /// <summary>
+        /// PvP dailies (GladiatorsStreak): on a player, the opponent ACCOUNT of the streak's last 1v1 win while the
+        /// PvpDailyGladiatorsStreakCount quest is held, in the same v1|count|hex form. Removed when the quest is absent. May instead hold
+        /// the pending-reset marker (PvpDailyProgress.PendingStreakResetMarker), written on the stored character after an offline Live 1v1
+        /// forfeit and consumed at the next login. Otherwise written only by Player.ApplyPvpDailyFacts.
+        /// </summary>
+        PvpDailyGladiatorsStreakState      = 9027,
+
+        /// <summary>
+        /// World Events presence payout: on a reward crate (WorldEventRewardCrate, PropertyBool 9078), the id of the reward
+        /// definition whose pool is rolled when the crate is used.
+        /// </summary>
+        WorldEventRewardProfile            = 9028,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): the id of the table that dropped a Knot treasure item.
+        KnotLootTable                      = 9029,
+
+        // Knot clear leaderboard (/top knot): the pinnacle key of the character's best Knot clear (the Knot type).
+        BestKnotClearPinnacleKey           = 9030,
+
+        // Per-copy creation roll (ACE.Server.Entity.CreationRoll): on a weenie, a v1| spec of stats each created copy rolls; removed from the copy.
+        CreationRollSpec                   = 9031,
+
+        // Custom Summons: on a Duo Summon Gem, the stored state of the first absorbed summon item.
+        DuoSummonSlotA                     = 9032,
+
+        // Custom Summons: on a Duo Summon Gem, the stored state of the second absorbed summon item.
+        DuoSummonSlotB                     = 9033,
     }
 }

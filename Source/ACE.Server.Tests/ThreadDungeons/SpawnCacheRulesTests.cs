@@ -45,7 +45,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual("You must be inside your Thread to use this.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.NotInside));
             Assert.AreEqual("Your Thread is not complete yet.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.NotComplete));
             Assert.AreEqual("Please wait before using /spawncache again.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.Cooldown));
-            Assert.AreEqual("Your Thread Cache is already forming.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.Forming));
+            Assert.AreEqual("A Thread Cache is already forming. Try again shortly.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.Forming));
             Assert.AreEqual("Your Thread Cache is empty.", SpawnCacheRules.MessageFor(SpawnCacheRefusal.Empty));
             Assert.IsNull(SpawnCacheRules.MessageFor(SpawnCacheRefusal.None));
         }
@@ -55,6 +55,68 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             Assert.AreEqual(CacheRequestMode.Summon, SpawnCacheRules.ModeFor(true));
             Assert.AreEqual(CacheRequestMode.Move, SpawnCacheRules.ModeFor(false));
+        }
+
+        [TestMethod]
+        public void Summon_and_Move_gather_placed_caches_Auto_does_not()
+        {
+            Assert.IsTrue(ThreadCachePlacer.MovesPlacedCachesFirst(CacheRequestMode.Summon, true), "Summon must also move placed caches");
+            Assert.IsTrue(ThreadCachePlacer.MovesPlacedCachesFirst(CacheRequestMode.Move, true));
+            Assert.IsFalse(ThreadCachePlacer.MovesPlacedCachesFirst(CacheRequestMode.Auto, true), "Auto stays a top-up");
+            Assert.IsFalse(ThreadCachePlacer.MovesPlacedCachesFirst(CacheRequestMode.Summon, false), "not inside: nothing moves");
+            Assert.IsFalse(ThreadCachePlacer.MovesPlacedCachesFirst(CacheRequestMode.Move, false));
+        }
+
+        [TestMethod]
+        public void Solo_execute_moves_placed_caches_before_building_the_new_ones()
+        {
+            var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadCachePlacer.cs");
+            var body = PooledLootSourceText.MethodBody(src,
+                "private static void Execute(ThreadDungeonRun run, Landblock landblock, CacheRequestMode mode, uint requesterGuid, ThreadLootRollBudget budget)");
+
+            var decision = body.IndexOf("var movesPlaced = MovesPlacedCachesFirst(mode, ownerInside);", StringComparison.Ordinal);
+            var move = body.IndexOf("if (mode == CacheRequestMode.Summon && movesPlaced)", StringComparison.Ordinal);
+            var build = body.IndexOf("ThreadCacheFiller.BuildPile(run, budget, ledgerSnapshot)", StringComparison.Ordinal);
+            var form = body.IndexOf("FormAndFillAtMember(run, landblock, owner", StringComparison.Ordinal);
+            var finish = body.IndexOf("FinishSummon(run, landblock, owner, summonMove, pass)", StringComparison.Ordinal);
+
+            Assert.IsTrue(decision >= 0 && decision < move, "one decision feeds both branches");
+            Assert.IsTrue(move >= 0, "Summon must move the placed caches");
+            Assert.IsTrue(move < build && build < form && form < finish, "move existing first, then build and form new, then finish the Summon");
+
+            Assert.AreEqual(1, Count(body, "SummonMoveGuarded("), "the Summon move call appears exactly once");
+            Assert.AreEqual(1, Count(body, "MoveCaches("), "the only other move call is the Move branch's");
+            Assert.AreEqual(1, Count(body, "FinishSummon("), "the Summon's exit relocation and single chat line live in one place");
+            StringAssert.Contains(body, "finally", "the line and the exit relocation also follow a Summon that returned early");
+        }
+
+        [TestMethod]
+        public void Solo_summon_move_records_progress_per_cache_so_a_throw_keeps_it()
+        {
+            var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadCachePlacer.cs");
+            var guard = PooledLootSourceText.MethodBody(src, "private static void SummonMoveGuarded(");
+            var move = PooledLootSourceText.MethodBody(src, "private static CacheMoveResult MoveCaches(");
+
+            StringAssert.Contains(guard, "MoveCaches(run, landblock, owner, quiet: true, progress)", "the guard hands its own result to the move");
+            Assert.IsFalse(guard.Contains("return default"), "a throw must not discard the progress");
+            StringAssert.Contains(move, "progress.Moved++", "counted per cache moved, not at the end");
+        }
+        [TestMethod]
+        public void Summon_says_one_line_formed_if_anything_moved_or_formed_no_room_only_if_neither()
+        {
+            Assert.AreEqual(ThreadCachePlacer.FormedMessage, ThreadCachePlacer.SummonLine(2, 1, false));
+            Assert.AreEqual(ThreadCachePlacer.FormedMessage, ThreadCachePlacer.SummonLine(1, 0, true), "moved something: never no-room");
+            Assert.AreEqual(ThreadCachePlacer.FormedMessage, ThreadCachePlacer.SummonLine(0, 3, true));
+            Assert.AreEqual(ThreadCachePlacer.NoRoomMessage, ThreadCachePlacer.SummonLine(0, 0, true));
+            Assert.IsNull(ThreadCachePlacer.SummonLine(0, 0, false));
+        }
+
+        private static int Count(string text, string needle)
+        {
+            var n = 0;
+            for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = text.IndexOf(needle, i + 1, StringComparison.Ordinal))
+                n++;
+            return n;
         }
 
         [TestMethod]

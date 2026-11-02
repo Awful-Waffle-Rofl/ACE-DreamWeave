@@ -624,6 +624,512 @@ namespace ACE.Server.WorldEvents
             return result;
         }
 
+        /// <summary>
+        /// The Hold goal's "protect" block checks (D6 - pure). Returns null when the block is usable, or the
+        /// reason it is not, phrased to follow "goal 'id' " in the diagnostic.
+        /// </summary>
+        internal static string ValidateProtect(ProtectDef protect)
+        {
+            if (protect == null)
+                return "is type Hold but has no protect block";
+
+            if (protect.Wcids != null && protect.Wcids.Any(w => w == 0))
+                return "has a protect.wcids list with a 0 entry";
+
+            if (protect.WcidFor(0) == 0)
+                return "has a protect block with no wcid (set wcid or wcids)";
+
+            if (protect.Count == null || protect.Count.Base < 1 || protect.Count.Cap < protect.Count.Base
+                || protect.Count.Cap > ProtectDef.MaxProtectedTargets || !IsFinite(protect.Count.PerParticipant)
+                || protect.Count.PerParticipant < 0)
+                return $"has an invalid protect.count (base at least 1, cap between base and {ProtectDef.MaxProtectedTargets})";
+
+            // protect.health only matters when damage is raw (undefendedSeconds 0); with time-based damage it is
+            // ignored, so it is neither required nor checked (ParseGoals notes it when a goal sets both).
+            if (!IsFinite(protect.UndefendedSeconds) || protect.UndefendedSeconds < 0)
+                return "has an invalid protect.undefendedSeconds (0 or more; 0 leaves monster damage unscaled)";
+
+            if (!protect.IsTimeScaled && (protect.Health == null || protect.Health.Base < 1 || protect.Health.Cap < protect.Health.Base
+                || !IsFinite(protect.Health.PerParticipant) || protect.Health.PerParticipant < 0))
+                return "has an invalid protect.health (base at least 1, cap at least base; required unless undefendedSeconds is set)";
+
+            if (!IsFinite(protect.Radius) || protect.Radius < 0)
+                return "has an invalid protect.radius (0 or more)";
+
+            if (!IsFinite(protect.SpawnRadius) || protect.SpawnRadius < 0)
+                return "has an invalid protect.spawnRadius (0 or more; 0 keeps the source's radius)";
+
+            if (!IsFinite(protect.MinDeathSeconds) || protect.MinDeathSeconds < 0)
+                return "has an invalid protect.minDeathSeconds (0 or more; 0 means no cap)";
+
+            if (protect.Waves != null && (protect.Waves.Base < 1 || protect.Waves.Cap < protect.Waves.Base
+                || !IsFinite(protect.Waves.PerParticipant) || protect.Waves.PerParticipant < 0))
+                return "has an invalid protect.waves (base at least 1, cap at least base)";
+
+            if (!IsFinite(protect.MinSeconds) || protect.MinSeconds < 0)
+                return "has an invalid protect.minSeconds (0 or more)";
+
+            if (!IsFinite(protect.HealBetweenWaves) || protect.HealBetweenWaves < 0 || protect.HealBetweenWaves > 1)
+                return "has an invalid protect.healBetweenWaves (0 to 1)";
+
+            if (!IsFinite(protect.MaxHealPerTenSeconds) || protect.MaxHealPerTenSeconds < 0 || protect.MaxHealPerTenSeconds > 1)
+                return "has an invalid protect.maxHealPerTenSeconds (0 to 1)";
+
+            if (!IsFinite(protect.SeekShare) || protect.SeekShare < 0 || protect.SeekShare > 1)
+                return "has an invalid protect.seekShare (0 to 1)";
+
+            if (protect.MinSurvivors < 1)
+                return "has an invalid protect.minSurvivors (1 or more)";
+
+            if (!IsFinite(protect.SpecialWaveChance) || protect.SpecialWaveChance < 0 || protect.SpecialWaveChance > 1)
+                return "has an invalid protect.specialWaveChance (0 to 1)";
+
+            if (protect.SpecialWaveFromWave < 1)
+                return "has an invalid protect.specialWaveFromWave (1 or more)";
+
+            if (!IsFinite(protect.HealReductionAfterHit) || protect.HealReductionAfterHit < 0 || protect.HealReductionAfterHit > 1)
+                return "has an invalid protect.healReductionAfterHit (0 to 1)";
+
+            if (!IsFinite(protect.HealReductionSeconds) || protect.HealReductionSeconds < 0 || protect.HealReductionSeconds > 60)
+                return "has an invalid protect.healReductionSeconds (0 to 60)";
+
+            if (protect.WaveSize != null && (protect.WaveSize.Base < 1 || protect.WaveSize.Cap < protect.WaveSize.Base
+                || !IsFinite(protect.WaveSize.PerParticipant) || protect.WaveSize.PerParticipant < 0))
+                return "has an invalid protect.waveSize (base at least 1, cap at least base)";
+
+            if (protect.MaxAlive < 0 || protect.MaxAlive > 200)
+                return "has an invalid protect.maxAlive (0 to 200; 0 keeps the source's)";
+
+            if (!IsFinite(protect.WaveIntervalSeconds) || protect.WaveIntervalSeconds < 0 || protect.WaveIntervalSeconds > 600)
+                return "has an invalid protect.waveIntervalSeconds (0 to 600; 0 keeps the source's cadence)";
+
+            if (!IsFinite(protect.NextWaveAliveShare) || protect.NextWaveAliveShare < 0 || protect.NextWaveAliveShare > 1)
+                return "has an invalid protect.nextWaveAliveShare (0 to 1)";
+
+            if (!IsFinite(protect.MinWaveGapSeconds) || protect.MinWaveGapSeconds < 0 || protect.MinWaveGapSeconds > 60)
+                return "has an invalid protect.minWaveGapSeconds (0 to 60)";
+
+            if (protect.MinSpecialWaves < 0 || protect.MinSpecialWaves > ProtectDef.MaxHoldWaves)
+                return $"has an invalid protect.minSpecialWaves (0 to {ProtectDef.MaxHoldWaves})";
+
+            if (!IsFinite(protect.FinaleBossScale) || (protect.FinaleBossScale != 0 && (protect.FinaleBossScale < 1 || protect.FinaleBossScale > 2.5)))
+                return "has an invalid protect.finaleBossScale (0 to match world event bosses, or 1 to 2.5)";
+
+            if (!IsFinite(protect.FinaleBossHealthMult) || protect.FinaleBossHealthMult < 1 || protect.FinaleBossHealthMult > 10)
+                return "has an invalid protect.finaleBossHealthMult (1 to 10)";
+
+            if (!IsFinite(protect.BossEffectSeconds) || protect.BossEffectSeconds < 1 || protect.BossEffectSeconds > 60)
+                return "has an invalid protect.bossEffectSeconds (1 to 60)";
+
+            if (!WorldEventHoldRules.TryParseBossEffect(protect.BossEffect, out _))
+                return "has an unknown protect.bossEffect (a PlayScript name such as ShieldUpRed, or none)";
+
+            if (!WorldEventHoldRules.TryParseBossEffect(protect.BossArrivalEffect, out _))
+                return "has an unknown protect.bossArrivalEffect (a PlayScript name such as LevelUp, or none)";
+
+            if (!IsFinite(protect.FinaleBossLeadSeconds) || protect.FinaleBossLeadSeconds < 0 || protect.FinaleBossLeadSeconds > 30)
+                return "has an invalid protect.finaleBossLeadSeconds (0 to 30)";
+
+            if (!WorldEventHoldRules.IsValidBossPrefix(protect.FinaleBossPrefix))
+                return "has an invalid protect.finaleBossPrefix (letters and spaces, up to 20)";
+
+            if (protect.WaveMix != null)
+            {
+                var shares = protect.WaveMix.Shares;
+
+                if (shares.Any(s => !IsFinite(s) || s < 0 || s > 1) || shares.Sum() <= 0)
+                    return "has an invalid protect.waveMix (each share 0 to 1, at least one above 0)";
+
+                if (!protect.IsWaveBased)
+                    return "has protect.waveMix without protect.waves";
+
+                var mix = protect.WaveMix;
+
+                if (mix.MinBreach < 0 || mix.MinBreach > 10 || mix.MinRanged < 0 || mix.MinRanged > 20 || mix.MinCorrupted < 0 || mix.MinCorrupted > 5
+                    || mix.MaxCorrupted < 0 || mix.MaxCorrupted > 10 || mix.MinCorrupted > mix.MaxCorrupted)
+                    return "has an invalid protect.waveMix minimum (minRanged 0 to 20, minCorrupted 0 to 5, maxCorrupted 0 to 10 and not below minCorrupted)";
+            }
+
+            if (!IsFinite(protect.UndefendedSecondsPerParticipant) || protect.UndefendedSecondsPerParticipant < 0 || protect.UndefendedSecondsPerParticipant > 600
+                || !IsFinite(protect.UndefendedSecondsFloor) || protect.UndefendedSecondsFloor < 0 || protect.UndefendedSecondsFloor > 3600)
+                return "has an invalid protect.undefendedSecondsPerParticipant or undefendedSecondsFloor (0 to 600, 0 to 3600)";
+
+            static bool Share(double v) => double.IsFinite(v) && v >= 0 && v <= 1;
+
+            if (!Share(protect.CorruptedKillHeal) || !Share(protect.ShrineHeal) || !Share(protect.RescueHeal)
+                || !Share(protect.RescueCapPerWave) || !Share(protect.HealBudgetPerWave))
+                return "has an invalid heal share (corruptedKillHeal, shrineHeal, rescueHeal, rescueCapPerWave, healBudgetPerWave: 0 to 1)";
+
+            if (!IsFinite(protect.ClearRegenPerSecond) || protect.ClearRegenPerSecond < 0 || protect.ClearRegenPerSecond > 0.1)
+                return "has an invalid protect.clearRegenPerSecond (0 to 0.1)";
+
+            if (!IsFinite(protect.ClearRadius) || protect.ClearRadius < 0 || protect.ClearRadius > 50)
+                return "has an invalid protect.clearRadius (0 to 50)";
+
+            if (!IsFinite(protect.ShrineCooldownSeconds) || protect.ShrineCooldownSeconds < 1 || protect.ShrineCooldownSeconds > 600)
+                return "has an invalid protect.shrineCooldownSeconds (1 to 600)";
+
+            if (!IsFinite(protect.MaxWaveIntervalSeconds) || protect.MaxWaveIntervalSeconds < 0 || protect.MaxWaveIntervalSeconds > 600)
+                return "has an invalid protect.maxWaveIntervalSeconds (0 to 600)";
+
+            if (protect.Shrine != null)
+            {
+                var s = protect.Shrine;
+
+                if (s.Wcid == 0)
+                    return "has protect.shrine with no wcid";
+
+                if (string.IsNullOrWhiteSpace(s.Name) || s.Name.Length > 30 || !s.Name.All(c => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ' || c == '\''))
+                    return "has an invalid protect.shrine.name (letters, spaces and apostrophes, up to 30)";
+
+                if (!IsFinite(s.Scale) || s.Scale < 0.1 || s.Scale > 3 || !IsFinite(s.UseRadius) || s.UseRadius < 1 || s.UseRadius > 10
+                    || !IsFinite(s.Dx) || !IsFinite(s.Dy) || Math.Abs(s.Dx) > 10 || Math.Abs(s.Dy) > 10)
+                    return "has an invalid protect.shrine layout (scale 0.1 to 3, useRadius 1 to 10, dx and dy within 10)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(s.ReadyEffect, out _) || !WorldEventHoldRules.TryParseBossEffect(s.UsedEffect, out _))
+                    return "has an unknown protect.shrine effect (a PlayScript name, or none)";
+
+                if (!IsFinite(s.ReadyPulseSeconds) || (s.ReadyPulseSeconds != 0 && (s.ReadyPulseSeconds < 5 || s.ReadyPulseSeconds > 120)))
+                    return "has an invalid protect.shrine.readyPulseSeconds (0, or 5 to 120)";
+            }
+
+            if (protect.Ward != null)
+            {
+                var ward = protect.Ward;
+
+                if (!IsFinite(ward.Reduction) || ward.Reduction < 0 || ward.Reduction > 1)
+                    return "has an invalid protect.ward.reduction (0 to 1)";
+
+                if (!IsFinite(ward.ShatterSeconds) || ward.ShatterSeconds < 1 || ward.ShatterSeconds > 120)
+                    return "has an invalid protect.ward.shatterSeconds (1 to 120)";
+
+                if (!WorldEventHoldRules.TryParseCombatKinds(ward.Reduces, out var reduces))
+                    return "has an invalid protect.ward.reduces (melee, missile, magic)";
+
+                if (!WorldEventHoldRules.TryParseCombatKinds(ward.BreakOn, out var breakOn))
+                    return "has an invalid protect.ward.breakOn (melee, missile, magic)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(ward.BreakEffect, out _) || !WorldEventHoldRules.TryParseBossEffect(ward.RestoreEffect, out _))
+                    return "has an unknown protect.ward effect (a PlayScript name, or none)";
+
+                ward.ReducesKinds = reduces;
+                ward.BreakOnKinds = breakOn;
+            }
+
+            if (protect.Corrupted != null)
+            {
+                var c = protect.Corrupted;
+
+                if (!WorldEventHoldRules.IsValidBossPrefix(c.Prefix))
+                    return "has an invalid protect.corrupted.prefix (letters and spaces, up to 20)";
+
+                if (!IsFinite(c.Scale) || c.Scale < 1 || c.Scale > 2 || !IsFinite(c.HealthMult) || c.HealthMult < 1 || c.HealthMult > 5)
+                    return "has an invalid protect.corrupted scale or healthMult (scale 1 to 2, healthMult 1 to 5)";
+
+                if (!IsFinite(c.EmpowerRadius) || c.EmpowerRadius < 0 || c.EmpowerRadius > 50
+                    || !IsFinite(c.EmpowerMult) || c.EmpowerMult < 1 || c.EmpowerMult > 5 || !IsFinite(c.SelfMult) || c.SelfMult < 1 || c.SelfMult > 10)
+                    return "has an invalid protect.corrupted aura (empowerRadius 0 to 50, empowerMult 1 to 5, selfMult 1 to 10)";
+
+                if (c.AssaultEveryWaves < 0 || c.AssaultEveryWaves > 10 || c.AssaultFromWave < 1 || c.AssaultFromWave > 10 || c.AssaultCount < 1 || c.AssaultCount > 5)
+                    return "has an invalid protect.corrupted assault (assaultEveryWaves 0 to 10, assaultFromWave 1 to 10, assaultCount 1 to 5)";
+
+                if (!IsFinite(c.EffectSeconds) || c.EffectSeconds < 1 || c.EffectSeconds > 60 || !WorldEventHoldRules.TryParseBossEffect(c.Effect, out _)
+                    || !WorldEventHoldRules.TryParseBossEffect(c.ExtraEffect, out _))
+                    return "has an invalid protect.corrupted effect (a PlayScript name or none, every 1 to 60 s)";
+
+                if (!WorldEventTint.TryParsePalette(c.TintPalette, out var tint))
+                    return "has an invalid protect.corrupted.tintPalette (a client palette id 0x04000000 to 0x0400FFFF, or none)";
+
+                c.TintPaletteId = tint;
+            }
+
+            if (!IsFinite(protect.BossMinKillSeconds) || (protect.BossMinKillSeconds != 0 && (protect.BossMinKillSeconds < 20 || protect.BossMinKillSeconds > 300)))
+                return "has an invalid protect.bossMinKillSeconds (0, or 20 to 300)";
+
+            if (!IsFinite(protect.BossSwapSeconds) || !IsFinite(protect.BossSwapMaxSeconds) || protect.BossSwapSeconds < 5
+                || protect.BossSwapMaxSeconds < protect.BossSwapSeconds || protect.BossSwapMaxSeconds > 120)
+                return "has an invalid protect.bossSwapSeconds or bossSwapMaxSeconds (5 to 120, max not below the min)";
+
+            if (!IsFinite(protect.BossPullShare) || (protect.BossPullShare != 0 && (protect.BossPullShare < 0.01 || protect.BossPullShare > 0.5))
+                || !IsFinite(protect.BossPullWindowSeconds) || protect.BossPullWindowSeconds < 2 || protect.BossPullWindowSeconds > 30
+                || !IsFinite(protect.BossPullSeconds) || protect.BossPullSeconds < 3 || protect.BossPullSeconds > 60)
+                return "has an invalid boss pull (bossPullShare 0 or 0.01 to 0.5, bossPullWindowSeconds 2 to 30, bossPullSeconds 3 to 60)";
+
+            var poseError = WorldEventHoldDefense.Validate(protect.DefendPose);
+
+            if (poseError != null)
+                return poseError;
+
+            if (protect.ClearArea != null)
+            {
+                var a = protect.ClearArea;
+
+                if (!IsFinite(a.TargetClearance) || a.TargetClearance < 1 || a.TargetClearance > 10
+                    || !IsFinite(a.PortalClearance) || a.PortalClearance < 1 || a.PortalClearance > 10
+                    || !IsFinite(a.PathClearance) || a.PathClearance < 0.5 || a.PathClearance > 5
+                    || !IsFinite(a.MaxPortalShiftDegrees) || a.MaxPortalShiftDegrees < 0 || a.MaxPortalShiftDegrees > 60
+                    || !IsFinite(a.MaxPortalShiftMetres) || a.MaxPortalShiftMetres < 0 || a.MaxPortalShiftMetres > 15
+                    || a.MinPortals < 1 || a.MinPortals > 8
+                    || !IsFinite(a.SearchRadius) || a.SearchRadius < 0 || a.SearchRadius > 100
+                    || !IsFinite(a.IgnoreRadius) || a.IgnoreRadius < 0 || a.IgnoreRadius > 2)
+                    return "has an invalid protect.clearArea (targetClearance and portalClearance 1 to 10, pathClearance 0.5 to 5, " +
+                           "maxPortalShiftDegrees 0 to 60, maxPortalShiftMetres 0 to 15, minPortals 1 to 8, searchRadius 0 to 100, ignoreRadius 0 to 2)";
+            }
+
+            if (protect.Portals != null)
+            {
+                var p = protect.Portals;
+
+                if (p.Count < 1 || p.Count > 8)
+                    return "has an invalid protect.portals.count (1 to 8)";
+
+                if (!IsFinite(p.Radius) || p.Radius < 5 || p.Radius > 80 || !IsFinite(p.Scale) || p.Scale < 0.1 || p.Scale > 2
+                    || !IsFinite(p.Inset) || p.Inset < 0 || p.Inset > 10 || !IsFinite(p.RotationDegrees))
+                    return "has an invalid protect.portals layout (radius 5 to 80, scale 0.1 to 2, inset 0 to 10)";
+
+                if (p.Parts == null || p.Parts.Count == 0 || p.Parts.Any(part => part == null || part.Wcid == 0))
+                    return "has protect.portals with no parts (each needs a wcid)";
+
+                if (!WorldEventHoldRules.TryParseBossEffect(p.PulseEffect, out _))
+                    return "has an unknown protect.portals.pulseEffect (a PlayScript name, or none)";
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// protect.specialWaves and protect.countByParticipants, repaired in place (never a reason to drop the
+        /// goal). A bad entry is dropped with a diagnostic: an unknown or repeated type, a weight that is not a
+        /// positive number, settings out of range, a layout entry with a bad count or radius. Lines are
+        /// repaired like protect.lines (blanks removed, dashes replaced). Special waves on a hold without
+        /// protect.waves are ignored, with a diagnostic.
+        /// </summary>
+        internal static void RepairHoldWaveSettings(string goalId, ProtectDef protect, List<string> diagnostics)
+        {
+            if (protect == null)
+                return;
+
+            if (protect.WaveMix != null)
+                protect.WaveMix.Announce = RepairLinePool(goalId, "waveMix.announce", protect.WaveMix.Announce, diagnostics);
+
+            if (protect.Ward != null)
+                protect.Ward.Announce = RepairLinePool(goalId, "ward.announce", protect.Ward.Announce, diagnostics);
+
+            if (protect.Corrupted != null)
+            {
+                protect.Corrupted.Announce = RepairLinePool(goalId, "corrupted.announce", protect.Corrupted.Announce, diagnostics);
+                protect.Corrupted.AssaultAnnounce = RepairLinePool(goalId, "corrupted.assaultAnnounce", protect.Corrupted.AssaultAnnounce, diagnostics);
+            }
+
+            protect.BossTargetAnnounce = RepairLinePool(goalId, "bossTargetAnnounce", protect.BossTargetAnnounce, diagnostics);
+            protect.BossPulledAnnounce = RepairLinePool(goalId, "bossPulledAnnounce", protect.BossPulledAnnounce, diagnostics);
+
+            if (protect.Waves != null && (protect.Waves.Cap > ProtectDef.MaxHoldWaves || protect.Waves.Base > ProtectDef.MaxHoldWaves))
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.waves goes above {ProtectDef.MaxHoldWaves}; " +
+                                $"a hold never has more than {ProtectDef.MaxHoldWaves} waves");
+
+            if (protect.SpecialWaves != null)
+            {
+                if (!protect.IsWaveBased && protect.SpecialWaves.Count > 0)
+                {
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.specialWaves needs protect.waves; ignored");
+                    protect.SpecialWaves = null;
+                }
+                else
+                {
+                    var kept = new List<SpecialWaveDef>();
+
+                    foreach (var wave in protect.SpecialWaves)
+                    {
+                        var error = SpecialWaveError(wave, kept);
+
+                        if (error != null)
+                        {
+                            diagnostics.Add($"goals.json: goal '{goalId}' protect.specialWaves entry '{wave?.Type}' {error}; dropped");
+                            continue;
+                        }
+
+                        wave.Announce = RepairLinePool(goalId, $"specialWaves.{wave.Type}.announce", wave.Announce, diagnostics);
+                        wave.Lines = RepairLinePool(goalId, $"specialWaves.{wave.Type}.lines", wave.Lines, diagnostics);
+
+                        kept.Add(wave);
+                    }
+
+                    protect.SpecialWaves = kept;
+                }
+            }
+
+            // Waves must arrive from outside the widest ring; a tighter spawnRadius is raised at runtime
+            // (WorldEvent.ResolveSpawnRadius), and said so here.
+            void NoteSpawnClearance()
+            {
+                var needed = protect.MaxRingRadius + ProtectDef.MinSpawnClearance;
+
+                if (protect.SpawnRadius > 0 && protect.SpawnRadius < needed)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.spawnRadius {protect.SpawnRadius:0.#} is inside the target ring " +
+                                    $"plus {ProtectDef.MinSpawnClearance:0} m; waves will spawn at {needed:0.#} m");
+            }
+
+            if (protect.CountByParticipants != null)
+            {
+                var kept = new List<TargetLayoutDef>();
+
+                foreach (var entry in protect.CountByParticipants)
+                {
+                    if (entry == null || entry.MinPlayers < 0 || entry.Count < 1 || entry.Count > ProtectDef.MaxProtectedTargets
+                        || !IsFinite(entry.Radius) || entry.Radius < 0 || entry.Radius > 60
+                        || kept.Exists(k => k.MinPlayers == entry.MinPlayers))
+                    {
+                        diagnostics.Add($"goals.json: goal '{goalId}' protect.countByParticipants entry minPlayers={entry?.MinPlayers} is invalid " +
+                                        $"(count 1 to {ProtectDef.MaxProtectedTargets}, radius 0 to 60, minPlayers unique and 0 or more); dropped");
+                        continue;
+                    }
+
+                    kept.Add(entry);
+                }
+
+                protect.CountByParticipants = kept;
+            }
+
+            NoteSpawnClearance();
+        }
+
+        /// <summary>Why one specialWaves entry is unusable (null when it is fine). Parses its type into TypeKind.</summary>
+        internal static string SpecialWaveError(SpecialWaveDef wave, IReadOnlyList<SpecialWaveDef> kept)
+        {
+            if (wave == null)
+                return "is empty";
+
+            if (!WorldEventHoldRules.TryParseWaveType(wave.Type, out var type))
+                return "has an unknown type (breach, runners, ranged, hunters or finale)";
+
+            wave.TypeKind = type;
+
+            if (type != HoldWaveType.Finale && (!IsFinite(wave.Weight) || wave.Weight <= 0))
+                return "has an invalid weight (above 0)";
+
+            if (type == HoldWaveType.Runners)
+            {
+                if (!IsFinite(wave.CountMult) || wave.CountMult <= 0 || wave.CountMult > 1)
+                    return "has an invalid countMult (above 0, up to 1)";
+
+                if (!IsFinite(wave.HealthMult) || wave.HealthMult < 0.1 || wave.HealthMult > 1)
+                    return "has an invalid healthMult (0.1 to 1)";
+
+                if (!IsFinite(wave.SpeedMult) || wave.SpeedMult < 1 || wave.SpeedMult > 3)
+                    return "has an invalid speedMult (1 to 3)";
+
+                if (!IsFinite(wave.AttackSpeedMult) || wave.AttackSpeedMult < 1 || wave.AttackSpeedMult > 3)
+                    return "has an invalid attackSpeedMult (1 to 3)";
+            }
+
+            if (type == HoldWaveType.Ranged && (!IsFinite(wave.HoldDistance) || wave.HoldDistance < 5 || wave.HoldDistance > 40))
+                return "has an invalid holdDistance (5 to 40)";
+
+            if (type == HoldWaveType.Hunters && (wave.Hunters < 1 || wave.Hunters > 20))
+                return "has an invalid hunters count (1 to 20)";
+
+            if (kept != null && kept.Any(k => k.TypeKind == type))
+                return "repeats a type";
+
+            return null;
+        }
+
+        private static List<string> RepairLinePool(string goalId, string key, List<string> pool, List<string> diagnostics)
+        {
+            pool ??= new List<string>();
+
+            var blanks = pool.RemoveAll(string.IsNullOrWhiteSpace);
+
+            if (blanks > 0)
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} had {blanks} blank line(s), removed");
+
+            var dashed = 0;
+
+            for (var i = 0; i < pool.Count; i++)
+            {
+                if (WorldEventHoldRules.RepairDashes(pool[i], out var repaired))
+                {
+                    pool[i] = repaired;
+                    dashed++;
+                }
+            }
+
+            if (dashed > 0)
+                diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} had {dashed} line(s) with an em or en dash, replaced with a hyphen");
+
+            return pool;
+        }
+
+        /// <summary>
+        /// The protect block's line pools, repaired in place (never a reason to drop the goal): blank lines
+        /// are removed, and an em or en dash becomes a hyphen (DreamWeave player-text rule). Each repair is
+        /// one diagnostic naming the goal and the pool. A missing "lines" block is fine and says nothing.
+        /// </summary>
+        internal static void RepairProtectLines(string goalId, ProtectDef protect, List<string> diagnostics)
+        {
+            var lines = protect?.Lines;
+
+            if (lines == null)
+                return;
+
+            lines.Spawn ??= new List<string>();
+            lines.Health ??= new List<string>();
+            lines.Destroyed ??= new List<string>();
+            lines.Success ??= new List<string>();
+            lines.Heal ??= new List<string>();
+
+            foreach (var (key, pool) in lines.Pools)
+            {
+                var blanks = pool.RemoveAll(string.IsNullOrWhiteSpace);
+
+                if (blanks > 0)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.lines.{key} had {blanks} blank line(s), removed");
+
+                var dashed = 0;
+
+                for (var i = 0; i < pool.Count; i++)
+                {
+                    if (WorldEventHoldRules.RepairDashes(pool[i], out var repaired))
+                    {
+                        pool[i] = repaired;
+                        dashed++;
+                    }
+                }
+
+                if (dashed > 0)
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.lines.{key} had {dashed} line(s) with an em or en dash, replaced with a hyphen");
+            }
+        }
+
+        /// <summary>
+        /// A Hold scene list (protect.decor / protect.targetDecor), checked with the same entry rules as a
+        /// source's decor: a bad entry is dropped with a diagnostic, never the goal. Null stays null.
+        /// </summary>
+        internal static List<DecorDef> ValidateProtectDecor(string goalId, string key, List<DecorDef> decor, List<string> diagnostics)
+        {
+            if (decor == null)
+                return null;
+
+            var kept = new List<DecorDef>();
+
+            for (var i = 0; i < decor.Count; i++)
+            {
+                var entry = decor[i];
+
+                if (entry == null || entry.Wcid == 0 || entry.Scale <= 0 || entry.Speed <= 0 || !IsFinite(entry.Yaw)
+                    || !IsFinite(entry.Dx) || !IsFinite(entry.Dy) || !IsFinite(entry.Dz) || !IsFinite(entry.Pitch))
+                {
+                    diagnostics.Add($"goals.json: goal '{goalId}' protect.{key} entry {i} is invalid " +
+                                    $"(wcid={entry?.Wcid} scale={entry?.Scale} speed={entry?.Speed}), dropped");
+                    continue;
+                }
+
+                kept.Add(entry);
+            }
+
+            return kept;
+        }
         private static Dictionary<string, GoalDef> ParseGoals(string json, List<string> diagnostics)
         {
             var result = new Dictionary<string, GoalDef>();
@@ -685,6 +1191,40 @@ namespace ACE.Server.WorldEvents
                         diagnostics.Add($"goals.json: goal '{goal.Id}' has an invalid holdSeconds, dropped");
                         continue;
                     }
+
+                    var protectError = ValidateProtect(goal.Protect);
+
+                    if (protectError != null)
+                    {
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' {protectError}, dropped");
+                        continue;
+                    }
+
+                    // A wave-based hold whose minimum time is past its safety cap could never use the minimum.
+                    if (goal.Protect.IsWaveBased && goal.Protect.MinSeconds > goal.HoldSeconds)
+                    {
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' has protect.minSeconds ({goal.Protect.MinSeconds:F0}) above holdSeconds ({goal.HoldSeconds}), dropped");
+                        continue;
+                    }
+
+                    RepairProtectLines(goal.Id, goal.Protect, diagnostics);
+                    RepairHoldWaveSettings(goal.Id, goal.Protect, diagnostics);
+
+                    goal.Protect.Decor = ValidateProtectDecor(goal.Id, "decor", goal.Protect.Decor, diagnostics);
+                    goal.Protect.TargetDecor = ValidateProtectDecor(goal.Id, "targetDecor", goal.Protect.TargetDecor, diagnostics);
+
+                    // Flagged, not dropped: a dead setting someone might otherwise tune.
+                    if (goal.Protect.IsTimeScaled && goal.Protect.Health != null)
+                        diagnostics.Add($"goals.json: goal '{goal.Id}' sets protect.health, which is ignored because protect.undefendedSeconds makes damage time-based; remove it");
+                }
+
+                // goals.json townReach (any goal type): a bad block drops the goal, as the contributor's loader did.
+                var reachError = WorldEventTownReach.Validate(goal.TownReach);
+
+                if (reachError != null)
+                {
+                    diagnostics.Add($"goals.json: goal '{goal.Id}' {reachError}, dropped");
+                    continue;
                 }
 
                 goal.TypeKind = typeKind;
@@ -773,6 +1313,7 @@ namespace ACE.Server.WorldEvents
 
                 reward.CacheDecor = ValidateCacheDecor(reward, diagnostics);
                 reward.CacheWcids = ValidateCacheWcids(reward, diagnostics);
+                reward.Pool = ValidatePool(reward, diagnostics);
 
                 result[reward.Id] = reward;
             }
@@ -927,9 +1468,12 @@ namespace ACE.Server.WorldEvents
 
                 source.CompatibleGoals = keptGoals;
                 source.Decor = ValidateDecor(source, diagnostics);
+                var rawDecorStyleCount = source.DecorStyles?.Count ?? 0;
                 source.DecorStyles = ValidateDecorStyles(source, diagnostics);
                 source.Npcs = ValidateNpcs(source, diagnostics);
                 source.Objectives = ValidateObjectives(source, diagnostics);
+                source.Arena = ValidateArena(source, diagnostics);
+                source.Hazard = ValidateHazard(source, rawDecorStyleCount, diagnostics);
 
                 if (source.ObjectiveWcid != 0 && source.Objectives.Count > 0)
                 {
@@ -1262,6 +1806,160 @@ namespace ACE.Server.WorldEvents
             return kept;
         }
 
+        /// <summary>
+        /// Presence-arena validation: a bad arena block is dropped (the theme is kept, with no arena) with
+        /// a diagnostic, because presence tracking is dressing on top of a theme that already works. A
+        /// missing block is simply null. Radius and halfHeight must be finite and not negative (0 means
+        /// "derive it"); the ring dials must be finite and ordered (ringSpacing and probeHeight above 0,
+        /// ringScale above 0, ringMin at least 1, ringMax at least ringMin).
+        /// </summary>
+        private static ArenaDef ValidateArena(SourceThemeDef source, List<string> diagnostics)
+        {
+            var arena = source.Arena;
+
+            if (arena == null)
+                return null;
+
+            string problem = null;
+
+            if (!IsFinite(arena.Radius) || arena.Radius < 0f)
+                problem = "radius";
+            else if (!IsFinite(arena.HalfHeight) || arena.HalfHeight < 0f)
+                problem = "halfHeight";
+            else if (!IsFinite(arena.RingSpacing) || arena.RingSpacing <= 0f)
+                problem = "ringSpacing";
+            else if (arena.RingMin < 1)
+                problem = "ringMin";
+            else if (arena.RingMax < arena.RingMin)
+                problem = "ringMax";
+            else if (!IsFinite(arena.RingScale) || arena.RingScale <= 0f)
+                problem = "ringScale";
+            else if (!IsFinite(arena.RingDz))
+                problem = "ringDz";
+            else if (!IsFinite(arena.ProbeHeight) || arena.ProbeHeight <= 0f)
+                problem = "probeHeight";
+
+            if (problem == null)
+                return arena;
+
+            diagnostics.Add($"sources.json: source '{source.Id}' has an invalid arena ({problem}), arena dropped");
+            return null;
+        }
+
+        /// <summary>The kinds a source's hazard block may name (HazardDef.Kind), lower case.</summary>
+        private static readonly string[] HazardKinds = { "wisps", "balls", "rain", "random", "none" };
+
+        /// <summary>The largest rainHeight a source may declare, metres.</summary>
+        private const float MaxRainHeight = 200f;
+
+        /// <summary>
+        /// Hazard block validation (HAZARDS-PLAN B1), the same shape as <see cref="ValidateArena"/>: a bad block is dropped
+        /// (the theme is kept, with no default hazard) with a diagnostic, because a hazard is dressing on a theme that already
+        /// works. kind must be one of wisps, balls, rain, random, none (case-insensitive, normalised to lower case); element,
+        /// when given, one of fire, acid, frost, lightning, earth; rainHeight, when given, finite and in (0, 200].
+        /// styleElements are index-aligned with decorStyles: each must be a known element and there must be exactly as many as
+        /// the source DECLARED decorStyles (before any bad style was dropped, which would shift the alignment). A bad
+        /// styleElements alone is dropped, not the whole block.
+        /// </summary>
+        private static HazardDef ValidateHazard(SourceThemeDef source, int rawDecorStyleCount, List<string> diagnostics)
+        {
+            var hazard = source.Hazard;
+
+            if (hazard == null)
+                return null;
+
+            string problem = null;
+            var kind = hazard.Kind?.Trim().ToLowerInvariant();
+
+            if (kind == null || Array.IndexOf(HazardKinds, kind) < 0)
+                problem = "kind";
+            else if (hazard.Element != null && !WorldEventHazardElements.TryParse(hazard.Element, out _))
+                problem = "element";
+            else if (hazard.RainHeight.HasValue && (!IsFinite(hazard.RainHeight.Value) || hazard.RainHeight.Value <= 0f || hazard.RainHeight.Value > MaxRainHeight))
+                problem = "rainHeight";
+
+            if (problem != null)
+            {
+                diagnostics.Add($"sources.json: source '{source.Id}' has an invalid hazard ({problem}), hazard dropped");
+                return null;
+            }
+
+            hazard.Kind = kind;
+
+            if (hazard.Element != null)
+                hazard.Element = hazard.Element.Trim().ToLowerInvariant();
+
+            if (hazard.StyleElements != null)
+            {
+                var bad = hazard.StyleElements.Any(e => !WorldEventHazardElements.TryParse(e, out _));
+
+                if (bad || hazard.StyleElements.Count != rawDecorStyleCount || source.DecorStyles.Count != rawDecorStyleCount)
+                {
+                    diagnostics.Add($"sources.json: source '{source.Id}' hazard styleElements must be {rawDecorStyleCount} known elements, one per decorStyles entry, and no decorStyles entry may have been dropped; styleElements dropped");
+                    hazard.StyleElements = null;
+                }
+                else
+                    hazard.StyleElements = hazard.StyleElements.Select(e => e.Trim().ToLowerInvariant()).ToList();
+            }
+
+            return hazard;
+        }
+
+        /// <summary>
+        /// Presence-payout pool validation, the same shape as <see cref="ValidateCacheDecor"/>: a bad entry
+        /// is dropped individually with a diagnostic and the reward profile is always kept. An entry needs a
+        /// non-zero wcid, qty of at least 1, a finite weight above 0, a scale of stack, chance or bags
+        /// (case-insensitive, normalised to lower case), and for bags a non-zero bagWcid and a bagsPerUnit
+        /// of at least 1. A missing or null "pool" key is an empty list.
+        /// </summary>
+        private static List<RewardPoolEntryDef> ValidatePool(RewardDef reward, List<string> diagnostics)
+        {
+            var kept = new List<RewardPoolEntryDef>();
+
+            if (reward.Pool == null)
+                return kept;
+
+            for (var i = 0; i < reward.Pool.Count; i++)
+            {
+                var entry = reward.Pool[i];
+                string problem = null;
+
+                if (entry == null)
+                    problem = "is null";
+                else if (entry.Wcid == 0)
+                    problem = "has a zero wcid";
+                else if (entry.Qty < 1)
+                    problem = "has qty below 1";
+                else if (double.IsNaN(entry.Weight) || double.IsInfinity(entry.Weight) || entry.Weight <= 0)
+                    problem = "has a weight that is not above 0";
+                else
+                {
+                    var scale = entry.Scale?.Trim().ToLowerInvariant();
+
+                    if (scale != RewardPoolEntryDef.ScaleStack && scale != RewardPoolEntryDef.ScaleChance && scale != RewardPoolEntryDef.ScaleBags)
+                        problem = $"has an unknown scale '{entry.Scale}'";
+                    else
+                    {
+                        entry.Scale = scale;
+
+                        if (scale == RewardPoolEntryDef.ScaleBags && (entry.BagWcid == null || entry.BagWcid.Value == 0))
+                            problem = "is scale bags with no bagWcid";
+                        else if (scale == RewardPoolEntryDef.ScaleBags && entry.BagsPerUnit < 1)
+                            problem = "is scale bags with bagsPerUnit below 1";
+                    }
+                }
+
+                if (problem != null)
+                {
+                    diagnostics.Add($"rewards.json: reward '{reward.Id}' pool entry {i} {problem}, dropped");
+                    continue;
+                }
+
+                kept.Add(entry);
+            }
+
+            return kept;
+        }
         /// <summary>
         /// WP-15 npc validation, deliberately the same shape as <see cref="ValidateDecor"/>: a bad npc entry
         /// is dressing that failed, so it is dropped on its own with a diagnostic and the theme is always

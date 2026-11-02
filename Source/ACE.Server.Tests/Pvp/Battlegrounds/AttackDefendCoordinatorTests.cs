@@ -63,6 +63,14 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
         private sealed class FakeGateway : IPvpPlayerGateway, IBattlegroundPlayerGateway, IPvpTeamFellowshipGateway
         {
+            /// <summary>Team hue (IPvpPlayerGateway.ClothingPalettes / ClothingPaletteIcon): null answers, like the interface default, dress nothing.</summary>
+            public Func<uint, IReadOnlyCollection<uint>> PaletteLookup;
+
+            public Func<uint, uint, uint> IconLookup;
+
+            public IReadOnlyCollection<uint> ClothingPalettes(uint clothingBase) => PaletteLookup?.Invoke(clothingBase);
+
+            public uint ClothingPaletteIcon(uint clothingBase, uint palette) => IconLookup?.Invoke(clothingBase, palette) ?? 0;
             public readonly Dictionary<uint, FakePlayer> Players = new();
             public readonly List<(uint Id, string Text)> Messages = new();
             public readonly List<(uint Id, PvpPlayerBinding Binding, Position Spawn)> Entered = new();
@@ -75,7 +83,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             {
                 var p = new FakePlayer
                 {
-                    Facts = new PvpPlayerFacts(id, name, 100, $"10.0.1.{id & 0xFF}", false, false, false, false, false, false, false, true, Array.Empty<uint>(), 0, PreferredTemplateKey: template),
+                    Facts = new PvpPlayerFacts(id, name, $"10.0.1.{id & 0xFF}", false, false, false, false, false, false, false, Array.Empty<uint>(), 0, PreferredTemplateKey: template, HasClearedThread: true),
                     Location = new Position(0xA9B40019, 84f, 7f, 94f, 0f, 0f, 0f, 1f, 0),
                 };
 
@@ -307,8 +315,20 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             /// <summary>Attack/Defend only by default (King of the Hill off), so every match formed here is Attack/Defend.</summary>
             public BattlegroundDials Bg = BattlegroundTunables.Defaults with { FillWindowSeconds = 0, KothEnabled = false };
 
+            /// <summary>
+            /// The pvp_conduct_* dials, as shipped (a clock jump adds at most PvpConductSampler.MaxIdleSecondsPerSample of idle time), except
+            /// that the contribution floor is OFF so the stat-less payout tests keep paying; a floor test turns it on.
+            /// </summary>
+            public ACE.Server.Pvp.PvpConductDials Conduct = ACE.Server.Pvp.PvpConductTunables.Defaults with { FloorEnabled = false };
+
             /// <summary>The scripted coin flip: true reverses the proposal's team order.</summary>
             public bool Swap;
+
+            /// <summary>The team-colour coin (TeamColourCoin). Attack/Defend never reads it: attackers are Red, defenders Blue.</summary>
+            public bool ColourCoin = true;
+
+            /// <summary>The team hue dials the coordinator takes at dispatch; null keeps the coordinator's own (the shipped defaults).</summary>
+            public Func<PvpTeamHueDials> HueDials;
 
             /// <summary>The scripted crystal-weenie lookup (the content guard): false means the crystal weenie does not resolve.</summary>
             public bool CrystalResolves = true;
@@ -318,10 +338,16 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public PvpMatchCoordinator Coordinator;
 
+            /// <summary>The Arena Crier seam; the default records nothing.</summary>
+            public IPvpArenaCrierAnnouncer Crier = new NoCrier();
+
             public Rig Build()
             {
-                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Now, () => Dials, Intents, new NoCrier(), () => Bg);
+                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Now, () => Dials, Intents, Crier, () => Bg, conductDialSource: () => Conduct);
                 Coordinator.AttackDefendSwapSides = () => Swap;
+                Coordinator.TeamColourCoin = () => ColourCoin;
+                if (HueDials != null)
+                    Coordinator.TeamHueDials = HueDials;
                 Coordinator.CrystalWeenieResolves = _ =>
                 {
                     CrystalLookups++;
@@ -461,7 +487,10 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual("Defenders Team", form.Teams.Single(t => t.TeamIndex == 1).Name);
         }
 
-        /// <summary>At Live each attacker hears the attacker line (with the planned crystal count) and each defender the defender line, exactly once.</summary>
+        /// <summary>
+        /// At Live each attacker hears the attacker line (with the planned crystal count) and each defender the defender line, exactly once.
+        /// Each line carries the side's colour (Docs/Pvp/TEMPLATES.md "Team hue": attackers Red, defenders Blue).
+        /// </summary>
         [TestMethod]
         public void Live_SendsEachSideItsRoleLine_Once()
         {
@@ -471,8 +500,8 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             var total = plan.Count;
             var list = BattlegroundText.CrystalList(plan.Crystals.Select(c => c.Site));
             Assert.IsTrue(list.StartsWith("Crystals: Great Hall ("), "fixture: the list names the planned sites with their hints");
-            var attackerLine = $"[Battleground] You are an Attacker. Destroy all {total} Warding Crystals before time runs out! {list}";
-            var defenderLine = $"[Battleground] You are a Defender. Protect the Warding Crystals until time runs out! {list}";
+            var attackerLine = $"[Battleground] You are an Attacker (Red). Destroy all {total} Warding Crystals before time runs out! {list}";
+            var defenderLine = $"[Battleground] You are a Defender (Blue). Protect the Warding Crystals until time runs out! {list}";
 
             rig.Tick();
 
@@ -489,6 +518,66 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             }
         }
 
+        /// <summary>
+        /// Drives: an Attack/Defend match to Live under both coin outcomes. DISCRIMINATES the Attack/Defend colour
+        /// rule at the coordinator: the attackers are Red and the defenders Blue whichever way the coin lands, so the role lines carry
+        /// those colours.
+        /// </summary>
+        [TestMethod]
+        public void Colours_AttackersRed_DefendersBlue_WhateverTheCoin()
+        {
+            foreach (var coin in new[] { true, false })
+            {
+                var rig = LiveAd(out var match, r => r.ColourCoin = coin);
+
+                foreach (var id in rig.Team(match, CrystalWinCondition.AttackerTeam))
+                {
+                    Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Id == id && m.Text.StartsWith("[Battleground] You are an Attacker (Red).")), $"coin {coin}: attacker 0x{id:X8} is Red");
+                }
+
+                foreach (var id in rig.Team(match, 1 - CrystalWinCondition.AttackerTeam))
+                {
+                    Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Id == id && m.Text.StartsWith("[Battleground] You are a Defender (Blue).")), $"coin {coin}: defender 0x{id:X8} is Blue");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Drives: an Attack/Defend match to Live under both coin outcomes with a hue-able kit. DISCRIMINATES the Attack/Defend hue: the
+        /// attackers (Red) wear the red palette and the defenders (Blue) the blue palette whichever way the coin lands, and the seats
+        /// of one side wear a byte-identical kit.
+        /// </summary>
+        [TestMethod]
+        public void TeamHue_AttackersWearRed_DefendersWearBlue_WhateverTheCoin()
+        {
+            // The second pair runs with the Tugak palette pool set: Attack/Defend must ignore it.
+            foreach (var (coin, withPool) in new[] { (true, false), (false, false), (true, true), (false, true) })
+            {
+                var rig = LiveAd(out var match, r =>
+                {
+                    r.ColourCoin = coin;
+                    r.Sink.TemplateRows = new List<PvpTemplateRecord> { PvpHueFixtures.Row(TemplateKey, BothModes) };
+                    r.Gateway.PaletteLookup = PvpHueFixtures.Palettes;
+                    r.Gateway.IconLookup = PvpHueFixtures.Icon;
+                    r.HueDials = withPool ? PvpHueFixtures.DialsWithFfaPool : PvpHueFixtures.Dials;
+                });
+
+                PvpTemplateDefinition Worn(uint id) => rig.Gateway.Entered.First(e => e.Id == id).Binding.Template;
+
+                var attackers = rig.Team(match, CrystalWinCondition.AttackerTeam);
+                var defenders = rig.Team(match, 1 - CrystalWinCondition.AttackerTeam);
+
+                foreach (var id in attackers)
+                    Assert.AreEqual(85, PvpHueFixtures.ChestPalette(Worn(id)), $"coin {coin}: attacker 0x{id:X8} wears red");
+
+                foreach (var id in defenders)
+                    Assert.AreEqual(88, PvpHueFixtures.ChestPalette(Worn(id)), $"coin {coin}: defender 0x{id:X8} wears blue");
+
+                Assert.AreEqual(1, attackers.Select(id => PvpHueFixtures.Json(Worn(id))).Distinct().Count(), $"coin {coin}: one side, one look");
+                Assert.AreEqual(1, defenders.Select(id => PvpHueFixtures.Json(Worn(id))).Distinct().Count(), $"coin {coin}: one side, one look");
+            }
+        }
+
         // ================= sequential crystals =================
 
         /// <summary>
@@ -500,10 +589,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         {
             var rig = LiveAd(out var match);
             var sites = rig.Spaces.ObjectiveCalls.Single().Plan.Crystals.Select(c => c.Site).ToList();
-            var attackerLine = "[Battleground] You are an Attacker. Destroy the Warding Crystals in order: 1. Great Hall (upper level, south-east of the octagon), 2. West Cavern (lower level, south from the octagon past the Defender room, then down the stairs), 3. Pit Hall (bottom of the spiral stair, south-east of the West Cavern) before time runs out!";
-            var defenderLine = attackerLine.Replace("You are an Attacker. Destroy", "You are a Defender. Protect").Replace("before time runs out!", "until time runs out!");
+            var attackerLine = "[Battleground] You are an Attacker (Red). Destroy the Warding Crystals in order: 1. Great Hall (upper level, south-east of the octagon), 2. West Cavern (lower level, south from the octagon past the Defender room, then down the stairs), 3. Pit Hall (bottom of the spiral stair, south-east of the West Cavern) before time runs out!";
+            var defenderLine = attackerLine.Replace("You are an Attacker (Red). Destroy", "You are a Defender (Blue). Protect").Replace("before time runs out!", "until time runs out!");
 
-            Assert.AreEqual(attackerLine, BattlegroundText.RoleAttackerOrdered(sites), "fixture: the helper builds the owner's line");
+            Assert.AreEqual(attackerLine, BattlegroundText.RoleAttackerOrdered(sites, "Red"), "fixture: the helper builds the owner's line");
+            Assert.AreEqual(attackerLine.Replace(" (Red)", ""), BattlegroundText.RoleAttackerOrdered(sites), "no colour: the original line");
 
             rig.Tick();
 
@@ -744,6 +834,40 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsTrue(rig.Gateway.BloodGrants.Where(g => rig.Team(match, 1).Contains(g.Id)).All(g => g.Amount == rig.Bg.MarksLoss), "the losers the loss amount");
         }
 
+        /// <summary>
+        /// The floor ON (production defaults) in Attack/Defend: a crystal attacker whose only stat is CrystalDamage, with few engaged
+        /// seconds, plus credited teammates and defenders. Everyone is paid and nobody is told they were withheld.
+        /// </summary>
+        [TestMethod]
+        public void Floor_On_CrystalAttackerWithCrystalDamage_IsPaid_Everyone()
+        {
+            var rig = LiveAd(out var match, r => r.Conduct = ACE.Server.Pvp.PvpConductTunables.Defaults);
+            var attackers = rig.Team(match, 0);
+            var defenders = rig.Team(match, 1);
+            var count = rig.Spaces.ObjectiveCalls.Single().Plan.Count;
+
+            match.Performance.CreditCrystalDamage(attackers[0], 500);
+            match.Performance.CreditEngagedSeconds(attackers[0], 5);
+            match.Performance.CreditPlayerDamage(attackers[1], 300, null);
+            match.Performance.CreditEngagedSeconds(attackers[1], 100);
+
+            foreach (var id in defenders)
+            {
+                match.Performance.CreditPlayerDamage(id, 100, null);
+                match.Performance.CreditEngagedSeconds(id, 100);
+            }
+
+            rig.Advance(120);
+
+            for (var i = 0; i < count - 1; i++)
+                rig.Destroy(match, i, attackers[0]);
+
+            rig.Destroy(match, count - 1);
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            Assert.AreEqual(4, rig.Gateway.BloodGrants.Count, "everyone is paid");
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+        }
         /// <summary>The time limit with a crystal standing is a RATED defender win, never a draw.</summary>
         [TestMethod]
         public void Timeout_IsARatedDefenderWin()
@@ -776,6 +900,40 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.StartsWith("[Battleground] Time is up.")), "never the King of the Hill timeout line");
         }
 
+        /// <summary>The time limit with a crystal standing: the Crier posts "Defenders (..) defeated Attackers (..)" with the mode's own team names.</summary>
+        [TestMethod]
+        public void CrierResult_Timeout_NamesDefendersAndAttackers()
+        {
+            var lines = new List<string>();
+            var rig = LiveAd(out var match, r => r.Crier = new LineCrier(lines));
+
+            rig.Destroy(match, 0);
+            rig.Advance(rig.Bg.TimeLimitSecondsAd);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            var line = lines.Single();
+            StringAssert.StartsWith(line, "Attack/Defend: Defenders (");
+            StringAssert.Contains(line, ") defeated Attackers (");
+            Assert.IsTrue(line.EndsWith(")."), line);
+
+            var split = line.IndexOf(" defeated ");
+
+            foreach (var id in rig.Team(match, 1))
+                StringAssert.Contains(line.Substring(0, split), $"P{id & 0xFF}");
+
+            foreach (var id in rig.Team(match, 0))
+                StringAssert.Contains(line.Substring(split), $"P{id & 0xFF}");
+        }
+
+        private sealed class LineCrier : IPvpArenaCrierAnnouncer
+        {
+            private readonly List<string> lines;
+
+            public LineCrier(List<string> lines) => this.lines = lines;
+
+            public void Announce(IReadOnlyList<string> sent, string senderName) => lines.AddRange(sent);
+        }
         /// <summary>
         /// The clock edge (review F6): the last crystal falls on the landblock thread AFTER this tick's intent drain, on the very tick the
         /// time limit is reached. It still counts before the clock check, so the attackers win on score; a crystal report for another
@@ -894,6 +1052,33 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             rig.Tick();
             Assert.AreEqual(1, matchB.ScoreBoard[0], "and only once");
+        }
+
+        /// <summary>
+        /// Rating and performance (Docs/Pvp/BATTLEGROUNDS.md) through an Attack/Defend Resolve: a timeout is a defender win (base +/-20 at K 40,
+        /// even teams). Attackers: one hit the crystal, one did nothing; P 1.3 and 0.7, capped at +/-0.25: -15 and -25. Defenders: one killed near
+        /// the crystal, one far from it; near (60%) outweighs far (40%): P 1.1 and 0.9, so +22 and +18.
+        /// </summary>
+        [TestMethod]
+        public void Resolve_PerformanceModifier_UsesEachRolesStats()
+        {
+            var rig = LiveAd(out var match);
+            var attackers = rig.Team(match, CrystalWinCondition.AttackerTeam);
+            var defenders = rig.Team(match, CrystalWinCondition.DefenderTeam);
+
+            match.Performance.CreditCrystalDamage(attackers[0], 100);
+            match.Performance.CreditKillshot(defenders[0], true, false);
+            match.Performance.CreditKillshot(defenders[1], false, false);
+
+            rig.Advance(rig.Bg.TimeLimitSecondsAd);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+            Assert.AreEqual(1485, ratings[attackers[0]], "the crystal hitter loses less");
+            Assert.AreEqual(1475, ratings[attackers[1]]);
+            Assert.AreEqual(1522, ratings[defenders[0]], "the near-crystal kill is worth more");
+            Assert.AreEqual(1518, ratings[defenders[1]]);
         }
 
         /// <summary>A timeout with every crystal standing keeps the every-crystal line.</summary>
@@ -1565,6 +1750,69 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(0, rig.Spaces.AdjustCalls.Count);
         }
 
+        // ================= performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats") =================
+
+        private static SeatPerformanceSnapshot Perf(PvpMatch match, uint id) => match.Performance.Snapshot().Single(s => s.CharacterId == id);
+
+        /// <summary>The coordinator binds the crystal frame once the space is allocated: the plan, the space and the kill-range snapshot.</summary>
+        [TestMethod]
+        public void Ledger_CrystalFrame_IsTheMatchesOwnPlanAndSpace()
+        {
+            var rig = LiveAd(out var match, r => r.Bg = r.Bg with { AdKillRange = 17.0 });
+            var frame = match.Performance?.Crystals;
+            var space = rig.Coordinator.SpaceOf(match.MatchId);
+
+            Assert.IsNotNull(frame, "an Attack/Defend match binds its crystals");
+            Assert.AreEqual(space.Instance, frame.MatchInstance);
+            Assert.AreEqual(space.LandblockId, frame.MatchLandblock);
+            Assert.AreEqual(17.0, frame.Range, "the pvp_bg_ad_kill_range formation snapshot");
+            Assert.AreSame(match.CrystalSequence, frame.Sequence, "the same sequence the damage gate reads");
+        }
+
+        /// <summary>
+        /// Cross-team killshots split near / far the vulnerable crystal by where the victim died, with the kill chip's own rule; a teamkill
+        /// is no killshot.
+        /// </summary>
+        [TestMethod]
+        public void Killshots_SplitNearAndFarTheVulnerableCrystal_CrossTeamOnly()
+        {
+            var rig = LiveAd(out var match);
+            var attackers = rig.Team(match, 0);
+            var defenders = rig.Team(match, 1);
+
+            Kill(rig, match, defenders[0], attackers[0], NearGreatHall(rig, match));
+            Kill(rig, match, defenders[1], attackers[0], At(rig, match, 0x01E4, 90f, -92.4f, -6f)); // 30 m out
+            Kill(rig, match, attackers[1], attackers[0], NearGreatHall(rig, match));               // teamkill
+
+            var s = Perf(match, attackers[0]);
+            Assert.AreEqual(2, s.Killshots);
+            Assert.AreEqual(1, s.KillshotsNearCrystal);
+            Assert.AreEqual(1, s.KillshotsFarCrystal);
+            Assert.AreEqual(0, s.KillshotsNearHill, "no hill in Attack/Defend");
+            Assert.AreEqual(1, rig.Spaces.AdjustCalls.Count, "fixture: the near kill also chipped (one definition of near)");
+        }
+
+        /// <summary>
+        /// Any-order play: once a crystal falls the ledger's destroyed set skips it, so a kill beside the fallen Great Hall is FAR. Without
+        /// the coordinator marking the ledger in HandleObjectiveDestroyed it would still read near.
+        /// </summary>
+        [TestMethod]
+        public void Killshots_AfterACrystalFalls_TheFallenCrystalIsNotNear()
+        {
+            var rig = LiveAd(out var match, r => r.Bg = r.Bg with { AdSequentialCrystals = false });
+            var attackers = rig.Team(match, 0);
+            var defenders = rig.Team(match, 1);
+
+            rig.Destroy(match, 0, attackers[0]);
+
+            Assert.IsFalse(match.Performance.IsCrystalStanding(0), "the coordinator marked the ledger");
+
+            Kill(rig, match, defenders[0], attackers[0], NearGreatHall(rig, match));
+
+            Assert.AreEqual(0, Perf(match, attackers[0]).KillshotsNearCrystal);
+            Assert.AreEqual(1, Perf(match, attackers[0]).KillshotsFarCrystal);
+        }
+
         // ================= /arena status and testspace =================
 
         /// <summary>The Attack/Defend status carries its own suffix (crystals destroyed of the planned count), and the command appends it in place of the score pair.</summary>
@@ -1601,9 +1849,12 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(BattlegroundText.StatusCrystals(1, count) + " Vulnerable: West Cavern.", rig.Coordinator.Status(A).StatusLine);
         }
 
-        /// <summary>King of the Hill's status suffix through the mode handler is byte-identical to the score suffix the command always appended.</summary>
+        /// <summary>
+        /// King of the Hill's status suffix through the mode handler names the teams by colour, Red first (Docs/Pvp/TEMPLATES.md "Colour
+        /// variants"); the command's legacy fallback (a result with no suffix) keeps West/East and is no longer reached for a live match.
+        /// </summary>
         [TestMethod]
-        public void Status_Koth_SuffixUnchanged()
+        public void Status_Koth_SuffixNamesTeamsByColour()
         {
             var rig = new Rig { Bg = BattlegroundTunables.Defaults with { FillWindowSeconds = 0, AdEnabled = false } }.Build();
             var match = rig.FormAndAccept(Four);
@@ -1614,10 +1865,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             match.ScoreBoard[1] = 4;
 
             var s = rig.Coordinator.Status(A);
-            Assert.AreEqual(BattlegroundText.StatusScore(15, 4, rig.Bg.KothScoreTarget), s.StatusLine);
+            Assert.AreEqual($" Score: Red 15, Blue 4, first to {rig.Bg.KothScoreTarget} wins.", s.StatusLine, "team 0 is Red in this rig");
 
             var legacy = s with { StatusLine = null };
-            Assert.AreEqual(ACE.Server.Command.Handlers.PvpArenaCommands.StatusResultText(legacy), ACE.Server.Command.Handlers.PvpArenaCommands.StatusResultText(s), "the routed suffix equals the old fallback");
+            StringAssert.Contains(ACE.Server.Command.Handlers.PvpArenaCommands.StatusResultText(legacy), "Score: West 15, East 4", "the fallback is untouched");
+            StringAssert.Contains(ACE.Server.Command.Handlers.PvpArenaCommands.StatusResultText(s), "Score: Red 15, Blue 4", "the routed suffix is the one shown");
             Assert.AreEqual(0, rig.Spaces.ObjectiveCalls.Count, "King of the Hill places no crystal");
         }
 

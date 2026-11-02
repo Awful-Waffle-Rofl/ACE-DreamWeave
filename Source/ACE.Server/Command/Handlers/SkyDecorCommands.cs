@@ -32,8 +32,14 @@ namespace ACE.Server.Command.Handlers
     /// </summary>
     public static class SkyDecorCommands
     {
+        private const string PlayerUsage =
+            "Usage:\n" +
+            "  /sky-decor disable   stop showing the sky decor (the Sky Rift discs)\n" +
+            "  /sky-decor enable    bring the sky decor back";
+
         private const string Usage =
             "Usage:\n" +
+            "  /sky-decor disable | enable              hide or show the sky decor for yourself (any player)\n" +
             "  /sky-decor info                          what is spawned where you stand\n" +
             "  /sky-decor show [<region>]               every tunable and its effective value\n" +
             "  /sky-decor set [<region>] <col> <value>  override a value in memory and respawn\n" +
@@ -44,20 +50,45 @@ namespace ACE.Server.Command.Handlers
             "<region> may be omitted when exactly one region covers the landblock you are standing on.\n" +
             "Settable columns: ";
 
-        [CommandHandler("sky-decor", AccessLevel.Developer, CommandHandlerFlag.None, 1,
-            "Server-generated sky decor (sky_decor_region).",
-            "info | show | set | sql | colours | reload\n\n" +
-            "info   - the regions covering your current landblock and realm, and what is spawned there.\n" +
-            "show   - every tunable column and its effective value; overrides are marked with *.\n" +
-            "set    - [<region>] <column> <value>: override a value IN MEMORY ONLY and respawn at once.\n" +
-            "         Never writes the database; lost on /sky-decor reload and on restart.\n" +
-            "sql    - a ready-to-paste UPDATE carrying the current effective values.\n" +
-            "colours- the colour names a palette may use, and the wcid behind each one.\n" +
-            "reload - re-read sky_decor_region and rebuild every loaded outdoor landblock. Drops overrides.")]
+        // The description and usage here are what @acehelp shows to ANY player who can run the command, so they list only the
+        // player subcommands. The admin subcommands (info, show, set, sql, colours, reload) are Developer-only inside the handler
+        // (IsSubcommandAllowed) and are listed by `/sky-decor help` for an admin only.
+        [CommandHandler("sky-decor", AccessLevel.Player, CommandHandlerFlag.None, 1,
+            "Hide or restore the sky decor (the Sky Rift discs).",
+            "enable | disable\n\n" +
+            "disable - stop your client being sent the sky decor; takes effect at once and is remembered.\n" +
+            "enable  - bring the sky decor back.")]
         public static void HandleSkyDecor(Session session, params string[] parameters)
         {
-            switch (parameters[0].ToLowerInvariant())
+            var sub = parameters[0].ToLowerInvariant();
+            var level = session == null ? AccessLevel.Admin : session.AccessLevel;
+
+            if (!IsSubcommandAllowed(sub, level))
             {
+                // Same reply as an unknown subcommand, and a player is shown only the player usage.
+                CommandHandlerHelper.WriteOutputInfo(session, $"Unknown /sky-decor subcommand '{parameters[0]}'.\n\n{UsageText(level)}");
+                return;
+            }
+
+            // Registered at Player level, so the dispatch-time audit skips this command; audit every admin subcommand here, after the
+            // gate. enable/disable/help are player-level and are not audited.
+            if (Array.IndexOf(PlayerSubcommands, sub) < 0)
+                CommandManager.LogCommandAudit(session, "sky-decor", AccessLevel.Developer, parameters, false);
+
+            switch (sub)
+            {
+                case "disable":
+                    HandleDisableEnable(session, true);
+                    break;
+
+                case "enable":
+                    HandleDisableEnable(session, false);
+                    break;
+
+                case "help":
+                    CommandHandlerHelper.WriteOutputInfo(session, UsageText(level));
+                    break;
+
                 case "reload":
                     HandleReload(session);
                     break;
@@ -87,14 +118,54 @@ namespace ACE.Server.Command.Handlers
                     // An unknown subcommand used to fall through to a one-line usage string that did not
                     // mention it was unknown, so `/sky-decor min_separation 0.5` looked like it had worked.
                     // Naming the token back is what makes a typo visible.
-                    CommandHandlerHelper.WriteOutputInfo(session, $"Unknown /sky-decor subcommand '{parameters[0]}'.\n\n{UsageText()}");
+                    CommandHandlerHelper.WriteOutputInfo(session, $"Unknown /sky-decor subcommand '{parameters[0]}'.\n\n{UsageText(level)}");
                     break;
             }
         }
 
-        private static string UsageText()
+        private static readonly string[] PlayerSubcommands = { "enable", "disable", "help" };
+
+        /// <summary>
+        /// Pure access gate. enable, disable and help are open to every player; every other subcommand (info, show, set, sql,
+        /// colours, colors, reload, and anything unknown) needs Developer. The console passes Admin.
+        /// </summary>
+        internal static bool IsSubcommandAllowed(string subcommand, AccessLevel level)
         {
+            if (level >= AccessLevel.Developer)
+                return true;
+
+            return Array.IndexOf(PlayerSubcommands, (subcommand ?? "").ToLowerInvariant()) >= 0;
+        }
+
+        internal static string UsageText(AccessLevel level)
+        {
+            if (level < AccessLevel.Developer)
+                return PlayerUsage;
+
             return Usage + string.Join(", ", SkyDecorOverrides.Columns);
+        }
+
+        private static void HandleDisableEnable(Session session, bool hide)
+        {
+            var player = session?.Player;
+
+            if (player == null)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "/sky-decor enable and disable are in-game only.");
+                return;
+            }
+
+            // In-game commands already run on the player's world thread (see MotionStateCommands), which is what the tracking
+            // state touched here needs.
+            var count = hide ? player.HideSkyDecorNow() : player.ShowSkyDecorNow();
+
+            string text;
+            if (hide)
+                text = count < 0 ? "Sky decor is already hidden. /sky-decor enable to show it again." : "Sky decor hidden. /sky-decor enable to show it again.";
+            else
+                text = count < 0 ? "Sky decor is already shown." : "Sky decor shown.";
+
+            CommandHandlerHelper.WriteOutputInfo(session, text);
         }
 
         // ===========================================================================================
@@ -189,7 +260,7 @@ namespace ACE.Server.Command.Handlers
             }
             else
             {
-                CommandHandlerHelper.WriteOutputInfo(session, $"/sky-decor set needs a column and a value.\n\n{UsageText()}");
+                CommandHandlerHelper.WriteOutputInfo(session, $"/sky-decor set needs a column and a value.\n\n{UsageText(AccessLevel.Developer)}");
                 return;
             }
 

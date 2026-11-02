@@ -9,9 +9,9 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Berserker T3: melee hits heal a fraction of the damage dealt (1/2/3% by rank), scaling with
-    /// Salvaging (harvest the fallen). Feeds the Blood Fury loop - live at low HP without dying there.
-    /// PvE only (the outgoing-damage dispatch already excludes player targets).
+    /// Berserker T1 (moved from T3 on 2026-10-24, Berserker pass): melee hits heal a fraction of the damage
+    /// dealt (3/6/9% by rank - the per-rank rate doubled from 1.5% in the same pass), scaling with Salvaging
+    /// (harvest the fallen). PvE only (the outgoing-damage dispatch already excludes player targets).
     /// </summary>
     public class BloodlustAbility : IOutgoingDamageAbility, IAbilityReadout
     {
@@ -19,10 +19,10 @@ namespace ACE.Server.ClassAbilities.Abilities
         {
             Id = ClassAbilityId.Bloodlust,
             AbilityClass = ClassAbilityClass.Berserker,
-            Tier = 3,
+            Tier = 1,   // T3 -> T1 2026-10-24 (Berserker pass); token icons and trainer tier block moved with it
             Name = "bloodlust",
             DisplayName = "Bloodlust",
-            Description = "Your melee hits heal you for 1.5% of the damage dealt per rank. Higher Salvaging increases the lifesteal.",
+            Description = "Your melee hits heal you for 3% of the damage dealt per rank. Higher Salvaging increases the lifesteal.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -95,7 +95,12 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (heal <= 0)
                 return;
 
-            attacker.UpdateVitalDelta(attacker.Health, heal);
+            var applied = attacker.UpdateVitalDelta(attacker.Health, heal);
+
+            // Hemomancy: lifesteal is a LEECH heal, and only the APPLIED delta counts. This one write serves
+            // both the ability and the gear-only path (Player_EquipmentMods calls in here).
+            if (applied > 0)
+                attacker.OnHealthRestored((uint)applied, true);
         }
 
         /// <summary>

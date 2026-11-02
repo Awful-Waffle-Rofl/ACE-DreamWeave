@@ -642,7 +642,7 @@ namespace ACE.Server.Tests
         // ---- the call site exists ------------------------------------------------------------------------
 
         private static readonly System.Text.RegularExpressions.Regex HookCall = new System.Text.RegularExpressions.Regex(
-            @"\bWorldEventCombatCreditHook\s*\.\s*OnDamageRecorded\s*\(\s*Creature\s*,\s*attacker\s*,\s*amount\s*\)\s*;");
+            @"\bWorldEventHooks\s*\.\s*OnDamageRecorded\s*\(\s*Creature\s*,\s*attacker\s*,\s*amount\s*\)\s*;");
 
         /// <summary>Removes // line comments and /* */ block comments, so a commented-out call cannot match.</summary>
         private static string StripComments(string source)
@@ -687,14 +687,14 @@ namespace ACE.Server.Tests
             var source = System.IO.File.ReadAllText(path);
 
             Assert.IsTrue(AddCallsTheHook(source),
-                "DamageHistory.Add must call WorldEventCombatCreditHook.OnDamageRecorded(Creature, attacker, amount) - it is the single site the World Events contact credit hangs off");
+                "DamageHistory.Add must call WorldEventHooks.OnDamageRecorded(Creature, attacker, amount) - it is the single site the World Events contact credit hangs off");
 
             // The matcher discriminates: the same file with the call commented out, or with a different
             // victim argument, must NOT pass.
             var commentedOut = HookCall.Replace(source, m => "// " + m.Value, 1);
             Assert.IsFalse(AddCallsTheHook(commentedOut), "a commented-out call must not satisfy the scan");
 
-            var wrongVictim = HookCall.Replace(source, "ACE.Server.WorldEvents.WorldEventCombatCreditHook.OnDamageRecorded(attacker, attacker, amount);", 1);
+            var wrongVictim = HookCall.Replace(source, "ACE.Server.WorldEvents.WorldEventHooks.OnDamageRecorded(attacker, attacker, amount);", 1);
             Assert.IsFalse(AddCallsTheHook(wrongVictim), "a call with a different victim argument must not satisfy the scan");
         }
 
@@ -876,17 +876,17 @@ namespace ACE.Server.Tests
         /// </summary>
         [TestMethod]
         [DataRow("Source/ACE.Server/Entity/DamageHistory.cs", "public void Add(WorldObject attacker, DamageType damageType, uint amount)",
-            @"if\s*\(\s*amount\s*==\s*0\s*\)\s*\{\s*ACE\.Server\.WorldEvents\.WorldEventCombatCreditHook\.OnCombatContact\(\s*Creature\s*,\s*attacker\s*\)\s*;\s*return\s*;\s*\}", 1)]
+            @"if\s*\(\s*amount\s*==\s*0\s*\)\s*\{\s*ACE\.Server\.WorldEvents\.WorldEventHooks\.OnCombatContact\(\s*Creature\s*,\s*attacker\s*\)\s*;\s*return\s*;\s*\}", 1)]
         [DataRow("Source/ACE.Server/WorldObjects/SpellProjectile.cs", "public void DamageTarget(Creature target, float damage, bool critical, bool critDefended, bool overpower)",
-            @"Spell\.Category\s*==\s*SpellCategory\.StaminaLowering\s*\)\s*\{[^{}]*UpdateVitalDelta\(\s*target\.Stamina[^{}]*WorldEventCombatCreditHook\.OnCombatContact\(\s*target\s*,\s*ProjectileSource\s*\)\s*;\s*\}", 1)]
+            @"Spell\.Category\s*==\s*SpellCategory\.StaminaLowering\s*\)\s*\{[^{}]*UpdateVitalDelta\(\s*target\.Stamina[^{}]*WorldEventHooks\.OnCombatContact\(\s*target\s*,\s*ProjectileSource\s*\)\s*;\s*\}", 1)]
         [DataRow("Source/ACE.Server/WorldObjects/SpellProjectile.cs", "public void DamageTarget(Creature target, float damage, bool critical, bool critDefended, bool overpower)",
-            @"Spell\.Category\s*==\s*SpellCategory\.ManaLowering\s*\)\s*\{[^{}]*UpdateVitalDelta\(\s*target\.Mana[^{}]*WorldEventCombatCreditHook\.OnCombatContact\(\s*target\s*,\s*ProjectileSource\s*\)\s*;\s*\}", 1)]
+            @"Spell\.Category\s*==\s*SpellCategory\.ManaLowering\s*\)\s*\{[^{}]*UpdateVitalDelta\(\s*target\.Mana[^{}]*WorldEventHooks\.OnCombatContact\(\s*target\s*,\s*ProjectileSource\s*\)\s*;\s*\}", 1)]
         [DataRow("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs", "private void HandleCastSpell_Boost(",
-            @"if\s*\(\s*harmfulBoost\s*&&\s*\(\s*srcVital\s*!=\s*""health""\s*\|\|\s*boost\s*>=\s*0\s*\)\s*\)\s*ACE\.Server\.WorldEvents\.WorldEventCombatCreditHook\.OnCombatContact\(\s*targetCreature\s*,\s*this\s*\)\s*;", 1)]
+            @"if\s*\(\s*harmfulBoost\s*&&\s*\(\s*srcVital\s*!=\s*""health""\s*\|\|\s*boost\s*>=\s*0\s*\)\s*\)\s*ACE\.Server\.WorldEvents\.WorldEventHooks\.OnCombatContact\(\s*targetCreature\s*,\s*this\s*\)\s*;", 1)]
         [DataRow("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs", "private void HandleCastSpell_Transfer(",
-            @"UpdateVitalDelta\(\s*transferSource\.Mana[^;]*;\s*ACE\.Server\.WorldEvents\.WorldEventCombatCreditHook\.OnCombatContact\(\s*transferSource\s*,\s*this\s*\)\s*;", 1)]
+            @"UpdateVitalDelta\(\s*transferSource\.Mana[^;]*;\s*ACE\.Server\.WorldEvents\.WorldEventHooks\.OnCombatContact\(\s*transferSource\s*,\s*this\s*\)\s*;", 1)]
         [DataRow("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs", "private void HandleCastSpell_Transfer(",
-            @"UpdateVitalDelta\(\s*transferSource\.Stamina[^;]*;\s*ACE\.Server\.WorldEvents\.WorldEventCombatCreditHook\.OnCombatContact\(\s*transferSource\s*,\s*this\s*\)\s*;", 1)]
+            @"UpdateVitalDelta\(\s*transferSource\.Stamina[^;]*;\s*ACE\.Server\.WorldEvents\.WorldEventHooks\.OnCombatContact\(\s*transferSource\s*,\s*this\s*\)\s*;", 1)]
         public void ContactCallSite_IsWired(string relativePath, string memberSignature, string pattern, int expected)
         {
             var body = MemberBody(StripComments(ReadSource(relativePath)), memberSignature);

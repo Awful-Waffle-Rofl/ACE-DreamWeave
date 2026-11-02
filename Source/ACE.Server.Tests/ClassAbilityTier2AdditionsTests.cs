@@ -50,12 +50,14 @@ namespace ACE.Server.Tests
             var cap = D("class_ability_manabarrier_max_share");
 
             // the Magic Defense rider adds flat to the rank share when the total stays under the cap:
-            // rank 2 (0.12) + a 0.05 rider = 0.17, which is still below 0.25
+            // rank 2 (0.12) + a 0.05 rider = 0.17, which is still below 0.30
             Assert.AreEqual(0.17, ManaBarrierAbility.DivertShare(2, b, s, 0.05, cap), 1e-9);
 
-            // the Magic Defense rider adds flat to the rank share, but 0.18 + 0.10 = 0.28 exceeds the
-            // 0.25 cap, so it clamps there
-            Assert.AreEqual(cap, ManaBarrierAbility.DivertShare(3, b, s, 0.10, cap), 1e-9);
+            // the Magic Defense rider adds flat to the rank share, but 0.18 + 0.15 = 0.33 exceeds the
+            // 0.30 cap (raised from 0.25 in the 2026-10-24 Archmage pass), so it clamps there; 0.18 + 0.10
+            // = 0.28 now fits under it
+            Assert.AreEqual(0.28, ManaBarrierAbility.DivertShare(3, b, s, 0.10, cap), 1e-9);
+            Assert.AreEqual(cap, ManaBarrierAbility.DivertShare(3, b, s, 0.15, cap), 1e-9);
 
             // ... but the total can never pass the cap
             Assert.AreEqual(cap, ManaBarrierAbility.DivertShare(3, b, s, 5.0, cap), 1e-9);
@@ -81,7 +83,7 @@ namespace ACE.Server.Tests
             var cap = D("class_ability_manabarrier_max_share");
 
             // rank 1: 0.06 skill share, a 1.89x multiplier -> rider = 0.06*1.89 - 0.06 = 0.0534, uncapped
-            // total 0.1134, which stays under the 0.25 cap
+            // total 0.1134, which stays under the 0.30 cap
             const double multiplier = 1.89;
 
             var rank1Share = b;
@@ -91,7 +93,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.1134, ManaBarrierAbility.DivertShare(1, b, s, rank1Rider, cap), 1e-9);
 
             // rank 3: 0.18 skill share, the same 1.89x multiplier -> rider = 0.18*1.89 - 0.18 = 0.1602,
-            // uncapped total 0.3402, which clamps to the 0.25 cap
+            // uncapped total 0.3402, which clamps to the 0.30 cap
             var rank3Share = b + 2 * s;
             var rank3Rider = rank3Share * multiplier - rank3Share;
 
@@ -167,7 +169,7 @@ namespace ACE.Server.Tests
             // moved T2 -> T3 by the 2026-09-12 class ability overhaul
             Assert.AreEqual(3, def.Tier);
             Assert.AreEqual(3, def.MaxRank);
-            CollectionAssert.AreEqual(new[] { 1, 2, 3 }, def.CostPerRank);
+            CollectionAssert.AreEqual(new[] { 1, 1, 1 }, def.CostPerRank, "1/2/3 -> 1/1/1 in the 2026-10-24 Archmage pass (reprice wave 6)");
             Assert.IsTrue(def.Implemented);
             StringAssert.Contains(def.Description, "Magic Defense", "the description must name the affinity skill");
         }
@@ -350,7 +352,7 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(0.06, D("class_ability_manabarrier_base"), 1e-9);
             Assert.AreEqual(0.06, D("class_ability_manabarrier_step"), 1e-9);
-            Assert.AreEqual(0.25, D("class_ability_manabarrier_max_share"), 1e-9);
+            Assert.AreEqual(0.30, D("class_ability_manabarrier_max_share"), 1e-9, "raised from 0.25 in the 2026-10-24 Archmage pass");
             Assert.AreEqual(1.0, D("class_ability_manabarrier_mana_per_health"), 1e-9);
 
             // Mana Barrier's own Magic Defense divisor pair (class_ability_manabarrier_magicdef_per_trained /

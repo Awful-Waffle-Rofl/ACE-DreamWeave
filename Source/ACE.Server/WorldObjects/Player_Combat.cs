@@ -9,6 +9,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.MonsterEffects;
 using ACE.Server.Entity.Actions;
@@ -131,11 +132,12 @@ namespace ACE.Server.WorldObjects
         /// it's applied to the target's health) - used by multi-shot's additional targets. Defaults to 1.0, a
         /// pure no-op for every existing caller.
         /// </summary>
-        /// <param name="multiShotArrow">TRUE only for a multi-shot EXTRA arrow (Player_Missile.FireMultiShotArrow's
-        /// extra-target spread): the on-hit procs then also scale by <paramref name="damageMultiplier"/>, through
-        /// DamageEvent.MultiShotProcMultiplier (owner ruling 2026-09-22). False for every other caller - Riposte
-        /// counters pass a damageMultiplier too, and their procs deliberately stay unscaled.</param>
-        public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f, bool primaryTarget = true, bool multiShotArrow = false)
+        /// <param name="damageMultiplier">The strike's damage fraction. The on-hit procs (Poison Weapon, Venom, Acid
+        /// Proc) take the SAME fraction through DamageEvent.StrikeFractionProcMultiplier, so a partial-damage strike
+        /// carries a proportionally partial proc: a Multishot extra arrow (owner ruling 2026-09-22) and a Riposte
+        /// counter (owner ruling 2026-10-15). Every other caller passes the default 1.0, a no-op. The Double Volley
+        /// re-fire at the primary target also passes 1.0.</param>
+        public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f, bool primaryTarget = true, bool powerBarSwing = true)
         {
             if (target.Health.Current <= 0)
                 return null;
@@ -156,15 +158,24 @@ namespace ACE.Server.WorldObjects
                 return null;
             }
 
+            // PropertyBool.PveOnly (PvpPveOnlyRule.BlocksDamage): a PvE-only weapon never harms a player, in or out of a match. Dropped here,
+            // before the damage roll, so no on-hit proc, cloak or enchantment runs; every caller already handles a null event.
+            if (PveOnlyBlocksWeaponHit(target, damageSource))
+                return null;
+
             var damageEvent = DamageEvent.CalculateDamage(this, target, damageSource);
+
+            // False for a Riposte counter (not a swing: its PowerMod is stale bar state). The Spellsword
+            // full-power upgrade reads it through SpellswordSpellTables.SwingPowerLevel.
+            damageEvent.PowerBarSwing = powerBarSwing;
 
             if (damageEvent.HasDamage && damageMultiplier != 1.0f)
                 damageEvent.Damage *= damageMultiplier;
 
-            // the procs' copy of an extra arrow's fraction - read only by DamageEvent.ProcDamageMultiplier,
-            // never by anything that reads Damage, so the two copies cannot compound
-            if (multiShotArrow)
-                damageEvent.MultiShotProcMultiplier = damageMultiplier;
+            // the procs' copy of the strike's fraction (Multishot extra arrow, Riposte counter) - read only by
+            // DamageEvent.ProcDamageMultiplier, never by anything that reads Damage, so the two copies cannot
+            // compound. A default 1.0 call writes 1.0, the field's own default.
+            damageEvent.StrikeFractionProcMultiplier = damageMultiplier;
 
             // class abilities that modify outgoing damage (e.g. Poison Weapon) - folded into the hit
             // before it's applied/reported, so mitigation has already happened and the attacker
@@ -632,7 +643,11 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Applies damages to a player from a physical damage source
         /// </summary>
-        public int TakeDamage(WorldObject source, DamageType damageType, float _amount, BodyPart bodyPart, bool crit = false, AttackConditions attackConditions = AttackConditions.None)
+        /// <param name="isHazard">
+        /// TRUE only from HazardContext.HitPlayers: every ward (PreWriteDamageContext.IsHazard lists them) skips the hit
+        /// (owner ruling R3). Every other caller leaves it false and nothing changes for them.
+        /// </param>
+        public int TakeDamage(WorldObject source, DamageType damageType, float _amount, BodyPart bodyPart, bool crit = false, AttackConditions attackConditions = AttackConditions.None, bool sendDefenderNotification = true, bool isHazard = false)
         {
             if (Invincible || IsDead) return 0;
 
@@ -685,7 +700,14 @@ namespace ACE.Server.WorldObjects
             // 477 health was survived. Mitigation rides the pre-write hook for exactly that reason; the
             // post-write dispatch below still runs, for Thorns, which is unaffected and still fires on a
             // zero-damage landed hit.
-            var afterMitigation = ApplyPreWriteDamageClassAbilities(source, damageType, amount);
+            //
+            // THE CLOAK SPELL PROC IS THE EXCEPTION: it is rolled on the hit as it stood going INTO this call
+            // (after the cloak's own damage-reduction proc above, before class-ability mitigation), so a hit
+            // that Ward or Barrier absorbed still counts as a hit for proc chance. Everything else below keeps
+            // the post-mitigation number.
+            var cloakProcPercent = (float)amount / Health.MaxValue;
+
+            var afterMitigation = ApplyPreWriteDamageClassAbilities(source, damageType, amount, isHazard: isHazard);
 
             if (afterMitigation != amount)
             {
@@ -695,7 +717,7 @@ namespace ACE.Server.WorldObjects
 
             // update health
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
-            DamageHistory.Add(source, damageType, damageTaken);
+            DamageHistory.Add(source, damageType, damageTaken, thrown: amount);
 
             // World Events measured boss damage scaling (TECH-DESIGN 2.16). This is the melee and missile
             // site: monster melee (Monster_Melee) and monster missile (ProjectileCollisionHelper) both
@@ -703,7 +725,7 @@ namespace ACE.Server.WorldObjects
             // every mitigation and after the cloak/ward reductions, because that is the number the
             // controller has to steer. Inert - two field reads - for every hit not dealt by a world-event
             // boss, which is all of them outside a run.
-            ACE.Server.WorldEvents.WorldEventBossDamageHook.NoteHit(source, this, (int)damageTaken, crit);
+            ACE.Server.WorldEvents.WorldEventHooks.NoteBossHit(source, this, (int)damageTaken, crit);
 
             // class abilities that react to a landed incoming hit (e.g. Thorns) - placed before the
             // death check so they still fire on a killing blow
@@ -742,7 +764,9 @@ namespace ACE.Server.WorldObjects
             // send network messages
             if (source is Creature creature)
             {
-                if (!SquelchManager.Squelches.Contains(source, ChatMessageType.CombatEnemy))
+                // sendDefenderNotification is false for monster-effect riders (flat damage, DoT ticks), which
+                // send their own descriptive chat line; the generic "hits you" line would double-report them
+                if (sendDefenderNotification && !SquelchManager.Squelches.Contains(source, ChatMessageType.CombatEnemy))
                     Session.Network.EnqueueSend(new GameEventDefenderNotification(Session, creature.Name, damageType, percent, amount, damageLocation, crit, attackConditions));
 
                 var hitSound = new GameMessageSound(Guid, GetHitSound(source, bodyPart), 1.0f);
@@ -768,7 +792,7 @@ namespace ACE.Server.WorldObjects
             }
 
             if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
-                Cloak.TryProcSpell(this, source, equippedCloak, percent);
+                Cloak.TryProcSpell(this, source, equippedCloak, cloakProcPercent);
 
             // if player attacker, update PK timer
             if (source is Player attacker)
@@ -854,12 +878,32 @@ namespace ACE.Server.WorldObjects
             // Efficiency (WeaponModId.Efficiency): reduces the final attack stamina cost. Read off the
             // equipped melee/missile weapon only - see Player_WeaponMods.cs for why GetWeaponOnlyModValue
             // and not the caster accessor.
-            staminaCost *= (float)WeaponModCombat.CostMultiplier(GetWeaponOnlyModValue(WeaponModId.Efficiency));
+            // Knot loot: Frugal Hand (summed over equipped items) adds to Efficiency before the single cost multiplier.
+            staminaCost *= (float)WeaponModCombat.CostMultiplier(KnotTraitCombat.CostFraction(GetWeaponOnlyModValue(WeaponModId.Efficiency), GetKnotFrugalFraction()));
             staminaCost = Math.Max(staminaCost, 1);
 
             //Console.WriteLine($"GetAttackStamina({powerAccuracy}) - burden: {burden}, baseCost: {baseCost}, staminaMod: {staminaMod}, staminaCost: {staminaCost}");
 
             return (int)Math.Round(staminaCost);
+        }
+
+        /// <summary>
+        /// TRUE when the current attack qualifies as reckless: Recklessness trained or specialized, melee or
+        /// missile combat mode, and the power/accuracy bar between 0.1 and 0.9. Exactly the three gates
+        /// GetRecklessnessMod checks before it computes a rating (it does not look at the rating itself, so a
+        /// low Recklessness skill still qualifies). Read by Intimidate (Berserker T2) in DamageEvent.GetEvadeChance.
+        /// </summary>
+        public bool IsRecklessAttackQualifying()
+        {
+            if (CombatMode != CombatMode.Melee && CombatMode != CombatMode.Missile)
+                return false;
+
+            if (GetCreatureSkill(Skill.Recklessness).AdvancementClass < SkillAdvancementClass.Trained)
+                return false;
+
+            var powerAccuracyBar = GetPowerAccuracyBar();
+
+            return powerAccuracyBar >= 0.1f && powerAccuracyBar <= 0.9f;
         }
 
         /// <summary>
@@ -1189,7 +1233,8 @@ namespace ACE.Server.WorldObjects
 
         public override bool CanDamage(Creature target)
         {
-            return target.Attackable && !target.Teleporting && !(target is CombatPet);
+            // WaffleACE fork, World Events Hold: a knight is never damageable by a player (see CheckPKStatusVsTarget).
+            return target.Attackable && !target.Teleporting && !(target is CombatPet) && !ACE.Server.WorldEvents.WorldEventHooks.RefusesPlayerHarm(target);
         }
 
         // http://acpedia.org/wiki/Announcements_-_2002/04_-_Betrayal
@@ -1479,6 +1524,17 @@ namespace ACE.Server.WorldObjects
             // (no tag) falls through unchanged.
             if (TryBattlegroundObjectiveGate(targetCreature, spell, out var objectiveResult))
                 return objectiveResult;
+
+            // WaffleACE fork, World Events Hold: a knight can only be harmed by its own run's monsters. Refused here as well
+            // as in CanDamage because the cleave, multi-shot and AoE candidate filters ask this method. Beneficial spells
+            // (a heal) fall through to the rules below.
+            if (ACE.Server.WorldEvents.WorldEventHooks.RefusesPlayerHarm(targetCreature) && IsHarmfulAction(spell))
+                return BattlegroundObjectiveRefusalErrors();
+
+            // Open World Threads R12: a player past an outdoor run's circle cannot harm its creatures (melee, missile,
+            // harmful spells and class-ability strikes all ask here). Harmful actions only; null for every other target.
+            if ((spell == null || spell.IsHarmful) && TryOutdoorPerimeterDamageGate(targetCreature, out var perimeterResult))
+                return perimeterResult;
 
             // PvP arena damage gate (Docs/Pvp/DESIGN.md H6), first among the PK rules: when either player is in a
             // match, PvpArenaGate decides and the retail rules below do not run. Harmful actions only (melee,

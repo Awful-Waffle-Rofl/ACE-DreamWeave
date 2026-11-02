@@ -144,7 +144,7 @@ namespace ACE.Server.Tests
         /// test - the stateful half needs a live Player and a landblock. It pins the call graph that makes
         /// the property true:
         ///
-        ///   ClearBloodChargeStacks() has ONE call site, inside ApplyBloodChargeDamage's burst branch;
+        ///   SetBloodChargeStacks() has ONE call site, inside ApplyBloodChargeDamage's burst branch;
         ///   ApplyBloodChargeDamage has TWO callers, and only ONE of them can pass exsanguinateEligible;
         ///   the one that can is ApplyLifeProjectileBloodCharge, called once per cast;
         ///   SpellProjectile - the per-projectile damage site - cannot reach the pool at all.
@@ -160,9 +160,9 @@ namespace ACE.Server.Tests
             var projectile = ReadServerSource("ACE.Server/WorldObjects/SpellProjectile.cs");
             var magic = ReadServerSource("ACE.Server/WorldObjects/WorldObject_Magic.cs");
 
-            // the pool is emptied in exactly one place: the declaration, plus the single call in the burst
-            Assert.AreEqual(2, CountOf(buffs, "ClearBloodChargeStacks("),
-                "ClearBloodChargeStacks should have exactly one declaration and one call site");
+            // the pool is reset (to the kept charges) in exactly one place: the declaration, plus the single call in the burst
+            Assert.AreEqual(2, CountOf(buffs, "SetBloodChargeStacks("),
+                "SetBloodChargeStacks should have exactly one declaration and one call site");
 
             // one declaration plus exactly three calls: Harm, and the cast-time resolver's two arms (the life
             // health bolt - Bloodstone Bolt - and the life projectiles)
@@ -480,7 +480,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void WeakenedBlood_FesterVisual_IsImmediate_SoTheDrainScriptLandsOnTop()
         {
-            var buffs = ReadServerSource("ACE.Server/WorldObjects/Player_ClassAbilityBuffs.cs");
+            var buffs = ReadServerSource("ACE.Server/WorldObjects/Player_WeakenedBlood.cs");
 
             var start = buffs.IndexOf("private void ApplyWeakenedBloodFester(", StringComparison.Ordinal);
             Assert.IsTrue(start >= 0, "ApplyWeakenedBloodFester not found");
@@ -713,25 +713,37 @@ namespace ACE.Server.Tests
         /// This is a live gate, not a decorative predicate: HandleCastSpell_Transfer branches on
         /// DamageBenefits to choose between GetHealthDrainResistanceOnly (no axis) and
         /// GetResistanceMod(HealthDrain) (axis). Flipping the Transfer arm to true changes runtime damage.
+        ///
+        /// WIDENED 2026-10-17 (Blood Mage buff pass): every HEALTH-damage spell benefits except Drain, so a
+        /// Health-damage Projectile (Bloodstone Bolt) now does; a projectile of any other damage type still
+        /// does not.
         /// </summary>
         [TestMethod]
-        public void WeakenedBlood_DamageBenefits_ExcludesDrainAndCoversHarmHecatombAndRavenFury()
+        public void WeakenedBlood_DamageBenefits_ExcludesDrainAndCoversEveryOtherHealthDamageSpell()
         {
-            // DRAIN. Excluded by ruling - the whole point of this test.
+            // DRAIN. Excluded by ruling - the whole point of this test - whichever overload asks.
             Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Transfer));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Transfer, DamageType.Health));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Transfer, DamageType.Undef));
 
-            // Harm (a Health Boost) and the two life projectiles (Martyr's Hecatomb, Curse of Raven Fury)
-            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.Boost));
-            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.FellowBoost));
-            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.LifeProjectile));
+            // Harm (a Health Boost; retail Harm rows carry no damage type) and the Health life projectiles
+            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.Boost, DamageType.Undef));
+            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.Boost, DamageType.Health));
+            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.FellowBoost, DamageType.Undef));
+            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.LifeProjectile, DamageType.Health));
 
-            // nothing else reads the mark: war and void bolts are on the elemental axis, not this one,
+            // the widening: a Health-damage Projectile (Bloodstone Bolt) now benefits
+            Assert.IsTrue(WeakenedBloodMath.DamageBenefits(SpellType.Projectile, DamageType.Health));
+
+            // ...but war bolts and a Mana life projectile are on their own axis, not this one
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Projectile, DamageType.Fire));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.LifeProjectile, DamageType.Mana));
+
             // and enchantments/dispels deal no damage for a vulnerability to act on
-            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Projectile));
-            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Enchantment));
-            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.EnchantmentProjectile));
-            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Dispel));
-            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Undef));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Enchantment, DamageType.Health));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.EnchantmentProjectile, DamageType.Health));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Dispel, DamageType.Health));
+            Assert.IsFalse(WeakenedBloodMath.DamageBenefits(SpellType.Undef, DamageType.Health));
         }
 
         /// <summary>
@@ -834,7 +846,7 @@ namespace ACE.Server.Tests
         public void CrimsonHarvest_TunableDefaults_AreFourTargetsWithinEightMetres()
         {
             Assert.AreEqual(8.0, D("class_ability_crimsonharvest_radius"), 1e-9);
-            Assert.AreEqual(4, L("class_ability_crimsonharvest_max_targets"));
+            Assert.AreEqual(4, L("class_ability_crimsonharvest_extra_targets_r3"));
         }
 
         [TestMethod]

@@ -93,8 +93,46 @@ namespace ACE.Server.WeaponMods
         /// </summary>
         public PropertyFloat? NativeFloat;
 
-        /// <summary>Magnitude at a perfect roll on a workmanship 10 weapon, in the native property's own units.</summary>
+        /// <summary>
+        /// Magnitude at a perfect roll on a workmanship 10 weapon, in the native property's own units. For a row
+        /// with a <see cref="CeilingFactor"/> this is the LARGEST per-item ceiling; read the ceiling for a given
+        /// item through <see cref="MaxRollFor"/>.
+        /// </summary>
         public double MaxRoll;
+
+        /// <summary>
+        /// OPTIONAL per-item ceiling factor, in (0, 1]: the item that carries the record decides what share of
+        /// <see cref="MaxRoll"/> it can reach. Null (every row but one) means 1.0 for every item.
+        ///
+        /// Exists for Defensive Weapon (owner ruling 2026-10-25), whose ceiling depends on the carrier - a
+        /// one-handed melee weapon reaches 100 armor level, every other class 200 - while the registry still
+        /// holds one MaxRoll per row. EVERY site that turns a fraction into a magnitude (or back) for an item
+        /// must go through <see cref="MaxRollFor"/> with that item, so the combat hook, the appraisal line, the
+        /// intensity percent and the market row all agree for any given item. The no-item overloads in
+        /// <see cref="WeaponModValue"/> resolve against a null item, which reads the full MaxRoll.
+        ///
+        /// Tier B only: a Tier A record holds its applied magnitude verbatim, so a factor there would desync the
+        /// reversal arithmetic.
+        /// </summary>
+        public Func<WorldObject, double> CeilingFactor;
+
+        /// <summary>
+        /// The ceiling this row reaches ON <paramref name="item"/>: <see cref="MaxRoll"/> times the row's
+        /// <see cref="CeilingFactor"/> for that item (1.0 when the row has none, or for a null item). A factor
+        /// that is NaN or outside (0, 1] is treated as 1.0 rather than trusted.
+        /// </summary>
+        public double MaxRollFor(WorldObject item)
+        {
+            if (CeilingFactor == null)
+                return MaxRoll;
+
+            var factor = CeilingFactor(item);
+
+            if (double.IsNaN(factor) || factor <= 0.0 || factor > 1.0)
+                factor = 1.0;
+
+            return MaxRoll * factor;
+        }
 
         /// <summary>
         /// What the engine reads when the native property is ABSENT. Both application and reversal combine

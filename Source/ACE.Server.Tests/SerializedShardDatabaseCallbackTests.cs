@@ -85,6 +85,19 @@ namespace ACE.Server.Tests
                 return true;
             }
 
+            public bool ThrowFromPossessions;
+            public int PossessionReads;
+
+            public override ACE.Database.Entity.PossessedBiotas GetPossessedBiotasInParallel(uint id)
+            {
+                PossessionReads++;
+
+                if (ThrowFromPossessions)
+                    throw new InvalidOperationException("simulated shard failure reading a character's possessions");
+
+                return new ACE.Database.Entity.PossessedBiotas(new List<ACE.Database.Models.Shard.Biota>(), new List<ACE.Database.Models.Shard.Biota>());
+            }
+
             public override List<bool> RemoveBiotaBatch(IList<uint> ids)
             {
                 if (ThrowFromRemoveBatch)
@@ -298,6 +311,109 @@ namespace ACE.Server.Tests
             }
 
             Assert.AreEqual(false, result);
+        }
+
+        /// <summary>
+        /// The player-login read (WorldManager.PlayerEnterWorld): one that throws must still be answered, with null.
+        /// RunStandalone swallows a task's exception without running its callback, and the login ends its
+        /// SuitHolderMoveGuard entering mark only from inside this callback - a dropped answer left that character
+        /// unmovable by the suit builder until restart.
+        /// </summary>
+        [TestMethod]
+        public void GetPossessedBiotas_WhenTheReadThrows_StillInvokesTheCallbackWithNull()
+        {
+            var db = new ThrowingShardDatabase { ThrowFromPossessions = true };
+            var serialized = new SerializedShardDatabase(db);
+
+            var answered = new ManualResetEventSlim(false);
+            var calls = 0;
+            var result = new ACE.Database.Entity.PossessedBiotas(new List<ACE.Database.Models.Shard.Biota>(), new List<ACE.Database.Models.Shard.Biota>());   // a non-null sentinel the callback must overwrite
+
+            serialized.GetPossessedBiotasInParallel(0x50000601, possessed =>
+            {
+                calls++;
+                result = possessed;
+                answered.Set();
+            });
+
+            serialized.Start();
+
+            try
+            {
+                Assert.IsTrue(answered.Wait(CallbackWaitMs), "a possession read whose database call throws must still be answered");
+            }
+            finally
+            {
+                serialized.Stop();
+            }
+
+            Assert.IsNull(result, "a failed read is answered with null, never an empty (log in carrying nothing) result");
+            Assert.AreEqual(1, calls);
+            Assert.AreEqual(1, db.PossessionReads, "sanity: the throwing read must actually have been reached");
+        }
+
+        /// <summary>The control: a read that succeeds is answered with what it read, not null.</summary>
+        [TestMethod]
+        public void GetPossessedBiotas_WhenTheReadSucceeds_AnswersTheResult()
+        {
+            var db = new ThrowingShardDatabase();
+            var serialized = new SerializedShardDatabase(db);
+
+            var answered = new ManualResetEventSlim(false);
+            ACE.Database.Entity.PossessedBiotas result = null;
+
+            serialized.GetPossessedBiotasInParallel(0x50000602, possessed =>
+            {
+                result = possessed;
+                answered.Set();
+            });
+
+            serialized.Start();
+
+            try
+            {
+                Assert.IsTrue(answered.Wait(CallbackWaitMs));
+            }
+            finally
+            {
+                serialized.Stop();
+            }
+
+            Assert.IsNotNull(result);
+            Assert.AreEqual(0, result.Inventory.Count);
+        }
+
+        /// <summary>A callback that throws is not answered a second time with null (the callback sits outside the read's try).</summary>
+        [TestMethod]
+        public void GetPossessedBiotas_ACallbackThatThrows_IsInvokedOnce()
+        {
+            var db = new ThrowingShardDatabase();
+            var serialized = new SerializedShardDatabase(db);
+
+            var calls = 0;
+            var after = new ManualResetEventSlim(false);
+
+            serialized.GetPossessedBiotasInParallel(0x50000603, possessed =>
+            {
+                Interlocked.Increment(ref calls);
+                throw new InvalidOperationException("a login callback that misbehaves");
+            });
+
+            // A later queued item: once it is answered, the first one has fully run.
+            serialized.RemoveBiota(0x70000602, ok => after.Set());
+
+            serialized.Start();
+
+            try
+            {
+                Assert.IsTrue(after.Wait(CallbackWaitMs));
+            }
+            finally
+            {
+                serialized.Stop();
+            }
+
+            Assert.AreEqual(1, calls);
         }
     }
 }

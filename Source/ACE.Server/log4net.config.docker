@@ -27,7 +27,7 @@
     <file value="/ace/Logs/ACE_Log.txt" />
     <appendToFile value="true" />
     <rollingStyle value="Size" />
-    <maxSizeRollBackups value="10" />
+    <maxSizeRollBackups value="50" />
     <maximumFileSize value="20480KB" />
     <staticLogFileName value="true" />
     <layout type="log4net.Layout.PatternLayout">
@@ -37,6 +37,16 @@
   </appender>
 
   <logger name="Packets">
+    <level value="INFO" />
+  </logger>
+
+  <!-- Quiet per-probe connection/login DEBUG (mostly server-tracker probes). -->
+  <!-- Note: AuthenticationHandler logs failed logins at DEBUG while the world is not Open. -->
+  <logger name="ACE.Server.Network.Managers.NetworkManager">
+    <level value="INFO" />
+  </logger>
+
+  <logger name="ACE.Server.Network.Handlers.AuthenticationHandler">
     <level value="INFO" />
   </logger>
 

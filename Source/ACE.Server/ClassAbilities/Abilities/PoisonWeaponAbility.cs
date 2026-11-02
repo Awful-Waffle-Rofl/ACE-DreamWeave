@@ -35,7 +35,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "increased further by high Alchemy. Ranks in Acid Proc raise this damage further still. " +
                           "The poison scales like the strike that carried it: your damage and critical damage " +
                           "ratings, the target's damage resistance, and on a critical hit the strike's critical " +
-                          "multiplier and Killer Instinct. Extra Multishot arrows carry reduced poison.",
+                          "multiplier and Killer Instinct. Extra Multishot arrows and Riposte counters carry poison reduced to match their damage.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,

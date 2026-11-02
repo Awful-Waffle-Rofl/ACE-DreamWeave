@@ -71,7 +71,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         ///
         /// Shield Block's own chance is read here unconditionally from rank (ignoring the shield-equipped
         /// gate that real combat applies), matching this readout family's established convention of
-        /// reporting "how strong the ability is" rather than "will it fire on the next hit" (see SavageBlows
+        /// reporting "how strong the ability is" rather than "will it fire on the next hit" (see Heavy Blows
         /// / Frenzy, which ignore their own runtime gates the same way).
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)

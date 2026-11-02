@@ -35,7 +35,7 @@ namespace ACE.Server.Tests
         private const float Tolerance = 1e-5f;
 
         private const string ExpectedDescription =
-            "Any weapon attack you land marks the target for 10 seconds. A marked creature takes 1/2/3/4/5% more " +
+            "Any weapon attack you land marks the target for 10 seconds. A marked creature takes 2/4/6/8/10% more " +
             "damage (by rank) from every source and damage type, including your fellows and pets. The mark is its " +
             "own debuff: it stacks with Vulnerability, Imperil and rending weapons. If several archers mark a " +
             "target, the strongest mark applies. Higher Assess Creature multiplies the bonus.";

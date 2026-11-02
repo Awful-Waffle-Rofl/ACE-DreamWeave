@@ -14,7 +14,6 @@ namespace ACE.Server.Pvp
         ArenaDisabled,
         ModeDisabled,
         AlreadyInInstance,
-        NotOnPkFacet,
         InRespite,
         ActivePkTimer,
         IsOlthoi,
@@ -23,7 +22,7 @@ namespace ACE.Server.Pvp
         IsTeleporting,
         AlreadyQueued,
         AlreadyInMatch,
-        BelowMinLevel,
+        NoThreadCleared,
         Denylisted,
         DeclineLockout,
         DuoNotSupportedForMode,
@@ -63,13 +62,25 @@ namespace ACE.Server.Pvp
         GroupNeedsFellowship,
 
         /// <summary>A member of the group failed admission; <see cref="PvpJoinResult.PartnerName"/> names them.</summary>
-        GroupMemberIneligible
+        GroupMemberIneligible,
+
+        /// <summary>
+        /// Battlegrounds and Tugak Brawl only: a deserter lockout is running (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout").
+        /// <see cref="PvpJoinResult.LockoutSecondsRemaining"/> carries the time left. Appended last.
+        /// </summary>
+        DeserterLockout,
+
+        /// <summary>
+        /// A battleground group join while pvp_bg_group_join_enabled is off (owner ruling 2026-10-15). Refused before anything is queued.
+        /// Appended last.
+        /// </summary>
+        GroupJoinDisabled
     }
 
     /// <summary>
     /// Result of <see cref="PvpMatchCoordinator.Join"/>. On success <see cref="WaitingCount"/> is the players now in
     /// that queue and <see cref="PartnerName"/> is set for a duo. On refusal the fields each line needs are set:
-    /// ModeKey (mode disabled, already queued), MinLevel (too low), LockoutSecondsRemaining, PartnerName (partner
+    /// ModeKey (mode disabled, already queued), LockoutSecondsRemaining, PartnerName (partner
     /// ineligible), TemplateKey (the template queued on, or the one refused), Detail (a ready-made refusal line, e.g. the
     /// pack-room shortfall), TemplateLabel (on success, the queued template's display name).
     /// </summary>
@@ -79,12 +90,13 @@ namespace ACE.Server.Pvp
         int WaitingCount = 0,
         string PartnerName = null,
         int LockoutSecondsRemaining = 0,
-        int MinLevel = 0,
         string TemplateKey = null,
         string Detail = null,
         string TemplateLabel = null,
-        int GroupMax = 0)
+        int GroupMax = 0,
+        IReadOnlyList<string> QueuedModeKeys = null)
     {
+        // QueuedModeKeys (on success): every room key the joiner now waits in, in matchmaking order. More than one = multi-queued.
         public bool Joined => Refusal == PvpJoinRefusal.None;
     }
 
@@ -100,11 +112,15 @@ namespace ACE.Server.Pvp
         DeclinedMatch,
 
         /// <summary>In a match: PR D asks the leave confirmation, then calls <see cref="PvpMatchCoordinator.Forfeit"/>.</summary>
-        InMatchNeedsConfirm
+        InMatchNeedsConfirm,
+
+        /// <summary>"/arena leave &lt;mode&gt;" for a queue the player is not in (or an unknown room). Appended last.</summary>
+        NotInMode
     }
 
     /// <param name="MatchId">Set for <see cref="PvpLeaveOutcome.InMatchNeedsConfirm"/>: the match the leave popup is about.</param>
-    public sealed record PvpLeaveResult(PvpLeaveOutcome Outcome, string ModeKey = null, string PartnerName = null, Guid? MatchId = null);
+    /// <param name="ModeKeys">Set for <see cref="PvpLeaveOutcome.LeftQueue"/>: every room key left, in matchmaking order (ModeKey is the first).</param>
+    public sealed record PvpLeaveResult(PvpLeaveOutcome Outcome, string ModeKey = null, string PartnerName = null, Guid? MatchId = null, IReadOnlyList<string> ModeKeys = null);
 
     public enum PvpAnswerOutcome
     {
@@ -166,7 +182,15 @@ namespace ACE.Server.Pvp
         bool Overtime = false,
         IReadOnlyDictionary<int, int> Scores = null,
         int ScoreTarget = 0,
-        string StatusLine = null);
+        string StatusLine = null,
+        IReadOnlyList<PvpQueueEntry> Queues = null);
+
+    /// <summary>
+    /// One queue a player waits in (multi-queue, Docs/Pvp/DESIGN.md "Joining the queue"): the room, time waited, the room's count of
+    /// players not held by a pending match, the template queued on (key and display label, null for none), and Held - true while a
+    /// match this player (or a duo/group partner in this unit) holds a seat in is pending, so this entry is paused.
+    /// </summary>
+    public sealed record PvpQueueEntry(string ModeKey, TimeSpan Waited, int WaitingCount, string TemplateKey, string TemplateLabel, bool Held);
 
     /// <summary>One active match, for the admin list.</summary>
     public sealed record PvpMatchSummary(

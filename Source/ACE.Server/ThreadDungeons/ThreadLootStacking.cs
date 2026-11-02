@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Knots;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
@@ -48,8 +49,10 @@ namespace ACE.Server.ThreadDungeons
     /// reaches the same result per fill step via the ordinary tuple <see cref="Consolidate(List{ValueTuple{WorldObject,string}},out int)"/>
     /// plus <see cref="TopUpExisting"/> against whatever a PRIOR step already placed (see ThreadCacheFiller.PlacePending
     /// for why a step-spanning buffer was not built - the smaller, budget-preserving fix). <see cref="SortForPlacement"/>
-    /// / <see cref="SortPileForPlacement"/> then order a batch: stackables first, grouped by wcid, each group's own
-    /// stacks adjacent and groups ordered by total Value descending, then everything else by Value descending.
+    /// / <see cref="SortPileForPlacement"/> then order a batch: the Knot family (Fiber, Pattern, Knot) first in arrival
+    /// order, then the player's fixed boss bonus (note, key, salvage; owner ruling 2026-10-30), then stackables
+    /// grouped by wcid, each group's own stacks adjacent and groups ordered by total Value descending, then
+    /// everything else by Value descending.
     /// <see cref="TopUpExisting"/> covers the case this round 2 exists for: identical stacks landing in the SAME
     /// cache across separate fill passes (different deal rounds, or different time-budgeted steps) must top up the
     /// stack already there instead of sitting beside it as a second one.
@@ -217,7 +220,10 @@ namespace ACE.Server.ThreadDungeons
                 for (var s = 0; s < survivorCount; s++)
                 {
                     var originalHeld = group[s];
-                    result.Add(new HeldPileItem(mergedItems[s], null, originalHeld.Round, destroyedRounds.Count > 0 ? destroyedRounds : null));
+                    // A merge that swallowed a fixed-bonus stack keeps the fixed slot on its FIRST survivor only.
+                    var fixedOrder = group.Select(h => h.FixedOrder).Where(o => o.HasValue).DefaultIfEmpty(null).Min();
+                    result.Add(new HeldPileItem(mergedItems[s], null, originalHeld.Round, destroyedRounds.Count > 0 ? destroyedRounds : null,
+                        s == 0 ? fixedOrder : null));
                 }
             }
 
@@ -225,7 +231,8 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
-        /// Placement order (owner ruling, 2026-09-22): stackables first, grouped by wcid (a group's stacks stay
+        /// Placement order (owner ruling, 2026-09-22; Knot family first and fixed bonus second per 2026-10-30, see
+        /// <see cref="SortPileForPlacement"/>): Knot family first, then stackables, grouped by wcid (a group's stacks stay
         /// adjacent, groups ordered by the group's total Value descending), then everything else by Value
         /// descending. Stable throughout - GroupBy and OrderBy/OrderByDescending preserve input order among ties -
         /// so a batch that needed no reordering comes back unchanged.
@@ -235,10 +242,16 @@ namespace ACE.Server.ThreadDungeons
             if (items == null || items.Count < 2)
                 return items;
 
-            var stackables = items.Where(i => i.Item is Stackable).ToList();
-            var others = items.Where(i => !(i.Item is Stackable)).ToList();
+            // Knots (design section 3.4; owner ruling 2026-10-30 widened it): the Knot family (Fiber, Pattern, Knot) goes
+            // first, in arrival order, ahead of everything else, so a Knotted Thread Cache shows its Knot drop in the first
+            // slot. This tuple shape carries no fixed boss bonus (that rides HeldPileItem.FixedOrder).
+            var knotDrops = items.Where(i => KnotItems.IsKnotFamily(i.Item)).ToList();
+            var stackables = items.Where(i => i.Item is Stackable && !KnotItems.IsKnotFamily(i.Item)).ToList();
+            var others = items.Where(i => !(i.Item is Stackable) && !KnotItems.IsKnotFamily(i.Item)).ToList();
 
             var result = new List<(WorldObject Item, string RareFinderName)>(items.Count);
+
+            result.AddRange(knotDrops);
 
             foreach (var group in stackables.GroupBy(i => i.Item.WeenieClassId)
                          .Select(g => (Total: g.Sum(x => (long)(x.Item.Value ?? 0)), Items: g.ToList()))
@@ -258,10 +271,21 @@ namespace ACE.Server.ThreadDungeons
             if (pile == null || pile.Count < 2)
                 return pile;
 
-            var stackables = pile.Where(h => h.Item is Stackable).ToList();
-            var others = pile.Where(h => !(h.Item is Stackable)).ToList();
+            // Order (owner rulings 2026-09-22 and 2026-10-30): the Knot family (Fiber, Pattern, Knot) in arrival order
+            // FIRST, then the player's FIXED boss bonus (Trade Note stack, Durable Legendary Key, salvage bags) in its
+            // build order, then stackables, then everything else. A Knot-family item wins over a fixed tag. OrderBy is
+            // stable, so equal ranks keep pile order.
+            var knotDrops = pile.Where(h => KnotItems.IsKnotFamily(h.Item)).ToList();
+            var fixedBonus = pile.Where(h => h.FixedOrder.HasValue && !KnotItems.IsKnotFamily(h.Item)).OrderBy(h => h.FixedOrder.Value).ToList();
+            var rest = pile.Where(h => !h.FixedOrder.HasValue && !KnotItems.IsKnotFamily(h.Item)).ToList();
+
+            var stackables = rest.Where(h => h.Item is Stackable).ToList();
+            var others = rest.Where(h => !(h.Item is Stackable)).ToList();
 
             var result = new List<HeldPileItem>(pile.Count);
+
+            result.AddRange(knotDrops);
+            result.AddRange(fixedBonus);
 
             foreach (var group in stackables.GroupBy(h => h.Item.WeenieClassId)
                          .Select(g => (Total: g.Sum(x => (long)(x.Item.Value ?? 0)), Items: g.ToList()))

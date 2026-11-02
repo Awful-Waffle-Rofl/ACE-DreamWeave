@@ -28,6 +28,10 @@ namespace ACE.Server.Tests
     /// change (it now implements ISpellHitAbility as well as IOutgoingDamageAbility), which is what the
     /// higher price is buying.
     ///
+    /// REPRICED A THIRD TIME 2026-10-24 by the Spellsword pass (ClassAbilityRepricing wave 4): Sundermark
+    /// and Dispelling Edge (now displayed "Dispelling Dance") back to 1/1/1, and Spellsurge, Spellstorm and
+    /// Cascade from one rank at 3 to three ranks at 1/1/1, moving the class to 17/12/9/38.
+    ///
     /// THEN RESHAPED 2026-09-12 by the same overhaul's new-ability wave, which moved this class's tier
     /// counts from 4/4/3 to 5/4/3 in two independent steps:
     ///  - SPELLWEAVE was added at Tier 1, the class's 5-rank "splash" ability (all eight classes got
@@ -65,14 +69,15 @@ namespace ACE.Server.Tests
             ("spellsword_training", 1, 3, new[] { 1, 1, 1 }),
             // Tier 2 - unlock: 3 CAPs, 5 spent in class
             ("runeblade",           2, 3, new[] { 1, 1, 1 }),
-            // premium reprice 2026-09-13: 1/rank -> 2/rank
-            ("sundermark",          2, 3, new[] { 2, 2, 2 }),
-            ("spellsurge",          2, 1, new[] { 3 }),
+            // Spellsword pass 2026-10-24 (reprice wave 4): 2/rank -> 1/rank, undoing the 2026-09-13 premium reprice
+            ("sundermark",          2, 3, new[] { 1, 1, 1 }),
+            // Spellsword pass 2026-10-24: one rank at 3 -> three ranks at 1/1/1 (PromoteToPaid)
+            ("spellsurge",          2, 3, new[] { 1, 1, 1 }),
             // Tier 3 - unlock: 8 CAPs, 15 spent in class
-            ("spellstorm",          3, 1, new[] { 3 }),
-            ("cascade",             3, 1, new[] { 3 }),
-            // premium reprice 2026-09-13: 1/rank -> 2/rank
-            ("dispellingedge",      3, 3, new[] { 2, 2, 2 }),
+            ("spellstorm",          3, 3, new[] { 1, 1, 1 }),
+            ("cascade",             3, 3, new[] { 1, 1, 1 }),
+            // Spellsword pass 2026-10-24: 2/rank -> 1/rank; displayed as "Dispelling Dance", internal name unchanged
+            ("dispellingedge",      3, 3, new[] { 1, 1, 1 }),
         };
 
         // ---- registration ------------------------------------------------------------------------
@@ -157,7 +162,8 @@ namespace ACE.Server.Tests
         // ---- tier distribution structural rule ----------------------------------------------------
 
         /// <summary>
-        /// DESIGN.md section 3's structural rule: 4-5 entries at T1, 3-4 at T2, 2-3 at T3. Counts every
+        /// DESIGN.md section 3's structural rule: 4-5 entries at T1, 3-4 at T2 (widened to 3-5 for Spellsword by the
+        /// owner ruling of 2026-10-30), 2-3 at T3. Counts every
         /// Spellsword-homed entry actually in the registry, including the generated bundle, the homed
         /// Enhanced entry and the two registration-only entries from the 2026-09-12 new-ability wave, not
         /// just the eight bespoke handlers - a count that only looked at DesignTable would miss all of
@@ -180,15 +186,18 @@ namespace ACE.Server.Tests
             var t3 = spellswordEntries.Count(d => d.Tier == 3);
 
             Assert.IsTrue(t1 >= 4 && t1 <= 5, $"T1 entry count {t1} is outside the 4-5 structural rule");
-            Assert.IsTrue(t2 >= 3 && t2 <= 4, $"T2 entry count {t2} is outside the 3-4 structural rule");
+            // Spellsword T2 band widened from 3-4 to 3-5: owner ruling 2026-10-30 (Volatile Elements placed at
+            // T2 and the higher class total accepted). Every other class and tier keeps its DESIGN.md band.
+            Assert.IsTrue(t2 >= 3 && t2 <= 5, $"T2 entry count {t2} is outside the 3-5 structural rule");
             Assert.IsTrue(t3 >= 2 && t3 <= 3, $"T3 entry count {t3} is outside the 2-3 structural rule");
 
             // exact counts as of the 2026-09-12 new-ability wave: T1 5 (Spellblade, Enhanced Light
             // Weapons, Spellsword Training, Resonance, Spellweave), T2 4 (Runeblade, Sundermark,
             // Spellsurge, Runic Ward - Enhanced Melee Defense left for Rogue and Runic Ward replaced it,
-            // so the count is unchanged), T3 3 (Spellstorm, Dispelling Edge, Cascade)
+            // so the count is unchanged), T3 3 (Spellstorm, Dispelling Edge, Cascade). T2 became 5 on
+            // 2026-10-30 when Volatile Elements was added at T2 (owner ruling) - see the band assertion above.
             Assert.AreEqual(5, t1);
-            Assert.AreEqual(4, t2);
+            Assert.AreEqual(5, t2);
             Assert.AreEqual(3, t3);
         }
 
@@ -198,9 +207,10 @@ namespace ACE.Server.Tests
             var defs = ClassAbilityRegistry.Abilities.Values;
 
             // FIVE at T1 since the 2026-09-12 new-ability wave added Spellweave; T2 is still four because
-            // Runic Ward replaced Enhanced Melee Defense, which returned to Rogue in the same wave.
+            // Runic Ward replaced Enhanced Melee Defense, which returned to Rogue in the same wave. T2 became
+            // FIVE on 2026-10-30 when Volatile Elements was added there (owner ruling).
             Assert.AreEqual(5, ClassAbilityCostSummary.EntryCountForClassTier(defs, ClassAbilityClass.Spellsword, 1));
-            Assert.AreEqual(4, ClassAbilityCostSummary.EntryCountForClassTier(defs, ClassAbilityClass.Spellsword, 2));
+            Assert.AreEqual(5, ClassAbilityCostSummary.EntryCountForClassTier(defs, ClassAbilityClass.Spellsword, 2));
             Assert.AreEqual(3, ClassAbilityCostSummary.EntryCountForClassTier(defs, ClassAbilityClass.Spellsword, 3));
         }
     }

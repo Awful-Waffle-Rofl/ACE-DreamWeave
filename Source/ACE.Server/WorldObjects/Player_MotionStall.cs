@@ -76,13 +76,21 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Drops the pending motion queue (MotionInterp.ClearPendingMotions, the HandleExitWorld way) and writes the
-        /// [MOTION_STALL] line. Server state only: nothing is sent to the client. A waiting turn-to then starts on the
-        /// next MoveToManager.UseTime. trigger "admin" always logs; the automatic triggers are rate-limited per player.
-        /// Returns the log line, or a "nothing to clear" message (no WARN) when the queue is already empty and the
-        /// object is not animating, or null when there is no motion interpreter.
+        /// Drops the pending motion queue and writes the [MOTION_STALL] line. Server state only: nothing is sent to the
+        /// client. A waiting turn-to then starts on the next MoveToManager.UseTime. trigger "admin" always logs; the
+        /// automatic triggers are rate-limited per player. Returns the log line, or a "nothing to clear" message (no
+        /// WARN) when the queue is already empty and the object is not animating, or null when there is no motion
+        /// interpreter.
+        ///
+        /// Both queues are drained (MotionStallWatchdog.DrainPendingMotions): the MotionTableManager twin queue is the
+        /// one that is actually stuck, so clearing only MotionInterp.PendingMotions left it holding the unmet node and
+        /// the next motions queued behind it again. While a cast is in progress only the MotionInterp queue is cleared,
+        /// as before: draining the twin queue fires MotionDone(success=false) callbacks, and the cast-gesture one
+        /// (HandleMotionDone_Magic) would schedule a DoCastSpell the cast_timeout path is already resolving itself.
+        /// The exception is allowTwinDrainWhileCasting on the cast_timeout clear that is about to FailCast (see
+        /// MotionStallWatchdog.ShouldDrainTwin).
         /// </summary>
-        public string ClearMotionStall(string trigger)
+        public string ClearMotionStall(string trigger, bool allowTwinDrainWhileCasting = false)
         {
             var physicsObj = PhysicsObj;
             var minterp = physicsObj?.MovementManager?.MotionInterpreter;
@@ -97,14 +105,16 @@ namespace ACE.Server.WorldObjects
             var staleSeconds = MotionStallWatchdog.StaleSeconds(count, PhysicsTimer.CurrentTime, minterp.PendingMotionsNonEmptySince);
             var motions = MotionStallWatchdog.DescribeMotions(minterp.PendingMotions);
             var contact = physicsObj.TransientState.HasFlag(TransientStateFlags.Contact);
+            var twin = MotionStallWatchdog.DescribeTwinQueue(physicsObj.PartArray?.MotionTableManager);
 
-            var cleared = minterp.ClearPendingMotions();
+            var drainTwin = MotionStallWatchdog.ShouldDrainTwin(MagicState != null && MagicState.IsCasting, allowTwinDrainWhileCasting, trigger);
+            var cleared = MotionStallWatchdog.DrainPendingMotions(physicsObj, minterp, drainTwin);
             motionStallTurnBlockedSince = MotionStallWatchdog.NotBlocked;
 
             var isAdmin = trigger == "admin";
             var pass = motionStallLogGate.TryPass(DateTime.UtcNow, out var suppressed) || isAdmin;
 
-            var line = MotionStallWatchdog.FormatClearLine(Name, Guid.Full, cleared, staleSeconds, motions, contact, trigger, suppressed);
+            var line = MotionStallWatchdog.FormatClearLine(Name, Guid.Full, cleared, staleSeconds, motions, contact, trigger, suppressed, twin);
 
             if (pass)
                 MotionStallWatchdog.Warn(line);
@@ -133,6 +143,7 @@ namespace ACE.Server.WorldObjects
             else
             {
                 sb.AppendLine($"  PendingMotions ({minterp.PendingMotions.Count}): {MotionStallWatchdog.DescribeMotions(minterp.PendingMotions)}");
+                sb.AppendLine($"  {MotionStallWatchdog.DescribeTwinQueue(physicsObj.PartArray?.MotionTableManager) ?? "twin queue: (no motion table manager)"}");
                 sb.AppendLine($"  seconds since last queue change={now - minterp.PendingMotionsChangedTime:0.0} continuously non-empty for={(minterp.PendingMotions.Count > 0 ? (now - minterp.PendingMotionsNonEmptySince).ToString("0.0") : "0.0")}");
             }
 

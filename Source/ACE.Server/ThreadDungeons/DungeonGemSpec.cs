@@ -254,6 +254,40 @@ namespace ACE.Server.ThreadDungeons
             return true;
         }
 
+        /// <summary>
+        /// The load= value codec ("wcid:doses,wcid:doses"), shared by TryParse and Serialize and also used on
+        /// its own by the Fragment Mold (PropertyString.FragmentMoldImprint stores exactly this text), so there
+        /// is one parser and one writer of the format. Empty or null text is the empty load. Value rules
+        /// (non-zero wcid, dose range, no duplicate) come from the same helper the constructor uses, so a
+        /// parsed load and a constructed one are legal on identical terms.
+        /// </summary>
+        public static bool TryParseLoad(string loadText, out List<(uint Wcid, int Doses)> load, out string error)
+        {
+            load = new List<(uint Wcid, int Doses)>();
+            error = null;
+
+            if (string.IsNullOrEmpty(loadText)) return true;
+
+            foreach (var item in loadText.Split(','))
+            {
+                var colon = item.IndexOf(':');
+                if (colon <= 0) { error = $"load entry '{item}' must be wcid:doses"; return false; }
+                var wcidText = item.Substring(0, colon);
+                if (!uint.TryParse(wcidText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var wcid))
+                { error = $"load wcid '{wcidText}' must be a non-zero uint"; return false; }
+                if (!int.TryParse(item.Substring(colon + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out var doses))
+                { error = $"load doses for '{wcidText}' must be 1..{MaxDoses}"; return false; }
+                load.Add((wcid, doses));
+            }
+
+            return LoadIsLegal(load, out error);
+        }
+
+        /// <summary>The writer half of <see cref="TryParseLoad"/>; Serialize's load= value is exactly this.</summary>
+        public static string SerializeLoad(IEnumerable<(uint Wcid, int Doses)> load)
+            => string.Join(",", (load ?? Enumerable.Empty<(uint Wcid, int Doses)>())
+                .Select(l => l.Wcid.ToString(CultureInfo.InvariantCulture) + ":" + l.Doses.ToString(CultureInfo.InvariantCulture)));
+
         public static bool TryParse(string text, out DungeonGemSpec spec, out string error)
         {
             spec = null;
@@ -338,24 +372,8 @@ namespace ACE.Server.ThreadDungeons
             if (!LocksAreLegal(locks, mods, out error)) return false;
 
             var load = new List<(uint Wcid, int Doses)>();
-            if (kv.TryGetValue("load", out var loadText) && loadText.Length > 0)
-            {
-                foreach (var item in loadText.Split(','))
-                {
-                    var colon = item.IndexOf(':');
-                    if (colon <= 0) { error = $"load entry '{item}' must be wcid:doses"; return false; }
-                    var wcidText = item.Substring(0, colon);
-                    if (!uint.TryParse(wcidText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var wcid))
-                    { error = $"load wcid '{wcidText}' must be a non-zero uint"; return false; }
-                    if (!int.TryParse(item.Substring(colon + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out var doses))
-                    { error = $"load doses for '{wcidText}' must be 1..{MaxDoses}"; return false; }
-                    load.Add((wcid, doses));
-                }
-
-                // Value rules (non-zero wcid, dose range, no duplicate) come from the same helper the
-                // constructor uses, so a parsed spec and a constructed one are legal on identical terms.
-                if (!LoadIsLegal(load, out error)) return false;
-            }
+            if (kv.TryGetValue("load", out var loadText) && !TryParseLoad(loadText, out load, out error))
+                return false;
 
             uint runId = 0, owner = 0;
             var hasRun = kv.ContainsKey("run");
@@ -395,7 +413,7 @@ namespace ACE.Server.ThreadDungeons
             sb.Append("|mods=").Append(string.Join(",", Modifiers.Select(m => m.Id + ":" + m.Magnitude.ToString("0.##", CultureInfo.InvariantCulture))));
             sb.Append("|press=").Append(Presses.ToString(CultureInfo.InvariantCulture));
             sb.Append("|lock=").Append(string.Join(",", Locks));
-            sb.Append("|load=").Append(string.Join(",", Load.Select(l => l.Wcid.ToString(CultureInfo.InvariantCulture) + ":" + l.Doses.ToString(CultureInfo.InvariantCulture))));
+            sb.Append("|load=").Append(SerializeLoad(Load));
             if (Guide != null)
                 sb.Append("|guide=").Append(Guide.Format());
             if (IsBound)

@@ -61,6 +61,14 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // World Events Hold: a knight is healed by its own kit path (health kits only, while it accepts player heals).
+            // One field read for every other target.
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnightHealTarget(target))
+            {
+                HealHoldKnight(healer, (Creature)target);
+                return;
+            }
+
             if (!(target is Player targetPlayer) || targetPlayer.Teleporting)
             {
                 healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
@@ -249,7 +257,17 @@ namespace ACE.Server.WorldObjects
             // Amount displayed to player can exceed actual amount healed due to heal boost ratings, but we only want to record the actual amount healed
             var actualHealAmount = (uint)target.UpdateVitalDelta(vital, healAmount);
             if (vital.Vital == PropertyAttribute2nd.MaxHealth)
+            {
                 target.DamageHistory.OnHeal(actualHealAmount);
+
+                // PvP conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): the health the write actually ADDED, never the attempted
+                // amount, so overheal is not credited. A teammate heal credits HealingDone and activity; a self-heal nothing.
+                Player.OnPvpHealApplied(healer, target, actualHealAmount);
+
+                // class ability: Hemomancy - credited to the healed TARGET, applied delta only
+                if (actualHealAmount > 0)
+                    target.OnHealthRestored(actualHealAmount, false);
+            }
 
             //if (target.Fellowship != null)
             //target.Fellowship.OnVitalUpdate(target);
@@ -264,6 +282,105 @@ namespace ACE.Server.WorldObjects
 
             if (healer != target)
                 target.Session.Network.EnqueueSend(new GameMessageSystemChat($"{healer.Name} heals you for {healAmount} {BoosterEnum.ToString()} points.", ChatMessageType.Broadcast));
+
+            if (UsesLeft <= 0 && !UnlimitedUse)
+                healer.TryConsumeFromInventoryWithNetworking(this, 1);
+        }
+
+        /// <summary>
+        /// World Events Hold: a health kit used on a knight. The player path's animation, movement rule and use count, but no
+        /// skill check (a knight's large time-scaled health would make the usual difficulty impossible) and no target-side
+        /// terms. The raw kit heal (skill x kit bonus, 20 to 50 percent, a 10 percent chance to double) is handed to
+        /// WorldEventHooks.TryQueuePlayerHeal: the conversion, the full-health refusal and the vital write run on the
+        /// KNIGHT's landblock, which also sends the result line. Stamina and mana kits are refused. Ported from DreamWeave #17.
+        /// </summary>
+        private void HealHoldKnight(Player healer, Creature knight)
+        {
+            if (BoosterEnum != PropertyAttribute2nd.Health || !ACE.Server.WorldEvents.WorldEventHooks.HoldAcceptsPlayerHeal(knight))
+            {
+                healer.SendUseDoneEvent(WeenieError.YouCantHealThat);
+                return;
+            }
+
+            // A read-only peek so a kit is never spent on a knight already at full health. The authoritative refusal stays in
+            // the queued action on the knight's landblock (health can change in between).
+            if (knight.Health.Current >= knight.Health.MaxValue)
+            {
+                healer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(healer.Session, WeenieErrorWithString._IsAtFullHealth, knight.Name));
+                healer.SendUseDoneEvent();
+                return;
+            }
+
+            if (healer.IsJumping)
+            {
+                healer.SendUseDoneEvent(WeenieError.YouCantDoThatWhileInTheAir);
+                return;
+            }
+
+            healer.IsBusy = true;
+
+            var motionCommand = MotionCommand.SkillHealOther;
+            var currentStance = healer.CurrentMotionState.Stance;
+            var animLength = MotionTable.GetAnimationLength(healer.MotionTableId, currentStance, motionCommand);
+
+            var startPos = new Physics.Common.Position(healer.PhysicsObj.Position);
+
+            var actionChain = new ActionChain();
+            actionChain.AddAction(healer, () => healer.SendMotionAsCommands(motionCommand, currentStance));
+            actionChain.AddDelaySeconds(animLength);
+            actionChain.AddAction(healer, () =>
+            {
+                var moved = startPos.Distance(new Physics.Common.Position(healer.PhysicsObj.Position));
+
+                if (moved < Healing_MaxMove || healer.PlayerKillerStatus == PlayerKillerStatus.NPK)
+                    DoHealingHoldKnight(healer, knight);
+                else
+                    healer.Session.Network.EnqueueSend(new GameMessageSystemChat("Your movement disrupted healing!", ChatMessageType.Broadcast));
+
+                healer.IsBusy = false;
+                healer.SendUseDoneEvent();
+            });
+
+            healer.EnqueueMotion(actionChain, MotionCommand.Ready);
+
+            actionChain.EnqueueChain();
+
+            healer.NextUseTime = DateTime.UtcNow.AddSeconds(animLength);
+        }
+
+        private void DoHealingHoldKnight(Player healer, Creature knight)
+        {
+            if (knight.IsDead || knight.IsDestroyed)
+                return;
+
+            var remainingMsg = "";
+
+            if (!UnlimitedUse)
+            {
+                UsesLeft--;
+                var s = UsesLeft == 1 ? "" : "s";
+                remainingMsg = UsesLeft > 0 ? $" Your {Name} has {UsesLeft} use{s} left." : $" Your {Name} is used up.";
+
+                Value -= StructureUnitValue;
+
+                if (Value < 0)
+                    Value = 0;
+            }
+
+            healer.Session.Network.EnqueueSend(new GameMessagePublicUpdatePropertyInt(this, PropertyInt.Structure, UsesLeft.Value));
+
+            var healingSkill = healer.GetCreatureSkill(Skill.Healing).Current;
+            var healBase = healingSkill * (float)(HealkitMod ?? 1.0);
+            var raw = ThreadSafeRandom.Next(healBase * 0.2f, healBase * 0.5f);
+            var critical = ThreadSafeRandom.Next(0.0f, 1.0f) < 0.1f;
+
+            if (critical)
+                raw *= 2;
+
+            var staminaCost = (uint)Math.Min(healer.Stamina.Current, Math.Round(raw / 5.0f));
+            healer.UpdateVitalDelta(healer.Stamina, (int)-staminaCost);
+
+            ACE.Server.WorldEvents.WorldEventHooks.TryQueuePlayerHeal(healer, knight, raw, critical, remainingMsg, ChatMessageType.Broadcast);
 
             if (UsesLeft <= 0 && !UnlimitedUse)
                 healer.TryConsumeFromInventoryWithNetworking(this, 1);

@@ -42,7 +42,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "(+28.5% at rank 3); higher Arcane Lore increases the bonus. Boosted casts cost " +
                           "+100% mana (stacking with Spell AOE to +200% on an Arc cast).",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
+            CostPerRank = new[] { 1, 1, 1 },   // Archmage pass 2026-10-24 (reprice wave 6): 2/rank -> 1/rank
             Implemented = true,
             AffinitySkill = Skill.ArcaneLore,
         };

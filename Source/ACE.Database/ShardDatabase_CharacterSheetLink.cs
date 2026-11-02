@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 using Microsoft.EntityFrameworkCore;
@@ -71,6 +72,41 @@ namespace ACE.Database
             {
                 log.Error($"[CHARSHEET] TryGetCharacterSheetLinkByCharacter failed for character {characterId}: {ex.GetFullMessage()}");
                 row = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Every published sheet whose character is not deleted: ONE NoTracking join of character_sheet_link
+        /// to character, filtered on the same IsDeleted / DeleteTime pair the Presence check uses. FALSE means
+        /// the read FAILED (rows is then empty). Ascending by character id (so a cap keeps a stable set) and unbounded; the caller caps it.
+        /// </summary>
+        public bool TryListPublishedCharacterSheetLinks(out List<(uint CharacterId, string Slug, string Name)> rows)
+        {
+            rows = new List<(uint CharacterId, string Slug, string Name)>();
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+                    var found = (from l in context.CharacterSheetLink
+                                 join c in context.Character on l.CharacterId equals c.Id
+                                 where !c.IsDeleted && c.DeleteTime == 0
+                                 orderby l.CharacterId
+                                 select new { l.CharacterId, l.Slug, c.Name }).ToList();
+
+                    foreach (var f in found)
+                        rows.Add((f.CharacterId, f.Slug, f.Name));
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[CHARSHEET] TryListPublishedCharacterSheetLinks failed: {ex.GetFullMessage()}");
+                rows = new List<(uint CharacterId, string Slug, string Name)>();
                 return false;
             }
         }

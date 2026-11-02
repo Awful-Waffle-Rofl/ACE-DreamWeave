@@ -26,15 +26,21 @@ namespace ACE.Server.Pvp
     /// <summary>
     /// Everything the queue-join check needs from a live player, snapshotted by the gateway so the coordinator never
     /// reads a Player. IpKey is the session endpoint address; FellowshipMemberIds is empty when not in a fellowship.
-    /// OnPkFacet is still reported but no longer gates admission (owner ruling 2026-10-03, Docs/Pvp/TEMPLATES.md).
+    /// HasClearedThread (PvpEligibility.HasClearedAThread) is the admission requirement: owner ruling 2026-10-15, one Thread clear
+    /// replaces the level and PK facet requirements (the PK facet stopped gating templated modes with owner ruling 2026-10-03,
+    /// Docs/Pvp/TEMPLATES.md). It defaults to false so a fact set built without it fails closed.
     /// PvP Template Facets: PreferredTemplateKey is the remembered /arena template choice (PropertyString 9023, null when
     /// none), IsTemplateAccount is true for a character on pvp_template_account, and IsPvpTemplated is true while the
-    /// character still carries a template restore record.
+    /// character still carries a template restore record. AccountId is the repeat-pairing key (AccountLeaderboard.AccountKeyFor:
+    /// the account id, or the character's own guid when it has no account); 0 = unknown, and the coordinator then keys on the character id.
+    /// RefuseUnpaidRematch is the /arena norematch opt-in (PropertyBool 9075): true = never match this player into an unpaid rematch.
+    /// False (the default, and what an absent property reads as) accepts one.
+    /// DeserterStrikes, DeserterLastStrikeAt and DeserterLockoutUntil are the stored deserter record (PropertyInt 9089, PropertyInt64 9026
+    /// and 9025, unix seconds; absent = 0), read by the battleground and Tugak Brawl join check (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout").
     /// </summary>
     public sealed record PvpPlayerFacts(
         uint CharacterId,
         string Name,
-        int Level,
         string IpKey,
         bool InInstance,
         bool InRespite,
@@ -43,12 +49,17 @@ namespace ACE.Server.Pvp
         bool IsMule,
         bool IsDead,
         bool IsTeleporting,
-        bool OnPkFacet,
         IReadOnlyList<uint> FellowshipMemberIds,
         uint MonarchId = 0,
         string PreferredTemplateKey = null,
         bool IsTemplateAccount = false,
-        bool IsPvpTemplated = false);
+        bool IsPvpTemplated = false,
+        uint AccountId = 0,
+        bool RefuseUnpaidRematch = false,
+        int DeserterStrikes = 0,
+        long DeserterLastStrikeAt = 0,
+        long DeserterLockoutUntil = 0,
+        bool HasClearedThread = false);
 
     /// <summary>
     /// The coordinator's only door to live players. Every method is called on the WORLD thread. The live
@@ -70,8 +81,28 @@ namespace ACE.Server.Pvp
 
         bool IsOnline(uint characterId);
 
-        /// <summary>A copy of where the player stands now, or null when offline. Becomes their stamped exit.</summary>
+        /// <summary>A copy of where the player stands now, or null when offline.</summary>
         Position GetCurrentPosition(uint characterId);
+
+        /// <summary>
+        /// Where the player goes when their participation ends: the stamped match exit (Docs/Pvp/DESIGN.md "Enter and exit"), taken once
+        /// at dispatch, or null when offline. Never an ephemeral position: a player standing in a Thread copy as a roster member is
+        /// recorded as away from it (ThreadDungeons.ThreadPvpAway, so the return can bring them back to the very spot) and their exit is
+        /// the Thread's outer stamp; any other ephemeral location exits to its stamp; with none, the lifestone. The default is
+        /// <see cref="GetCurrentPosition"/>, which is what every exit was before (the test fakes keep it).
+        /// </summary>
+        Position GetExitPoint(uint characterId) => GetCurrentPosition(characterId);
+
+        /// <summary>
+        /// The player's participation in their match (in <paramref name="matchInstance"/>, 0 when the match never had a space) has ended
+        /// (every exit, once per seat). The live gateway decides what happens to a Thread away entry
+        /// (ThreadDungeons.ThreadPvpAway.ParticipationEndedAction): an online player already out of the match copy left without the
+        /// return resolver, so the entry is released; otherwise its hold shrinks to the run's empty grace from now. Called for an
+        /// offline player too. The default does nothing.
+        /// </summary>
+        void OnParticipationEnded(uint characterId, uint matchInstance)
+        {
+        }
 
         PvpPresence GetPresence(uint characterId, uint matchInstance);
 
@@ -117,12 +148,47 @@ namespace ACE.Server.Pvp
         string CheckTemplateRoom(uint characterId, PvpTemplateDefinition template);
 
         /// <summary>
+        /// Team hue (Docs/Pvp/TEMPLATES.md "Team hue"): the palette ids <paramref name="clothingBase"/> (a ClothingTable id) lists, or null
+        /// when it cannot be read. The live gateway reads the client portal dat and caches the answer. The default answers null, so a
+        /// gateway without dat access (every test fake that does not override it) never dresses a kit: no palette is ever written
+        /// that this seam did not list.
+        /// </summary>
+        IReadOnlyCollection<uint> ClothingPalettes(uint clothingBase) => null;
+
+        /// <summary>The icon the clothing table carries for <paramref name="palette"/> of <paramref name="clothingBase"/>, or 0 for none. The default answers 0.</summary>
+        uint ClothingPaletteIcon(uint clothingBase, uint palette) => 0;
+
+        /// <summary>
+        /// Team hue `@wcid` swap (Docs/Pvp/TEMPLATES.md "Team hue"): the world weenie <paramref name="wcid"/> read as a look source, or
+        /// null when there is no such weenie or it could not be read. The live gateway reads the world database's cached weenie on each
+        /// call (so a match dispatch never reads the database per match, and a live re-import is seen) and memoizes only the extraction. The default answers null, so a gateway without
+        /// world access (every test fake that does not override it) never swaps a look.
+        /// </summary>
+        PvpLookSource WorldLookSource(uint wcid) => null;
+
+        /// <summary>
         /// PvP Template Facets (TEMPLATES.md "Backstop"): runs Player.PvpTemplateRunEquippedBackstop on the player's
         /// own queue. When it moves anything or leaves personal items worn (survivors), the live gateway reports a
         /// PvpIntentKind.BackstopFired intent for <paramref name="matchId"/> carrying both counts; the coordinator
         /// ejects on survivors. A no-op for an offline player.
         /// </summary>
         void RunTemplateBackstop(uint characterId, Guid matchId);
+
+        /// <summary>
+        /// PvP dailies: applies one eligible seat's <see cref="PvpMatchFacts"/>, or a Live 1v1 forfeiter's forfeit fact
+        /// (<see cref="PvpMatchFacts.ForfeitOf"/>), on the player's own action chain (the live gateway:
+        /// Player.ApplyPvpDailyFacts). Called at most once per participant per match. An offline or logging-out player is skipped and
+        /// logged: daily progress has no offline path (except the forfeit fact's pending streak reset). The default does nothing but warn
+        /// once per process, so a gateway that does not carry dailies need not implement it, and one that silently drops them is visible.
+        /// </summary>
+        void ApplyDailyFacts(PvpMatchFacts facts)
+        {
+            if (System.Threading.Interlocked.Exchange(ref defaultApplyDailyFactsWarned, 1) == 0)
+                log4net.LogManager.GetLogger(typeof(IPvpPlayerGateway)).Warn($"[PVP] {GetType().Name} does not implement ApplyDailyFacts: PvP daily facts are being DROPPED (first: match {facts?.MatchId}, 0x{facts?.CharacterId:X8}); warned once");
+        }
+
+        /// <summary>Set once the default <see cref="ApplyDailyFacts"/> has warned.</summary>
+        private static int defaultApplyDailyFactsWarned;
     }
 
     /// <summary>
@@ -140,6 +206,14 @@ namespace ACE.Server.Pvp
 
         /// <summary>Queues destruction once empty. Does not evict. Idempotent.</summary>
         void Release(MatchSpace space);
+
+        /// <summary>
+        /// Battleground rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"): admits the player's CURRENT Player object to a live
+        /// space. A match instance admits by Player reference and every login builds a new one, so a player coming back to a held seat
+        /// must be admitted again before the teleport in. False when the space is gone, its realm cannot admit, or the player is
+        /// offline. The default answers false: a space seam that cannot admit fails a rejoin closed (the seat then forfeits).
+        /// </summary>
+        bool AdmitLate(MatchSpace space, uint characterId) => false;
     }
 
     /// <summary>
@@ -169,6 +243,7 @@ namespace ACE.Server.Pvp
         /// most recent stamped match on, per ladder. The callback gets (rows, status); rows is null on Failed.
         /// </summary>
         void LoadLatestParticipantTemplates(Action<List<PvpLatestParticipantTemplateRecord>, PvpTemplateStoreStatus> callback);
+
     }
 
     /// <summary>

@@ -640,7 +640,7 @@ namespace ACE.Server.Tests.Pvp
                 rig.AcceptAll(A, B);
                 var match = rig.DriveAcceptedToLive(A);
 
-                Assert.IsTrue(rig.Gateway.Got(A, "[Arena] 1v1: Alpha (Duelist) vs Bravo (War Mage)."), "the arena announcement");
+                Assert.IsTrue(rig.Gateway.Got(A, "[Arena] 1v1: Red team: Alpha (Duelist) vs Blue team: Bravo (War Mage)."), "the arena announcement, each side tagged with its colour");
 
                 rig.Death(B, match.MatchId, killer: A);
                 rig.Tick();

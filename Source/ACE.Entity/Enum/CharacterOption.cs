@@ -200,6 +200,20 @@ namespace ACE.Entity.Enum
             return CharacterOptions2Attributes[val];
         }
 
+        /// <summary>
+        /// The single option-to-flag mapping: true when <paramref name="option"/> is set in the persisted
+        /// CharacterOptions1/CharacterOptions2 words. Player.GetCharacterOption and the offline leaderboard read share it.
+        /// </summary>
+        public static bool IsSet(this CharacterOption option, int characterOptions1, int characterOptions2)
+        {
+            var option1 = option.GetCharacterOptions1Attribute();
+
+            if (option1 != null)
+                return (characterOptions1 & (int)option1.Option) != 0;
+
+            return (characterOptions2 & (int)option.GetCharacterOptions2Attribute().Option) != 0;
+        }
+
         public static uint GetCharacterOptions1Flag(this ReadOnlyDictionary<CharacterOption, bool> options)
         {
             return GetCharacterOptions1Flag(options.ToDictionary(k => k.Key, v => v.Value));

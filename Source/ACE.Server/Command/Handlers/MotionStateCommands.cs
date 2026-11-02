@@ -11,8 +11,9 @@ namespace ACE.Server.Command.Handlers
 {
     /// <summary>
     /// /motionstate: admin diagnostic for the motion-stall watchdog (see WorldObjects.MotionStallWatchdog).
-    /// Shows one online character's server-side animation queue and pending move-to/turn/use, and with
-    /// 'clear' drops the queue the HandleExitWorld way regardless of the motion_stall_autoclear tunable.
+    /// Shows one online character's server-side animation queues (MotionInterp and its MotionTableManager twin) and
+    /// pending move-to/turn/use, and with 'clear' drains both queues the way a jump does (MotionInterp only while a
+    /// cast is in progress; see MotionStallWatchdog.ShouldDrainTwin), regardless of the motion_stall_autoclear tunable.
     ///
     /// Threading: the physics state may only be read or changed on the world thread. An in-game command already
     /// runs there (NetworkManager.InboundMessageQueue.RunActions in the world loop), so it answers synchronously.
@@ -26,8 +27,8 @@ namespace ACE.Server.Command.Handlers
         [CommandHandler("motionstate", AccessLevel.Admin, CommandHandlerFlag.None, 1,
             "Show (or clear) a character's server-side pending animation queue, for stuck-use diagnosis.",
             "<character name> [clear]\n" +
-            "Prints IsAnimating, the pending motions, time since the queue last changed, Contact/OnWalkable, any pending move-to/turn/use and FastTick.\n" +
-            "clear drops the pending motions (server state only, nothing is sent to the client) and logs a [MOTION_STALL] line with trigger=admin.")]
+            "Prints IsAnimating, the pending motions, the twin animation queue (head motion:NumAnims, count, AnimationCounter), time since the queue last changed, Contact/OnWalkable, any pending move-to/turn/use and FastTick.\n" +
+            "clear drains both pending queues as a jump would (only the motion queue while casting; server state only, nothing is sent to the client) and logs a [MOTION_STALL] line with trigger=admin.")]
         public static void HandleMotionState(Session session, params string[] parameters)
         {
             if (!TryResolve(parameters, out var found, out var isOnline, out var clear, out var name))

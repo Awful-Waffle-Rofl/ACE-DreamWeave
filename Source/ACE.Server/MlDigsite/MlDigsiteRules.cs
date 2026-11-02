@@ -514,6 +514,29 @@ namespace ACE.Server.MlDigsite
         /// </summary>
         public const int TotalWaves = 8;
 
+        /// <summary>
+        /// What an EMPTY wave (no live creatures, no kill) does next: any wave short of the last is skipped to the
+        /// next one; the last is re-spawned once, and if it is empty again the run ends at the stall outcome
+        /// (unless a checkpoint mini-boss is alive, when the stall clock is left to run).
+        /// </summary>
+        public static MlDigsiteEmptyWaveAction EmptyWaveAction(int waveNumber, bool lastWaveRespawnUsed, bool checkpointAlive, int totalWaves = TotalWaves)
+        {
+            if (waveNumber < totalWaves)
+                return MlDigsiteEmptyWaveAction.SkipToNext;
+
+            if (!lastWaveRespawnUsed)
+                return MlDigsiteEmptyWaveAction.RespawnLast;
+
+            return checkpointAlive ? MlDigsiteEmptyWaveAction.LeaveToClock : MlDigsiteEmptyWaveAction.EndRun;
+        }
+
+        /// <summary>
+        /// Whether a wave that EMPTIED BY VANISHING still counts as a real clear: at least half of what was
+        /// spawned (rounded up) was actually killed. A wave with nothing recorded as spawned never does.
+        /// </summary>
+        public static bool VanishCountsAsClear(int killsThisWave, int spawnedThisWave)
+            => spawnedThisWave > 0 && killsThisWave >= (spawnedThisWave + 1) / 2;
+
         /// <summary>Whether clearing wave <paramref name="waveNumber"/> wins a Waves encounter outright.</summary>
         public static bool WaveWon(int waveNumber, int totalWaves = TotalWaves)
             => totalWaves > 0 && waveNumber >= totalWaves;

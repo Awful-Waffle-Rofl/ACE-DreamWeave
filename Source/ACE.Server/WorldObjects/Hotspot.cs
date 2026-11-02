@@ -203,7 +203,12 @@ namespace ACE.Server.WorldObjects
                     iAmount = creature.UpdateVitalDelta(creature.Health, -iAmount);
 
                     if (iAmount > 0)
+                    {
                         creature.DamageHistory.OnHeal((uint)iAmount);
+
+                        // class ability: Hemomancy - a healing hotspot's APPLIED delta on a player
+                        player?.OnHealthRestored((uint)iAmount, false);
+                    }
                     else
                         creature.DamageHistory.Add(this, DamageType.Health, (uint)-iAmount);
 

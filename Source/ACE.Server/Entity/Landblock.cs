@@ -70,6 +70,23 @@ namespace ACE.Server.Entity
         internal Realms.EphemeralRealm InnerRealmInfo { get; set; }
 
         /// <summary>
+        /// What this copy is relative to its ephemeral instance's footprint (primary, member, buffer, ...), or
+        /// NotEphemeral for a persistent instance. Set by LandblockManager.GetLandblock before <see cref="Init"/>
+        /// and never changed afterwards. Members carry the primary's <see cref="InnerRealmInfo"/>; buffer,
+        /// unrelated and orphan copies carry none and load as bare terrain (<see cref="ContentSources"/>).
+        /// </summary>
+        internal Realms.EphemeralLoadRole GroupRole { get; set; }
+
+        /// <summary>
+        /// The content sources this copy loads (Realms.EphemeralInstanceGroup.ContentSourcesFor). None for a
+        /// bare-terrain ephemeral copy (a buffer around an outdoor footprint, or any landblock loaded under an
+        /// instance id that is not live): no landblock_instance rows, so no generators; no shard statics or
+        /// dynamics; no encounters. Dat geometry, dat scenery and sky decor still load. CreateWorldObjects,
+        /// SpawnDynamicShardObjects and SpawnEncounters each consult it; a later content filter hooks the chooser.
+        /// </summary>
+        internal Realms.EphemeralContentSources ContentSources => Realms.EphemeralInstanceGroup.ContentSourcesFor(GroupRole);
+
+        /// <summary>
         /// True if this landblock copy is an ephemeral (temporary, unpersisted) instance
         /// </summary>
         public bool IsEphemeral
@@ -96,6 +113,25 @@ namespace ACE.Server.Entity
         /// This prevents a player from possibly pasing through a door that hasn't spawned in yet, and other scenarios.
         /// </summary>
         public bool CreateWorldObjectsCompleted { get; private set; }
+
+        /// <summary>
+        /// True once the population task has faulted BEFORE CreateWorldObjects queued the action that sets
+        /// <see cref="CreateWorldObjectsCompleted"/>, so that flag can never become true. Written by the task's faulted
+        /// continuation (a pool thread) and read by ThreadDungeonManager's reap on the world thread, hence volatile. A
+        /// fault after the completion action was queued (SpawnDynamicShardObjects and later) does not set it.
+        /// </summary>
+        public bool CreateWorldObjectsFaulted => createWorldObjectsFaulted;
+
+        private volatile bool createWorldObjectsFaulted;
+
+        /// <summary>Set by CreateWorldObjects once it has queued the action that sets CreateWorldObjectsCompleted.</summary>
+        private volatile bool createWorldObjectsCompletionQueued;
+
+        /// <summary>
+        /// Pure: does a faulted population task mean the landblock can never complete? Only when the fault came before
+        /// the completion action was queued.
+        /// </summary>
+        internal static bool FaultBlocksCompletion(bool completionQueued) => !completionQueued;
 
         private DateTime lastActiveTime;
 
@@ -321,6 +357,11 @@ namespace ACE.Server.Entity
                 SpawnSkyDecor();
             }).ContinueWith(t =>
             {
+                // Open World Threads: lets the Thread reap end a run whose copy can never load at once (LoadFailed)
+                // instead of waiting out its 60 s load timeout.
+                if (FaultBlocksCompletion(createWorldObjectsCompletionQueued))
+                    createWorldObjectsFaulted = true;
+
                 log.Error($"Landblock 0x{Id.Landblock:X4} instance 0x{Instance:X8}: the population task faulted. This landblock will stay empty, and any player inside it is held pre-materialize (pink bubble) until Player.OnTeleportComplete's bounded wait expires.", t.Exception);
             }, TaskContinuationOptions.OnlyOnFaulted);
 
@@ -335,7 +376,15 @@ namespace ACE.Server.Entity
         {
             // Realms Phase 3: a realm's override rows replace base content for its instances
             ACE.Entity.Position.ParseInstanceID(Instance, out _, out var realmId, out _);
-            var objects = DatabaseManager.World.GetCachedInstancesByLandblock(Id.Landblock, realmId);
+
+            // Instance groups: a bare-terrain copy (outside an outdoor footprint, or under a dead instance id)
+            // takes no landblock_instance rows and no shard statics, so it holds no generators and no retail
+            // content. The empty lists still run the rest of this method, which is what sets
+            // CreateWorldObjectsCompleted - a player who wanders onto a bare copy must not be held pre-materialize.
+            var contentSources = ContentSources;
+            var objects = contentSources.HasFlag(Realms.EphemeralContentSources.WorldRows)
+                ? DatabaseManager.World.GetCachedInstancesByLandblock(Id.Landblock, realmId)
+                : new List<ACE.Database.Models.World.LandblockInstance>();
 
             // Threads (WaffleACE): a run's private copy loads the dungeon's doors, levers, plates and
             // hotspots but none of its generators, hand-placed creatures or chests, and every retail portal
@@ -346,6 +395,30 @@ namespace ACE.Server.Entity
             // The same filter for puzzlegate-sweep's runless copy (EphemeralRealm.RunlessThreadCopyExitPortalWcid), so
             // the sweep places puzzles into exactly the content a run's copy holds.
             var threadCopyExit = InnerRealmInfo?.ThreadCopyExitPortalWcid;
+
+            // Open World Threads: an outdoor run's footprint member (the primary or any other member; buffers carry no
+            // InnerRealmInfo and loaded no rows above) takes the outdoor allow-list instead of the dungeon filter.
+            var outdoorRun = InnerRealmInfo?.Run;
+            var outdoorSite = threadCopyExit != null && outdoorRun?.Dungeon?.IsOutdoor == true ? outdoorRun.Dungeon.Outdoor : null;
+            var outdoorHoldsExit = false;
+
+            // Open World Threads R8: the run's ONE exit, decided before anything is built. A site whose exit does not parse,
+            // or the exit landblock that cannot place its exit row, throws: CreateWorldObjectsCompleted then never sets,
+            // and the manager's "landblock never loaded" path ends the run instead of letting a player in with no way out.
+            ACE.Database.Models.World.LandblockInstance outdoorExitRow = null;
+            if (outdoorSite != null)
+            {
+                outdoorExitRow = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.OutdoorExitRow(outdoorSite.Exit, Id.Landblock, threadCopyExit.Value, objects);
+                outdoorHoldsExit = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.ExitIsOnLandblock(outdoorSite.Exit, Id.Landblock);
+
+                var exitError = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.OutdoorExitError(outdoorSite.Exit, Id.Landblock, outdoorExitRow);
+                if (exitError != null)
+                {
+                    log.Error($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8} {outdoorRun}: {exitError} - abandoning this copy");
+                    throw new InvalidOperationException(exitError);
+                }
+            }
+
             if (threadCopyExit != null)
             {
                 // The filter drops a wcid the world db has no weenie for (KeyNotFoundException) and counts it.
@@ -357,17 +430,50 @@ namespace ACE.Server.Entity
                 var filterWcid = 0u;
                 try
                 {
-                    objects = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.Filter(objects,
-                        wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.WeenieType ?? throw new KeyNotFoundException($"wcid {wcid}"); },
-                        wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.PropertiesGenerator?.Count > 0; },
-                        threadCopyExit.Value, out var filterStats);
-                    log.Info($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8} content filter: {filterStats}, shard statics skipped");
+                    if (outdoorSite != null)
+                    {
+                        // Open World Threads R7/R8: the outdoor ALLOW-LIST (doors and fixed, non-interactive decor only) on every
+                        // footprint landblock, plus the run's one click-only exit on the landblock that holds the exit position.
+                        objects = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.FilterOutdoor(objects,
+                            wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.WeenieType ?? throw new KeyNotFoundException($"wcid {wcid}"); },
+                            wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.PropertiesGenerator?.Count > 0; },
+                            wcid =>
+                            {
+                                filterWcid = wcid;
+                                var weenie = DatabaseManager.World.GetCachedWeenie(wcid);
+                                return ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.IsFixedDecorGeneric(
+                                    (Usable?)weenie?.GetProperty(PropertyInt.ItemUseable), weenie?.PropertiesEmote?.Count ?? 0,
+                                    weenie?.GetProperty(PropertyBool.Stuck) ?? false);
+                            },
+                            outdoorExitRow, out var outdoorStats);
+                        log.Info($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8} content filter: {outdoorStats.OutdoorSummary()}, shard statics skipped");
+                    }
+                    else
+                    {
+                        objects = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.Filter(objects,
+                            wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.WeenieType ?? throw new KeyNotFoundException($"wcid {wcid}"); },
+                            wcid => { filterWcid = wcid; return DatabaseManager.World.GetCachedWeenie(wcid)?.PropertiesGenerator?.Count > 0; },
+                            threadCopyExit.Value, out var filterStats);
+                        log.Info($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8} content filter: {filterStats}, shard statics skipped");
+                    }
                 }
                 catch (Exception ex)
                 {
                     log.Error($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8}: content filter failed while resolving wcid {filterWcid} - abandoning this copy rather than loading it half-filtered", ex);
                     throw;
                 }
+            }
+
+            // Per-copy row exclusion (WaffleACE, Matron Knot): a copy may drop every landblock_instance row inside a box
+            // (EphemeralRealm.ExcludedRows). It runs here - after the Thread filter, before the factory - for two
+            // reasons: Filter returns a NEW list, so the cached list every copy shares is untouched; and link
+            // resolution (CreateNewWorldObjects and ActivateLinks below) reads this same list, so a kept parent
+            // generator outside the box cannot resolve an excluded row as its link child.
+            var excludedRows = InnerRealmInfo?.ExcludedRows;
+            if (excludedRows != null)
+            {
+                objects = Realms.EphemeralRowExclusion.Filter(objects, excludedRows, out var excludedCount);
+                log.Info($"Landblock 0x{Id.Landblock:X4} instance 0x{Instance:X8}: row exclusion {excludedRows} dropped {excludedCount} landblock_instance rows");
             }
 
             // Threads: a run's copy is retail-pristine and loads NO shard-persisted statics, so no
@@ -379,7 +485,7 @@ namespace ACE.Server.Entity
             // landblock's static guid range alone - it cannot tell one instance's copy from another's.
             // Note the type: this is ACE.Database.Models.Shard.Biota, NOT the ACE.Entity.Models.Biota that
             // `using ACE.Entity.Models` binds a bare `Biota` to in this file.
-            var shardObjects = threadCopyExit != null
+            var shardObjects = threadCopyExit != null || !contentSources.HasFlag(Realms.EphemeralContentSources.ShardStatics)
                 ? new List<ACE.Database.Models.Shard.Biota>()
                 : DatabaseManager.Shard.BaseDatabase.GetStaticObjectsByLandblock(Id.Landblock);
             var factoryObjects = WorldObjectFactory.CreateNewWorldObjects(objects, shardObjects);
@@ -396,6 +502,29 @@ namespace ACE.Server.Entity
             // loads lives in this copy's instance
             foreach (var fo in factoryObjects)
                 fo.Location.Instance = Instance;
+
+            if (outdoorSite != null)
+            {
+                // R9: every kept door across the footprint is forced open and unlocked BEFORE it enters the world.
+                var portals = 0;
+                foreach (var fo in factoryObjects)
+                {
+                    if (fo is Door door)
+                        door.ForceOpenUnlocked();
+                    else if (fo.WeenieType == WeenieType.Portal || fo.WeenieType == WeenieType.HousePortal)
+                        portals++;
+                }
+
+                // R8's load-time assertion: exactly one Portal across the copy (one here on the exit landblock, none elsewhere).
+                // A wrong count abandons the copy (the same "landblock never loaded" path as above) rather than running a
+                // site with no exit, or with a second way out.
+                var portalError = ACE.Server.ThreadDungeons.ThreadDungeonContentFilter.OutdoorPortalCountError(outdoorHoldsExit, portals);
+                if (portalError != null)
+                {
+                    log.Error($"[DYNDUNGEON] 0x{Id.Landblock:X4} instance 0x{Instance:X8} {outdoorRun}: {portalError} - abandoning this copy");
+                    throw new InvalidOperationException(portalError);
+                }
+            }
 
             actionQueue.EnqueueAction(new ActionEventDelegate(() =>
             {
@@ -454,6 +583,8 @@ namespace ACE.Server.Entity
 
                 PhysicsLandblock.SortObjects();
             }));
+
+            createWorldObjectsCompletionQueued = true;
         }
 
         /// <summary>
@@ -462,13 +593,17 @@ namespace ACE.Server.Entity
         /// </summary>
         private void SpawnDynamicShardObjects()
         {
+            // Instance groups: a bare-terrain copy loads nothing from the shard (see ContentSources).
+            if (!ContentSources.HasFlag(Realms.EphemeralContentSources.ShardDynamics))
+                return;
+
             var dynamics = DatabaseManager.Shard.BaseDatabase.GetDynamicObjectsByLandblock(Id.Landblock, Instance);
 
             // WaffleACE world events (Docs/WorldEvents/TECH-DESIGN.md 2.9): this is the single point where shard
             // biotas re-enter the world, so it is also where anything a crashed event left behind gets caught.
             // Drops every biota carrying PropertyInt.WorldEventId and queues its deletion from the shard.
             // Never throws - on any failure it hands back the unfiltered list and the landblock loads as before.
-            dynamics = WorldEvents.WorldEventOrphanFilter.FilterAndSweep(Id.Landblock, Instance, dynamics);
+            dynamics = WorldEvents.WorldEventHooks.FilterOrphanedDynamics(Id.Landblock, Instance, dynamics);
 
             // WaffleACE ML digsite encounters: the same sweep, for the same reason, on PropertyInt
             // MlDigsiteEncounterId. Needed MORE than the world-event one is: a digsite runs on an ordinary
@@ -520,6 +655,10 @@ namespace ACE.Server.Entity
             // Threads: a run copy has no retail creatures by construction, and encounters are a
             // second creature source that CreateWorldObjects' content filter never sees.
             if (InnerRealmInfo?.ThreadCopyExitPortalWcid != null)
+                return;
+
+            // Instance groups: a bare-terrain copy spawns no encounters (see ContentSources).
+            if (!ContentSources.HasFlag(Realms.EphemeralContentSources.Encounters))
                 return;
 
             // Realms Phase 4: a realm may suppress this landblock's encounters entirely
@@ -1245,7 +1384,12 @@ namespace ACE.Server.Entity
                     // shared UnloadInterval, and a Cleared group copy still owing loot for its loot hold.
                     // Pulled here on every heartbeat rather than pushed onto the landblock, so nothing can
                     // outlive the run: once it stops qualifying or ends the override is null.
-                    if (ShouldQueueForUnload(players.Count, lastActiveTime, thisHeartBeat, InnerRealmInfo?.UnloadIntervalOverride ?? UnloadInterval))
+                    //
+                    // Open World Threads (R22): a footprint MEMBER of a live outdoor run never queues itself; it
+                    // unloads only when the run's primary drains the group (or once the run releases the hold).
+                    var heldMember = Realms.EphemeralInstanceGroup.MemberIdleUnloadHeld(GroupRole, InnerRealmInfo?.HoldsFootprintMembers == true);
+
+                    if (!heldMember && ShouldQueueForUnload(players.Count, lastActiveTime, thisHeartBeat, InnerRealmInfo?.UnloadIntervalOverride ?? UnloadInterval))
                         LandblockManager.AddToDestructionQueue(this);
                 }
 
@@ -2002,6 +2146,37 @@ namespace ACE.Server.Entity
             IsDormant = false;
 
             return false;
+        }
+
+        /// <summary>
+        /// Instance groups: true when a player is on this landblock or staged to arrive on it. Read-only (unlike
+        /// <see cref="TryClaimForDestruction"/>, it flushes nothing), for LandblockManager's unload drain, which asks
+        /// it of the OTHER landblocks of a group whose primary is being torn down. World thread only, at the end of
+        /// the tick, where no landblock is mid-tick.
+        /// </summary>
+        internal bool HasPlayerIncludingPending()
+        {
+            if (players.Count > 0)
+                return true;
+
+            foreach (var wo in pendingAdditions.Values)
+            {
+                if (wo is Player)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Instance groups: refreshes the idle clock of a group primary the unload drain refused because a player
+        /// is elsewhere in its group, so its heartbeat does not re-queue it every few seconds. The same two
+        /// assignments as the refusal in <see cref="TryClaimForDestruction"/>.
+        /// </summary>
+        internal void KeepActiveForGroup()
+        {
+            lastActiveTime = DateTime.UtcNow;
+            IsDormant = false;
         }
 
         /// <summary>

@@ -140,7 +140,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void R23_cleared_observed_empty_past_grace_ends_when_nothing_is_owed()
         {
             var end = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true, createCompleted: true,
-                playerEverObserved: true, playerPresent: false, groupLootHeld: false, sinceStart: TimeSpan.FromMinutes(20),
+                playerEverObserved: true, playerPresent: false, lootHeld: false, sinceStart: TimeSpan.FromMinutes(20),
                 sinceCleared: TimeSpan.FromMinutes(2), now: Now, expiresUtc: NotExpired, out var reason);
 
             Assert.IsTrue(end);
@@ -152,14 +152,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void R29_a_cleared_group_run_owing_loot_is_not_ended_for_standing_empty()
         {
             var held = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true, createCompleted: true,
-                playerEverObserved: true, playerPresent: false, groupLootHeld: true, sinceStart: TimeSpan.FromMinutes(20),
+                playerEverObserved: true, playerPresent: false, lootHeld: true, sinceStart: TimeSpan.FromMinutes(20),
                 sinceCleared: TimeSpan.FromMinutes(30), now: Now, expiresUtc: NotExpired, out var heldReason);
 
             Assert.IsFalse(held);
             Assert.IsNull(heldReason);
 
             var released = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true, createCompleted: true,
-                playerEverObserved: true, playerPresent: false, groupLootHeld: false, sinceStart: TimeSpan.FromMinutes(20),
+                playerEverObserved: true, playerPresent: false, lootHeld: false, sinceStart: TimeSpan.FromMinutes(20),
                 sinceCleared: TimeSpan.FromMinutes(30), now: Now, expiresUtc: NotExpired, out var releasedReason);
 
             Assert.IsTrue(released);
@@ -169,17 +169,17 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void R29_hold_does_not_stop_ttl_unload_or_load_failure()
         {
-            var expired = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, true, true, true, false, groupLootHeld: true,
+            var expired = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, true, true, true, false, lootHeld: true,
                 TimeSpan.FromHours(4), TimeSpan.FromMinutes(30), Now, Now.AddMinutes(-1), out var expiredReason);
             Assert.IsTrue(expired);
             Assert.AreEqual(DungeonRunTelemetry.EndReasons.Expired, expiredReason);
 
-            var unloaded = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, false, true, true, false, groupLootHeld: true,
+            var unloaded = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, false, true, true, false, lootHeld: true,
                 TimeSpan.FromMinutes(20), TimeSpan.FromMinutes(30), Now, NotExpired, out var unloadedReason);
             Assert.IsTrue(unloaded);
             Assert.AreEqual(DungeonRunTelemetry.EndReasons.LandblockUnloaded, unloadedReason);
 
-            var loadFailed = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Starting, true, false, true, false, groupLootHeld: true,
+            var loadFailed = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Starting, true, false, true, false, lootHeld: true,
                 TimeSpan.FromSeconds(61), TimeSpan.Zero, Now, NotExpired, out var loadReason);
             Assert.IsTrue(loadFailed);
             Assert.AreEqual(DungeonRunTelemetry.EndReasons.LoadFailed, loadReason);
@@ -250,8 +250,12 @@ namespace ACE.Server.Tests.ThreadDungeons
             }
         }
 
+        /// <summary>
+        /// Owner ruling 2026-10-10 (superseding ruling A1): a solo clear no longer destroys the gem - the owner may
+        /// still need it to come back for loot after a death. Against the old code the order read gem, survey.
+        /// </summary>
         [TestMethod]
-        public void A_solo_clear_still_destroys_the_gem_before_the_survey()
+        public void A_solo_clear_keeps_the_gem_and_still_records_the_survey()
         {
             var run = NewRun();
             Assert.IsFalse(run.IsGroup);
@@ -277,7 +281,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 ThreadDungeonManager.ClearRewardHandler = originalReward;
             }
 
-            CollectionAssert.AreEqual(new[] { "gem", "survey" }, order);
+            CollectionAssert.AreEqual(new[] { "survey" }, order, "no gem destroy at the clear");
             Assert.AreEqual(1, rewards, "solo keeps its single owner call, even with the owner offline");
         }
 
@@ -287,6 +291,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreEqual("Filos Doom is cleared. Your key will let you return until this Thread closes.", ThreadDungeonManager.GroupClearedMessage("Filos Doom", isOwner: false));
             Assert.AreEqual("Filos Doom is cleared. Your gem will let you return until this Thread closes.", ThreadDungeonManager.GroupClearedMessage("Filos Doom", isOwner: true));
             Assert.AreEqual("You are no longer in this Thread's fellowship. Kill experience here is no longer shared with the group.", ThreadDungeonManager.FellowshipLeftWarning);
+            Assert.AreEqual("Filos Doom is cleared. Your gem will bring you back if you fall; it crumbles when you leave by recall or the exit portal.", ThreadDungeonManager.SoloClearedMessage("Filos Doom"));
         }
 
         [TestMethod]
@@ -323,28 +328,83 @@ namespace ACE.Server.Tests.ThreadDungeons
         private static readonly ThreadDungeonRunState[] AllStates =
             { ThreadDungeonRunState.Starting, ThreadDungeonRunState.Active, ThreadDungeonRunState.Cleared, ThreadDungeonRunState.Ended };
 
+        /// <summary>
+        /// LootHoldActive's truth table (owner ruling 2026-10-10: one hold for solo and group runs). The solo/group
+        /// difference lives in what LootOwed counts, so the solo rows are driven through real runs: a cleared solo
+        /// run owing loot is held (the old GroupLootHoldActive answered false for it), and the same run with its
+        /// owner gem retired is not.
+        /// </summary>
         [TestMethod]
-        public void Hold_is_active_only_for_a_cleared_group_run_owing_loot_with_a_positive_hold()
+        public void Hold_is_active_only_for_a_cleared_run_owing_loot_with_a_positive_hold()
         {
             var cleared = ThreadDungeonRunState.Cleared;
 
-            Assert.IsTrue(ThreadDungeonRun.GroupLootHoldActive(cleared, isGroup: true, groupLootOwed: true, lootHold: Hold), "group + owed + hold");
-
-            Assert.IsFalse(ThreadDungeonRun.GroupLootHoldActive(cleared, isGroup: false, groupLootOwed: true, lootHold: Hold), "solo");
-            Assert.IsFalse(ThreadDungeonRun.GroupLootHoldActive(cleared, isGroup: true, groupLootOwed: false, lootHold: Hold), "nothing owed");
-            Assert.IsFalse(ThreadDungeonRun.GroupLootHoldActive(cleared, isGroup: true, groupLootOwed: true, lootHold: TimeSpan.Zero), "a hold of 0 is no hold");
-            Assert.IsFalse(ThreadDungeonRun.GroupLootHoldActive(cleared, isGroup: true, groupLootOwed: true, lootHold: TimeSpan.FromMinutes(-1)), "a negative hold is no hold");
+            Assert.IsTrue(ThreadDungeonRun.LootHoldActive(cleared, lootOwed: true, lootHold: Hold), "owed + hold");
+            Assert.IsFalse(ThreadDungeonRun.LootHoldActive(cleared, lootOwed: false, lootHold: Hold), "nothing owed");
+            Assert.IsFalse(ThreadDungeonRun.LootHoldActive(cleared, lootOwed: true, lootHold: TimeSpan.Zero), "a hold of 0 is no hold");
+            Assert.IsFalse(ThreadDungeonRun.LootHoldActive(cleared, lootOwed: true, lootHold: TimeSpan.FromMinutes(-1)), "a negative hold is no hold");
 
             foreach (var state in new[] { ThreadDungeonRunState.Starting, ThreadDungeonRunState.Active, ThreadDungeonRunState.Ended })
-                Assert.IsFalse(ThreadDungeonRun.GroupLootHoldActive(state, true, true, Hold), $"{state}: only a Cleared run is held");
+                Assert.IsFalse(ThreadDungeonRun.LootHoldActive(state, true, Hold), $"{state}: only a Cleared run is held");
+
+            // Solo, through the production LootOwed: owed while the gem lives, released once it is retired.
+            var solo = NewRun();
+            solo.MarkPooledLoot(true);
+            Assert.IsTrue(solo.TryMarkLootBonusPending(), "fixture: unclaimed loot");
+            Assert.IsTrue(ThreadDungeonRun.LootHoldActive(cleared, ThreadRunPresence.LootOwed(solo), Hold), "a cleared solo run owing loot is held");
+            solo.RetireOwnerGem();
+            Assert.IsFalse(ThreadDungeonRun.LootHoldActive(cleared, ThreadRunPresence.LootOwed(solo), Hold), "a retired solo gem owes nothing");
+
+            // Group, through the same entry point: exactly GroupLootOwed, the retire latch plays no part.
+            var group = NewRun(MemberA);
+            group.MarkPooledLoot(true);
+            Assert.IsTrue(group.TryMarkLootBonusPending());
+            Assert.AreEqual(ThreadRunPresence.GroupLootOwed(group), ThreadRunPresence.LootOwed(group));
+            Assert.IsTrue(ThreadDungeonRun.LootHoldActive(cleared, ThreadRunPresence.LootOwed(group), Hold), "a cleared group run owing loot is held, as before");
+        }
+
+        /// <summary>The solo half of LootOwed, the whole input space: owed only while the gem lives and something is owed.</summary>
+        [TestMethod]
+        public void Solo_loot_owed_truth_table()
+        {
+            foreach (var retired in new[] { false, true })
+            foreach (var unclaimed in new[] { false, true })
+            foreach (var cache in new[] { false, true })
+            foreach (var placement in new[] { false, true })
+            {
+                var expected = !retired && (unclaimed || cache || placement);
+                Assert.AreEqual(expected, ThreadRunPresence.SoloLootOwed(retired, unclaimed, cache, placement),
+                    $"retired={retired} unclaimed={unclaimed} cache={cache} placement={placement}");
+            }
+
+            var fresh = NewRun();
+            Assert.IsFalse(ThreadRunPresence.LootOwed(fresh), "a solo run with nothing pooled owes nothing");
+            fresh.MarkPlacementWanted();
+            Assert.IsTrue(ThreadRunPresence.LootOwed(fresh), "a delivery waiting for the owner is owed");
+            Assert.IsFalse(ThreadRunPresence.GroupLootOwed(fresh), "control: the old group-only answer was false for the same solo run");
+        }
+
+        [TestMethod]
+        public void Run_loot_hold_is_the_group_snapshot_for_a_group_and_the_sanitised_tunable_for_solo()
+        {
+            Assert.AreEqual(Hold, ThreadDungeonManager.ResolveRunLootHold(GroupOf(3), 999), "group: its snapshot, whatever the solo read says");
+            Assert.AreEqual(TimeSpan.FromMinutes(45), ThreadDungeonManager.ResolveRunLootHold(GroupScaling.Solo, 45), "solo: the tunable");
+            Assert.AreEqual(TimeSpan.Zero, ThreadDungeonManager.ResolveRunLootHold(GroupScaling.Solo, 0), "solo: 0 is no hold");
+            Assert.AreEqual(TimeSpan.FromMinutes(GroupScaling.DefaultLootHoldMinutes), ThreadDungeonManager.ResolveRunLootHold(GroupScaling.Solo, -3), "solo: negative reads as the default, as for a group");
+            Assert.AreEqual(TimeSpan.Zero, GroupScaling.Solo.LootHold, "the shared Solo snapshot still carries no hold");
+
+            var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(ManagerPath),
+                "public static bool TryStart(Player owner, WorldObject gem, DungeonGemSpec spec, DungeonEntryDef dungeon,\n            IReadOnlyList<RosterSeat> seats, out ThreadDungeonRun run, out string reason,\n            out IReadOnlyList<string> droppedNames, string startGroup = null)");
+            StringAssert.Contains(body, "LootHold = ResolveRunLootHold(group, soloLootHoldMinutes),");
+            StringAssert.Contains(body, "PropertyManager.GetLong(\"dynamic_dungeons_group_loot_hold_minutes\", GroupScaling.DefaultLootHoldMinutes)");
         }
 
         [TestMethod]
         public void The_unload_window_is_the_loot_hold_only_while_held_and_master_grace_otherwise()
         {
-            Assert.AreEqual(Hold, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, groupLootHeld: true, lootHold: Hold), "held: the hold replaces the landblock default");
-            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, groupLootHeld: false, lootHold: Hold), "not held: master's null");
-            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, groupLootHeld: true, lootHold: TimeSpan.Zero), "a hold of 0 never becomes a zero window");
+            Assert.AreEqual(Hold, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, lootHeld: true, lootHold: Hold), "held: the hold replaces the landblock default");
+            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, lootHeld: false, lootHold: Hold), "not held: master's null");
+            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, lootHeld: true, lootHold: TimeSpan.Zero), "a hold of 0 never becomes a zero window");
 
             Assert.AreEqual(Grace, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Starting, Grace, true, Hold), "an uncleared run keeps master's grace");
             Assert.AreEqual(Grace, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Active, Grace, true, Hold), "an uncleared run keeps master's grace");
@@ -384,55 +444,71 @@ namespace ACE.Server.Tests.ThreadDungeons
             var realm = new EphemeralRealm(null) { Run = run, OpenToFellowship = false };
 
             Assert.AreEqual(Hold, run.Group.LootHold, "the run carries the lock-time hold");
-            Assert.IsFalse(run.IsGroupLootHeld);
+            Assert.IsFalse(run.IsLootHeld);
 
-            run.SetGroupLootHeld(true);
+            run.SetLootHeld(true);
             Assert.AreEqual(TimeSpan.FromMinutes(12), realm.UnloadIntervalOverride, "Starting: the grace, even with the flag set");
 
             run.MarkPopulated(0, 0, 0);
             Assert.AreEqual(ThreadDungeonRunState.Cleared, run.State);
             Assert.AreEqual(Hold, realm.UnloadIntervalOverride, "Cleared and held: the hold");
 
-            run.SetGroupLootHeld(false);
+            run.SetLootHeld(false);
             Assert.IsNull(realm.UnloadIntervalOverride, "Cleared, loot all collected: master's landblock default");
 
-            run.SetGroupLootHeld(true);
+            run.SetLootHeld(true);
             run.MarkEnded(DungeonRunTelemetry.EndReasons.Expired);
             Assert.IsNull(realm.UnloadIntervalOverride, "Ended: nothing, flag or not");
         }
 
+        /// <summary>
+        /// Owner ruling 2026-10-10: a solo run's override reads the run's own LootHold (stamped by TryStart), not the
+        /// shared Solo snapshot's zero. Held and cleared, the copy keeps the hold; a run whose hold is 0 never does.
+        /// </summary>
         [TestMethod]
-        public void A_solo_runs_override_is_masters_even_if_the_held_flag_were_set()
+        public void A_solo_runs_override_is_its_own_loot_hold_while_held()
         {
             var run = NewRun();
             Assert.IsFalse(run.IsGroup);
-            Assert.AreEqual(TimeSpan.Zero, run.Group.LootHold, "Solo carries no hold");
+            Assert.AreEqual(TimeSpan.Zero, run.Group.LootHold, "the shared Solo snapshot carries no hold");
+            run.LootHold = Hold;
 
             var realm = new EphemeralRealm(null) { Run = run, OpenToFellowship = false };
-            run.SetGroupLootHeld(true);
+            run.SetLootHeld(true);
 
             run.MarkPopulated(0, 0, 0);
             Assert.AreEqual(ThreadDungeonRunState.Cleared, run.State);
-            Assert.IsNull(realm.UnloadIntervalOverride, "a zero hold cannot hold a solo copy");
+            Assert.AreEqual(Hold, realm.UnloadIntervalOverride, "a held cleared solo copy keeps the hold");
+
+            run.SetLootHeld(false);
+            Assert.IsNull(realm.UnloadIntervalOverride, "not held: master's landblock default");
+
+            var zero = NewRun();
+            zero.SetLootHeld(true);
+            zero.MarkPopulated(0, 0, 0);
+            Assert.IsNull(new EphemeralRealm(null) { Run = zero, OpenToFellowship = false }.UnloadIntervalOverride, "control: a zero hold cannot hold a copy");
         }
 
         /// <summary>
-        /// Owner ruling (2026-09-27): a Cleared solo run gets no unload window, and so no countdown warning,
-        /// even with a positive hold tunable and loot owed - GroupLootHoldActive requires isGroup, so a solo
-        /// run's held answer is always false and ResolveUnloadInterval falls through to its Cleared/null case.
-        /// The control is the same call with isGroup true: the hold applies exactly as
-        /// <see cref="Hold_is_active_only_for_a_cleared_group_run_owing_loot_with_a_positive_hold"/> already pins.
+        /// Owner ruling 2026-10-10 (superseding the 2026-09-27 "solo never held" ruling): a Cleared solo run owing loot
+        /// gets the hold as its unload window (and so the countdown warning), and the same run with its owner gem
+        /// retired gets none. Against the old code the first assertion failed: GroupLootHoldActive required isGroup.
         /// </summary>
         [TestMethod]
-        public void Cleared_solo_run_gets_no_unload_window_even_with_a_positive_hold_and_loot_owed()
+        public void Cleared_solo_run_owing_loot_gets_the_hold_window_until_its_gem_is_retired()
         {
-            var soloHeld = ThreadDungeonRun.GroupLootHoldActive(ThreadDungeonRunState.Cleared, isGroup: false, groupLootOwed: true, lootHold: Hold);
-            Assert.IsFalse(soloHeld, "solo is never held");
-            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, soloHeld, Hold), "no window: the run falls straight to ShouldEnd's cleared-and-empty branch");
+            var run = NewRun();
+            run.MarkPooledLoot(true);
+            Assert.IsTrue(run.TryMarkLootBonusPending());
 
-            var groupHeld = ThreadDungeonRun.GroupLootHoldActive(ThreadDungeonRunState.Cleared, isGroup: true, groupLootOwed: true, lootHold: Hold);
-            Assert.IsTrue(groupHeld, "control: the same inputs, but a group run");
-            Assert.AreEqual(Hold, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, groupHeld, Hold), "a group run keeps its hold window");
+            var soloHeld = ThreadDungeonRun.LootHoldActive(ThreadDungeonRunState.Cleared, ThreadRunPresence.LootOwed(run), Hold);
+            Assert.IsTrue(soloHeld, "a cleared solo run owing loot is held");
+            Assert.AreEqual(Hold, ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, soloHeld, Hold));
+
+            run.RetireOwnerGem();
+            var released = ThreadDungeonRun.LootHoldActive(ThreadDungeonRunState.Cleared, ThreadRunPresence.LootOwed(run), Hold);
+            Assert.IsFalse(released, "the willing exit released it");
+            Assert.IsNull(ThreadDungeonRun.ResolveUnloadInterval(ThreadDungeonRunState.Cleared, Grace, released, Hold), "no window: ShouldEnd's cleared-and-empty branch takes it");
         }
 
         [TestMethod]
@@ -452,11 +528,11 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void A_held_run_that_idles_out_ends_as_landblock_unloaded_and_still_files_cleared()
         {
             Assert.IsFalse(ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true, createCompleted: true,
-                playerEverObserved: true, playerPresent: false, groupLootHeld: true, sinceStart: TimeSpan.FromMinutes(90),
+                playerEverObserved: true, playerPresent: false, lootHeld: true, sinceStart: TimeSpan.FromMinutes(90),
                 sinceCleared: TimeSpan.FromMinutes(60), now: Now, expiresUtc: NotExpired, out _), "held while the copy is loaded");
 
             Assert.IsTrue(ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: false, createCompleted: true,
-                playerEverObserved: true, playerPresent: false, groupLootHeld: true, sinceStart: TimeSpan.FromMinutes(90),
+                playerEverObserved: true, playerPresent: false, lootHeld: true, sinceStart: TimeSpan.FromMinutes(90),
                 sinceCleared: TimeSpan.FromMinutes(60), now: Now, expiresUtc: NotExpired, out var reason), "the copy unloaded after the hold");
 
             Assert.AreEqual(DungeonRunTelemetry.EndReasons.LandblockUnloaded, reason);
@@ -468,7 +544,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             foreach (var expires in new[] { Now, Now.AddMinutes(-5) })
             {
-                Assert.IsTrue(ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, true, true, true, false, groupLootHeld: true,
+                Assert.IsTrue(ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, true, true, true, false, lootHeld: true,
                     TimeSpan.FromHours(3), TimeSpan.FromMinutes(30), Now, expires, out var reason));
                 Assert.AreEqual(DungeonRunTelemetry.EndReasons.Expired, reason);
             }
@@ -478,7 +554,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         [TestMethod]
-        public void The_held_flag_changes_nothing_when_false_so_solo_reaping_is_unchanged()
+        public void The_held_flag_changes_nothing_when_false()
         {
             foreach (var state in AllStates)
             foreach (var landblock in new[] { true, false })
@@ -488,7 +564,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             {
                 var label = $"{state} lb={landblock} obs={observed} present={present} since={sinceCleared}";
 
-                // GroupLootHoldActive is false for every solo run, so this is the whole solo input space.
+                // With the held flag false (nothing owed, or a solo gem retired), this is the whole input space.
                 var legacy = ThreadDungeonManager.ShouldEnd(state, landblock, false, observed, present, TimeSpan.FromMinutes(2), sinceCleared, Now, NotExpired, out var legacyReason);
                 var notHeld = ThreadDungeonManager.ShouldEnd(state, landblock, false, observed, present, false, TimeSpan.FromMinutes(2), sinceCleared, Now, NotExpired, out var notHeldReason);
 
@@ -639,14 +715,20 @@ namespace ACE.Server.Tests.ThreadDungeons
             var tick = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(ManagerPath), "public static void Tick()");
 
             var sample = tick.IndexOf("SampleMemberPresence(run);", StringComparison.Ordinal);
-            var owed = tick.IndexOf("ThreadRunPresence.GroupLootOwed(run)", StringComparison.Ordinal);
-            // Owner ruling (2026-09-27): groupLootHeld is GroupLootHoldActive alone - it requires isGroup, so a
-            // solo run's answer is always false and it is never put on the loot hold.
-            var held = tick.IndexOf("var groupLootHeld = ThreadDungeonRun.GroupLootHoldActive(state, run.IsGroup, groupLootOwed, run.Group.LootHold);", StringComparison.Ordinal);
-            var store = tick.IndexOf("run.SetGroupLootHeld(groupLootHeld);", StringComparison.Ordinal);
-            var shouldEnd = tick.IndexOf("ShouldEnd(state, landblock != null, createCompleted, run.PlayerEverObserved, playerPresent, groupLootHeld,", StringComparison.Ordinal);
-            var window = tick.IndexOf("var emptyWindow = ThreadDungeonRun.ResolveUnloadInterval(state, run.EmptyGrace, run.IsGroupLootHeld, run.Group.LootHold);", StringComparison.Ordinal);
-            var warn = tick.IndexOf("WarnIfEmptyGraceRunningOut(run, landblock.LastActiveUtc, emptyWindow.Value, now);", StringComparison.Ordinal);
+            // Owner ruling 2026-10-10: one hold for solo and group runs - LootOwed decides what is owed, and the
+            // hold is the run's own write-once LootHold (never Group.LootHold, which is 0 for every solo run).
+            var owed = tick.IndexOf("var lootOwed = state == ThreadDungeonRunState.Cleared && ThreadRunPresence.LootOwed(run);", StringComparison.Ordinal);
+            var held = tick.IndexOf("var lootHeld = ThreadDungeonRun.LootHoldActive(state, lootOwed, run.LootHold);", StringComparison.Ordinal);
+            var store = tick.IndexOf("run.SetLootHeld(lootHeld);", StringComparison.Ordinal);
+            // Open World Threads F2: the landblock-present argument is the footprint-aware RunGroupGone (primary rule unchanged).
+            // WP3b delta review: the fifth argument is the copy's load fault (Landblock.CreateWorldObjectsFaulted).
+            var shouldEnd = tick.IndexOf("ShouldEnd(state, !RunGroupGone(landblock != null, run.Dungeon?.IsOutdoor == true, state, allMembersLoaded), createCompleted,", StringComparison.Ordinal);
+            var shouldEndArgs = tick.IndexOf("RunCopyCreateFaulted(run, landblock), run.PlayerEverObserved, playerPresent, lootHeld, pvpHeldWindow.HasValue,", StringComparison.Ordinal);
+            Assert.IsTrue(shouldEnd > 0 && shouldEndArgs > shouldEnd && shouldEndArgs - shouldEnd < 300, "the reap's ShouldEnd call carries the fault, presence, loot hold and PvP hold arguments");
+            // Thread return (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): the countdown reads the same single interval, PvP hold included.
+            var window = tick.IndexOf("var emptyWindow = ThreadDungeonRun.ResolveUnloadInterval(state, run.EmptyGrace, run.IsLootHeld, run.LootHold, pvpWindow.HasValue, pvpWindow ?? TimeSpan.Zero);", StringComparison.Ordinal);
+            // Open World Threads F4: the idle clock is the latest across the run copy's loaded landblocks (the primary alone for a dungeon).
+            var warn = tick.IndexOf("WarnIfEmptyGraceRunningOut(run, GroupLastActiveUtc(LoadedRunLandblocks(run, landblock).Select(copy => copy.LastActiveUtc)), emptyWindow.Value, now);", StringComparison.Ordinal);
             var solo = tick.IndexOf("if (!run.IsGroup && state == ThreadDungeonRunState.Cleared && run.IsPlacementWanted", StringComparison.Ordinal);
             var pinned = tick.IndexOf("ThreadCachePlacer.IsOwnerInside(run, PlayerManager.GetOnlinePlayer(run.OwnerGuid))", StringComparison.Ordinal);
             var retry = tick.IndexOf("RetryWaitingDelivery(run);", StringComparison.Ordinal);
@@ -660,25 +742,25 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsFalse(tick.Contains("KeepsCopyAlive"), "the parallel keep-alive mechanism is gone");
             Assert.IsTrue(shouldEnd < solo && solo < pinned && pinned < retry, "the solo retry keeps its pinned owner condition");
             Assert.IsTrue(retry < group && group < trigger && trigger < populate, "the group branch retries through PooledLootTrigger before populating");
+            Assert.IsFalse(tick.Contains("Group.LootHold"), "the hold is read from the run, so a solo run is not stuck on the Solo snapshot's zero");
+            Assert.IsFalse(tick.Contains("GroupLootOwed("), "the reap asks LootOwed, which covers solo runs too");
         }
 
         [TestMethod]
-        public void AnnounceCleared_destroys_the_gem_only_for_solo_and_before_the_survey()
+        public void AnnounceCleared_destroys_no_gem_and_sends_the_solo_line()
         {
             var body = PooledLootSourceText.MethodBody(PooledLootSourceText.Read(ManagerPath), "private static void AnnounceCleared(ThreadDungeonRun run)");
 
             var recipients = body.IndexOf("ThreadRunPresence.MessageRecipients(run)", StringComparison.Ordinal);
             var perMember = body.IndexOf("ClearRewardHandler(run, member);", StringComparison.Ordinal);
-            var guard = body.IndexOf("if (!run.IsGroup)\n                GemDestroyer(run);", StringComparison.Ordinal);
-            var gem = body.IndexOf("GemDestroyer(run);", StringComparison.Ordinal);
             var survey = body.IndexOf("SurveyRecorder(run);", StringComparison.Ordinal);
+            var soloLine = body.IndexOf("SoloClearedMessage(run.Dungeon.Name)", StringComparison.Ordinal);
 
             var line = body.IndexOf("GroupClearedMessage(run.Dungeon.Name, member.Guid.Full == run.OwnerGuid)", StringComparison.Ordinal);
 
             Assert.IsTrue(recipients >= 0 && recipients < line && line < perMember, "each recipient's line names gem (owner) or key (member), then their rewards");
-            Assert.IsTrue(guard >= 0, "GemDestroyer at the clear is solo-only (R29)");
-            Assert.IsTrue(gem >= 0 && gem < survey, "GemDestroyer still precedes SurveyRecorder");
-            Assert.AreEqual(1, CountOf(body, "GemDestroyer(run);"));
+            Assert.IsTrue(soloLine >= 0 && soloLine < survey, "the solo clear line, then the survey");
+            Assert.AreEqual(0, CountOf(body, "GemDestroyer(run);"), "owner ruling 2026-10-10: no gem dies at the clear, solo or group");
         }
 
         [TestMethod]

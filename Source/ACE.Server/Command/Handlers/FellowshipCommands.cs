@@ -27,7 +27,7 @@ namespace ACE.Server.Command.Handlers
             "  add [playername]     - invite a player to your fellowship\n" +
             "  join <playername> [password] - join the fellowship that a player is in (password required if Closed and passworded)\n" +
             "  addlandblock         - invite every fellowship-less player on your landblock (auto-accept honoured)\n" +
-            "  joinlandblock [password] - join the largest open (or matching passworded) fellowship on your landblock, or create one\n" +
+            "  joinlandblock [password] - join the largest open (or matching passworded) fellowship on your landblock (never creates one)\n" +
             "  password [<pw>|off]  - (leader) set/clear the join password; bare shows whether one is set\n" +
             "  noleech [on|off]     - (leader) toggle auto-ejection of members not contributing XP\n" +
             "  quit                 - leave your fellowship\n" +
@@ -540,12 +540,12 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            // none found: create a fresh default fellowship
-            player.FellowshipCreate($"{player.Name}'s Fellowship", true);
-
-            if (player.Fellowship != null)
-                Msg(player, $"No open fellowship found on your landblock - created \"{player.Fellowship.FellowshipName}\".");
+            // none found: never create one silently (player suggestion); point at the explicit command instead
+            Msg(player, NoOpenFellowshipMessage);
         }
+
+        /// <summary>Reply when /fship joinlandblock finds nothing to join. It must not create a fellowship.</summary>
+        internal const string NoOpenFellowshipMessage = "No open fellowship found on your landblock. Use /fship create to start one.";
 
         private static void HandleLeech(Player player, string[] args)
         {

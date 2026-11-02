@@ -13,10 +13,11 @@ namespace ACE.Server.WorldObjects
         /// which reproduces the shipped <c>cloak_min_proc</c> default and leaves Cloak.RollProc's arithmetic
         /// bit-identical.
         ///
-        /// READ FROM Cloak.TryProcSpell, ONCE, FOR ALL FOUR CLOAK SPELL-PROC SITES. TryProcSpell already
-        /// takes the cloak's wearer as its defender parameter, so the floor is fetched there rather than
-        /// threaded through four call sites that would each have to remember to pass it - see the doc comment
-        /// on <see cref="CloakedInPowerAbility"/> for why that is the shape that keeps a future fifth site
+        /// READ FROM Cloak.TryProcSpell, ONCE, FOR ALL SIX CLOAK SPELL-PROC SITES (Player.TakeDamage,
+        /// SpellProjectile.DamageTarget, Harm, Drain Health, the Reflect bounce and the Shield Block). TryProcSpell
+        /// already takes the cloak's wearer as its defender parameter, so the floor is fetched there rather than
+        /// threaded through six call sites that would each have to remember to pass it - see the doc comment
+        /// on <see cref="CloakedInPowerAbility"/> for why that is the shape that keeps a future seventh site
         /// honest.
         ///
         /// THIS IS A PER-HIT HOT PATH (every landed hit on a cloak-wearing player), so the cheap

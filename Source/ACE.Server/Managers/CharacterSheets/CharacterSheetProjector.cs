@@ -5,6 +5,7 @@ using System.Linq;
 using log4net;
 
 using ACE.Common.Extensions;
+using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities;
@@ -56,6 +57,20 @@ namespace ACE.Server.Managers.CharacterSheets
             (PropertyAttribute2nd.MaxMana, "Mana"),
         };
 
+        /// <summary>
+        /// One equipped item's sheet entry. Its snapshot deliberately carries NO suit projection
+        /// (MarketSnapshot.FromItem's includeSuit stays false): the suit builder reads equipped gear
+        /// through ProjectEquippedForSuit, and a second copy here would be labelled source "vault".
+        /// </summary>
+        internal static SheetItem ProjectEquippedItem(WorldObject item)
+            => new SheetItem
+            {
+                ItemGuid = item.Guid.Full,
+                Name = item.Name,
+                Slot = SlotName(item.CurrentWieldedLocation),
+                Snapshot = MarketSnapshot.FromItem(item),
+            };
+
         public static CharacterSheet Project(Player player, bool includeClassAbilities, DateTime nowUtc, bool ownerView = false)
         {
             if (player == null)
@@ -76,13 +91,7 @@ namespace ACE.Server.Managers.CharacterSheets
             {
                 try
                 {
-                    items.Add(new SheetItem
-                    {
-                        ItemGuid = item.Guid.Full,
-                        Name = item.Name,
-                        Slot = SlotName(item.CurrentWieldedLocation),
-                        Snapshot = MarketSnapshot.FromItem(item),
-                    });
+                    items.Add(ProjectEquippedItem(item));
                 }
                 catch (Exception ex)
                 {
@@ -190,7 +199,7 @@ namespace ACE.Server.Managers.CharacterSheets
         /// runs BEFORE the projection. One bad item is skipped, never the profile. Split out so the filter is
         /// testable without a live Player.
         /// </summary>
-        internal static List<SuitItem> ProjectEquippedForSuit(IEnumerable<WorldObject> items, string ownerName)
+        internal static List<SuitItem> ProjectEquippedForSuit(IEnumerable<WorldObject> items, string ownerName, uint? holderGuid = null)
         {
             var equipped = new List<SuitItem>();
 
@@ -202,7 +211,7 @@ namespace ACE.Server.Managers.CharacterSheets
                         continue;
 
                     equipped.Add(SuitItemProjector.FromItem(item, SuitItem.SourceEquipped)
-                        with { CurrentWieldedLocation = item.GetProperty(PropertyInt.CurrentWieldedLocation) });
+                        with { CurrentWieldedLocation = item.GetProperty(PropertyInt.CurrentWieldedLocation), HolderGuid = holderGuid });
                 }
                 catch (Exception ex)
                 {
@@ -213,6 +222,85 @@ namespace ACE.Server.Managers.CharacterSheets
             return equipped;
         }
 
+        /// <summary>Most suit-relevant pack items one profile will project; the rest are dropped with a log line.</summary>
+        internal const int MaxPackSuitItems = 300;
+
+        /// <summary>
+        /// The carried (not worn) items that matter to a suit, each as a "pack" SuitItem. Walks the main pack and
+        /// each side container's Inventory, one level deep, deduped by guid like Player.GetAllPossessions; anything
+        /// whose guid is in <paramref name="equippedGuids"/> is dropped. The suit-relevance filter runs BEFORE the
+        /// projection, so a non-suit item costs one property read. At most <paramref name="maxItems"/> are projected,
+        /// in a DETERMINISTIC order (main-pack items by guid, then side packs by PlacementPosition then guid, each
+        /// with its items by guid), so which items survive the cap does not depend on dictionary order.
+        /// <paramref name="truncated"/> is true when a suit-relevant item was dropped by the cap (also logged).
+        /// One bad item is skipped, never the profile. Pure over its inputs, so it is testable without a live Player.
+        /// </summary>
+        internal static List<SuitItem> ProjectPackForSuit(IEnumerable<WorldObject> inventory, ISet<uint> equippedGuids, uint holderGuid, string ownerName, int maxItems, out bool truncated)
+        {
+            truncated = false;
+
+            var pack = new List<SuitItem>();
+            var seen = new HashSet<uint>();
+            var mainPack = inventory.Where(i => i != null).OrderBy(i => i.Guid.Full).ToList();
+
+            IEnumerable<WorldObject> Walk()
+            {
+                foreach (var item in mainPack)
+                    yield return item;
+
+                foreach (var container in mainPack.OfType<Container>().OrderBy(c => c.PlacementPosition ?? 0).ThenBy(c => c.Guid.Full))
+                {
+                    foreach (var sub in container.Inventory.Values.OrderBy(i => i.Guid.Full).ToList())
+                        yield return sub;
+                }
+            }
+
+            foreach (var item in Walk())
+            {
+                try
+                {
+                    if (!seen.Add(item.Guid.Full) || equippedGuids.Contains(item.Guid.Full))
+                        continue;
+
+                    if (!SuitItemProjector.IsSuitRelevant(item))
+                        continue;
+
+                    if (pack.Count >= maxItems)
+                    {
+                        truncated = true;
+                        log.Warn($"[CHARSHEET] {ownerName} carries more than {maxItems} suit-relevant pack items; the suit profile drops the rest.");
+                        break;
+                    }
+
+                    pack.Add(SuitItemProjector.FromItem(item, SuitItem.SourcePack) with { HolderGuid = holderGuid });
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[CHARSHEET] could not project pack item 0x{item?.Guid.Full:X8} of {ownerName} for the suit profile; skipping it: {ex.GetFullMessage()}");
+                }
+            }
+
+            return pack;
+        }
+
+        internal static List<SuitItem> ProjectPackForSuit(IEnumerable<WorldObject> inventory, ISet<uint> equippedGuids, uint holderGuid, string ownerName, int maxItems = MaxPackSuitItems)
+            => ProjectPackForSuit(inventory, equippedGuids, holderGuid, ownerName, maxItems, out _);
+
+        /// <summary>
+        /// The owner view's gear lists from the two collections ProjectOwner reads off the Player: the WORN items
+        /// (EquippedObjects) become "equipped" rows and their appraisal, and the CARRIED items (Inventory) become
+        /// "pack" rows minus anything worn. Split out so a test can pin which collection feeds which list.
+        /// </summary>
+        internal static (List<SuitItem> Equipped, List<SheetItem> Appraisal, List<SuitItem> Pack, bool PackTruncated) ProjectOwnerGear(
+            IEnumerable<WorldObject> equippedObjects, IEnumerable<WorldObject> inventory, string ownerName, List<SheetItem> sheetEquipped, uint holderGuid)
+        {
+            var worn = equippedObjects.ToList();
+            var (equipped, appraisal) = ProjectOwnerEquipment(worn, ownerName, sheetEquipped, holderGuid);
+            var pack = ProjectPackForSuit(inventory, new HashSet<uint>(worn.Select(i => i.Guid.Full)), holderGuid, ownerName, MaxPackSuitItems, out var truncated);
+
+            return (equipped, appraisal, pack, truncated);
+        }
+
         /// <summary>
         /// The owner-only extras: heritage, and the equipped items that matter to a suit (SuitItemProjector.
         /// IsSuitRelevant), each projected as a "equipped" SuitItem. Same threading rule and same no-mutation
@@ -220,7 +308,7 @@ namespace ACE.Server.Managers.CharacterSheets
         /// </summary>
         private static OwnerProfile ProjectOwner(Player player, CharacterSheet sheet)
         {
-            var (equipped, appraisal) = ProjectOwnerEquipment(player.EquippedObjects.Values.ToList(), player.Name, sheet.Equipped);
+            var gear = ProjectOwnerGear(player.EquippedObjects.Values, player.Inventory.Values, player.Name, sheet.Equipped, player.Guid.Full);
             var heritage = ProjectHeritage(player.HeritageGroupName, player.HeritageGroup);
 
             return new OwnerProfile
@@ -233,18 +321,70 @@ namespace ACE.Server.Managers.CharacterSheets
                 Attributes = sheet.Attributes,
                 Vitals = sheet.Vitals,
                 Skills = sheet.Skills,
-                Equipped = equipped,
-                EquippedAppraisal = appraisal,
+                Equipped = gear.Equipped,
+                EquippedAppraisal = gear.Appraisal,
+                Pack = gear.Pack,
+                PackTruncated = gear.PackTruncated,
+                ClassAbilityImport = GuardedClassAbilityImport(() => ProjectClassAbilityImport(player), player.Name),
             };
         }
 
         /// <summary>
+        /// Gathers the import projection's inputs from the Player (quest registry rows, the bought-point and
+        /// balance PropertyInts, the respec flags) and hands them to the pure <see cref="ClassAbilityImportProjection"/>.
+        /// respec_pending mirrors Player.ApplyClassAbilityOverhaulRespec's two guards: PropertyInt 9067 unset AND
+        /// class_ability_overhaul_respec_sweep_enabled on.
+        /// </summary>
+        private static ClassAbilityImportBlock ProjectClassAbilityImport(Player player)
+        {
+            return BuildClassAbilityImport(
+                player.Character.GetQuests(player.CharacterDatabaseLock),
+                player.ClassAbilityPointsPurchasedWithLum,
+                player.ClassAbilityPointsPurchasedWithXp,
+                player.TotalClassAbilityPointsEarned,
+                player.AvailableClassAbilityPoints,
+                player.GetProperty(PropertyInt.ClassAbilityOverhaulRespecDone) ?? 0,
+                PropertyManager.GetBool("class_ability_overhaul_respec_sweep_enabled").Item);
+        }
+
+        /// <summary>
+        /// The input-gathering seam, taking already-read values so a test can drive it without a Player.
+        /// respec_pending is the stamp being unset AND the sweep switch on, the two guards of
+        /// Player.ApplyClassAbilityOverhaulRespec.
+        /// </summary>
+        internal static ClassAbilityImportBlock BuildClassAbilityImport(
+            IEnumerable<CharacterPropertiesQuestRegistry> quests, int lumBought, int xpBought, int earned, int available, int respecDone, bool sweepEnabled)
+        {
+            var rows = (quests ?? Enumerable.Empty<CharacterPropertiesQuestRegistry>())
+                .Select(q => new ImportQuestRow(q.QuestName, q.NumTimesCompleted))
+                .ToList();
+
+            return ClassAbilityImportProjection.Project(rows, lumBought, xpBought, earned, available, respecDone == 0 && sweepEnabled);
+        }
+
+        /// <summary>
+        /// Runs the import block build and swallows a failure to null, so a fault in this optional block can never
+        /// take down the suit-profile (same owner build). The import route answers a null block with a server error.
+        /// </summary>
+        internal static ClassAbilityImportBlock GuardedClassAbilityImport(Func<ClassAbilityImportBlock> build, string characterName)
+        {
+            try
+            {
+                return build();
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[CHARSHEET] could not project the class ability import block of {characterName}; leaving it null: {ex.GetFullMessage()}");
+                return null;
+            }
+        }
+        /// <summary>
         /// The owner view's two equipment lists: the suit-relevant items as "equipped" SuitItems, and the sheet
         /// snapshots of exactly those items. ProjectOwner calls only this, so a test can pin the wiring without a Player.
         /// </summary>
-        internal static (List<SuitItem> Equipped, List<SheetItem> Appraisal) ProjectOwnerEquipment(IEnumerable<WorldObject> items, string ownerName, List<SheetItem> sheetEquipped)
+        internal static (List<SuitItem> Equipped, List<SheetItem> Appraisal) ProjectOwnerEquipment(IEnumerable<WorldObject> items, string ownerName, List<SheetItem> sheetEquipped, uint? holderGuid = null)
         {
-            var equipped = ProjectEquippedForSuit(items, ownerName);
+            var equipped = ProjectEquippedForSuit(items, ownerName, holderGuid);
             return (equipped, JoinEquippedAppraisal(sheetEquipped, equipped));
         }
 

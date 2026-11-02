@@ -1,6 +1,9 @@
+using System;
+
 using ACE.Common;
 using ACE.Entity.Enum;
 using ACE.Server.ClassAbilities;
+using ACE.Server.Entity;
 using ACE.Server.WorldObjects.Managers;
 
 namespace ACE.Server.WorldObjects
@@ -27,6 +30,22 @@ namespace ACE.Server.WorldObjects
         private double weakenedBloodMod = 1.0;
         private double weakenedBloodExpireTime;
 
+        // The mark's attack/cast SLOW, as the speed factor it leaves this monster at (1.0 = none). Lives
+        // beside the mark and SHARES ITS EXPIRY (weakenedBloodExpireTime): there is no second timer, so the
+        // slow can never outlive or undercut the vulnerability it rides with. Merged by the strongest slow
+        // (smallest factor) while the mark is running - WeakenedBloodMath.RefreshSpeedFactor.
+        private double weakenedBloodSpeedFactor = 1.0;
+
+        /// <summary>
+        /// Whether this creature may carry the Weakened Blood SLOW. Players, pets (CombatPet derives from
+        /// Pet) and chess pieces never do - the same exclusion, for the same reasons, as
+        /// <see cref="CanBeClassAbilityPinned"/>: the slow is PvE only, a player's own summon must never be
+        /// slowed by a stray hit, and GamePiece drives its own timing. Enforced HERE, at the state boundary,
+        /// so no present or future application site can slow one. The vulnerability half of the mark is not
+        /// gated by this.
+        /// </summary>
+        public bool CanBeWeakenedBloodSlowed => !(this is Player || this is Pet || this is GamePiece);
+
         /// <summary>
         /// Applies or refreshes Weakened Blood on this creature. Both the magnitude and the expiry take the
         /// MAXIMUM against whatever is already held (<see cref="WeakenedBloodMath.Refresh"/>), so a
@@ -38,20 +57,39 @@ namespace ACE.Server.WorldObjects
         /// non-vulnerability magnitude or a non-positive duration).
         ///
         /// That distinction exists for the CASTER'S confirmation line, which is the only thing that reads it.
-        /// Weakened Blood is applied by every landed Harm and every landed Drain - including each of Crimson
-        /// Harvest's up-to-five secondary strikes - so a message on every application would be five lines from
-        /// one cast and several a second in a sustained fight. One line when the mark takes hold, then
-        /// silence for the 20 seconds it holds, is the same "announce the transition, not the state" shape
-        /// the Frenzy and Nether Rush fade notices already use.
+        /// Weakened Blood can land from every Harm, every Drain strike and every Health-damage life
+        /// projectile, so a message on every application would be several lines from one cast and several a
+        /// second in a sustained fight. One line when the mark takes hold, then silence for the 20 seconds it
+        /// holds, is the same "announce the transition, not the state" shape the Frenzy and Mana Rush fade
+        /// notices already use; the caster additionally caps it at one line per cast
+        /// (Player.TryApplyWeakenedBlood).
+        ///
+        /// <paramref name="speedFactor"/> is the applier's slow (1.0 = none, see
+        /// WeakenedBloodMath.SpeedFactor). It is dropped silently on a creature that
+        /// <see cref="CanBeWeakenedBloodSlowed"/> refuses, and otherwise merged by the strongest slow under
+        /// the mark's shared expiry.
         /// </summary>
-        public bool ApplyWeakenedBlood(double mod, double durationSeconds)
+        public bool ApplyWeakenedBlood(double mod, double durationSeconds, double speedFactor = 1.0)
+        {
+            return ApplyWeakenedBlood(mod, durationSeconds, speedFactor, Time.GetUnixTime());
+        }
+
+        /// <summary>
+        /// <see cref="ApplyWeakenedBlood(double, double, double)"/> at an explicit clock, so the merge and
+        /// lapse rules are testable without waiting out a real 20-second window.
+        /// </summary>
+        internal bool ApplyWeakenedBlood(double mod, double durationSeconds, double speedFactor, double now)
         {
             if (mod <= 1.0 || durationSeconds <= 0.0)
                 return false;
 
-            var now = Time.GetUnixTime();
-
             var wasHeld = weakenedBloodMod > 1.0 && WeakenedBloodMath.IsActive(now, weakenedBloodExpireTime);
+
+            // the slow merges against the expiry as it stood BEFORE this application - that is the window
+            // the existing factor was actually alive in
+            var incomingFactor = CanBeWeakenedBloodSlowed ? Math.Clamp(speedFactor, WeakenedBloodMath.MinSpeedFactor, 1.0) : 1.0;
+
+            weakenedBloodSpeedFactor = WeakenedBloodMath.RefreshSpeedFactor(now, weakenedBloodSpeedFactor, weakenedBloodExpireTime, incomingFactor);
 
             var refreshed = WeakenedBloodMath.Refresh(now, weakenedBloodMod, weakenedBloodExpireTime, mod, now + durationSeconds);
 
@@ -59,6 +97,75 @@ namespace ACE.Server.WorldObjects
             weakenedBloodExpireTime = refreshed.ExpireTime;
 
             return !wasHeld;
+        }
+
+        /// <summary>
+        /// The speed factor the Weakened Blood slow currently leaves this monster at (1.0 = not slowed),
+        /// lazily clearing it once the mark's shared window has lapsed. Multiplies the monster's attack
+        /// animation speed (Creature.GetAnimSpeed) and divides its cast times and cadence delays
+        /// (<see cref="ScaleWeakenedBloodSlowDuration"/>). Always 1.0 for a creature that cannot be slowed,
+        /// because nothing below 1.0 is ever stored on one.
+        /// </summary>
+        public double GetWeakenedBloodSpeedFactor()
+        {
+            // the common case - never slowed - reads no clock
+            if (weakenedBloodSpeedFactor >= 1.0)
+                return 1.0;
+
+            return GetWeakenedBloodSpeedFactor(Time.GetUnixTime());
+        }
+
+        internal double GetWeakenedBloodSpeedFactor(double now)
+        {
+            if (weakenedBloodSpeedFactor >= 1.0)
+                return 1.0;
+
+            if (!WeakenedBloodMath.IsActive(now, weakenedBloodExpireTime))
+            {
+                weakenedBloodSpeedFactor = 1.0;
+                return 1.0;
+            }
+
+            return weakenedBloodSpeedFactor;
+        }
+
+        /// <summary>
+        /// A monster DURATION (a cast time or a cadence delay) under the Weakened Blood slow: divided by the
+        /// speed factor, so a factor of 0.5 doubles it. Returns the input unchanged - bit for bit - when the
+        /// monster is not slowed.
+        /// </summary>
+        public float ScaleWeakenedBloodSlowDuration(float duration)
+        {
+            var factor = GetWeakenedBloodSpeedFactor();
+
+            return factor >= 1.0 ? duration : (float)(duration / factor);
+        }
+
+        /// <summary>
+        /// The double-precision twin of <see cref="ScaleWeakenedBloodSlowDuration(float)"/>, for the cadence
+        /// delays that are rolled as doubles (ThreadSafeRandom.Next returns double).
+        /// </summary>
+        public double ScaleWeakenedBloodSlowDuration(double duration)
+        {
+            var factor = GetWeakenedBloodSpeedFactor();
+
+            return factor >= 1.0 ? duration : duration / factor;
+        }
+
+        /// <summary>
+        /// The magic-attack gate's delay (AiUseMagicDelay, 3 seconds when unset) under the Weakened Blood
+        /// slow. Monster_Combat reads this in NextMagicAttackTime and in DoAttackStance's alignment of
+        /// PrevAttackTime, so both sides of that arithmetic always use the same value.
+        /// </summary>
+        public double GetWeakenedBloodScaledMagicDelay()
+        {
+            // defaults to most common value found in py16 db (the same default NextMagicAttackTime had).
+            // Kept in double, the property's own type, so an unslowed monster's gate is bit-identical.
+            var magicDelay = AiUseMagicDelay ?? 3.0f;
+
+            var factor = GetWeakenedBloodSpeedFactor();
+
+            return factor >= 1.0 ? magicDelay : magicDelay / factor;
         }
 
         /// <summary>
@@ -153,5 +260,100 @@ namespace ACE.Server.WorldObjects
 
             return HuntersMarkMath.Combine(mods);
         }
+
+        // ---- Elemental Proficiency Lightning: a TARGET-SIDE "more damage taken" debuff ------------------
+        //
+        // Archmage T3 (ELEMENTAL-PROFICIENCY-DESIGN.md). Transient state on the VICTIM, for the same reasons
+        // as Weakened Blood above: it is read by every attacker, it must not be dispellable, must not persist
+        // and must not show up as a resistable spell. ONE debuff per target, not one per caster (owner
+        // ruling): a second Archmage's application merges into the same slot through
+        // ElementalProficiencyMath.Merge - the stronger bonus is kept and the end time is the later of the
+        // two - so a low-rank caster can never downgrade or shorten a high-rank caster's debuff.
+        //
+        // Clock: Timers.RunningTime, the same clock the pin and stun timers use. Mutated on the applying
+        // caster's landblock thread, the same assumption Weakened Blood documents above. Never persisted.
+
+        private double elementalLightningBonus;
+        private double elementalLightningEndTime;
+
+        /// <summary>
+        /// Applies or refreshes the Elemental Proficiency Lightning debuff: this creature takes
+        /// (1 + <paramref name="damageTakenBonus"/>) times the damage from every source until it lapses.
+        ///
+        /// RETURNS TRUE ONLY FOR A NEW LANDING - the creature was not already carrying a live debuff. A refresh
+        /// of a running debuff returns FALSE (it still merges), and so does a refusal: an ineligible target
+        /// (<see cref="ElementalProficiencyMath.IsEligibleTarget"/> - players, pets and game pieces), a dead
+        /// creature, a non-positive bonus or a non-positive duration.
+        /// </summary>
+        public bool TryApplyElementalLightning(double damageTakenBonus, double seconds)
+        {
+            return TryApplyElementalLightning(damageTakenBonus, seconds, Timers.RunningTime);
+        }
+
+        /// <summary>
+        /// <see cref="TryApplyElementalLightning(double, double)"/> at an explicit running-time clock, so the
+        /// merge and lapse rules are testable without waiting out a real window.
+        /// </summary>
+        internal bool TryApplyElementalLightning(double damageTakenBonus, double seconds, double now)
+        {
+            if (damageTakenBonus <= 0.0 || seconds <= 0.0)
+                return false;
+
+            if (!ElementalProficiencyMath.IsEligibleTarget(this) || IsDead)
+                return false;
+
+            var wasHeld = IsElementalLightningActive(now);
+
+            var existing = wasHeld
+                ? new ElementalProficiencyMath.Effect(elementalLightningBonus, elementalLightningEndTime)
+                : new ElementalProficiencyMath.Effect(0.0, 0.0);
+
+            var merged = ElementalProficiencyMath.Merge(existing, new ElementalProficiencyMath.Effect(damageTakenBonus, now + seconds));
+
+            elementalLightningBonus = merged.Value;
+            elementalLightningEndTime = merged.EndTime;
+
+            return !wasHeld;
+        }
+
+        private bool IsElementalLightningActive(double now)
+        {
+            return elementalLightningBonus > 0.0 && now < elementalLightningEndTime;
+        }
+
+        /// <summary>
+        /// This creature's Lightning "more damage taken" multiplier (1.0 = none), lazily clearing the debuff
+        /// once it has lapsed. Multiplied into Creature.GetResistanceMod beside GetHuntersMarkMod on every
+        /// site that applies the mark, so it is its own multiplicative axis: it stacks with Hunter's Mark,
+        /// Vulnerability, Weakened Blood, rending weapons and every other damage-taken source.
+        ///
+        /// HOT PATH - every damage resolution against every creature and player. An unaffected creature
+        /// pays one double compare and reads no clock.
+        /// </summary>
+        public float GetElementalLightningMod()
+        {
+            if (elementalLightningBonus <= 0.0)
+                return 1.0f;
+
+            return GetElementalLightningMod(Timers.RunningTime);
+        }
+
+        internal float GetElementalLightningMod(double now)
+        {
+            if (elementalLightningBonus <= 0.0)
+                return 1.0f;
+
+            if (now >= elementalLightningEndTime)
+            {
+                elementalLightningBonus = 0.0;
+                elementalLightningEndTime = 0.0;
+                return 1.0f;
+            }
+
+            return (float)(1.0 + elementalLightningBonus);
+        }
+
+        /// <summary>TRUE while this creature carries a live Lightning debuff.</summary>
+        public bool HasElementalLightning => GetElementalLightningMod() > 1.0f;
     }
 }

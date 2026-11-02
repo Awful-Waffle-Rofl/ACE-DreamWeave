@@ -293,6 +293,9 @@ namespace ACE.Server.WorldObjects
             // point of no return beyond this point -- cannot be cancelled
             Attacking = true;
 
+            // PvP conduct: a swing at an enemy is activity even if it whiffs (a hit also stamps at the damage gate)
+            StampPvpAttackAttempt(target);
+
             if (subsequent)
             {
                 // client shows hourglass, until attack done is received
@@ -312,14 +315,10 @@ namespace ACE.Server.WorldObjects
             var baseStaminaCost = GetAttackStamina(GetPowerRange());
 
             // class ability: Whirlwind adds a stamina surcharge and, when affordable, enables the
-            // 360°/+1-target cleave for this swing (else this is a no-op and the swing cleaves normally)
+            // 360-degree / +rank-target cleave for this swing (else this is a no-op and the swing cleaves
+            // normally). Savage Blows' second surcharge that used to follow was removed with the ability
+            // (retired 2026-10-24, Berserker pass).
             var staminaCost = ApplyWhirlwindStamina(weapon, baseStaminaCost);
-
-            // class ability: Savage Blows adds its own stamina surcharge and, when affordable, enables the
-            // swing's damage bonus. Both surcharges are computed off the same baseStaminaCost, so they
-            // stack additively (e.g. +100% Whirlwind and +25% Savage Blows together give +125% total, not
-            // compounded), and Whirlwind is applied first so it has stamina priority when funds are tight.
-            staminaCost = ApplySavageBlowsStamina(creature, baseStaminaCost, staminaCost);
 
             UpdateVitalDelta(Stamina, -staminaCost);
 
@@ -368,9 +367,10 @@ namespace ACE.Server.WorldObjects
                         targetProc = true;
                     }
 
-                    // class ability: Whirlwind grants a cleave even on a non-cleaving weapon, and Kinetic
-                    // Charge's spend (above) can too - both stack on top of the weapon's own CleaveTargets
-                    if (weapon != null && (weapon.IsCleaving || WhirlwindSwingActive || KineticChargeCleaveTargets > 0))
+                    // class ability: Whirlwind grants a cleave even on a non-cleaving weapon - or bare hands, so
+                    // its branch does not need a weapon (Berserker pass 2026-10-24) - and Kinetic Charge's spend
+                    // (above) can too on a weapon. All stack on top of the weapon's own CleaveTargets.
+                    if (WhirlwindSwingActive || (weapon != null && (weapon.IsCleaving || KineticChargeCleaveTargets > 0)))
                     {
                         var cleave = GetCleaveTarget(creature, weapon);
 

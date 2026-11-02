@@ -44,6 +44,18 @@ namespace ACE.Server.Tests
     [TestClass]
     public class BloodMageAbilityDefinitionTests
     {
+        /// <summary>
+        /// Seeds the tunable cache from the hardcoded defaults (no database), the same setup the sibling
+        /// Blood Mage test classes use. Without it the three tests that read a tier-gate tunable through
+        /// <see cref="Tunable"/> fall through to a database read and throw whenever this class runs before
+        /// any other class has seeded the cache - as it does under a filtered run.
+        /// </summary>
+        [ClassInitialize]
+        public static void TestSetup(TestContext context)
+        {
+            DefaultPropertyManager.LoadDefaultProperties();
+        }
+
         private static ClassAbilityDefinition ByName(string name)
         {
             Assert.IsTrue(ClassAbilityRegistry.TryGetByName(name, out var def), $"{name} is not registered");
@@ -67,13 +79,16 @@ namespace ACE.Server.Tests
             ("weakened_blood",     2, 3, new[] { 1, 1, 1 }),
             // premium reprice 2026-09-13: 1/rank -> 2/rank
             ("malediction",        2, 3, new[] { 2, 2, 2 }),
-            ("crimson_harvest",    2, 1, new[] { 3 }),
+            // Blood Mage buff pass: one rank at 3 -> three ranks at 1/1/1 (rank 3 = the old single rank)
+            ("crimson_harvest",    2, 3, new[] { 1, 1, 1 }),
             ("heal_boost_rating",  2, 3, new[] { 1, 1, 1 }),
             // Tier 3 - 8 CAP earned, 15 spent in class
-            ("exsanguinate",       3, 1, new[] { 3 }),
-            // premium reprice 2026-09-13: 1/rank -> 2/rank
-            ("blood_price",        3, 3, new[] { 2, 2, 2 }),
-            ("sanguine_ward",      3, 3, new[] { 1, 2, 3 }),
+            // Blood Mage buff pass: one rank at 3 -> three ranks at 1/1/1 (ranks buy kept charges)
+            ("exsanguinate",       3, 3, new[] { 1, 1, 1 }),
+            // Blood Mage buff pass: the 2026-09-13 premium 2/2/2 reversed to 1/1/1
+            ("blood_price",        3, 3, new[] { 1, 1, 1 }),
+            // Blood Mage buff pass: 1/2/3 -> 1/1/1
+            ("sanguine_ward",      3, 3, new[] { 1, 1, 1 }),
         };
 
         // ---- registration ------------------------------------------------------------------------
@@ -132,10 +147,15 @@ namespace ACE.Server.Tests
             // taking the class to 47. T1 is untouched by that last step - neither repriced entry lives
             // there. These agree with ClassAbilityCapTotalsTests, which pins the same four numbers for all
             // eight classes.
+            //
+            // THEN THE BLOOD MAGE BUFF PASS (wave 1 of ClassAbilityRepricing): Crimson Harvest (T2) went from
+            // one rank at 3 to three at 1/1/1, a 3 either way, so T2 stays 15; at T3 Exsanguinate likewise
+            // stays 3, Blood Price fell 6 -> 3 and Sanguine Ward 6 -> 3, taking T3 15 -> 9 and the class
+            // 47 -> 41.
             Assert.AreEqual(17, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 1), "T1 total");
             Assert.AreEqual(15, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 2), "T2 total");
-            Assert.AreEqual(15, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 3), "T3 total");
-            Assert.AreEqual(47, ClassAbilityCostSummary.MaxCostForClass(defs, ClassAbilityClass.BloodMage), "class total");
+            Assert.AreEqual(9, ClassAbilityCostSummary.MaxCostForClassTier(defs, ClassAbilityClass.BloodMage, 3), "T3 total");
+            Assert.AreEqual(41, ClassAbilityCostSummary.MaxCostForClass(defs, ClassAbilityClass.BloodMage), "class total");
         }
 
         /// <summary>

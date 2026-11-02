@@ -127,7 +127,7 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void Parse_BerserkerTrainer_ResolvesThirteenBerserkerAbilities()
         {
-            const string trainerAbilities = "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,adrenaline,savageblows,breakarmor,executioner,enhanced_stamina,vengeance,damage_rating,whirlwind,bloodlust";
+            const string trainerAbilities = "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,adrenaline,bloodlust,breakarmor,executioner,heavy_blows,intimidate,damage_rating,whirlwind,berserk_rage";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
@@ -135,6 +135,10 @@ namespace ACE.Server.Tests
             // ruling - it had been UN-HOMED by the 2026-09-12 overhaul, still registered and stocked but
             // excluded from the class-filtered list, the way an unhomed Enhanced entry is). It is now
             // included here because it counts as a Berserker ability again.
+            //
+            // STILL THIRTEEN after the 2026-10-24 Berserker pass, with a different roster: Savage Blows,
+            // Vengeance and Enhanced Stamina retired (and leave this string), Heavy Blows, Intimidate and
+            // Berserk Rage added. The string is the exact value now committed for Bregan Holt.
             Assert.AreEqual(13, skills.Count);
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Berserker));
         }
@@ -145,9 +149,11 @@ namespace ACE.Server.Tests
         /// dropped it from this string, so every ability it stocks is once again an Archmage ability.
         /// </summary>
         [TestMethod]
-        public void Parse_ArchmageTrainer_ResolvesTwelveArchmageAbilities()
+        public void Parse_ArchmageTrainer_ResolvesThirteenArchmageAbilities()
         {
-            const string trainerAbilities = "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,quickened_casting,enhanced_mana,flatcastspeed,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend";
+            // 2026-10-24 Archmage pass: quickened_casting and flatcastspeed retired; elemental_inversion,
+            // arcane_hollow and volatile_wall added (twelve -> thirteen). The exact value now committed for Kaori Tenma.
+            const string trainerAbilities = "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,elemental_inversion,enhanced_mana,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall";
 
             var skills = ClassAbilityTrainer.ParseTrainerAbilities(trainerAbilities);
 
@@ -155,7 +161,7 @@ namespace ACE.Server.Tests
             // it had been UN-HOMED by the 2026-09-12 overhaul, still registered and stocked - see the
             // Berserker note). It is now included here because it counts as an Archmage entry again, alongside
             // quickened_casting (added 2026-09-12, new-ability wave), which this string had been missing.
-            Assert.AreEqual(12, skills.Count);
+            Assert.AreEqual(13, skills.Count);
             Assert.IsTrue(skills.All(s => s.AbilityClass == ClassAbilityClass.Archmage));
         }
 
@@ -208,11 +214,14 @@ namespace ACE.Server.Tests
                 // 2026-09-12 (new-ability wave); cloaked_in_power added 2026-09-29 (Vanguard T2).
                 "thorns,taunt,battlehardened,vanguard_training,enhanced_heavyweapons,enhanced_endurance,rallying_presence,damage_resist_rating,shieldblock,kinetic_charge,crit_resist_rating,enhanced_health,reflect_magic,cloaked_in_power",
                 // Berserker trainer (NPC 1001003). adrenaline and vengeance added 2026-09-12 (new-ability
-                // wave); enhanced_stamina re-homed here 2026-09-14 (owner ruling).
-                "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,adrenaline,savageblows,breakarmor,executioner,enhanced_stamina,vengeance,damage_rating,whirlwind,bloodlust",
+                // wave); enhanced_stamina re-homed here 2026-09-14 (owner ruling). 2026-10-24 Berserker pass:
+                // savageblows, vengeance and enhanced_stamina retired; heavy_blows, intimidate, berserk_rage added.
+                "frenzy,berserker_training,enhanced_twohandedcombat,enhanced_strength,adrenaline,bloodlust,breakarmor,executioner,heavy_blows,intimidate,damage_rating,whirlwind,berserk_rage",
                 // Archmage trainer (NPC 1001004). quickened_casting added 2026-09-12 (new-ability wave);
                 // enhanced_mana re-homed here 2026-09-14 (owner ruling).
-                "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,enhanced_mana,quickened_casting,flatcastspeed,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend",
+                // 2026-10-24 Archmage pass: quickened_casting and flatcastspeed retired; elemental_inversion,
+                // arcane_hollow and volatile_wall added.
+                "spellaoe,archmage_training,enhanced_warmagic,enhanced_focus,enhanced_mana,elemental_inversion,arcane_hollow,overchannel,enhanced_magicdefense,manabarrier,echocast,elementalrend,volatile_wall",
                 // VoidSummon trainer (NPC 1001005). umbral_siphon and soul_jump added 2026-09-12 (new-ability
                 // wave).
                 "netherrush,void_training,enhanced_voidmagic,enhanced_self,umbral_siphon,empoweredsummons,enhanced_summoning,summon2x,voiddamage,withering,soul_jump,netherbloom,soultether",
@@ -225,7 +234,7 @@ namespace ACE.Server.Tests
                 // (9008) value. enhanced_meleedefense moved back to Rogue T2 2026-09-12 in the class
                 // ability overhaul, so it no longer appears here. spellweave and runic_ward added the same
                 // day (new-ability wave).
-                "spellblade,enhanced_lightweapons,resonance,spellsword_training,spellweave,runeblade,sundermark,spellsurge,runic_ward,spellstorm,cascade,dispellingedge",
+                "spellblade,enhanced_lightweapons,resonance,spellsword_training,spellweave,runeblade,sundermark,spellsurge,runic_ward,volatile_elements,spellstorm,cascade,dispellingedge",
             };
 
             var stockedIds = trainerLists

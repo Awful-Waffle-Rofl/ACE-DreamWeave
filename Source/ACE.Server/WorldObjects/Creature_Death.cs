@@ -97,7 +97,12 @@ namespace ACE.Server.WorldObjects
                 // preconditions. THE KILLING BLOW IS THE POINT: killingPlayer comes from
                 // DamageHistory.LastDamager, not TopDamager and not the damage list, so a fellow who did
                 // more damage gets nothing. That exclusion is the mechanic. See Player_KillFillVessel.cs.
-                killingPlayer.ApplyKillFillVesselCreatureDeath(this);
+                // A speed-course creature feeds neither this nor the mule-form token below
+                // (FeedsKillProgressHooks, Creature_DeathRewards.cs).
+                var feedsProgress = FeedsKillProgressHooks(P_SpeedCourseCreature);
+
+                if (feedsProgress)
+                    killingPlayer.ApplyKillFillVesselCreatureDeath(this);
 
                 // Mule form tokens: an attuned token in the killer's pack records one kill toward a
                 // mule appearance. Same once-per-death guarantee from onDeathEntered above, the same
@@ -105,7 +110,8 @@ namespace ACE.Server.WorldObjects
                 // DamageHistory.LastDamager, never TopDamager), and the Player-side method owns the
                 // shared preconditions. Matches on WeenieClassId, not CreatureType. See
                 // Player_MuleFormToken.cs.
-                killingPlayer.ApplyMuleFormTokenCreatureDeath(this);
+                if (feedsProgress)
+                    killingPlayer.ApplyMuleFormTokenCreatureDeath(this);
             }
 
             //QuestManager.OnDeath(lastDamager?.TryGetAttacker());
@@ -189,8 +195,28 @@ namespace ACE.Server.WorldObjects
             // run, which is what advances the objective, the alive count and the MVP ledger. Sits after the
             // exactly-once dieEntered guard for the same reason the wave hook does, and requires BOTH the
             // in-memory back-reference and the persisted stamp so a creature from a finished run is inert.
-            if (P_WorldEvent != null && GetProperty(PropertyInt.WorldEventId) != null)
-                ACE.Server.WorldEvents.WorldEventManager.OnEventCreatureDied(this, lastDamager, topDamager);
+            ACE.Server.WorldEvents.WorldEventHooks.OnCreatureDied(this, lastDamager, topDamager);
+
+            // World Events pooled loot (world_events_pooled_loot_enabled): a non-boss creature of a run that latched
+            // the switch leaves no corpse and banks its kill on the run, to be split among the participants and built
+            // into their own chests at claim time (WorldEventLootPool). Decided once, OR-ed into the corpse local below.
+            // A bank that THROWS falls back to a normal corpse (BankKill destroys any rare it had rolled first, so the
+            // corpse cannot add a second); a bank the pool REFUSES (closed) leaves no corpse and its rare is destroyed.
+            // The P_WorldEvent test first keeps the property read off every non-event death.
+            var eventPooledLoot = ACE.Server.WorldEvents.WorldEventHooks.IsPooledLootDeath(this);
+
+            if (eventPooledLoot)
+            {
+                try
+                {
+                    ACE.Server.WorldEvents.WorldEventHooks.BankPooledKill(this, topDamager);
+                }
+                catch (Exception ex)
+                {
+                    eventPooledLoot = false;
+                    log.Error($"[WORLDEVENT] pooled bank failed for {Name} (0x{Guid}, wcid {WeenieClassId}); it leaves a normal corpse instead", ex);
+                }
+            }
 
             // Threads pooled loot (Docs/Threads/POOLED-LOOT-CACHE-DESIGN.md sections 2-3): a creature of a pooled
             // run leaves no corpse and banks its loot on the run instead. Banked HERE, before the run kill hook just
@@ -216,7 +242,7 @@ namespace ACE.Server.WorldObjects
             if (objectiveDeath)
                 ReportBattlegroundObjectiveDestroyed(lastDamager);
 
-            var suppressCorpse = pooledLoot || IsDigsiteCorpselessDeath(P_DigsiteEncounter, GetProperty(PropertyInt.MlDigsiteEncounterId)) || rewardless || objectiveDeath;
+            var suppressCorpse = pooledLoot || IsDigsiteCorpselessDeath(P_DigsiteEncounter, GetProperty(PropertyInt.MlDigsiteEncounterId)) || rewardless || eventPooledLoot || IsPinnacleCorpselessDeath(PinnacleCorpseless) || objectiveDeath;
 
             // Guarded: a throw here (the rare roll creates a world object) must not abort Die() after dieEntered is
             // set, or the kill is never recorded and the creature is never destroyed. pooledLoot stays true, so the
@@ -352,7 +378,8 @@ namespace ACE.Server.WorldObjects
                 // the ONE local decided at the top of this method, which ORs together the Threads pooled-loot
                 // rule (the kill was banked above), the ML digsite rule (the encounter's chest is the
                 // reward), the puzzle-gate ambush rule (a free summon pays nothing) and the Attack/Defend crystal
-                // rule (a match objective is not a kill). Destroy() still waits
+                // rule (a match objective is not a kill), and the World Events pooled-loot rule (the kill was banked
+                // above). Destroy() still waits
                 // out the death animation exactly as before.
                 if (!suppressCorpse)
                     CreateCorpse(topDamager);
@@ -981,6 +1008,10 @@ namespace ACE.Server.WorldObjects
 
             if (CanGenerateRare && killer != null)
                 corpse.TryGenerateRare(lootKiller);
+
+            // Pinnacle (WaffleACE): a kept head corpse is empty, and an empty corpse rots in 15 s; it stays until the copy unloads
+            if (PinnacleCorpseKept)
+                corpse.TimeToRot = -1;
 
             corpse.InitPhysicsObj();
 

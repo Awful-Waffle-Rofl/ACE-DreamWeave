@@ -119,12 +119,85 @@ namespace ACE.Server.ThreadDungeons
         /// the owner gem Decide has already refused zero entries, so the owner always lands on Spend exactly as before.
         /// </summary>
         internal static EntryCharge DecideEntryCharge(bool freeEntryClaimed, int structure)
+            => DecideEntryCharge(freeEntryClaimed, structure, clearedSoloReturn: false);
+
+        /// <summary>
+        /// <see cref="DecideEntryCharge(bool, int)"/> plus the cleared-solo return (owner ruling 2026-10-10):
+        /// <paramref name="clearedSoloReturn"/> (<see cref="IsClearedSoloReturn(bool, ThreadDungeonRunState)"/>) makes
+        /// the owner's re-entry into their own Cleared solo run Free, even at zero entries. An Active run and every
+        /// group run are unchanged.
+        /// </summary>
+        internal static EntryCharge DecideEntryCharge(bool freeEntryClaimed, int structure, bool clearedSoloReturn)
         {
-            if (freeEntryClaimed)
+            if (freeEntryClaimed || clearedSoloReturn)
                 return EntryCharge.Free;
 
             return structure <= 0 ? EntryCharge.NoEntries : EntryCharge.Spend;
         }
+
+        /// <summary>
+        /// Is a use of this run's gem a cleared-solo return (owner ruling 2026-10-10)? A SOLO run in the Cleared state:
+        /// stepping back in costs no entry, and a gem at zero entries is not refused. Decide's owner check still runs
+        /// first, so only the owner ever reaches the free entry. Pure.
+        /// </summary>
+        internal static bool IsClearedSoloReturn(bool isGroup, ThreadDungeonRunState state)
+            => !isGroup && state == ThreadDungeonRunState.Cleared;
+
+        /// <summary>
+        /// The free cleared return, solo or group. Solo is <see cref="IsClearedSoloReturn"/> unchanged. A Cleared GROUP
+        /// run is free only for a player who still holds a deal seat (<paramref name="holdsSeat"/>, ThreadDungeonRun.DealSeats)
+        /// AND has a share waiting (<paramref name="shareWaiting"/>, see <see cref="GroupShareWaits"/>): a member who died
+        /// or stepped out comes back for their caches without spending an entry. Anyone else in a group run keeps
+        /// today's entry rules, and so does every run that is not Cleared. Pure.
+        /// </summary>
+        internal static bool IsClearedReturn(bool isGroup, ThreadDungeonRunState state, bool holdsSeat, bool shareWaiting)
+            => IsClearedSoloReturn(isGroup, state)
+                || (isGroup && state == ThreadDungeonRunState.Cleared && holdsSeat && shareWaiting);
+
+        /// <summary>
+        /// <see cref="IsClearedReturn"/> read off a live run for <paramref name="playerGuid"/>. The group facts are read
+        /// only for a Cleared group run, so every other run costs one state read. Null run: false.
+        ///
+        /// Threading. Callers include the gem user's landblock thread, the dying player's thread, a delivery step on
+        /// the copy's thread and the manager tick, so the placed-cache read (<see cref="GroupShareWaits"/>) is not
+        /// confined to the copy's thread. It is a read only: nothing is mutated off-thread (the run's pile and seat state
+        /// go through its own accessors, which take its stateLock). A stale answer is tolerated by design - a transient false costs one free return (the
+        /// player spends an entry, or is refused at zero, exactly as before this rule) or one notice, and a transient
+        /// true only waives one entry for a member who did have a share a moment earlier.
+        /// </summary>
+        internal static bool IsClearedReturnFor(ThreadDungeonRun run, uint playerGuid)
+        {
+            if (run == null)
+                return false;
+
+            var state = run.State;
+
+            if (!run.IsGroup || state != ThreadDungeonRunState.Cleared)
+                return IsClearedReturn(run.IsGroup, state, false, false);
+
+            var holdsSeat = run.DealSeats().Contains(playerGuid);
+            return IsClearedReturn(true, state, holdsSeat, holdsSeat && GroupShareWaits(run, playerGuid));
+        }
+
+        /// <summary>
+        /// Does a group member still have something to collect inside? Their share of the shared pool not dealt yet, their
+        /// own held pile (ThreadDungeonRun.HasUnclaimedLootFor), or a cache already formed for them that still holds items
+        /// (ThreadLootPool.AnyCacheHoldsItemsFor). The same two reads ThreadExitGuard makes for a group member.
+        ///
+        /// Deliberately the WIDER definition (code review F3): the shared undealt pool counts for every seated member,
+        /// because the next deal hands each seat a share of it, so a member who died before the deal reached them is
+        /// already owed something. Matching ThreadExitGuard keeps "you would lose loot by leaving" and "returning is
+        /// free" the same question. Not thread-confined: see <see cref="IsClearedReturnFor"/>.
+        /// </summary>
+        internal static bool GroupShareWaits(ThreadDungeonRun run, uint memberGuid)
+            => run != null && (run.HasUnclaimedLootFor(memberGuid) || ThreadLootPool.AnyCacheHoldsItemsFor(run, memberGuid));
+
+        /// <summary>The line on the free re-entry a lethal Unraveling death earned (Open World Threads R18).</summary>
+        public const string UnravelReturnMessage = "The Thread gathers you back in. This return costs you nothing.";
+
+        /// <summary>The line on a free return into a cleared solo run (owner ruling 2026-10-10).</summary>
+        public static string ClearedReturnMessage(string dungeonName)
+            => $"You step back into {dungeonName}. It is cleared, so returning costs no entry.";
 
         /// <summary>The line on a gem's FIRST entry: the owner opening the run, or a member's first (free) key use.</summary>
         public static string FirstEntryMessage(string gemName, string dungeonName, int entries)
@@ -140,7 +213,19 @@ namespace ACE.Server.ThreadDungeons
         /// gem's count AFTER the charge was applied.
         /// </summary>
         internal static string EntryMessage(EntryCharge charge, string gemName, string dungeonName, int entries)
-            => charge == EntryCharge.Free ? FirstEntryMessage(gemName, dungeonName, entries) : ReEntryMessage(dungeonName, entries);
+            => EntryMessage(charge, gemName, dungeonName, entries, clearedSoloReturn: false);
+
+        /// <summary>
+        /// <see cref="EntryMessage(EntryCharge, string, string, int)"/> with the cleared-solo return: that free entry
+        /// gets <see cref="ClearedReturnMessage"/>, never the first-entry line a key's free entry gets.
+        /// </summary>
+        internal static string EntryMessage(EntryCharge charge, string gemName, string dungeonName, int entries, bool clearedSoloReturn)
+        {
+            if (clearedSoloReturn && charge == EntryCharge.Free)
+                return ClearedReturnMessage(dungeonName);
+
+            return charge == EntryCharge.Free ? FirstEntryMessage(gemName, dungeonName, entries) : ReEntryMessage(dungeonName, entries);
+        }
 
         /// <summary>
         /// The admission half of a re-entry, kept pure so it can be tested without a landblock.
@@ -256,8 +341,21 @@ namespace ACE.Server.ThreadDungeons
             }
 
             var minPlayerLevel = guide.MinPlayerLevel;
+
+            // Owner ruling 2026-10-10: stepping back into a CLEARED solo run is free, even at zero entries. Extended to a
+            // CLEARED group run for a seated player whose share still waits inside (DungeonGemRules.IsClearedReturn): a
+            // member who died keeps their seat and pile, so collecting it costs no entry. Read once and used for Decide,
+            // the charge and the line alike. The state can only move Cleared -> Ended after this, and an Ended run's copy
+            // is caught by the closed-copy check below before anything is charged; a run already reaped resolves to null,
+            // so the gem takes the ConsumeDeadGem branch and no new run is ever opened from a bound gem.
+            var clearedReturn = DungeonGemRules.IsClearedReturnFor(run, player.Guid.Full);
+
+            // Open World Threads R18: an unspent lethal-Unraveling credit is a free entry for Decide too, or a gem at zero entries
+            // would be refused before the credit could ever be spent. The credit is only READ here; it is consumed after admission.
+            var unravelCredit = run != null && run.HasUnravelReentry(player.Guid.Full);
+
             var decision = DungeonGemRules.Decide(spec, player.Guid.Full, gem.Structure ?? 0, runIsLive, ThreadDungeonManager.IsEnabled, player.Level ?? 0, minPlayerLevel, out var reason,
-                freeEntry: isKey && !run.MemberEntered(player.Guid.Full));
+                freeEntry: (isKey && !run.MemberEntered(player.Guid.Full)) || clearedReturn || unravelCredit);
 
             switch (decision)
             {
@@ -312,7 +410,13 @@ namespace ACE.Server.ThreadDungeons
 
                     // Ruling R8: a member's first key use is free, even at zero entries; every later use spends one,
                     // like the owner gem. The claim is taken here, after admission, so a refused entry claims nothing.
-                    var charge = DungeonGemRules.DecideEntryCharge(isKey && run.TryClaimFreeKeyEntry(player.Guid.Full), gem.Structure ?? 0);
+                    // A cleared return is already free, so it never claims the key's one-time free entry: the key keeps it
+                    // for a later paid-looking entry (code review F1). The charge stays Free through DecideEntryCharge's
+                    // clearedReturn argument, and the line stays ClearedReturnMessage.
+                    var keyFree = isKey && !clearedReturn && run.TryClaimFreeKeyEntry(player.Guid.Full);
+                    // Open World Threads R18: a lethal-Unraveling death earned one free re-entry (never consumed by a cleared return, which is already free).
+                    var unravelFree = !keyFree && !clearedReturn && run.TryConsumeUnravelReentry(player.Guid.Full);
+                    var charge = DungeonGemRules.DecideEntryCharge(keyFree || unravelFree, gem.Structure ?? 0, clearedReturn);
                     if (charge == DungeonGemRules.EntryCharge.NoEntries)
                     {
                         Say(player, DungeonGemRules.NoEntriesReason);
@@ -323,7 +427,7 @@ namespace ACE.Server.ThreadDungeons
                         player.UpdateProperty(gem, PropertyInt.Structure, DungeonGemRules.EntriesAfterUse(gem.Structure ?? 0));
                     player.UpdateProperty(gem, PropertyString.LongDesc, ComposeLongDesc(spec, run.Dungeon.Name, gem.Structure ?? 0, gem.MaxStructure ?? 0, run.IsGroup));
                     player.EnqueueBroadcast(new GameMessageUpdateObject(gem));
-                    Teleport(player, run, DungeonGemRules.EntryMessage(charge, gem.Name, run.Dungeon.Name, gem.Structure ?? 0));
+                    Teleport(player, run, unravelFree ? DungeonGemRules.UnravelReturnMessage : DungeonGemRules.EntryMessage(charge, gem.Name, run.Dungeon.Name, gem.Structure ?? 0, clearedReturn));
                     return true;
 
                 case GemUseDecision.StartRun:
@@ -373,26 +477,16 @@ namespace ACE.Server.ThreadDungeons
             return false;
         }
 
-        /// <summary>The dungeon an unbound spec opens, or null. Deterministic for an "any" spec (seeded by the spec).</summary>
+        /// <summary>The dungeon an unbound spec opens, or null. Deterministic given the same live outdoor count and tunables (the pick is seeded by the spec, but the eligible pool depends on the outdoor switch, cap and live runs).</summary>
         private static Defs.DungeonEntryDef ResolveDungeon(DungeonGemSpec spec)
         {
             var store = ThreadDungeonManager.Store;
-            Defs.DungeonEntryDef dungeon = null;
 
-            if (spec.DungeonId != DungeonGemSpec.Any)
-                store.Dungeons.TryGetValue(spec.DungeonId, out dungeon);
-            else
-            {
-                var rng = new Random(spec.Seed);
-                var candidates = new System.Collections.Generic.List<Defs.DungeonEntryDef>();
-                foreach (var d in store.Dungeons.Values)
-                    if (d.Enabled && spec.Level >= d.MinLevel && spec.Level <= d.MaxLevel)
-                        candidates.Add(d);
-                if (candidates.Count > 0)
-                    dungeon = candidates[rng.Next(candidates.Count)];
-            }
-
-            return dungeon;
+            // Outdoor rotation (Open World Threads): kill switch and concurrency cap first, then
+            // one uniform draw over every eligible row of any kind. A gem bound to an id is never re-rolled. See OutdoorRotation.Resolve. A Thread-Guide gem never
+            // rolls an outdoor site (OutdoorRotation.ResolveForGem).
+            return OutdoorRotation.ResolveForGem(ThreadGuideRules.IsGuide(spec), spec.DungeonId, store.Dungeons, spec.Level, spec.Seed,
+                OutdoorSiteTunables.OutdoorEnabled, ThreadDungeonManager.LiveOutdoorRunCount(), OutdoorSiteTunables.MaxConcurrentRuns);
         }
 
         private const string NoDungeonMessage = "No dungeon answers this gem's call right now.";
@@ -857,8 +951,8 @@ namespace ACE.Server.ThreadDungeons
                 // modifier strengths and reward lines printed here are the ones the run applies.
                 ThreadDungeonSpawner.ResolveModifierLevelExponent());
 
-        /// <summary>The bound line's tail on a solo gem: it dies at the clear.</summary>
-        public const string SoloBoundLineTail = "It crumbles when the dungeon is cleared or its last entry is spent; a death after the clear leaves no way back in.";
+        /// <summary>The bound line's tail on a solo gem (owner ruling 2026-10-10): it survives the clear and dies on a willing exit from the cleared copy or when the run ends.</summary>
+        public const string SoloBoundLineTail = "It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes.";
 
         /// <summary>
         /// The bound line's tail on a GROUP run's owner gem and on every member key (orchestrator wording, ruling R29):
@@ -893,7 +987,7 @@ namespace ACE.Server.ThreadDungeons
         ///   Luminance: x{n.nn} (x{n.nn} from this gem)     (same total/parenthetical rule as Experience, using lumScale)
         ///   Loot Quantity: x{n.nn}   (ONLY when the gem-level-scaled capped product differs from 1.00; no separate xpScale/lumScale-style dial exists for this axis, only the reward-scale ratio)
         ///   Entries: {entries} of {maxEntries}
-        ///   Bound to {name}. It crumbles when the dungeon is cleared or its last entry is spent; a death after the clear leaves no way back in. | Unbound. Use it to open a dungeon. | Unpressed. Load spell components onto it, then press it at the Fragment Press.
+        ///   Bound to {name}. It crumbles when you leave the cleared dungeon by recall or its exit portal, or when the dungeon closes. | Unbound. Use it to open a dungeon. | Unpressed. Load spell components onto it, then press it at the Fragment Press.
         ///
         /// The Pressed: line is emitted only for a fragment because a Thread Gem's load is always empty
         /// (DungeonGemFactory enforces it), so on a gem the line would be permanent noise. The ten shipped

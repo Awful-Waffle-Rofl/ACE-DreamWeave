@@ -58,9 +58,10 @@ namespace ACE.Server.Pvp
     /// <summary>
     /// What the coordinator hands the gateway with each grant: the match (for logs), the cap dials as they stood
     /// at Resolve, so the player-side cap check reads the same settings the match resolved under, and the
-    /// <see cref="Ledger"/> whose daily cap the grant counts against (defaults to the arena's).
+    /// <see cref="Ledger"/> whose daily cap the grant counts against (defaults to the arena's). <see cref="DoubleMarks"/> marks a battleground
+    /// grant that was multiplied by a Double Marks window, so the pickup line says so; it changes no amount or cap.
     /// </summary>
-    public sealed record PvpBloodGrant(Guid MatchId, int DailyCap, string ResetTimezone, int ResetHour, PvpBloodLedgerKind Ledger = PvpBloodLedgerKind.Arena);
+    public sealed record PvpBloodGrant(Guid MatchId, int DailyCap, string ResetTimezone, int ResetHour, PvpBloodLedgerKind Ledger = PvpBloodLedgerKind.Arena, bool DoubleMarks = false);
 
     /// <summary>
     /// The PvP arena Blood payout, pure (Docs/Pvp/DESIGN.md "Rewards"; owner ruling 2026-10-01). Blood is a COSMETIC
@@ -102,11 +103,12 @@ namespace ACE.Server.Pvp
 
         /// <summary>
         /// Blood owed to one participant of a resolved match, before the daily cap. 0 when the payout is off, the match
-        /// never went Live, the opponents shared an IP, or the participant forfeited. A non-positive dial pays 0.
+        /// never went Live, the opponents shared an IP, the participant forfeited, or <paramref name="withheld"/> (an unpaid
+        /// rematch: the repeat-pairing cap, Docs/Pvp/DESIGN.md). A non-positive dial pays 0.
         /// </summary>
-        public static int BloodFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, PvpArenaDials dials)
+        public static int BloodFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, PvpArenaDials dials, bool withheld = false)
         {
-            if (dials == null || !dials.BloodEnabled || !wentLive || sameIp || forfeited)
+            if (dials == null || !dials.BloodEnabled || !wentLive || sameIp || forfeited || withheld)
                 return 0;
 
             int amount;
@@ -134,15 +136,26 @@ namespace ACE.Server.Pvp
         }
 
         /// <summary>
+        /// The effective Double Marks multiplier (pvp_bg_bonus_multiplier): NaN, infinite or below 1 reads as 1.0, so the bonus never reduces pay.
+        /// </summary>
+        public static double SanitizeBonusMultiplier(double multiplier)
+        {
+            if (double.IsNaN(multiplier) || double.IsInfinity(multiplier) || multiplier < 1.0)
+                return 1.0;
+
+            return multiplier;
+        }
+
+        /// <summary>
         /// Marks owed to one participant of a resolved BATTLEGROUND match, before the battleground daily cap: the per-result
-        /// base (pvp_bg_marks_win / _loss / _draw) times <see cref="SanitizeMarksScale"/> of pvp_bg_marks_scale, rounded
+        /// base (pvp_bg_marks_win / _loss / _draw) times <see cref="SanitizeMarksScale"/> of pvp_bg_marks_scale times <see cref="SanitizeBonusMultiplier"/> of <paramref name="bonusMultiplier"/> (the Double Marks window's pvp_bg_bonus_multiplier, 1.0 outside a window), rounded
         /// to the nearest whole Mark (halves away from zero) and never below 0. 0 when the shared master switch
         /// (pvp_arena_blood_enabled, passed as <paramref name="enabled"/>) is off, the match never went Live, opposing teams shared an IP, or the participant
-        /// forfeited. A non-positive base pays 0 whatever the scale. Saturates at int.MaxValue.
+        /// forfeited, or was <paramref name="withheld"/> by the contribution floor (<see cref="PvpConductFloor"/>). A non-positive base pays 0 whatever the scale. Saturates at int.MaxValue.
         /// </summary>
-        public static int BgMarksFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, bool enabled, BattlegroundDials bg)
+        public static int BgMarksFor(PvpBloodResult result, bool forfeited, bool wentLive, bool sameIp, bool enabled, BattlegroundDials bg, bool withheld, double bonusMultiplier = 1.0)
         {
-            if (bg == null || !enabled || !wentLive || sameIp || forfeited)
+            if (bg == null || !enabled || !wentLive || sameIp || forfeited || withheld)
                 return 0;
 
             int baseAmount;
@@ -157,7 +170,7 @@ namespace ACE.Server.Pvp
             if (baseAmount <= 0)
                 return 0;
 
-            var scaled = Math.Round(baseAmount * SanitizeMarksScale(bg.MarksScale), MidpointRounding.AwayFromZero);
+            var scaled = Math.Round(baseAmount * SanitizeMarksScale(bg.MarksScale) * SanitizeBonusMultiplier(bonusMultiplier), MidpointRounding.AwayFromZero);
 
             if (scaled >= int.MaxValue)
                 return int.MaxValue;

@@ -90,6 +90,10 @@ namespace ACE.Server.WorldObjects
                 {
                     if (AttackTarget == null || IsDead || target.IsDead) return;
 
+                    // Elemental Proficiency Bludgeon stun: a swing that was winding up when the stun landed
+                    // never connects
+                    if (IsClassAbilityStunned) return;
+
                     if (WeenieType == WeenieType.GamePiece)
                     {
                         target.TakeDamage(this, DamageType.Slash, target.Health.Current);
@@ -122,7 +126,8 @@ namespace ACE.Server.WorldObjects
                             if (GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
                                 FightDirty(targetPlayer, damageEvent.Weapon);
                         }
-                        else if (combatPet != null || targetPet != null || Faction1Bits != null || target.Faction1Bits != null || PotentialFoe(target))
+                        else if (combatPet != null || targetPet != null || Faction1Bits != null || target.Faction1Bits != null || PotentialFoe(target)
+                            || ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnightTargetFor(this, target))
                         {
                             // combat pet inflicting or receiving damage
                             //Console.WriteLine($"{target.Name} taking {Math.Round(damage)} {damageType} damage from {Name}");
@@ -158,7 +163,12 @@ namespace ACE.Server.WorldObjects
             PrevAttackTime = Timers.RunningTime;
             NextMoveTime = PrevAttackTime + animLength + 0.5f;
 
-            var meleeDelay = ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f));
+            // Weakened Blood slow: animLength is already slowed through GetAnimSpeed; the random recovery
+            // delay is a duration, so it stretches by the same factor (unchanged when unslowed)
+            var meleeDelay = ScaleWeakenedBloodSlowDuration(ThreadSafeRandom.Next(0.0f, (float)(PowerupTime ?? 1.0f)));
+
+            // World Events Hold: a wave runner recovers faster. One field read for every other creature.
+            meleeDelay = ACE.Server.WorldEvents.WorldEventHooks.HoldMeleeDelay(this, meleeDelay);
 
             NextAttackTime = PrevAttackTime + animLength + meleeDelay;
 
@@ -357,6 +367,9 @@ namespace ACE.Server.WorldObjects
             var baseSpeed = GetAnimSpeed();
             var animSpeedMod = IsDualWieldAttack ? 1.2f : 1.0f;     // dual wield swing animation 20% faster
             var animSpeed = baseSpeed * animSpeedMod;
+
+            // World Events Hold: a wave runner swings faster. One field read for every other creature.
+            animSpeed = ACE.Server.WorldEvents.WorldEventHooks.HoldAnimSpeed(this, animSpeed);
 
             animLength = MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, motionCommand, animSpeed);
 

@@ -60,6 +60,7 @@ namespace ACE.Server.MonsterEffects
         public IReadOnlyList<int> CastHookIndexes { get; }
         public IReadOnlyList<int> HeartbeatIndexes { get; }
         public IReadOnlyList<int> RampSourceIndexes { get; }
+        public IReadOnlyList<int> TauntHoldIndexes { get; }
 
         private MonsterEffectSet(Entry[] authored)
         {
@@ -88,6 +89,7 @@ namespace ACE.Server.MonsterEffects
             CastHookIndexes       = IndexesOf<IMonsterCastHook>(entries);
             HeartbeatIndexes      = IndexesOf<IMonsterHeartbeat>(entries);
             RampSourceIndexes     = IndexesOf<IMonsterRampSource>(entries);
+            TauntHoldIndexes      = IndexesOf<IMonsterTauntHold>(entries);
         }
 
         private static int[] IndexesOf<THook>(Entry[] entries) where THook : class, IMonsterEffect =>
@@ -130,8 +132,8 @@ namespace ACE.Server.MonsterEffects
         /// <summary>
         /// Test seam (InternalsVisibleTo, ACE.Server.csproj:15): builds a set from handler instances
         /// directly, bypassing the registry. <see cref="Build"/> resolves kinds through
-        /// MonsterEffectRegistry, which ships no handlers yet, so this is the only way a test can exercise
-        /// the dispatch sites without making the production registry mutable.
+        /// MonsterEffectRegistry, so a test that wants a hand-picked handler set (or a spec the handler's
+        /// Validate would reject) goes through this seam instead of mutating the production registry.
         /// </summary>
         internal static MonsterEffectSet BuildFromHandlers(params (IMonsterEffect Handler, MonsterEffectSpec Spec)[] entries) =>
             new MonsterEffectSet(entries.Select(e => new Entry(e.Handler, e.Spec)).ToArray());

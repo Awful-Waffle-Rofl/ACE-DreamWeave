@@ -14,9 +14,35 @@ namespace ACE.Server.Managers.Market.Suit
     {
         public const string SourceVault = "vault";
         public const string SourceEquipped = "equipped";
+        public const string SourcePack = "pack";
 
-        /// <summary>"vault" or "equipped" today; later phases add more.</summary>
+        /// <summary>"vault", "equipped" or "pack" (carried, not worn). A shared mule's item is still "vault".</summary>
         public string Source { get; init; }
+
+        /// <summary>
+        /// Which vault a "vault" item sits in: null (omitted) for the caller's own vault, "s:&lt;grant id&gt;" for a
+        /// mule shared with the character the shared-inventory route was asked about. Echoed back as a transfer
+        /// line's vault_key, which the server re-resolves against the grant before anything moves.
+        /// </summary>
+        public string VaultKey { get; init; }
+
+        /// <summary>
+        /// The shared mule's label (the granter character's name, or the "A shared mule" fallback, exactly as
+        /// /mule search all labels it); null (omitted) for the caller's own vault. Display only.
+        /// </summary>
+        public string VaultLabel { get; init; }
+
+        /// <summary>
+        /// The character whose pack or body holds the item ("pack" and "equipped" items only); null (omitted)
+        /// for a vault, ledger or class line.
+        /// </summary>
+        public uint? HolderGuid { get; init; }
+
+        /// <summary>True when PropertyInt.Attuned is >= 1 (the item cannot be traded); null (omitted) otherwise.</summary>
+        public bool? Attuned { get; init; }
+
+        /// <summary>True when PropertyInt.Bonded is >= 1 (the item survives death / is bonded); null (omitted) otherwise.</summary>
+        public bool? Bonded { get; init; }
 
         /// <summary>The stored item's guid; null for a collapsed ledger row, which has no biota.</summary>
         public uint? ItemGuid { get; init; }
@@ -29,7 +55,7 @@ namespace ACE.Server.Managers.Market.Suit
         /// <summary>Units this line stands for: 1 for a stored item, the pool count for a class line.</summary>
         public int Count { get; init; } = 1;
 
-        /// <summary>Whether the item is currently listed on the market. Filled by a later step; always false here.</summary>
+        /// <summary>Whether the item is currently listed on the market. The projector always builds it false; the vault suit inventory (MarketManager_Suit) sets it true for a listed line.</summary>
         public bool Listed { get; init; }
 
         public string Name { get; init; }
@@ -99,6 +125,24 @@ namespace ACE.Server.Managers.Market.Suit
         /// ineligible items, non-armor) and for a template-weenie projection (no live item to judge).
         /// </summary>
         public IReadOnlyList<SuitReduction> Reductions { get; init; }
+
+        /// <summary>PropertyInt.GearDamage (Damage Rating); null when absent or 0.</summary>
+        public int? GearDamage { get; init; }
+
+        /// <summary>PropertyInt.GearDamageResist (Damage Reduction Rating); null when absent or 0.</summary>
+        public int? GearDamageResist { get; init; }
+
+        /// <summary>PropertyInt.GearCritDamage (Critical Damage Rating); null when absent or 0.</summary>
+        public int? GearCritDamage { get; init; }
+
+        /// <summary>PropertyInt.GearCritDamageResist (Critical Damage Reduction Rating); null when absent or 0.</summary>
+        public int? GearCritDamageResist { get; init; }
+
+        /// <summary>PropertyInt.GearHealingBoost (Healing Boost Rating); null when absent or 0.</summary>
+        public int? GearHealingBoost { get; init; }
+
+        /// <summary>PropertyInt.GearMaxHealth (Vitality, "Maximum Health Bonus"); null when absent or 0.</summary>
+        public int? GearMaxHealth { get; init; }
     }
 
     /// <summary>

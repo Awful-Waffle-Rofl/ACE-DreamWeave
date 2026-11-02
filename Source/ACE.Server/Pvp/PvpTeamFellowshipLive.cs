@@ -258,6 +258,22 @@ namespace ACE.Server.Pvp
             }
         }
 
+        public void Readmit(Guid matchId, int teamIndex, uint characterId)
+        {
+            if (!teamBooks.TryGetValue(matchId, out var book) || !book.Teams.TryGetValue(teamIndex, out var team))
+                return;
+
+            var p = Online(characterId);
+
+            if (p == null || p.IsLoggingOut || p.Fellowship != null || !team.IsPvpTeam || team.PvpTeamMatchId != matchId || LiveMembers(team).Count == 0)
+                return;
+
+            if (team.AddPvpTeamMember(p))
+                log.Info($"[PVP] match {matchId}: {p.Name} rejoined the team fellowship {team.FellowshipName}");
+            else
+                log.Warn($"[PVP] match {matchId}: {p.Name} could not rejoin the team fellowship {team.FellowshipName}");
+        }
+
         public void Dispose(Guid matchId)
         {
             if (teamBooks.Remove(matchId, out var book))

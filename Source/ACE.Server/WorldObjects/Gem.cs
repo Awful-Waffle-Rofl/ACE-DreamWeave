@@ -78,6 +78,11 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Owner ruling 2026-10-22: rare gems are disabled in Knot fights - stripped on entry, refused inside.
+            // Checked before the confirmation prompt and the rare timer so nothing is spent or prompted.
+            if (RefuseRareInKnot(player))
+                return;
+
             // handle rare gems
             if (RareId != null && player.GetCharacterOption(CharacterOption.ConfirmUseOfRareGems) && !confirmed)
             {
@@ -123,6 +128,11 @@ namespace ACE.Server.WorldObjects
         {
             if (player.IsDead) return;
 
+            // Owner ruling 2026-10-22 (rare gems disabled in Knot fights): re-checked here because the animated
+            // ActOnUse path and the confirmation callback reach this method later than the ActOnUse check.
+            if (RefuseRareInKnot(player))
+                return;
+
             // verify item is still valid
             if (player.FindObject(Guid.Full, Player.SearchLocations.MyInventory) == null)
             {
@@ -151,6 +161,39 @@ namespace ACE.Server.WorldObjects
             // below, the same way the summoning contract does.
             if (MuleFormToken.IsToken(this) && TryHandleMuleFormTokenUse(player))
                 return;
+
+            // Fragment Mold: it only works ON a Raw Fragment (HandleActionUseOnTarget). A target-less use must
+            // refuse BEFORE the fall-through consumption at the bottom of this method, or the mold is destroyed.
+            // The weenie also sets UnlimitedUse as a second guard.
+            if (GetProperty(PropertyBool.FragmentMold) == true)
+            {
+                player.SendTransientError(ThreadDungeons.FragmentMoldRules.RefuseNoTarget);
+                return;
+            }
+
+            // Sacrificial Dagger: like the mold, it only works ON a summon item. A target-less use must refuse
+            // BEFORE the fall-through consumption at the bottom of this method, or the dagger is destroyed.
+            if (SacrificialDagger.IsDagger(this))
+            {
+                player.SendTransientError(SacrificialDagger.NoTargetText);
+                return;
+            }
+
+            // Summon Gem Hammer: same shape as the dagger - it only works ON a Duo Summon Gem, and a target-less use
+            // must refuse BEFORE the fall-through consumption below, or the hammer is destroyed.
+            if (SummonGemHammer.IsHammer(this))
+            {
+                player.SendTransientError(SummonGemHammer.NoTargetText);
+                return;
+            }
+
+            // Duo Summon Gem: the gem is a PetDevice weenie, never a Gem. A Gem-typed weenie carrying the flag is a
+            // content error; refuse it here so a double-click cannot consume what may be holding two summons.
+            if (DuoSummonGem.IsDuoGem(this))
+            {
+                player.SendTransientError(DuoSummonGem.UnboundText);
+                return;
+            }
 
             // class ability point item - a gem whose function is granting class ability points
             // (see ClassAbilityRegistry / Player_ClassAbilities). Data-driven: any Gem weenie with
@@ -221,6 +264,29 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Knots: a Fiber and a Pattern do nothing without their partner (a Fiber needs a Pattern used on it). A target-less
+            // use must refuse BEFORE the generic consume at the bottom of this method, or the item is destroyed.
+            // The weenies also set UnlimitedUse as a second guard. A FULL Pattern used with no target retries its completion
+            // (the retry after making room for the Knot).
+            if (ACE.Server.Knots.KnotItems.IsFiber(this))
+            {
+                player.SendTransientError(ACE.Server.Knots.KnotItems.FiberNeedsPattern);
+                return;
+            }
+
+            if (ACE.Server.Knots.KnotItems.IsPattern(this))
+            {
+                if (!ACE.Server.Knots.KnotSeam.TryCompleteFullPattern(player, this))
+                    player.SendTransientError(ACE.Server.Knots.KnotItems.PatternNeedsTarget);
+                return;
+            }
+
+            // Knots: a Knot (PropertyInt.KnotItemKind) enters its pinnacle. KnotSeam returns true on every path,
+            // refusals included, so the generic consume at the bottom of this method never reaches a Knot; the
+            // Knot is spent or destroyed only inside the handler, after the encounter admits the player.
+            if (ACE.Server.Knots.KnotItems.IsKnot(this) && ACE.Server.Knots.KnotSeam.TryHandleUse(this, player))
+                return;
+
             // Threads (WaffleACE): a Gem carrying PropertyString.DungeonGemSpec opens or re-enters a
             // private dungeon copy. Sits before the portal-gem branch on purpose: a dungeon gem carries no
             // Destination, and every refusal or consume happens inside the handler. See ThreadDungeonGemHandler.
@@ -233,6 +299,13 @@ namespace ACE.Server.WorldObjects
             // marker, since there is no CheckUseRequirements override and a Use emote would fire before
             // ActOnUse ever reaches here.
             if (ACE.Server.MlTreasure.TreasureMapHandler.TryHandleUse(this, player))
+                return;
+
+            // World Events presence payout: a Gem carrying PropertyBool.WorldEventRewardCrate is the event reward
+            // crate, rolled in code (pool x stamped multiplier); every refusal and the consume happen inside the
+            // handler. Same rule as the treasure map above: no Use emote set may exist on a weenie carrying this
+            // marker.
+            if (ACE.Server.WorldEvents.WorldEventHooks.TryUseRewardCrate(this, player))
                 return;
 
             // portal gem - a Gem with a Destination position teleports the player there instantly on use
@@ -371,10 +444,10 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            var portalDest = new Position(Destination);
-            AdjustDungeon(portalDest);
-
-            portalDest = Portal.ResolvePortalDestination(this, player, portalDest);
+            // Resolved WITHOUT AdjustDungeon for the refusal checks below (AdjustDungeon only moves the cell within
+            // the landblock, so it cannot change their answer); it is adjusted just before the teleport, once
+            // nothing can refuse - see Portal.ResolveArrivalDestination for why the order matters.
+            var portalDest = Portal.ResolvePortalDestination(this, player, new Position(Destination));
 
             // a cross-realm hop that stays inside one landblock renders as a blend of both realms' content,
             // because the landblock is already loaded for the instance the player is standing in. The Town
@@ -396,11 +469,15 @@ namespace ACE.Server.WorldObjects
             if (UseSound > 0)
                 player.Session.Network.EnqueueSend(new GameMessageSound(player.Guid, UseSound));
 
+            // portalDest is already instance-resolved (above), so adjusting it now touches only the landblock this
+            // teleport loads anyway
+            AdjustDungeon(portalDest);
+
             WorldManager.ThreadSafeTeleport(player, portalDest, new ActionEventDelegate(() =>
             {
                 player.SendWeenieError(WeenieError.ITeleported);
 
-            }), true);
+            }), true, TeleportSource.Gem);
         }
 
         /// <summary>
@@ -608,8 +685,31 @@ namespace ACE.Server.WorldObjects
             set { if (!value) RemoveProperty(PropertyBool.RareUsesTimer); else SetProperty(PropertyBool.RareUsesTimer, value); }
         }
 
+        /// <summary>
+        /// Owner ruling 2026-10-22: rare gems are disabled in Knot fights. True (after telling the player) when this is a
+        /// rare gem and the player stands in a registered fight copy. Non-rare gems, including the Knot item, never match.
+        /// </summary>
+        private bool RefuseRareInKnot(Player player)
+        {
+            if (RareId == null || player?.Location == null)
+                return false;
+
+            if (!ACE.Server.Pinnacles.PinnacleFightManager.RefusesRareGem(true, ACE.Server.Pinnacles.PinnacleFightManager.IsInsidePinnacleCopy(player.Location.Instance)))
+                return false;
+
+            player.Session?.Network.EnqueueSend(new GameMessageSystemChat(ACE.Server.Pinnacles.PinnacleFightManager.RareGemsRefusedLine, ChatMessageType.Broadcast));
+            return true;
+        }
+
         public override void HandleActionUseOnTarget(Player player, WorldObject target)
         {
+            // Owner ruling 2026-10-22 (rare gems disabled in Knot fights): a rare gem used on a target is refused too.
+            if (RefuseRareInKnot(player))
+            {
+                player.SendUseDoneEvent();
+                return;
+            }
+
             // should tailoring kit / aetheria be subtyped?
             if (Tailoring.IsTailoringKit(WeenieClassId))
             {
@@ -648,6 +748,42 @@ namespace ACE.Server.WorldObjects
                 // handler that ends a use-on-target owns it (RecipeManager, PrismaticDriftStone and
                 // Healer all send it on every branch), or the client's use state stays locked. The
                 // double-click path does not need it: TryUseItem sends it after OnActivate returns.
+                player.SendUseDoneEvent();
+                return;
+            }
+
+            // Custom Summons: the Sacrificial Dagger imprints a destroyed summon's ratings, or applies an imprint to
+            // another summon. Keyed on its PropertyBool, so a second dagger weenie is pure content. UseOnTarget
+            // sends the use-done event on every exit.
+            if (SacrificialDagger.IsDagger(this))
+            {
+                SacrificialDagger.UseOnTarget(player, this, target);
+                return;
+            }
+
+            // Custom Summons: the Summon Gem Hammer breaks a bound Duo Summon Gem back into its two summon items. Keyed
+            // on its PropertyBool. UseOnTarget sends the use-done event on every exit (after its animation).
+            if (SummonGemHammer.IsHammer(this))
+            {
+                SummonGemHammer.UseOnTarget(player, this, target);
+                return;
+            }
+
+            // Knots: a Pattern used on a Fiber takes the Fiber in and becomes a Knot at the tenth. Every
+            // exit sends use-done, same contract as the branches around it.
+            if (ACE.Server.Knots.KnotItems.IsPattern(this))
+            {
+                ACE.Server.Knots.KnotSeam.UsePatternOnTarget(player, this, target);
+                player.SendUseDoneEvent();
+                return;
+            }
+
+            // Threads: the Fragment Mold. Checked BEFORE the DungeonGemSpec branch below: the mold carries no
+            // spec of its own, but it is the thing that reads one off its target, and keying on its own bool
+            // keeps it from ever being mistaken for a fragment. Same GameEventUseDone contract as that branch.
+            if (GetProperty(PropertyBool.FragmentMold) == true)
+            {
+                ACE.Server.ThreadDungeons.FragmentMold.UseObjectOnTarget(player, this, target);
                 player.SendUseDoneEvent();
                 return;
             }
@@ -759,7 +895,7 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            if (!MuleFormToken.IsValidAttunementTarget(target, MuleFormToken.DatSetupHeight, MuleFormToken.DatSetupEffectScale, out var refusal))
+            if (!MuleFormToken.IsValidAttunementTarget(target, MuleFormToken.DatSetupHeight, MuleFormToken.DatSetupEffectScale, MuleFormToken.DatSetupDrawsNothing, out var refusal))
             {
                 player.Session?.Network.EnqueueSend(new GameMessageSystemChat(refusal, ChatMessageType.Broadcast));
                 return;

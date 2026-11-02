@@ -1106,10 +1106,10 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CurrentVersion_IsFour_TheModsProjection()
+        public void CurrentVersion_IsFive_TheSuitProjection()
         {
-            Assert.AreEqual(4, MarketSnapshot.CurrentVersion,
-                            "mods, mod_capacity and weapon_quality_tier shipped in projection version 4");
+            Assert.AreEqual(5, MarketSnapshot.CurrentVersion,
+                            "suit shipped in projection version 5 (mods, mod_capacity and weapon_quality_tier in 4)");
         }
 
         [TestMethod]
@@ -1163,6 +1163,87 @@ namespace ACE.Server.Tests
 
             Assert.IsNotNull(mods, "the re-projected snapshot must carry the seeded weapon mod");
             Assert.IsTrue(mods.Any(m => m.Token == "Heft"), "the Heft row must survive the backfill round trip");
+        }
+
+        /// <summary>
+        /// A suit piece listed under projection version 4 has no suit; the sweep after the deploy must
+        /// re-project it with one (the backfill is a listing-snapshot site, so it passes includeSuit),
+        /// and a non-suit item swept alongside must still read none.
+        /// </summary>
+        [TestMethod]
+        public void AVersionFourSuitPieceListing_GainsItsSuitAfterTheSweep()
+        {
+            var suitWeenie = new Weenie
+            {
+                WeenieClassId = StoredWcid,
+                WeenieType = WeenieType.Clothing,
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Backfilled Breastplate" } },
+                PropertiesInt = new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.ItemType, (int)ItemType.Armor },
+                    { PropertyInt.ValidLocations, (int)(EquipMask.ChestArmor | EquipMask.AbdomenArmor) },
+                    { PropertyInt.EquipmentSetId, (int)EquipmentSet.Defenders },
+                },
+            };
+
+            var armor = new Clothing(suitWeenie, new ACE.Entity.ObjectGuid(0x7F6A0001u));
+            store.SeedItem(SellerAccount, armor);
+            var salvage = SeedStoredItem(SellerAccount, GroupWcid);
+
+            var suitRow = SeedListingRow(1, SellerAccount, armor.Guid.Full, StoredWcid, armor.Name);
+            var salvageRow = SeedListingRow(2, SellerAccount, salvage.Guid.Full, GroupWcid, salvage.Name);
+
+            foreach (var row in new[] { suitRow, salvageRow })
+            {
+                var stored = MarketSnapshot.Deserialize(row.SnapshotJson);
+                stored.SnapshotVersion = 4;
+                row.SnapshotJson = MarketSnapshot.Serialize(stored);
+            }
+
+            Assert.IsNull(MarketSnapshot.Deserialize(suitRow.SnapshotJson).Suit, "control: the version 4 document has no suit");
+
+            Boot();
+
+            var report = MarketManager.BackfillSnapshots(100, false);
+
+            Assert.AreEqual(2, report.Rewritten);
+
+            var suit = MarketManager.GetListing(1).Snapshot.Suit;
+
+            Assert.IsNotNull(suit, "the swept suit piece must gain its suit");
+            Assert.AreEqual(armor.Guid.Full, suit.ItemGuid);
+            Assert.AreEqual((int)(EquipMask.ChestArmor | EquipMask.AbdomenArmor), suit.ValidLocations);
+            Assert.AreEqual((int)EquipmentSet.Defenders, suit.EquipmentSetId);
+            Assert.IsNull(MarketManager.GetListing(2).Snapshot.Suit, "a non-suit item stays without one");
+            Assert.AreEqual(MarketSnapshot.CurrentVersion, MarketManager.GetListing(1).Snapshot.SnapshotVersion);
+        }
+
+        [TestMethod]
+        public void ListingAStoredSuitPiece_CarriesItsSuitInTheNewListingSnapshot()
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = StoredWcid,
+                WeenieType = WeenieType.Clothing,
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Listed Breastplate" } },
+                PropertiesInt = new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.ItemType, (int)ItemType.Armor },
+                    { PropertyInt.ValidLocations, (int)(EquipMask.ChestArmor | EquipMask.AbdomenArmor) },
+                },
+            };
+
+            var armor = new Clothing(weenie, new ACE.Entity.ObjectGuid(0x7F6A0002u));
+            store.SeedItem(SellerAccount, armor);
+            wallet.Seed(SellerActor.CharacterGuid, 1000);
+
+            Boot();
+
+            var result = MarketManager.List(SellerActor, armor.Guid.Full, 0, 1, 5, MarketChannel.Web);
+
+            Assert.IsTrue(result.Ok, $"listing refused: {result.Error}");
+            Assert.IsNotNull(result.Value.Snapshot.Suit, "MarketManager.List is a listing-snapshot site and must attach the suit");
+            Assert.AreEqual(armor.Guid.Full, result.Value.Snapshot.Suit.ItemGuid);
         }
 
         [TestMethod]

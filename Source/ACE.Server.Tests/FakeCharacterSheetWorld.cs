@@ -55,6 +55,11 @@ namespace ACE.Server.Tests
             return PresenceOf.TryGetValue(characterGuid, out var presence) ? presence : CharacterPresence.Missing;
         }
 
+        /// <summary>A character absent from this map is unknown to PlayerManager (PlayerInfo answers null).</summary>
+        public ConcurrentDictionary<uint, SheetPlayerInfo> InfoOf { get; } = new ConcurrentDictionary<uint, SheetPlayerInfo>();
+
+        public SheetPlayerInfo PlayerInfo(uint characterGuid) => InfoOf.TryGetValue(characterGuid, out var info) ? info : null;
+
         public CharacterSheet BuildOnline(uint characterGuid, bool includeClassAbilities, TimeSpan timeout, bool ownerView = false)
         {
             Interlocked.Increment(ref OnlineBuildCount);
@@ -100,13 +105,16 @@ namespace ACE.Server.Tests
             return RankSnapshot;
         }
 
+        /// <summary>The class ability import block every owner-view build carries; null by default.</summary>
+        public ClassAbilityImportBlock OwnerClassAbilityImport;
+
         // a fresh instance per build, so ranks attached to one sheet can never bleed into another
-        private static CharacterSheet SheetFor(uint characterGuid, bool ownerView = false)
+        private CharacterSheet SheetFor(uint characterGuid, bool ownerView = false)
         {
             var sheet = new CharacterSheet { Name = $"Character{characterGuid:X8}", Level = 200, GeneratedAt = new DateTime(2026, 9, 14, 0, 0, 0, DateTimeKind.Utc) };
 
             if (ownerView)
-                sheet.Owner = new OwnerProfile { Name = sheet.Name, Level = sheet.Level, Heritage = "Aluvian" };
+                sheet.Owner = new OwnerProfile { Name = sheet.Name, Level = sheet.Level, Heritage = "Aluvian", ClassAbilityImport = OwnerClassAbilityImport };
 
             return sheet;
         }

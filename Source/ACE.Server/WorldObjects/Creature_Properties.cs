@@ -118,6 +118,10 @@ namespace ACE.Server.WorldObjects
         /// mark is a stackable separate debuff, so a rending weapon or a stronger Vulnerability must not
         /// displace it). The hollow-weapon early return carries it too. The mark reads 1.0 on a player, so the
         /// PvP-scaled ignore-magic-resist branch (reachable only when this is a player) is unaffected.
+        ///
+        /// FORK CHANGE - Elemental Proficiency Lightning (Creature.GetElementalLightningMod) rides beside the mark
+        /// on the same three sites (both returns here and the HealthDrain case), as a further separate factor:
+        /// it stacks multiplicatively with the mark, the vulnerability max and every other damage-taken term.
         /// </summary>
         public float GetResistanceMod(DamageType damageType, WorldObject attacker, WorldObject weapon, float weaponResistanceMod = 1.0f)
         {
@@ -132,7 +136,7 @@ namespace ACE.Server.WorldObjects
             if (ignoreMagicResist)
             {
                 if (HollowMath.IsFullResistBypass(hollow, hollowPvp, IgnoreMagicResistPvpScalar))
-                    return weaponResistanceMod * GetHuntersMarkMod();
+                    return weaponResistanceMod * GetHuntersMarkMod() * GetElementalLightningMod();
             }
 
             var protMod = EnchantmentManager.GetProtectionResistanceMod(damageType);
@@ -185,7 +189,7 @@ namespace ACE.Server.WorldObjects
                 vulnMod = GetPositiveRatingMod(addVuln);
             }
 
-            return protMod * vulnMod * GetHuntersMarkMod();
+            return protMod * vulnMod * GetHuntersMarkMod() * GetElementalLightningMod();
         }
 
         public virtual float GetNaturalResistance(DamageType damageType)
@@ -219,24 +223,33 @@ namespace ACE.Server.WorldObjects
             }
         }
 
-        public double GetResistanceMod(ResistanceType resistance, WorldObject attacker = null, WorldObject weapon = null, float weaponResistanceMod = 1.0f)
+        /// <summary>
+        /// The full resistance multiplier for one resistance type: innate ResistX x the enchantment term.
+        /// FORK CHANGE - <paramref name="innateOverride"/> (Archmage pass 2026-10-24): when set, it REPLACES the
+        /// innate ResistX term for the seven types ArchmageResistanceMath.InnateResistTypes lists (fire, cold,
+        /// acid, electric, pierce, slash, bludgeon) and nothing else. The enchantment term, the weapon resistance
+        /// mod and Hunter's Mark are still those of <paramref name="resistance"/>. Elemental Inversion and Arcane
+        /// Hollow pass it through Player.GetArchmageInnateOverride; it is ignored for Nether and for the
+        /// life/stamina/mana cases. Null (the default) is the unchanged lookup.
+        /// </summary>
+        public double GetResistanceMod(ResistanceType resistance, WorldObject attacker = null, WorldObject weapon = null, float weaponResistanceMod = 1.0f, double? innateOverride = null)
         {
             switch (resistance)
             {
                 case ResistanceType.Slash:
-                    return (ResistSlash ?? 1.0) * GetResistanceMod(DamageType.Slash, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistSlash ?? 1.0) * GetResistanceMod(DamageType.Slash, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Pierce:
-                    return (ResistPierce ?? 1.0) * GetResistanceMod(DamageType.Pierce, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistPierce ?? 1.0) * GetResistanceMod(DamageType.Pierce, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Bludgeon:
-                    return (ResistBludgeon ?? 1.0) * GetResistanceMod(DamageType.Bludgeon, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistBludgeon ?? 1.0) * GetResistanceMod(DamageType.Bludgeon, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Fire:
-                    return (ResistFire ?? 1.0) * GetResistanceMod(DamageType.Fire, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistFire ?? 1.0) * GetResistanceMod(DamageType.Fire, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Cold:
-                    return (ResistCold ?? 1.0) * GetResistanceMod(DamageType.Cold, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistCold ?? 1.0) * GetResistanceMod(DamageType.Cold, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Acid:
-                    return (ResistAcid ?? 1.0) * GetResistanceMod(DamageType.Acid, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistAcid ?? 1.0) * GetResistanceMod(DamageType.Acid, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Electric:
-                    return (ResistElectric ?? 1.0) * GetResistanceMod(DamageType.Electric, attacker, weapon, weaponResistanceMod);
+                    return (innateOverride ?? ResistElectric ?? 1.0) * GetResistanceMod(DamageType.Electric, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.Nether:
                     return (ResistNether ?? 1.0) * GetResistanceMod(DamageType.Nether, attacker, weapon, weaponResistanceMod);
                 case ResistanceType.HealthBoost:
@@ -249,7 +262,7 @@ namespace ACE.Server.WorldObjects
                     // 2026-09-14: life damage takes the mark). Drain never reaches this case - it reads
                     // GetHealthDrainResistanceOnly - so Drain stays excluded.
                     return GetEffectiveResistHealthDrain() * GetNaturalResistance(DamageType.Health) * GetLifeResistRatingMod()
-                           * GetLifeVulnerabilityMod(weaponResistanceMod) * GetHuntersMarkMod();
+                           * GetLifeVulnerabilityMod(weaponResistanceMod) * GetHuntersMarkMod() * GetElementalLightningMod();
                 case ResistanceType.StaminaBoost:
                     return (ResistStaminaBoost ?? 1.0) * GetHealingRatingMod();     // does healing rating affect these?
                 case ResistanceType.StaminaDrain:

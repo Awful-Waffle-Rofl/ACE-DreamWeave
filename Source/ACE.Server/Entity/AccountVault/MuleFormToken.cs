@@ -169,7 +169,8 @@ namespace ACE.Server.Entity.AccountVault
         /// as a plain float so it stays reachable with no database (see that overload's doc comment).
         /// </summary>
         public static bool IsValidAttunementTarget(WorldObject target, Func<uint, float> setupHeight,
-                                                   Func<uint, float> setupEffectScale, out string refusal)
+                                                   Func<uint, float> setupEffectScale,
+                                                   Func<uint, uint, bool> setupDrawsNothing, out string refusal)
         {
             if (target == null)
             {
@@ -184,8 +185,11 @@ namespace ACE.Server.Entity.AccountVault
                 target.WeenieType,
                 target.Attackable,
                 target.SetupTableId,
+                target.ClothingBase ?? 0u,
+                target.WeenieClassId,
                 setupHeight,
                 setupEffectScale,
+                setupDrawsNothing,
                 (float)PropertyManager.GetDouble("mule_form_max_effect_scale").Item,
                 out refusal);
         }
@@ -224,16 +228,27 @@ namespace ACE.Server.Entity.AccountVault
         /// WHY THERE IS NO MATCHING CHECK AT SUMMON TIME. Owner ruling: this gate is ATTUNEMENT-ONLY,
         /// by design, not an oversight to complete later. A player who already captured an oversized
         /// form before this shipped keeps it rendering - deliberate goodwill toward the beta group -
-        /// and MuleFormBody.CloneWithDonorBody and MuleSummonHandler are untouched by this feature. Do
+        /// and MuleSummonHandler carries no gate (CloneWithDonorBody's stand-in bodies are a look
+        /// substitution for an existing form, not a refusal - see MuleFormStandIn). Do
         /// not add a summon-side mirror of this check; that scope was explicitly declined.
         ///
         /// Bosses and event spawns are deliberately allowed (user ruling). Attunement records the
         /// WeenieClassId, so a Tusker Guard and a Tusker are different forms even though they share a
         /// CreatureType.
+        ///
+        /// <paramref name="setupDrawsNothing"/> answers (Setup id, ClothingBase id) with true when that
+        /// body draws nothing at all (see MuleFormVisibility), and must answer false for a body that
+        /// draws OR one it cannot read: this check fails OPEN, because a dat hiccup must not bar a good
+        /// donor. A null delegate skips the check. It is injected for the same reason as the others
+        /// (no dat in a unit test host). The ClothingBase travels with the Setup because a creature whose
+        /// bare Setup is empty can still be visible through the parts its ClothingBase swaps in.
+        /// <paramref name="wcid"/> exempts a donor that has a stand-in body (MuleFormStandIn): the
+        /// stand-in is what makes it visible, so a body that draws nothing stays attunable.
         /// </summary>
         public static bool IsValidAttunementTarget(bool isCreature, bool isPlayer, bool isPet, WeenieType weenieType,
-                                                   bool attackable, uint setupId, Func<uint, float> setupHeight,
-                                                   Func<uint, float> setupEffectScale, float maxEffectScale,
+                                                   bool attackable, uint setupId, uint clothingBaseId, uint wcid,
+                                                   Func<uint, float> setupHeight, Func<uint, float> setupEffectScale,
+                                                   Func<uint, uint, bool> setupDrawsNothing, float maxEffectScale,
                                                    out string refusal)
         {
             refusal = CannotTakeThatShapeMessage;
@@ -255,6 +270,12 @@ namespace ACE.Server.Entity.AccountVault
                 return false;
 
             if (setupEffectScale == null || setupEffectScale(setupId) > maxEffectScale)
+                return false;
+
+            // A body the client draws nothing for (Dark Sarcophagus: one clip-mapped quad plus sixteen
+            // translucent parts) would summon an invisible vendor with only a floating name. A donor
+            // with a stand-in body is exempt - the stand-in is its visible form.
+            if (setupDrawsNothing != null && !MuleFormStandIn.Has(wcid) && setupDrawsNothing(setupId, clothingBaseId))
                 return false;
 
             refusal = null;
@@ -444,6 +465,47 @@ namespace ACE.Server.Entity.AccountVault
 
             return maxScale;
         }
+
+        /// <summary>
+        /// Per-(setup, clothingBase) memo for <see cref="DatSetupDrawsNothing"/>. Same posture as
+        /// <see cref="setupEffectScaleCache"/>: only KNOWN answers (true or false) are written, so a
+        /// dat read that threw is retried on the next attempt rather than pinned for the process lifetime.
+        /// </summary>
+        private static readonly ConcurrentDictionary<(uint Setup, uint ClothingBase), bool> setupDrawsNothingCache =
+            new ConcurrentDictionary<(uint Setup, uint ClothingBase), bool>();
+
+        /// <summary>
+        /// The production "does this body draw anything" lookup, out of the client dat. True only when
+        /// the body is KNOWN to draw nothing; false for a body that draws and for one that could not be
+        /// read (fail open). Never throws. Tests inject their own delegate instead of calling this.
+        /// </summary>
+        public static bool DatSetupDrawsNothing(uint setupId, uint clothingBaseId) =>
+            GetOrComputeDrawsNothing(setupId, clothingBaseId, MuleFormVisibility.ReadDrawsNothing);
+
+        /// <summary>
+        /// The cache-or-compute seam behind <see cref="DatSetupDrawsNothing"/>; the compute delegate
+        /// answers null for "could not tell". Internal so a test can prove an unknown answer is neither
+        /// cached nor treated as "draws nothing".
+        /// </summary>
+        internal static bool GetOrComputeDrawsNothing(uint setupId, uint clothingBaseId, Func<uint, uint, bool?> compute)
+        {
+            var key = (setupId, clothingBaseId);
+
+            if (setupDrawsNothingCache.TryGetValue(key, out var cached))
+                return cached;
+
+            var answer = compute(setupId, clothingBaseId);
+
+            if (!answer.HasValue)
+                return false;
+
+            setupDrawsNothingCache[key] = answer.Value;
+            return answer.Value;
+        }
+
+        /// <summary>TEST-ONLY seam: drops the draws-nothing memo for one (Setup, ClothingBase) pair.</summary>
+        internal static void ClearDrawsNothingCacheForTest(uint setupId, uint clothingBaseId) =>
+            setupDrawsNothingCache.TryRemove((setupId, clothingBaseId), out _);
 
         /// <summary>
         /// TEST-ONLY seam: drops the effect-scale memo for one Setup id, so a test can force

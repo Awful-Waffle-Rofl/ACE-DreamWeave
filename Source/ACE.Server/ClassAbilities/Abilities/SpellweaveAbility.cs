@@ -19,7 +19,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// "simplify" procs out.
     ///
     /// SHIPPED (2026-09-12): both halves are a symmetric ARM/CONSUME pair of one-shot charges, never a
-    /// stacking ramp like Frenzy/Nether Rush/Resonance. The state lives on the Player
+    /// stacking ramp like Frenzy/Mana Rush/Resonance. The state lives on the Player
     /// (Player_ClassAbilityBuffs.cs: spellweaveWeaponChargeArmed, spellweaveSpellChargeArmed,
     /// spellweaveSpellDamageMod):
     ///
@@ -83,7 +83,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// <summary>
         /// The damage multiplier for EITHER half of the weave (1.0 = none): 1 + rank*percentPerRank + the
         /// affinity ADDED amount. Pure for testability, matching the other migrated abilities
-        /// (SavageBlowsAbility, AttackSpeedAbility): <paramref name="affinityAddedFraction"/> is the AMOUNT
+        /// (HeavyBlowsAbility, AttackSpeedAbility): <paramref name="affinityAddedFraction"/> is the AMOUNT
         /// the Item Enchantment multiplier adds to the rank term (rankBonus * multiplier - rankBonus), not
         /// the raw multiplier, so a caller with no affinity term can pass 0 and get the rank-only bonus
         /// bit-for-bit. Shared by both halves - the mechanic is symmetric, so one formula serves both.

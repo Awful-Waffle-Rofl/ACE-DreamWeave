@@ -1,6 +1,7 @@
 using System;
 
 using ACE.Server.Managers;
+using ACE.Server.WorldObjects;
 
 namespace ACE.Server.WeaponMods
 {
@@ -32,15 +33,15 @@ namespace ACE.Server.WeaponMods
         /// only one that ever was, Cleave, was retired 2026-08-07 - so this branch is machinery held for the
         /// next such row, not dead code that can be deleted.
         /// </summary>
-        public static double Resolve(WeaponModDefinition definition, double potency, double workmanship, double scale)
+        public static double Resolve(WeaponModDefinition definition, double potency, double workmanship, double scale, WorldObject item = null)
         {
             if (definition == null)
                 return 0.0;
 
             if (definition.Binary)
-                return definition.MaxRoll;
+                return definition.MaxRollFor(item);
 
-            var raw = definition.MaxRoll * Clamp01(potency) * (ClampWorkmanship(workmanship) / 10.0) * SanitizeScale(scale);
+            var raw = definition.MaxRollFor(item) * Clamp01(potency) * (ClampWorkmanship(workmanship) / 10.0) * SanitizeScale(scale);
 
             if (!definition.IsInteger)
                 return raw;
@@ -66,8 +67,8 @@ namespace ACE.Server.WeaponMods
         /// Zero or negative means "no meaningful ceiling" - a muted scale, or a hypothetical row with a
         /// non-positive MaxRoll - and callers must treat that as unreportable rather than dividing by it.
         /// </summary>
-        public static double MaxMagnitude(WeaponModDefinition definition, double scale) =>
-            Resolve(definition, 1.0, 10.0, scale);
+        public static double MaxMagnitude(WeaponModDefinition definition, double scale, WorldObject item = null) =>
+            Resolve(definition, 1.0, 10.0, scale, item);
 
         /// <summary>MaxMagnitude against the live weapon_mod_magnitude_scale tunable.</summary>
         public static double MaxMagnitude(WeaponModDefinition definition) =>
@@ -120,6 +121,12 @@ namespace ACE.Server.WeaponMods
         // CATALOG contributes (MaxRoll, the scale tunable) deliberately left out, so the catalog side can be
         // retuned and every existing weapon moves with it. It is exactly the number the appraisal panel
         // reports: a fraction of 0.83 is the "[83%]" a player reads.
+        //
+        // THE OPTIONAL ITEM ARGUMENT (2026-10-25). A row with a WeaponModDefinition.CeilingFactor (today only
+        // Defensive Weapon: 100 on a one-handed melee weapon, 200 on everything else) reaches a different
+        // ceiling on different items, so every conversion below takes the CARRIER item and resolves the
+        // ceiling through WeaponModDefinition.MaxRollFor. Pass the item at every production site; a null item
+        // reads the row's full MaxRoll. Rows without a factor are unaffected either way.
 
         /// <summary>
         /// The roll's own contribution, in [0, 1]: potency scaled by workmanship. This is what a Tier B record
@@ -141,15 +148,15 @@ namespace ACE.Server.WeaponMods
         /// Integer quantization and the Binary short-circuit are applied here too, so this stays substitutable
         /// for <see cref="Resolve"/> even on a row shape that no Tier B entry uses today.
         /// </summary>
-        public static double MagnitudeFromFraction(WeaponModDefinition definition, double fraction, double scale)
+        public static double MagnitudeFromFraction(WeaponModDefinition definition, double fraction, double scale, WorldObject item = null)
         {
             if (definition == null)
                 return 0.0;
 
             if (definition.Binary)
-                return definition.MaxRoll;
+                return definition.MaxRollFor(item);
 
-            var raw = definition.MaxRoll * Clamp01(fraction) * SanitizeScale(scale);
+            var raw = definition.MaxRollFor(item) * Clamp01(fraction) * SanitizeScale(scale);
 
             if (!definition.IsInteger)
                 return raw;
@@ -179,7 +186,7 @@ namespace ACE.Server.WeaponMods
         /// Returns 0 when there is no ceiling to divide by - a muted scale, or a non-positive MaxRoll - which
         /// is the same "unreportable" reading the display layer takes.
         /// </summary>
-        public static double FractionFor(WeaponModDefinition definition, double magnitude, double scale)
+        public static double FractionFor(WeaponModDefinition definition, double magnitude, double scale, WorldObject item = null)
         {
             if (definition == null || double.IsNaN(magnitude))
                 return 0.0;
@@ -187,7 +194,7 @@ namespace ACE.Server.WeaponMods
             if (definition.Binary)
                 return 1.0;
 
-            var ceiling = definition.MaxRoll * SanitizeScale(scale);
+            var ceiling = definition.MaxRollFor(item) * SanitizeScale(scale);
 
             if (double.IsNaN(ceiling) || ceiling <= 0.0)
                 return 0.0;

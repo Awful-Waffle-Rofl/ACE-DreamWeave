@@ -72,7 +72,8 @@ namespace ACE.Server.ThreadDungeons
                 return null;
             }
 
-            // Explicit fallback: GetBool's own is false until PropertyManager.DoWork seeds a row, and this ships ON.
+            // Explicit fallback: this ships ON. GetBool's own `false` is returned only before PropertyManager.Initialize
+            // pre-seeds the defaults, or for a key missing from DefaultBooleanProperties.
             if (!PropertyManager.GetBool("dynamic_dungeons_loot_weenie_warmup", true).Item)
             {
                 log.Info("[DYNDUNGEON] loot weenie warm-up skipped: dynamic_dungeons_loot_weenie_warmup is off");
@@ -99,6 +100,13 @@ namespace ACE.Server.ThreadDungeons
             yield return ThreadDungeonRewardSpawner.BossCacheWcid;
             yield return ThreadDungeonRewardSpawner.SummonedExitWcid;
             yield return ThreadDungeonRewardSpawner.TradeNoteWcid;
+
+            // Knots (Docs/Knots/KNOTS-DESIGN.md sections 3 and 5): the Fiber and the Pattern the clear roll creates, and
+            // the Knotted Thread Cache the placer forms for them, and the Pinnacle Cache a pinnacle win pays into.
+            yield return ACE.Server.Knots.KnotItems.FiberWcid;
+            yield return ACE.Server.Knots.KnotItems.PatternWcid;
+            yield return ACE.Server.Knots.KnotItems.KnottedThreadCacheWcid;
+            yield return ACE.Server.Knots.KnotItems.PinnacleCacheWcid;
 
             foreach (var wcid in (salvageBags ?? Enumerable.Empty<uint>()).Concat(affinityBases ?? Enumerable.Empty<uint>()))
             {

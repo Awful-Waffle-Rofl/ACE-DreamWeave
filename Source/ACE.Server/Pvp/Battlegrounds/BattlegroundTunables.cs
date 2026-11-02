@@ -122,8 +122,53 @@ namespace ACE.Server.Pvp.Battlegrounds
         // = 1.0 (unchanged), negative = 0 (pays nothing); sanitized where it is applied (PvpArenaRewards.SanitizeMarksScale).
         double MarksScale = 1.0,
         // pvp_bg_marks_daily_cap - at most this many PAID battleground matches per character per day (its own ledger,
-        // independent of pvp_arena_blood_daily_cap; same reset zone and hour). 0 or negative = no cap.
-        int MarksDailyCap = 10);
+        // independent of pvp_arena_blood_daily_cap; same reset zone and hour). 0 or negative = no cap. Defaults 0 (no cap).
+        int MarksDailyCap = 0,
+        // pvp_bg_perf_koth_near_margin - performance stats only (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"): a King of the Hill killshot counts as
+        // near the hill when the victim died inside the scored zone widened by this many metres horizontally. Snapshotted at formation.
+        // NaN, infinite or negative = 0 (sanitized where it is applied, BattlegroundPerformanceLedger.IsNearHill). Changes no score; near-hill kills weigh more in the rating ("Rating and performance").
+        double KothPerfNearMargin = 6.0,
+        // pvp_bg_perf_enabled - the performance modifier on battleground rating (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance"). Off = every
+        // battleground delta is exactly the team-Elo one. Read when the match resolves, like every pvp_bg_perf_* rating setting below.
+        bool PerfEnabled = true,
+        // pvp_bg_perf_gain - m = clamp(gain x (P - 1), -cap, +cap). NaN, infinite or negative = 0 (sanitized in PerformanceDials.From).
+        double PerfGain = 1.0,
+        // pvp_bg_perf_cap_pct - the cap on |m| in percent; clamped to 0..100.
+        long PerfCapPct = 25,
+        // pvp_bg_perf_w_* - the stat weights, normalised per role; negative = 0, and a 0 weight drops the stat.
+        long PerfWeightAdAtkCrystalDmg = 30,
+        long PerfWeightAdAtkPlayerDmg = 40,
+        long PerfWeightAdAtkKills = 30,
+        long PerfWeightAdDefDmgNear = 30,
+        long PerfWeightAdDefKillsNear = 30,
+        long PerfWeightAdDefDmgFar = 20,
+        long PerfWeightAdDefKillsFar = 20,
+        long PerfWeightKothHillSeconds = 50,
+        long PerfWeightKothDmg = 25,
+        long PerfWeightKothKills = 25,
+        // pvp_bg_perf_koth_near_kill_weight - a King of the Hill killshot near the hill counts this many kills. NaN, infinite or negative = 1.
+        double PerfKothNearKillWeight = 2.0,
+        // pvp_bg_group_join_enabled - whether /arena join bg group may queue a whole fellowship as one premade unit. Defaults OFF
+        // (owner ruling 2026-10-15). Read on each join (PvpMatchCoordinator.Join). Turning it off never evicts a premade already queued.
+        bool GroupJoinEnabled = false,
+        // pvp_bg_ring_dmg - the battleground's own ring scaler (twin of pvp_arena_ffa_ring_dmg): multiplies the damage of ring-shape spell
+        // projectiles of ANY school between two players bound to the same Live battleground match, at choke point AM1 before the damage cap.
+        // Read on every hit through BattlegroundTunables.DialSource. NaN, infinite or negative = unchanged (sanitized where it is applied).
+        double RingDmg = 1.0,
+        // pvp_bg_rejoin_grace_seconds - seconds a battleground seat is held for a participant who logs out, crashes or relogs during
+        // a Live match (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin"). Logging back in within it puts them back in the match;
+        // at the end of it the ordinary logout forfeit runs. 0 = no grace (every logout forfeits at once, as before). Read when a
+        // grace begins; clamped to 0..MaxRejoinGraceSeconds. Battlegrounds only: the arena modes (1v1, 2v2, Tugak Brawl) have none.
+        int RejoinGraceSeconds = 120,
+        // pvp_bg_bonus_* - the daily Double Marks windows (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"). BonusEnabled is the master switch;
+        // BonusWindows is the HH:mm-HH:mm list in BonusTimezone's local time; a match that went Live inside a window pays BonusMultiplier times
+        // its Marks (sanitized where it is applied, PvpArenaRewards.SanitizeBonusMultiplier: NaN, infinite or below 1 = 1.0). BonusWarnMinutes is the
+        // Arena Crier's heads-up lead, clamped to 0..MaxBonusWarnMinutes (0 = no heads-up).
+        bool BonusEnabled = true,
+        string BonusWindows = "06:00-07:00,18:00-19:00",
+        string BonusTimezone = "America/Los_Angeles",
+        double BonusMultiplier = 2.0,
+        int BonusWarnMinutes = 15);
 
     /// <summary>
     /// Test seam for the pvp_bg_* settings, mirroring <see cref="PvpTunables"/>: PropertyManager.Get* throws
@@ -195,7 +240,30 @@ namespace ACE.Server.Pvp.Battlegrounds
             MarksLoss: 1,
             MarksDraw: 1,
             MarksScale: 1.0,
-            MarksDailyCap: 10);
+            MarksDailyCap: 0,
+            KothPerfNearMargin: 6.0,
+            PerfEnabled: true,
+            PerfGain: 1.0,
+            PerfCapPct: 25,
+            PerfWeightAdAtkCrystalDmg: 30,
+            PerfWeightAdAtkPlayerDmg: 40,
+            PerfWeightAdAtkKills: 30,
+            PerfWeightAdDefDmgNear: 30,
+            PerfWeightAdDefKillsNear: 30,
+            PerfWeightAdDefDmgFar: 20,
+            PerfWeightAdDefKillsFar: 20,
+            PerfWeightKothHillSeconds: 50,
+            PerfWeightKothDmg: 25,
+            PerfWeightKothKills: 25,
+            PerfKothNearKillWeight: 2.0,
+            GroupJoinEnabled: false,
+            RingDmg: 1.0,
+            RejoinGraceSeconds: 120,
+            BonusEnabled: true,
+            BonusWindows: "06:00-07:00,18:00-19:00",
+            BonusTimezone: "America/Los_Angeles",
+            BonusMultiplier: 2.0,
+            BonusWarnMinutes: 15);
 
         private static BattlegroundDials ReadFromProperties()
         {
@@ -259,7 +327,30 @@ namespace ACE.Server.Pvp.Battlegrounds
                     MarksLoss: (int)PropertyManager.GetLong("pvp_bg_marks_loss", d.MarksLoss).Item,
                     MarksDraw: (int)PropertyManager.GetLong("pvp_bg_marks_draw", d.MarksDraw).Item,
                     MarksScale: PropertyManager.GetDouble("pvp_bg_marks_scale", d.MarksScale).Item,
-                    MarksDailyCap: (int)PropertyManager.GetLong("pvp_bg_marks_daily_cap", d.MarksDailyCap).Item));
+                    MarksDailyCap: (int)PropertyManager.GetLong("pvp_bg_marks_daily_cap", d.MarksDailyCap).Item,
+                    KothPerfNearMargin: PropertyManager.GetDouble("pvp_bg_perf_koth_near_margin", d.KothPerfNearMargin).Item,
+                    PerfEnabled: PropertyManager.GetBool("pvp_bg_perf_enabled", d.PerfEnabled).Item,
+                    PerfGain: PropertyManager.GetDouble("pvp_bg_perf_gain", d.PerfGain).Item,
+                    PerfCapPct: PropertyManager.GetLong("pvp_bg_perf_cap_pct", d.PerfCapPct).Item,
+                    PerfWeightAdAtkCrystalDmg: PropertyManager.GetLong("pvp_bg_perf_w_ad_atk_crystal_dmg", d.PerfWeightAdAtkCrystalDmg).Item,
+                    PerfWeightAdAtkPlayerDmg: PropertyManager.GetLong("pvp_bg_perf_w_ad_atk_player_dmg", d.PerfWeightAdAtkPlayerDmg).Item,
+                    PerfWeightAdAtkKills: PropertyManager.GetLong("pvp_bg_perf_w_ad_atk_kills", d.PerfWeightAdAtkKills).Item,
+                    PerfWeightAdDefDmgNear: PropertyManager.GetLong("pvp_bg_perf_w_ad_def_dmg_near", d.PerfWeightAdDefDmgNear).Item,
+                    PerfWeightAdDefKillsNear: PropertyManager.GetLong("pvp_bg_perf_w_ad_def_kills_near", d.PerfWeightAdDefKillsNear).Item,
+                    PerfWeightAdDefDmgFar: PropertyManager.GetLong("pvp_bg_perf_w_ad_def_dmg_far", d.PerfWeightAdDefDmgFar).Item,
+                    PerfWeightAdDefKillsFar: PropertyManager.GetLong("pvp_bg_perf_w_ad_def_kills_far", d.PerfWeightAdDefKillsFar).Item,
+                    PerfWeightKothHillSeconds: PropertyManager.GetLong("pvp_bg_perf_w_koth_hill_s", d.PerfWeightKothHillSeconds).Item,
+                    PerfWeightKothDmg: PropertyManager.GetLong("pvp_bg_perf_w_koth_dmg", d.PerfWeightKothDmg).Item,
+                    PerfWeightKothKills: PropertyManager.GetLong("pvp_bg_perf_w_koth_kills", d.PerfWeightKothKills).Item,
+                    PerfKothNearKillWeight: PropertyManager.GetDouble("pvp_bg_perf_koth_near_kill_weight", d.PerfKothNearKillWeight).Item,
+                    GroupJoinEnabled: PropertyManager.GetBool("pvp_bg_group_join_enabled", d.GroupJoinEnabled).Item,
+                    RingDmg: PropertyManager.GetDouble("pvp_bg_ring_dmg", d.RingDmg).Item,
+                    RejoinGraceSeconds: ClampRejoinGraceSeconds(PropertyManager.GetLong("pvp_bg_rejoin_grace_seconds", d.RejoinGraceSeconds).Item),
+                    BonusEnabled: PropertyManager.GetBool("pvp_bg_bonus_enabled", d.BonusEnabled).Item,
+                    BonusWindows: PropertyManager.GetString("pvp_bg_bonus_windows", d.BonusWindows).Item,
+                    BonusTimezone: PropertyManager.GetString("pvp_bg_bonus_timezone", d.BonusTimezone).Item,
+                    BonusMultiplier: PropertyManager.GetDouble("pvp_bg_bonus_multiplier", d.BonusMultiplier).Item,
+                    BonusWarnMinutes: ClampBonusWarnMinutes(PropertyManager.GetLong("pvp_bg_bonus_warn_minutes", d.BonusWarnMinutes).Item)));
             }
             catch (Exception ex)
             {
@@ -312,8 +403,30 @@ namespace ACE.Server.Pvp.Battlegrounds
                 AdAlertMinIntervalSeconds = Math.Max(1, d.AdAlertMinIntervalSeconds),
                 AdStatusAnnounceSeconds = Math.Max(MinStatusAnnounceSeconds, d.AdStatusAnnounceSeconds),
                 SpawnProtectionSeconds = ClampSpawnProtectionSeconds(d.SpawnProtectionSeconds),
+                RejoinGraceSeconds = ClampRejoinGraceSeconds(d.RejoinGraceSeconds),
+                BonusWarnMinutes = ClampBonusWarnMinutes(d.BonusWarnMinutes),
             };
         }
+
+        /// <summary>
+        /// The longest rejoin grace in seconds (pvp_bg_rejoin_grace_seconds); the dial clamps to 0..this. Kept below the match copy's
+        /// idle unload: a battleground realm has no UnloadIntervalOverride (EphemeralRealm.UnloadIntervalOverride is a Thread run's
+        /// only), so a copy everyone has left unloads after Landblock.UnloadInterval (5 minutes), and a longer grace with the whole
+        /// match offline would only end in a rejoin that cannot be admitted.
+        /// </summary>
+        public const int MaxRejoinGraceSeconds = 240;
+
+        /// <summary>The longest Double Marks heads-up lead in minutes (pvp_bg_bonus_warn_minutes); the dial clamps to 0..this.</summary>
+        public const int MaxBonusWarnMinutes = 180;
+
+        /// <summary>Clamps a raw heads-up lead to 0..<see cref="MaxBonusWarnMinutes"/> BEFORE narrowing to int. Pure.</summary>
+        public static int ClampBonusWarnMinutes(long raw) => (int)Math.Clamp(raw, 0L, (long)MaxBonusWarnMinutes);
+
+        /// <summary>
+        /// Clamps a raw rejoin grace to 0..<see cref="MaxRejoinGraceSeconds"/> BEFORE narrowing to int, so a huge setting lands on the cap
+        /// rather than on a wrapped value. Pure.
+        /// </summary>
+        public static int ClampRejoinGraceSeconds(long raw) => (int)Math.Clamp(raw, 0L, (long)MaxRejoinGraceSeconds);
 
         /// <summary>The longest spawn-protection window in seconds (pvp_bg_spawn_protection_seconds); the dial clamps to 0..this.</summary>
         public const int MaxSpawnProtectionSeconds = 30;

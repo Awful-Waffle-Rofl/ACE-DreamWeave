@@ -76,6 +76,12 @@ namespace ACE.Server.WorldObjects
         // (ForfeitSpeedChallenge), so a later run never inherits a stale rebase.
         private bool speedChallengeClockRebased;
 
+        /// <summary>The instance the current run is bound to, 0 for none. Read-only view for the speed-course controller.</summary>
+        public uint SpeedRunInstance => speedRunInstance;
+
+        /// <summary>The current run's clock was rebased by the season's start object. Read-only view for the speed-course controller.</summary>
+        public bool SpeedRunClockRebased => speedChallengeClockRebased;
+
         /// <summary>
         /// True while a speed-challenge run is armed/in progress. Persisted so a mid-run logout can be caught at
         /// next login (see WorldManager.DoPlayerEnterWorld) and the player re-homed to their lifestone.
@@ -634,9 +640,10 @@ namespace ACE.Server.WorldObjects
         /// way around it, and D2-D5 are the only routes to D1's two contributors, so no legitimate run can
         /// reach the tome with any of them still sealed; the Archive Door latches on Grael's death, before his
         /// corpse (and the tome on it) exists. The test season's room holds no doors at all, and an instance
-        /// with no objective Doors passes trivially. A future season that wants an OPTIONAL objective-gated
-        /// side room would need this rule narrowed (a content flag) - the refusal names the gate, so such a
-        /// room surfaces on its first test clear rather than silently.
+        /// with no objective Doors passes trivially. A season with OPTIONAL objective-gated rooms names their keys
+        /// in its speed course's optionalGateKeys (the Black Book's open-order corner rooms: a run needs three of
+        /// the four), passed here as <paramref name="optionalKeys"/>: those gates are never required. Any other
+        /// such room still surfaces on its first test clear, because the refusal names the gate.
         /// <para/>
         /// OPENED is the gate's ObjectiveLock latch, never the door's current state and never Door.Open:
         /// doors auto-close, and Door.ActOnUse opens even a LOCKED door for a player standing behind it
@@ -660,7 +667,7 @@ namespace ACE.Server.WorldObjects
         /// only the gate the finishing key resolves to is exempt, which is the only gate that key's in-flight
         /// contribution could open.
         /// </summary>
-        public static SpeedGateCheck CheckRequiredGates(IEnumerable<SpeedGateSnapshot> gates, string finishingSourceKey)
+        public static SpeedGateCheck CheckRequiredGates(IEnumerable<SpeedGateSnapshot> gates, string finishingSourceKey, ICollection<string> optionalKeys = null)
         {
             var result = new SpeedGateCheck(new List<string>(), new List<string>());
 
@@ -703,6 +710,9 @@ namespace ACE.Server.WorldObjects
                 if (!string.IsNullOrWhiteSpace(finishingSourceKey) && string.Equals(key, finishingSourceKey, StringComparison.Ordinal))
                     continue;
 
+                if (optionalKeys != null && optionalKeys.Contains(key))
+                    continue;
+
                 result.Unopened.Add(string.IsNullOrWhiteSpace(winner.Name) ? "an unnamed gate" : winner.Name);
             }
 
@@ -713,9 +723,28 @@ namespace ACE.Server.WorldObjects
         /// The unopened-gate names from CheckRequiredGates, for callers that do not need the duplicate-key
         /// report.
         /// </summary>
-        public static List<string> FindUnopenedRequiredGates(IEnumerable<SpeedGateSnapshot> gates, string finishingSourceKey)
+        public static List<string> FindUnopenedRequiredGates(IEnumerable<SpeedGateSnapshot> gates, string finishingSourceKey, ICollection<string> optionalKeys = null)
         {
-            return CheckRequiredGates(gates, finishingSourceKey).Unopened;
+            return CheckRequiredGates(gates, finishingSourceKey, optionalKeys).Unopened;
+        }
+
+        /// <summary>
+        /// The optional gate keys of the speed course this run plays: the live course run's course for the run's
+        /// instance, else the course the store holds for the run's season (one course per season). Empty when the
+        /// season has no course (the Lost Coastal Archive): every objective Door is then required.
+        /// </summary>
+        private HashSet<string> SpeedCourseOptionalGateKeys()
+        {
+            var course = ACE.Server.SpeedCourses.SpeedCourseManager.GetRun(speedRunInstance)?.Course
+                ?? ACE.Server.SpeedCourses.SpeedCourseManager.Store?.GetCourse(speedRunSeasonId);
+
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var key in course?.OptionalGateKeys ?? new List<string>())
+                if (!string.IsNullOrWhiteSpace(key))
+                    keys.Add(key);
+
+            return keys;
         }
 
         /// <summary>
@@ -764,7 +793,7 @@ namespace ACE.Server.WorldObjects
                 gates.Add(new SpeedGateSnapshot(wo.Guid.Full, wo is Door, wo.ObjectiveLockRequired ?? 0, wo.ObjectiveLockKey, wo.P_ObjectiveLock?.Latched == true, wo.Name));
             }
 
-            var check = CheckRequiredGates(gates, source?.ObjectiveLockKey);
+            var check = CheckRequiredGates(gates, source?.ObjectiveLockKey, SpeedCourseOptionalGateKeys());
 
             foreach (var key in check.DuplicateKeys)
                 log.Warn($"[SPEED] content warning: objective lock key '{key}' is claimed by more than one gate in instance 0x{speedRunInstance:X8}; only the lowest-guid gate can latch, so only that gate is checked for {Name}'s finish.");

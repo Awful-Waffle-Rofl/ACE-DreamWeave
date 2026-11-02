@@ -66,7 +66,11 @@ namespace ACE.Server.Entity
         /// (DungeonSurveyRules.Window / Count / Total and their per-dungeon siblings). They are a rolling
         /// counter, not a quest: without this the player sees "You've earned a quest stamp:
         /// DynDungeonSurveyWindow" every time a run is surveyed, and the account total inflates on a timer.
-        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_", "DynDungeonSurvey" };
+        ///
+        /// "PvpDaily" covers the PvP daily and weekly rows (Pvp/PvpDailyCatalog.cs): every PvpDaily&lt;Task&gt;Count counter and
+        /// PvpDaily&lt;Task&gt;Done flag. They are re-accepted every 20 hours (weekly: 7 days), so without this each character would be
+        /// announced and stamped once per row name, up to 38 rows, for bookkeeping that is not a quest.
+        public static readonly string[] ExcludedPrefixes = { "ClassAbility_", "QuestStamp", "ContractAccepted_", "DynDungeonSurvey", "PvpDaily" };
 
         /// <summary>
         /// TRUE when a quest registry row by this name is worth a stamp: a non-empty name that does not carry

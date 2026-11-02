@@ -130,6 +130,7 @@ namespace ACE.Server.Tests
         public void ArmorRending_DoesNothingForCasters()
         {
             Assert.AreEqual(1.0f, WorldObject.GetArmorRendingMod(MakeSkill(Skill.WarMagic, 360)), Epsilon);
+            Assert.AreEqual(1.0f, WorldObject.GetArmorRendingMod(MakeSkill(Skill.ItemEnchantment, 360)), Epsilon);
         }
 
         // ---- shared curve invariants ----
@@ -184,6 +185,27 @@ namespace ACE.Server.Tests
             Assert.AreEqual(250, WorldObject.GetBaseSkillImbued(MakeSkill(Skill.HeavyWeapons, 250)));
         }
 
+        [TestMethod]
+        public void ItemEnchantment_ScalesEveryImbueExactlyLikeWarMagic()
+        {
+            // A Spellsword class-ability proc's attackSkill is Item Enchantment (SpellProjectile.CasterSkillOverride).
+            // Classified Undef, it silently zeroed CS, CB and Rending on every proc from the wielded weapon.
+            foreach (uint baseSkill in new uint[] { 0, 60, 120, 210, 300, 360, 500 })
+            {
+                var war = MakeSkill(Skill.WarMagic, baseSkill);
+                var item = MakeSkill(Skill.ItemEnchantment, baseSkill);
+
+                Assert.AreEqual(WorldObject.GetCriticalStrikeMod(war), WorldObject.GetCriticalStrikeMod(item), Epsilon, $"CS at BS {baseSkill}");
+                Assert.AreEqual(WorldObject.GetCriticalStrikeMod(war, isPvP: true), WorldObject.GetCriticalStrikeMod(item, isPvP: true), Epsilon, $"CS PvP at BS {baseSkill}");
+                Assert.AreEqual(WorldObject.GetCripplingBlowMod(war), WorldObject.GetCripplingBlowMod(item), Epsilon, $"CB at BS {baseSkill}");
+                Assert.AreEqual(WorldObject.GetRendingMod(war), WorldObject.GetRendingMod(item), Epsilon, $"Rend at BS {baseSkill}");
+            }
+
+            Assert.AreEqual(WorldObject.MaxCripplingBlowMod, WorldObject.GetCripplingBlowMod(MakeSkill(Skill.ItemEnchantment, 360)), Epsilon);
+            Assert.AreEqual(WorldObject.MaxCriticalStrikeMod, WorldObject.GetCriticalStrikeMod(MakeSkill(Skill.ItemEnchantment, 360)), Epsilon);
+            Assert.AreEqual(WorldObject.MaxRendingMod, WorldObject.GetRendingMod(MakeSkill(Skill.ItemEnchantment, 360)), Epsilon);
+        }
+
         // ---- skill / damage type classification ----
 
         [TestMethod]
@@ -196,8 +218,9 @@ namespace ACE.Server.Tests
             foreach (var missile in new[] { Skill.MissileWeapons, Skill.Bow, Skill.Crossbow, Skill.Sling, Skill.ThrownWeapon })
                 Assert.AreEqual(WorldObject.ImbuedSkillType.Missile, WorldObject.GetImbuedSkillType(MakeSkill(missile, 100)), missile.ToString());
 
-            // LifeMagic is deliberately Magic here (Martyr's Hecatomb crits)
-            foreach (var magic in new[] { Skill.WarMagic, Skill.VoidMagic, Skill.LifeMagic })
+            // LifeMagic is deliberately Magic here (Martyr's Hecatomb crits), and so is ItemEnchantment
+            // (Spellsword class-ability procs read it as their attack skill)
+            foreach (var magic in new[] { Skill.WarMagic, Skill.VoidMagic, Skill.LifeMagic, Skill.ItemEnchantment })
                 Assert.AreEqual(WorldObject.ImbuedSkillType.Magic, WorldObject.GetImbuedSkillType(MakeSkill(magic, 100)), magic.ToString());
 
             Assert.AreEqual(WorldObject.ImbuedSkillType.Undef, WorldObject.GetImbuedSkillType(MakeSkill(Skill.MeleeDefense, 100)));

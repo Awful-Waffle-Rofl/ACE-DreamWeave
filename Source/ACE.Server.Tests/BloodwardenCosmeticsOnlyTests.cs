@@ -11,8 +11,12 @@ using ACE.Entity.Enum.Properties;
 namespace ACE.Server.Tests
 {
     /// <summary>
-    /// The cosmetics-only guard for the PvP arena's Bloodwarden vendor (wcid 1004130, restyled from Tegao
-    /// Wavecounter) and its Blood currency (wcid 1006650).
+    /// The cosmetics-only and pricing guard for the PvP arena's FOUR Hopeslayer vendors (named Bloodwarden until 2026-10-15;
+    /// 1004130 Armsmaster, restyled from
+    /// Tegao Wavecounter; 1006651 Quartermaster; 1006652 Armorer; 1006653 Tailor - the one 895-row shop was split
+    /// on 2026-10-12 because it lagged the client on open) and their Blood currency (wcid 1006650). Every check
+    /// below runs over the shop rows of ALL FOUR vendors; which vendor stocks which clone is pinned separately by
+    /// ACE.Content.Tools.Tests VendorRoutingTests.
     ///
     /// WHY THIS EXISTS: the owner allows PvP rewards at all ONLY because the one thing they buy is cosmetic.
     /// A single shop clone that carries damage, armor, a gear rating, a spell or a proc would turn Blood into
@@ -33,17 +37,70 @@ namespace ACE.Server.Tests
     [TestClass]
     public class BloodwardenCosmeticsOnlyTests
     {
-        private const uint VendorWcid = 1004130;
+        private static readonly uint[] VendorWcids = { 1004130, 1006651, 1006652, 1006653 };
         private const uint BloodWcid = 1006650;
-        private const int ExpectedPrice = 5;
 
-        // The three armor reduction tools (Main/Middle/Lower) were repriced to 1 Blood in #1590.
-        private const int ReductionToolPrice = 1;
-        private static readonly HashSet<uint> ReductionToolWcids = new() { 1004316, 1004317, 1004318 };
+        // PRICE TABLE, in Marks of the Hopeslayer (owner ranges, 2026-10-15), per vendor: weapons and shields 500
+        // (Armsmaster, Quartermaster), armor 800 each with no bundle (Armorer), clothing, robes and cloaks 500
+        // (Tailor). Every clone's price is written by ACE.Content.Tools cosmeticimport (VendorRouting.Price, in
+        // CosmeticAllowlist.Strip); this is the independent pin on the committed result. It was 5 on every line.
+        private static readonly Dictionary<uint, int> ExpectedPricePerVendor = new()
+        {
+            { 1004130, 500 }, { 1006651, 500 }, { 1006652, 800 }, { 1006653, 500 },
+        };
+
+        // The seven tailoring tools (1004312-1004318) cost 1 Mark each:
+        // the three reduction tools since #1590, the rest since 2026-10-15.
+        private const int TailoringToolPrice = 1;
+        private static readonly HashSet<uint> TailoringToolWcids = new() { 1004312, 1004313, 1004314, 1004315, 1004316, 1004317, 1004318 };
+
+        // The nine RETAIL Perennial dyes the Tailor stocks as-is (not clones: a dye works through cook_book rows keyed
+        // on its own wcid). They have no unit under Content/sql/weenies, so the clone checks skip them; their price
+        // (3500, set on the retail weenies by Content/sql/patches/hopeslayer_perennial_dye_price.sql) is pinned by
+        // Hopeslayer_Tailor_StocksTheNinePerennialDyes_PricedByTheirPatch. 30084 Perennial Botched Dye is deliberately
+        // absent (owner ruling 2026-10-15: 0 cook_book rows in retail data, so it does nothing).
+        private const int PerennialDyePrice = 3500;
+        private static readonly HashSet<uint> RetailDyeWcids = new() { 30082, 30083, 30085, 30086, 30087, 30088, 30089, 30090, 30091 };
+        private const uint BotchedDyeWcid = 30084;
+
+        // PvP PRESTIGE items: hand-authored, NOT clones, priced on their own and gated by PropertyBool 9076 PvpPrestigeGated
+        // (a peak rating or battleground wins, Vendor.BuyItems_ValidateTransaction). Each is stocked by exactly one named
+        // vendor, skipped by the clone checks, and pinned instead by Hopeslayer_PrestigeItems_AreGatedPricedAndCarryNoPower,
+        // which still forbids every power id and allows only the named extras below on top of the cosmetic allowlist.
+        // 1006654 Guise of the Hopeslayer: the Bael'Zharon body suit (PropertyString 9020 WornModelOverrides), 9000 Marks.
+        private static readonly Dictionary<uint, (uint Vendor, int Price)> PrestigeItems = new()
+        {
+            { 1006654, (1006652, 9000) },
+        };
+
+        // What a prestige item may carry beyond the cosmetic allowlist: int 33 Bonded, 114 Attuned (it cannot be handed to
+        // someone who has not earned it); bool 123 TopLayerPriority, 9076 PvpPrestigeGated; string 9020 WornModelOverrides;
+        // and weenie_properties_palette rows (its colour). None of these is a power property.
+        private static readonly HashSet<int> PrestigeExtraInts = new() { (int)PropertyInt.Bonded, (int)PropertyInt.Attuned };
+        private static readonly HashSet<int> PrestigeExtraBools = new() { (int)PropertyBool.TopLayerPriority, (int)PropertyBool.PvpPrestigeGated };
+        private static readonly HashSet<int> PrestigeExtraStrings = new() { (int)PropertyString.WornModelOverrides };
+        private const string PaletteTable = "weenie_properties_palette";
+
+        // (object_Id, sub_Palette_Id, offset, length)
+        private static readonly Regex PaletteRow = new(@"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", RegexOptions.Compiled);
 
         // Every shop clone must be one of the generated/hand-curated cosmetic ranges; a count far below this
         // means the parse found nothing (a regex that matches zero rows would otherwise pass vacuously).
+        // MinimumShopLines is the total across the four vendors; the per-vendor floor makes an emptied vendor fail
+        // on its own (the smallest vendor stocks ~170 rows, so 100 leaves room without letting one go empty).
         private const int MinimumShopLines = 800;
+        private const int MinimumShopLinesPerVendor = 100;
+
+        // Exact stock, beside the floors: the floors only catch a collapse, not a few dropped rows. These are the 895
+        // rows the single Bloodwarden carried before the 2026-10-12 split, divided 225/208/289/173 by the routing rule;
+        // they move only deliberately (same numbers as ACE.Content.Tools.Tests VendorRoutingTests).
+        // 2026-10-15: plus the nine working retail Perennial dyes on the Tailor (173 + 9, 895 + 9).
+        // 2026-10-15: plus the prestige suit 1006654 on the Armorer (289 + 1, 904 + 1).
+        private const int ExpectedTotalShopLines = 905;
+        private static readonly Dictionary<uint, int> ExpectedShopLinesPerVendor = new()
+        {
+            { 1004130, 225 }, { 1006651, 208 }, { 1006652, 290 }, { 1006653, 182 },
+        };
 
         private static readonly HashSet<string> AllowedTables = new()
         {
@@ -144,7 +201,7 @@ namespace ACE.Server.Tests
         private static string Normalise(string sql)
             => CommentOrLiteral.Replace(sql, m => m.Value.StartsWith("'") ? "''" : "");
 
-        private static ParsedWeenie Parse(string sql, uint wcid)
+        private static ParsedWeenie Parse(string sql, uint wcid, bool allowPaletteRows = false)
         {
             var parsed = new ParsedWeenie();
             var deleteSeen = 0;
@@ -161,6 +218,18 @@ namespace ACE.Server.Tests
                     var table = insert.Groups[1].Value;
                     var body = insert.Groups[2].Value;
                     parsed.InsertCount++;
+
+                    // Prestige items only: their palette rows are four-column, so they are counted here rather than by Triple.
+                    if (allowPaletteRows && table == PaletteTable)
+                    {
+                        var paletteRows = PaletteRow.Matches(body).Cast<Match>().ToList();
+                        if (body.Count(c => c == '(') != paletteRows.Count + 1)
+                            parsed.Problems.Add($"table `{table}`: {body.Count(c => c == '(') - 1} row(s) in the file but only {paletteRows.Count} parsed");
+                        if (!parsed.Rows.TryGetValue(table, out var paletteList))
+                            parsed.Rows[table] = paletteList = new List<(int, string)>();
+                        paletteList.AddRange(paletteRows.Select(m => (int.Parse(m.Groups[2].Value), m.Groups[3].Value + ":" + m.Groups[4].Value)));
+                        continue;
+                    }
 
                     if (!AllowedTables.Contains(table))
                     {
@@ -207,12 +276,13 @@ namespace ACE.Server.Tests
             return row.Count == 0 ? null : int.Parse(row[0].Value);
         }
 
-        private static List<uint> ShopWcids()
+        /// <summary>One vendor's Shop wcids; the guard fails if the vendor's create_list holds anything but its own Wield/Shop rows or too few Shop rows.</summary>
+        private static List<uint> ShopWcids(uint vendorWcid)
         {
-            var sql = Normalise(WeenieSql(VendorWcid));
+            var sql = Normalise(WeenieSql(vendorWcid));
             var shop = new List<uint>();
             var statements = Regex.Matches(sql, @"INSERT INTO `weenie_properties_create_list`(.*?);", RegexOptions.Singleline);
-            Assert.IsTrue(statements.Count > 0, $"weenie {VendorWcid} has no weenie_properties_create_list statement");
+            Assert.IsTrue(statements.Count > 0, $"weenie {vendorWcid} has no weenie_properties_create_list statement");
 
             var rowsInFile = 0;
             var rowsMatched = 0;
@@ -230,10 +300,10 @@ namespace ACE.Server.Tests
                     var owner = uint.Parse(m.Groups[1].Value);
                     var destination = int.Parse(m.Groups[2].Value);
 
-                    if (owner != VendorWcid || (destination != 2 /* Wield */ && destination != 4 /* Shop */))
+                    if (owner != vendorWcid || (destination != 2 /* Wield */ && destination != 4 /* Shop */))
                         badRows.Add($"object {owner}, destination_Type {destination}, wcid {m.Groups[3].Value}");
 
-                    if (owner == VendorWcid && destination == 4)
+                    if (owner == vendorWcid && destination == 4)
                     {
                         shopRows++;
                         shop.Add(uint.Parse(m.Groups[3].Value));
@@ -241,21 +311,40 @@ namespace ACE.Server.Tests
                 }
             }
 
-            Assert.AreEqual(rowsInFile, rowsMatched, $"weenie {VendorWcid}'s create_list has {rowsInFile} row(s) but only {rowsMatched} were parsed - an unreadable row is a shop item the guard never checked");
-            Assert.AreEqual(0, badRows.Count, "create_list rows that are not this vendor's Wield (2) or Shop (4) rows:\n" + string.Join("\n", badRows.Take(10)));
+            Assert.AreEqual(rowsInFile, rowsMatched, $"weenie {vendorWcid}'s create_list has {rowsInFile} row(s) but only {rowsMatched} were parsed - an unreadable row is a shop item the guard never checked");
+            Assert.AreEqual(0, badRows.Count, "create_list rows that are not this vendor's Wield (2) or Shop (4) rows (vendor " + vendorWcid + "):\n" + string.Join("\n", badRows.Take(10)));
             Assert.AreEqual(shopRows, shop.Count, "shop wcid count does not equal the number of destination_Type 4 rows");
 
-            Assert.IsTrue(shop.Count >= MinimumShopLines, $"parsed only {shop.Count} shop lines from weenie {VendorWcid}; expected at least {MinimumShopLines} - the guard would pass vacuously");
-            Assert.AreEqual(shop.Count, shop.Distinct().Count(), "duplicate shop wcids in the Bloodwarden's create_list");
+            Assert.IsTrue(shop.Count >= MinimumShopLinesPerVendor, $"parsed only {shop.Count} shop lines from weenie {vendorWcid}; expected at least {MinimumShopLinesPerVendor} per vendor - an empty vendor, or a guard that passes vacuously");
+            Assert.AreEqual(shop.Count, shop.Distinct().Count(), $"duplicate shop wcids in weenie {vendorWcid}'s create_list");
             return shop;
         }
 
-        /// <summary>Every shop clone, parsed; a file that is missing or not wholly accounted for is reported, never skipped.</summary>
+        /// <summary>Every Shop wcid of all four vendors, each clone on exactly one vendor.</summary>
+        private static List<uint> ShopWcids()
+        {
+            var all = new List<uint>();
+            foreach (var vendor in VendorWcids)
+                all.AddRange(ShopWcids(vendor));
+
+            Assert.IsTrue(all.Count >= MinimumShopLines, $"parsed only {all.Count} shop lines across the four vendors; expected at least {MinimumShopLines} - the guard would pass vacuously");
+            var twice = all.GroupBy(x => x).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            Assert.AreEqual(0, twice.Count, "clones stocked by more than one Bloodwarden vendor (or twice by one): " + string.Join(", ", twice.Take(25)));
+            return all;
+        }
+
+        /// <summary>
+        /// Every shop CLONE, parsed; a file that is missing or not wholly accounted for is reported, never skipped. The
+        /// nine retail Perennial dyes are the only shop rows that are not clones, and only on the Tailor; they are
+        /// excluded here and checked by their own test.
+        /// </summary>
         private static List<(uint Wcid, ParsedWeenie Parsed)> ParsedShop(List<string> violations)
         {
             var result = new List<(uint, ParsedWeenie)>();
             foreach (var wcid in ShopWcids())
             {
+                if (RetailDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
+                    continue;
                 var files = WeenieDir().GetFiles(wcid + " *.sql");
                 if (files.Length != 1)
                 {
@@ -275,25 +364,107 @@ namespace ACE.Server.Tests
         public void Bloodwarden_EveryShopFile_IsFullyParsed()
         {
             var violations = new List<string>();
-            var shopCount = ShopWcids().Count;
+            var shopCount = ShopWcids().Count(w => !RetailDyeWcids.Contains(w) && !PrestigeItems.ContainsKey(w)); // the retail dyes and the prestige items have their own tests
             var parsed = ParsedShop(violations);
             Assert.AreEqual(shopCount, parsed.Count, "some shop files were skipped instead of parsed:\n" + string.Join("\n", violations.Take(25)));
             Assert.AreEqual(0, violations.Count, "shop files the guard could not fully account for:\n" + string.Join("\n", violations.Take(25)));
         }
 
+        /// <summary>
+        /// The vendor panel lists stock in create_list row order (Vendor iterates PropertiesCreateList; the rows are
+        /// inserted in file order), so the Armorer's first Shop row is the first item a player sees. Owner request:
+        /// Guise of the Hopeslayer (1006654) leads the Armorer's list.
+        /// </summary>
         [TestMethod]
-        public void Bloodwarden_EveryShopItem_IsPricedFiveBlood()
+        public void Armorer_FirstShopRow_IsTheGuiseOfTheHopeslayer()
+        {
+            var shop = ShopWcids(1006652);
+            Assert.AreEqual(1006654u, shop[0], "Hopeslayer's Armorer (1006652) must list Guise of the Hopeslayer (1006654) first; first shop row is " + shop[0]);
+        }
+
+        /// <summary>
+        /// The price table, per vendor ROUTE: every clone a vendor stocks costs that vendor's price (Value and
+        /// StackUnitValue both, since the shelf and the till read different ones on a stackable), except the seven tailoring tools (1004312-1004318)
+        /// at 1 Mark each. Checked per vendor so a clone priced for the wrong shop fails by name.
+        /// </summary>
+        [TestMethod]
+        public void Hopeslayer_EveryShopClone_IsPricedPerItsVendorsRoute()
         {
             var violations = new List<string>();
-            foreach (var (wcid, w) in ParsedShop(violations))
+            var checkedPerVendor = new Dictionary<uint, int>();
+            foreach (var vendor in VendorWcids)
             {
-                var value = IntValue(w, (int)PropertyInt.Value);
-                var unit = IntValue(w, (int)PropertyInt.StackUnitValue);
-                var expected = ReductionToolWcids.Contains(wcid) ? ReductionToolPrice : ExpectedPrice;
-                if (value != expected || unit != expected)
-                    violations.Add($"{wcid}: Value={value?.ToString() ?? "absent"} StackUnitValue={unit?.ToString() ?? "absent"} (both must be {expected})");
+                var vendorViolations = new List<string>();
+                foreach (var wcid in ShopWcids(vendor))
+                {
+                    if (RetailDyeWcids.Contains(wcid) || PrestigeItems.ContainsKey(wcid))
+                        continue;
+                    var files = WeenieDir().GetFiles(wcid + " *.sql");
+                    if (files.Length != 1)
+                    {
+                        violations.Add($"{wcid}: expected exactly one weenie file, found {files.Length}");
+                        continue;
+                    }
+                    var w = Parse(File.ReadAllText(files[0].FullName), wcid);
+                    var value = IntValue(w, (int)PropertyInt.Value);
+                    var unit = IntValue(w, (int)PropertyInt.StackUnitValue);
+                    var expected = TailoringToolWcids.Contains(wcid) ? TailoringToolPrice : ExpectedPricePerVendor[vendor];
+                    if (value != expected || unit != expected)
+                        violations.Add($"vendor {vendor}, {wcid}: Value={value?.ToString() ?? "absent"} StackUnitValue={unit?.ToString() ?? "absent"} (both must be {expected})");
+                    checkedPerVendor[vendor] = checkedPerVendor.GetValueOrDefault(vendor) + 1;
+                }
             }
-            Assert.AreEqual(0, violations.Count, "Bloodwarden shop items not at their expected Blood price:\n" + string.Join("\n", violations.Take(25)));
+            foreach (var vendor in VendorWcids)
+                Assert.IsTrue(checkedPerVendor.GetValueOrDefault(vendor) >= MinimumShopLinesPerVendor - 10, $"only {checkedPerVendor.GetValueOrDefault(vendor)} clones price-checked on vendor {vendor} - the check would pass vacuously");
+            Assert.AreEqual(0, violations.Count, "Hopeslayer shop clones not at their vendor's price:\n" + string.Join("\n", violations.Take(25)));
+        }
+
+        /// <summary>Every stocked clone carries IsSellable (bool 69) = false, so it cannot sell back to an NPC for pyreals.</summary>
+        [TestMethod]
+        public void Hopeslayer_EveryShopClone_IsNotSellable()
+        {
+            var violations = new List<string>();
+            var parsed = ParsedShop(violations);
+            foreach (var (wcid, w) in parsed)
+            {
+                var rows = w.Table("weenie_properties_bool").Where(r => r.Type == (int)PropertyBool.IsSellable).ToList();
+                if (rows.Count != 1 || !(rows[0].Value == "False" || rows[0].Value == "0"))
+                    violations.Add($"{wcid}: IsSellable rows = [{string.Join(", ", rows.Select(r => r.Value))}] (must be exactly one, False)");
+            }
+            Assert.IsTrue(parsed.Count >= MinimumShopLines, $"only {parsed.Count} clones checked - the check would pass vacuously");
+            Assert.AreEqual(0, violations.Count, "Hopeslayer shop clones that can sell back for pyreals:\n" + string.Join("\n", violations.Take(25)));
+        }
+
+        /// <summary>
+        /// The Tailor stocks exactly the nine working retail Perennial dyes as its only non-clone rows, and the patch unit
+        /// that prices them sets Value (19) and StackUnitValue (15) to 3500 for exactly those nine. 30084 Perennial Botched
+        /// Dye is neither stocked by any vendor nor priced. Without the patch a dye
+        /// ships at Value 0 and sells for the max(1, ...) floor of one Mark.
+        /// </summary>
+        [TestMethod]
+        public void Hopeslayer_Tailor_StocksTheNinePerennialDyes_PricedByTheirPatch()
+        {
+            var tailorDyes = ShopWcids(1006653).Where(RetailDyeWcids.Contains).ToList();
+            CollectionAssert.AreEquivalent(RetailDyeWcids.ToList(), tailorDyes, "the Tailor must stock the nine Perennial dyes 30082-30091 except 30084");
+            foreach (var vendor in VendorWcids.Where(v => v != 1006653))
+                Assert.IsFalse(ShopWcids(vendor).Any(RetailDyeWcids.Contains), $"vendor {vendor} stocks a Perennial dye; only the Tailor does");
+            foreach (var vendor in VendorWcids)
+                Assert.IsFalse(ShopWcids(vendor).Contains(BotchedDyeWcid), $"vendor {vendor} stocks Perennial Botched Dye {BotchedDyeWcid}, which does nothing");
+
+            var patch = Path.Combine(WeenieDir().Parent.FullName, "patches", "hopeslayer_perennial_dye_price.sql");
+            Assert.IsTrue(File.Exists(patch), $"missing {patch}");
+            var sql = Normalise(File.ReadAllText(patch));
+            var priced = Regex.Matches(sql, @"\(\s*(\d+)\s*,\s*(15|19)\s*,\s*(\d+)\s*\)").Cast<Match>()
+                .Select(m => (Wcid: uint.Parse(m.Groups[1].Value), Type: int.Parse(m.Groups[2].Value), Value: int.Parse(m.Groups[3].Value))).ToList();
+            foreach (var dye in RetailDyeWcids)
+                foreach (var type in new[] { 15, 19 })
+                {
+                    var rows = priced.Where(r => r.Wcid == dye && r.Type == type).ToList();
+                    Assert.AreEqual(1, rows.Count, $"patch must set int {type} on {dye} exactly once");
+                    Assert.AreEqual(PerennialDyePrice, rows[0].Value, $"patch int {type} on {dye}");
+                }
+            Assert.IsFalse(priced.Any(r => r.Wcid == BotchedDyeWcid), $"the patch must not price Perennial Botched Dye {BotchedDyeWcid}");
+            Assert.AreEqual(18, priced.Count, "the patch must price exactly the nine dyes (18 rows), nothing else");
         }
 
         [TestMethod]
@@ -342,29 +513,178 @@ namespace ACE.Server.Tests
             Assert.IsFalse(AllowedInts.Overlaps(NeverInts.Keys), "the int allowlist grew Damage, ArmorLevel or ItemWorkmanship");
             Assert.IsFalse(AllowedInts.Overlaps(RatingInts), "the int allowlist grew a gear or luminance rating");
             Assert.IsFalse(AllowedDids.Overlaps(NeverDids), "the data-id allowlist grew a spell or proc");
+            Assert.IsFalse(PrestigeExtraInts.Overlaps(NeverInts.Keys) || PrestigeExtraInts.Overlaps(RatingInts), "the prestige extras grew a power int");
+        }
+
+        /// <summary>Every property a prestige item carries outside the cosmetic allowlist plus the named prestige extras.</summary>
+        private static List<string> PrestigeViolations(uint wcid, ParsedWeenie w, bool allowExtras)
+        {
+            var violations = new List<string>();
+
+            foreach (var (type, value) in w.Table("weenie_properties_int"))
+            {
+                if (NeverInts.TryGetValue(type, out var never))
+                    violations.Add($"{wcid}: {never} (int {type}) = {value} - a shop item must never carry it");
+                else if (RatingInts.Contains(type))
+                    violations.Add($"{wcid}: gear/luminance rating int {type} ({(PropertyInt)type}) = {value}");
+                else if (!AllowedInts.Contains(type) && !(allowExtras && PrestigeExtraInts.Contains(type)))
+                    violations.Add($"{wcid}: int {type} ({(PropertyInt)type}) = {value}");
+            }
+
+            foreach (var (type, value) in w.Table("weenie_properties_float"))
+                if (!AllowedFloats.Contains(type))
+                    violations.Add($"{wcid}: float {type} ({(PropertyFloat)type}) = {value}");
+
+            foreach (var (type, value) in w.Table("weenie_properties_d_i_d"))
+                if (NeverDids.Contains(type) || !AllowedDids.Contains(type))
+                    violations.Add($"{wcid}: data id {type} ({(PropertyDataId)type}) = {value}");
+
+            foreach (var (type, value) in w.Table("weenie_properties_bool"))
+                if (!AllowedBools.Contains(type) && !(allowExtras && PrestigeExtraBools.Contains(type)))
+                    violations.Add($"{wcid}: bool {type} ({(PropertyBool)type}) = {value}");
+
+            foreach (var (type, _) in w.Table("weenie_properties_string"))
+                if (!AllowedStrings.Contains(type) && !(allowExtras && PrestigeExtraStrings.Contains(type)))
+                    violations.Add($"{wcid}: string {type} ({(PropertyString)type})");
+
+            if (!allowExtras && w.Table(PaletteTable).Count > 0)
+                violations.Add($"{wcid}: {w.Table(PaletteTable).Count} palette row(s)");
+
+            return violations;
+        }
+
+        /// <summary>
+        /// The prestige items (PrestigeItems): each is stocked by exactly its named vendor and no other, is fully parsed, costs
+        /// its own price on shelf and till, is gated (PvpPrestigeGated = True), Attuned and not sellable, and carries nothing
+        /// beyond the cosmetic allowlist plus the named prestige extras - never a power id.
+        /// </summary>
+        [TestMethod]
+        public void Hopeslayer_PrestigeItems_AreGatedPricedAndCarryNoPower()
+        {
+            Assert.IsTrue(PrestigeItems.Count > 0, "the check would pass vacuously");
+
+            foreach (var (wcid, (vendor, price)) in PrestigeItems)
+            {
+                CollectionAssert.Contains(ShopWcids(vendor), wcid, $"prestige item {wcid} must be a Shop row of vendor {vendor}");
+                foreach (var other in VendorWcids.Where(v => v != vendor))
+                    Assert.IsFalse(ShopWcids(other).Contains(wcid), $"prestige item {wcid} is also stocked by vendor {other}");
+
+                var w = Parse(WeenieSql(wcid), wcid, allowPaletteRows: true);
+                Assert.AreEqual(0, w.Problems.Count, $"prestige item {wcid} not fully parsed:\n" + string.Join("\n", w.Problems));
+
+                Assert.AreEqual(price, IntValue(w, (int)PropertyInt.Value), $"{wcid} Value");
+                Assert.AreEqual(price, IntValue(w, (int)PropertyInt.StackUnitValue), $"{wcid} StackUnitValue");
+                Assert.AreEqual(1, IntValue(w, (int)PropertyInt.Attuned), $"{wcid} must be Attuned");
+                Assert.AreEqual(1, IntValue(w, (int)PropertyInt.Bonded), $"{wcid} must be Bonded");
+
+                // Palette rows: ObjDesc writes offset and length as ONE byte each, and a palette has 256 units of 8 colours, so
+                // every row must fit both, and the rows must tile units 0-255 exactly with no overlap (a gap would leave
+                // the wearer's own colours showing through; an overlap means two rows fight over the same units).
+                var palette = w.Table(PaletteTable)
+                    .Select(r => r.Value.Split(':'))
+                    .Select(v => (Offset: int.Parse(v[0]), Length: int.Parse(v[1])))
+                    .OrderBy(r => r.Offset)
+                    .ToList();
+                Assert.IsTrue(palette.Count > 0, $"{wcid} has no palette rows to check");
+                var next = 0;
+                foreach (var (offset, length) in palette)
+                {
+                    Assert.IsTrue(offset <= 255, $"{wcid}: palette offset {offset} does not fit a byte");
+                    Assert.IsTrue(length >= 1 && length <= 255, $"{wcid}: palette length {length} at offset {offset} is not 1-255");
+                    Assert.IsTrue(offset + length <= 256, $"{wcid}: palette row {offset}+{length} runs past unit 256");
+                    Assert.AreEqual(next, offset, $"{wcid}: palette rows leave a gap or overlap at unit {next} (next row starts at {offset})");
+                    next = offset + length;
+                }
+                Assert.AreEqual(256, next, $"{wcid}: palette rows end at unit {next}, not 256");
+
+                string Bool(PropertyBool b) => w.Table("weenie_properties_bool").Where(r => r.Type == (int)b).Select(r => r.Value).SingleOrDefault();
+                Assert.AreEqual("True", Bool(PropertyBool.PvpPrestigeGated), $"{wcid} must carry PvpPrestigeGated = True, or anyone with the Marks can buy it");
+                Assert.AreEqual("False", Bool(PropertyBool.IsSellable), $"{wcid} must not sell back for pyreals");
+
+                var violations = PrestigeViolations(wcid, w, allowExtras: true);
+                Assert.AreEqual(0, violations.Count, $"prestige item {wcid} carries something outside the cosmetic allowlist and the prestige extras:\n" + string.Join("\n", violations));
+
+                // Positive control: the exemption is load-bearing and narrow. Without the extras the same file fails, and only on
+                // the named extras it actually carries.
+                var strict = PrestigeViolations(wcid, w, allowExtras: false);
+                Assert.IsTrue(strict.Count > 0, $"{wcid} needs no prestige extras; it should be an ordinary clone instead");
+                Assert.IsTrue(strict.Any(v => v.Contains("bool 9076")), $"{wcid}: the strict check must flag PvpPrestigeGated:\n" + string.Join("\n", strict));
+            }
         }
 
         [TestMethod]
         public void Bloodwarden_UsesBloodAsItsCurrency()
         {
-            var vendor = Parse(WeenieSql(VendorWcid), VendorWcid);
-            var currency = vendor.Table("weenie_properties_d_i_d").Where(r => r.Type == (int)PropertyDataId.AlternateCurrency).ToList();
-            Assert.AreEqual(1, currency.Count, "the Bloodwarden must carry exactly one AlternateCurrency (DID 57) row");
-            Assert.AreEqual(BloodWcid.ToString(), currency[0].Value, "the Bloodwarden's AlternateCurrency must be Blood (1006650)");
+            foreach (var wcid in VendorWcids)
+            {
+                var vendor = Parse(WeenieSql(wcid), wcid);
+                var currency = vendor.Table("weenie_properties_d_i_d").Where(r => r.Type == (int)PropertyDataId.AlternateCurrency).ToList();
+                Assert.AreEqual(1, currency.Count, $"vendor {wcid} must carry exactly one AlternateCurrency (DID 57) row");
+                Assert.AreEqual(BloodWcid.ToString(), currency[0].Value, $"vendor {wcid}'s AlternateCurrency must be Blood (1006650)");
+            }
         }
 
         /// <summary>
-        /// Creature.GenerateNewFace (Creature.cs:207, for every non-Player creature) rolls a random head from the
-        /// heritage's CharGen list unless HeadObject (DID 18) is already set (Creature.cs:359), so an Undead NPC
-        /// without the pin spawns with a different skull each time. The Bloodwarden's look is the pinned one.
+        /// Every Mark price is the item's own Value times the vendor's SellPrice (Vendor.GetSellCost), so the prices
+        /// pinned above hold only while each vendor's SellPrice (float 38) is exactly 1.
         /// </summary>
         [TestMethod]
-        public void Bloodwarden_PinsItsUndeadHead()
+        public void Hopeslayer_EachVendor_HasSellPriceExactlyOne()
         {
-            var vendor = Parse(WeenieSql(VendorWcid), VendorWcid);
-            var heads = vendor.Table("weenie_properties_d_i_d").Where(r => r.Type == (int)PropertyDataId.HeadObject).ToList();
-            Assert.AreEqual(1, heads.Count, "the Bloodwarden must pin exactly one HeadObject (DID 18) or its head is randomised on every spawn");
-            Assert.AreEqual(0x01004619u.ToString(), heads[0].Value, "the Bloodwarden's HeadObject must be the Undead-male CharGen head 0x01004619");
+            foreach (var wcid in VendorWcids)
+            {
+                var vendor = Parse(WeenieSql(wcid), wcid);
+                var sellPrice = vendor.Table("weenie_properties_float").Where(r => r.Type == (int)PropertyFloat.SellPrice).ToList();
+                Assert.AreEqual(1, sellPrice.Count, $"vendor {wcid} must carry exactly one SellPrice (float 38) row");
+                Assert.AreEqual(1.0, double.Parse(sellPrice[0].Value, System.Globalization.CultureInfo.InvariantCulture), $"vendor {wcid}'s SellPrice must be 1, or every Mark price drifts");
+            }
+        }
+
+        /// <summary>The split must leave four distinct vendors: the four wcids are all in the shop-vendor list the other checks use.</summary>
+        [TestMethod]
+        public void Bloodwarden_ShopStock_IsExactlyTheKnownSet_PerVendorAndInTotal()
+        {
+            var total = 0;
+            foreach (var wcid in VendorWcids)
+            {
+                var n = ShopWcids(wcid).Count;
+                total += n;
+                Assert.AreEqual(ExpectedShopLinesPerVendor[wcid], n, $"vendor {wcid} has {n} shop lines; expected exactly {ExpectedShopLinesPerVendor[wcid]} (update deliberately if stock changed on purpose)");
+            }
+            Assert.AreEqual(ExpectedTotalShopLines, total, "total shop lines across the four vendors changed; update the expected counts deliberately if this was intended");
+        }
+
+        [TestMethod]
+        public void Bloodwarden_IsFourVendors_WithTheirOwnShops()
+        {
+            CollectionAssert.AreEqual(new uint[] { 1004130, 1006651, 1006652, 1006653 }, VendorWcids);
+            foreach (var wcid in VendorWcids)
+                Assert.IsTrue(ShopWcids(wcid).Count >= MinimumShopLinesPerVendor, $"vendor {wcid} stocks too few lines");
+        }
+
+        /// <summary>
+        /// Each vendor wears its own retail look (owner spec 2026-10-15): Setup from the look source, and no
+        /// HeritageGroup int (188), so Creature.GenerateNewFace (Creature.cs:207) never randomises a head - the old
+        /// Undead look needed a HeadObject pin for that, which is gone with it.
+        /// </summary>
+        [TestMethod]
+        public void Hopeslayer_EachVendorWearsItsRetailLook_WithNoRandomHead()
+        {
+            var expectedSetup = new Dictionary<uint, uint>
+            {
+                { 1004130, 0x020013F1 }, // Shonossoar the Song-Keeper, retail 33009
+                { 1006651, 0x020015FF }, // Count Dardante, retail 87595
+                { 1006652, 0x02000001 }, // Faurset, retail 87516
+                { 1006653, 0x02001BFB }, // Tormented Shadow, retail 51876
+            };
+            foreach (var wcid in VendorWcids)
+            {
+                var vendor = Parse(WeenieSql(wcid), wcid);
+                var setup = vendor.Table("weenie_properties_d_i_d").Where(r => r.Type == (int)PropertyDataId.Setup).ToList();
+                Assert.AreEqual(1, setup.Count, $"vendor {wcid} must carry exactly one Setup");
+                Assert.AreEqual(expectedSetup[wcid], Convert.ToUInt32(setup[0].Value, 16), $"vendor {wcid}'s Setup");
+                Assert.IsNull(IntValue(vendor, (int)PropertyInt.HeritageGroup), $"vendor {wcid} carries a HeritageGroup int, so GenerateNewFace would randomise its head");
+            }
         }
 
         [TestMethod]

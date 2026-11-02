@@ -14,8 +14,11 @@ namespace ACE.Server.Tests
     /// exercising the actual GetReadout wiring (unit conversion to display percent/multiplier, Label/Unit/Per,
     /// CapNote) rather than re-deriving the arithmetic a second time.
     ///
-    /// SKIPPED: TransfusionAbility.GetReadout and ExsanguinateAbility.GetReadout both call a live Player
-    /// method (GetClassAbilityScaling / GetClassAbilityRank respectively) and Player's static initializer
+    /// ExsanguinateAbility.GetReadout became null-player safe in the Blood Mage buff pass and is covered for
+    /// the null case only below; its live (owned Sanguine Reserve) path still needs a Player.
+    ///
+    /// SKIPPED: TransfusionAbility.GetReadout and the live half of ExsanguinateAbility.GetReadout both call a
+    /// live Player method (GetClassAbilityScaling / GetClassAbilityRank respectively) and Player's static initializer
     /// cannot run under this test host (project constraint - see BloodMageMechanicsTests' header and
     /// CLAUDE.md's "Player statics untestable" note). Their underlying pure statics
     /// (DrainSurplusDistribution.ShareFraction, BloodChargeMath.StackCap, ExsanguinateMath.BurstMultiplier)
@@ -91,14 +94,51 @@ namespace ACE.Server.Tests
 
         // ---- Crimson Harvest -------------------------------------------------------------------------
 
+        /// <summary>
+        /// Since the Blood Mage buff pass Crimson Harvest has three ranks and a scalable number: the EXTRA
+        /// creatures a Drain strikes (class_ability_crimsonharvest_extra_targets_r1..r3 = 2/3/4).
+        /// </summary>
         [TestMethod]
-        public void CrimsonHarvest_Readout_HasNoScalableValue()
+        public void CrimsonHarvest_Readout_ReportsExtraTargetsByRank()
         {
             var ability = new CrimsonHarvestAbility();
 
-            var readout = ability.GetReadout(null, 1);
+            var r1 = ability.GetReadout(null, 1);
+            var r2 = ability.GetReadout(null, 2);
+            var r3 = ability.GetReadout(null, 3);
 
-            Assert.IsFalse(readout.HasValue);
+            Assert.AreEqual(2.0, r1.Skill, 1e-9);
+            Assert.AreEqual(3.0, r2.Skill, 1e-9);
+            Assert.AreEqual(4.0, r3.Skill, 1e-9);
+
+            foreach (var readout in new[] { r1, r2, r3 })
+            {
+                Assert.IsTrue(readout.HasValue);
+                Assert.AreEqual(0.0, readout.Affinity, 1e-9);
+                Assert.AreEqual(0.0, readout.Gear, 1e-9);
+                Assert.AreEqual(readout.Skill, readout.Effective, 1e-9);
+                Assert.AreEqual("", readout.Unit);
+                Assert.IsFalse(readout.Capped);
+            }
+        }
+
+        // ---- Exsanguinate ----------------------------------------------------------------------------
+
+        /// <summary>
+        /// Exsanguinate's readout is null-player safe since the buff pass: a null player holds no Sanguine
+        /// Reserve, so there is no pool to burst (Skill 0) and the kept-charges Secondary is omitted rather
+        /// than padded with a zero.
+        /// </summary>
+        [TestMethod]
+        public void Exsanguinate_Readout_NullPlayer_ReportsNoBurstAndOmitsKeptCharges()
+        {
+            var readout = new ExsanguinateAbility().GetReadout(null, 3);
+
+            Assert.IsTrue(readout.HasValue);
+            Assert.AreEqual(0.0, readout.Skill, 1e-9);
+            Assert.AreEqual(0.0, readout.Affinity, 1e-9);
+            Assert.AreEqual(0.0, readout.Gear, 1e-9);
+            Assert.IsNull(readout.Secondary);
         }
 
         // ---- Blood Price -----------------------------------------------------------------------------

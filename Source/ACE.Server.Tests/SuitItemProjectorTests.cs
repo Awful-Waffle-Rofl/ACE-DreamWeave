@@ -238,6 +238,91 @@ namespace ACE.Server.Tests
             CollectionAssert.AreEqual(new[] { "kind", "skill_or_attr", "difficulty" }, req.EnumerateObject().Select(p => p.Name).ToArray());
         }
 
+        // ---- gear ratings ----
+
+        [TestMethod]
+        public void GearRatings_ProjectFromTheirProperties_AndZeroOrAbsentStayNull()
+        {
+            var w = Ring();
+            w.PropertiesInt[PropertyInt.GearCritDamage] = 2;
+            w.PropertiesInt[PropertyInt.GearMaxHealth] = 3;
+            w.PropertiesInt[PropertyInt.GearDamage] = 0;
+
+            foreach (var s in new[] { SuitItemProjector.FromItem(AsClothing(w)), SuitItemProjector.FromWeenie(w) })
+            {
+                Assert.AreEqual(2, s.GearCritDamage);
+                Assert.AreEqual(3, s.GearMaxHealth);
+                Assert.IsNull(s.GearDamage, "an explicit 0 is null");
+                Assert.IsNull(s.GearDamageResist);
+                Assert.IsNull(s.GearCritDamageResist);
+                Assert.IsNull(s.GearHealingBoost);
+            }
+        }
+
+        [TestMethod]
+        public void GearRatings_EachReadsItsOwnProperty_AndSerializesSnakeCaseOmittingNulls()
+        {
+            var w = Ring();
+            w.PropertiesInt[PropertyInt.GearDamage] = 1;
+            w.PropertiesInt[PropertyInt.GearDamageResist] = 2;
+            w.PropertiesInt[PropertyInt.GearCritDamage] = 3;
+            w.PropertiesInt[PropertyInt.GearCritDamageResist] = 4;
+            w.PropertiesInt[PropertyInt.GearHealingBoost] = 5;
+            w.PropertiesInt[PropertyInt.GearMaxHealth] = 6;
+
+            var root = JsonDocument.Parse(Json(SuitItemProjector.FromItem(AsClothing(w)))).RootElement;
+
+            Assert.AreEqual(1, root.GetProperty("gear_damage").GetInt32());
+            Assert.AreEqual(2, root.GetProperty("gear_damage_resist").GetInt32());
+            Assert.AreEqual(3, root.GetProperty("gear_crit_damage").GetInt32());
+            Assert.AreEqual(4, root.GetProperty("gear_crit_damage_resist").GetInt32());
+            Assert.AreEqual(5, root.GetProperty("gear_healing_boost").GetInt32());
+            Assert.AreEqual(6, root.GetProperty("gear_max_health").GetInt32());
+
+            var bare = JsonDocument.Parse(Json(SuitItemProjector.FromItem(AsClothing(Ring())))).RootElement;
+            Assert.IsFalse(bare.EnumerateObject().Any(p => p.Name.StartsWith("gear_", StringComparison.Ordinal)));
+        }
+
+        [TestMethod]
+        public void GearRatings_Negative_AreKeptByEveryProjection()
+        {
+            var w = Ring();
+            w.PropertiesInt[PropertyInt.GearDamage] = -3;
+            w.PropertiesInt[PropertyInt.GearCritDamageResist] = -1;
+
+            var fromItem = SuitItemProjector.FromItem(AsClothing(w));
+            var fromWeenie = SuitItemProjector.FromWeenie(w);
+            var fromProbe = SuitItemProjector.FromLedgerProbe(AsClothing(w), 1234u, "k", 2);
+
+            foreach (var s in new[] { fromItem, fromWeenie, fromProbe })
+            {
+                Assert.AreEqual(-3, s.GearDamage);
+                Assert.AreEqual(-1, s.GearCritDamageResist);
+            }
+
+            Assert.IsTrue(Json(fromItem).Contains("\"gear_damage\":-3"));
+            Assert.IsNull(fromProbe.ItemGuid);
+            Assert.AreEqual(1234u, fromProbe.Wcid);
+            Assert.AreEqual(2, fromProbe.Count);
+        }
+
+        [TestMethod]
+        public void GearRatings_SixDistinctValues_ProjectFromWeenie()
+        {
+            var w = Ring();
+            w.PropertiesInt[PropertyInt.GearDamage] = 1;
+            w.PropertiesInt[PropertyInt.GearDamageResist] = 2;
+            w.PropertiesInt[PropertyInt.GearCritDamage] = 3;
+            w.PropertiesInt[PropertyInt.GearCritDamageResist] = 4;
+            w.PropertiesInt[PropertyInt.GearHealingBoost] = 5;
+            w.PropertiesInt[PropertyInt.GearMaxHealth] = 6;
+
+            var s = SuitItemProjector.FromWeenie(w);
+
+            CollectionAssert.AreEqual(new int?[] { 1, 2, 3, 4, 5, 6 },
+                new[] { s.GearDamage, s.GearDamageResist, s.GearCritDamage, s.GearCritDamageResist, s.GearHealingBoost, s.GearMaxHealth });
+        }
+
         // ---- wield requirements ----
 
         [TestMethod]

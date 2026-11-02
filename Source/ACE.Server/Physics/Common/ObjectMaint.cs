@@ -6,6 +6,7 @@ using System.Threading;
 using ACE.Entity.Enum;
 using ACE.Server.Physics.Managers;
 using ACE.Server.WorldObjects;
+using ACE.Server.WorldEvents;
 
 namespace ACE.Server.Physics.Common
 {
@@ -460,11 +461,14 @@ namespace ACE.Server.Physics.Common
                 if (PhysicsObj.WeenieObj.IsCombatPet)
                     results = objs.Where(i => i.WeenieObj.IsMonster && i.WeenieObj.PlayerKillerStatus != PlayerKillerStatus.PK);    // combat pets cannot attack pk-only creatures (ie. faction banners)
                 else if (PhysicsObj.WeenieObj.IsFactionMob)
-                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet || i.WeenieObj.IsMonster && !i.WeenieObj.SameFaction(PhysicsObj));
+                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet || i.WeenieObj.IsMonster && !i.WeenieObj.SameFaction(PhysicsObj)
+                        || WorldEventHooks.PhysicsIsHoldKnightTargetFor(i.WeenieObj.HoldKnightRunId, PhysicsObj.WeenieObj.IsMonster, PhysicsObj.WeenieObj.HoldMonsterRunId));
                 else
                 {
                     // adding faction mobs here, even though they are retaliate-only, for inverse visible targets
-                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.PlayerKillerStatus != PlayerKillerStatus.PK || i.WeenieObj.IsFactionMob || i.WeenieObj.PotentialFoe(PhysicsObj));
+                    // WaffleACE fork, World Events Hold: a knight is a candidate ONLY for its own run's monsters.
+                    results = objs.Where(i => i.IsPlayer || i.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.PlayerKillerStatus != PlayerKillerStatus.PK || i.WeenieObj.IsFactionMob || i.WeenieObj.PotentialFoe(PhysicsObj)
+                        || WorldEventHooks.PhysicsIsHoldKnightTargetFor(i.WeenieObj.HoldKnightRunId, PhysicsObj.WeenieObj.IsMonster, PhysicsObj.WeenieObj.HoldMonsterRunId));
                 }
             }
             return results;
@@ -697,7 +701,7 @@ namespace ACE.Server.Physics.Common
 
                 // remove expired objects from all lists
                 foreach (var expiredObj in expiredObjs)
-                    RemoveObject(expiredObj);
+                    ExpireObject(expiredObj);
 
                 return expiredObjs;
             }
@@ -705,6 +709,41 @@ namespace ACE.Server.Physics.Common
             {
                 rwLock.ExitWriteLock();
             }
+        }
+
+        /// <summary>
+        /// The destruction-queue expiry of one object (see <see cref="DestroyObjects"/>).
+        ///
+        /// Normally this is <see cref="RemoveObject"/>. The exception is a PLAYER that still knows this owner.
+        /// Dungeon visibility (EnvCell VisibleCells) is not always symmetric: the other player's cell can see
+        /// this owner's cell while this owner's cell cannot see back (PlayerCommands /objsend notes the same
+        /// imbalance). RemoveObject would then drop the pair from BOTH KnownPlayers tables while the other
+        /// player's KnownObjects, and its client, still hold this owner. This owner's broadcasts (motion,
+        /// attacks, death, position) stop reaching a client that still draws them, and nothing on the other
+        /// player's side ever re-adds the link: its AddVisibleObject is a no-op for an object it already has.
+        ///
+        /// So for that case only, this owner forgets the object (KnownObjects, VisibleObjects, destruction
+        /// queue, targets) but both KnownPlayers links are kept, and broadcasts keep flowing both ways. Real
+        /// destruction (RemoveObject from a flush, DestroyObject) is unchanged, and still clears both links.
+        /// </summary>
+        private void ExpireObject(PhysicsObj obj)
+        {
+            if (obj == null)
+                return;
+
+            var stillKnowsOwner = obj.IsPlayer && PhysicsObj != null && obj.ObjMaint.KnownObjects.ContainsKey(PhysicsObj.ID);
+
+            if (!stillKnowsOwner)
+            {
+                RemoveObject(obj);
+                return;
+            }
+
+            KnownObjects.Remove(obj.ID, out _);
+            RemoveVisibleObject(obj);
+            DestructionQueue.Remove(obj, out _);
+            RemoveVisibleTarget(obj);
+            RemoveRetaliateTarget(obj);
         }
 
         /// <summary>
@@ -862,6 +901,120 @@ namespace ACE.Server.Physics.Common
         }
 
         /// <summary>
+        /// Makes sure <paramref name="player"/> is in this object's KnownPlayers (its broadcast recipient list),
+        /// with every check <see cref="AddKnownPlayer"/> applies, the landblock-instance gate included.
+        /// </summary>
+        /// <returns>true if the player was missing and has been added</returns>
+        public bool EnsureKnownPlayer(PhysicsObj player)
+        {
+            if (player == null)
+                return false;
+
+            // rwLock is one static lock shared by every ObjectMaint (recursive), so touching this table from
+            // inside another ObjectMaint's write lock - as RepairInverseKnownPlayers does - cannot lock-order
+            // deadlock. It is the same pattern AddKnownObject uses for its inverse AddKnownPlayer.
+            rwLock.EnterWriteLock();
+            try
+            {
+                return AddKnownPlayer(player);
+            }
+            finally
+            {
+                rwLock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>
+        /// Heartbeat self-heal for one-way player visibility (see <see cref="ExpireObject"/>): for every player
+        /// this owner can currently see, makes sure this owner is in that player's KnownPlayers, so the player's
+        /// broadcasts reach this owner's client. Only maintained for players. Iterates the table in place under
+        /// the write lock, with no allocation.
+        /// </summary>
+        /// <returns>the number of links repaired</returns>
+        public int RepairInverseKnownPlayers()
+        {
+            if (PhysicsObj == null || !PhysicsObj.IsPlayer)
+                return 0;
+
+            rwLock.EnterWriteLock();
+            try
+            {
+                var repaired = 0;
+
+                foreach (var obj in VisibleObjects.Values)
+                {
+                    if (obj == null || !obj.IsPlayer || obj.ObjMaint == null)
+                        continue;
+
+                    if (obj.ObjMaint.EnsureKnownPlayer(PhysicsObj))
+                        repaired++;
+                }
+
+                return repaired;
+            }
+            finally
+            {
+                rwLock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>
+        /// Cuts, both ways, every broadcast link this owner holds to a player it does not itself know: a KnownPlayers
+        /// entry with no matching KnownObjects entry. These are the links <see cref="ExpireObject"/> keeps after a
+        /// one-way expiry (and any other leftover). The teleport flush only walks KnownObjects, so without this an
+        /// owner leaving its instance would keep broadcasting to, and being drawn by, a player it left
+        /// behind - across instances, which is the leak <see cref="DifferentInstance"/> exists to stop.
+        ///
+        /// Each cut removes this owner from the player's KnownObjects, VisibleObjects, destruction queue and
+        /// KnownPlayers, and the player from this owner's tables. A player that knew this owner stays in its
+        /// KnownPlayers until then, so normal (mutually known) pairs are never touched here.
+        /// </summary>
+        /// <returns>
+        /// One entry per player cut: the player, and true when it still held this owner in its KnownObjects - its
+        /// client still draws the owner, so the caller decides (by teleport_flush_scope) whether to send a delete.
+        /// Allocates only when something was left over; called once per instance-changing teleport.
+        /// </returns>
+        public IReadOnlyList<KeyValuePair<PhysicsObj, bool>> CutResidualObservers()
+        {
+            rwLock.EnterWriteLock();
+            try
+            {
+                List<KeyValuePair<PhysicsObj, bool>> cut = null;
+
+                foreach (var player in KnownPlayers.Values)
+                {
+                    if (player == null || KnownObjects.ContainsKey(player.ID))
+                        continue;
+
+                    var heldOwner = PhysicsObj != null && player.ObjMaint != null && player.ObjMaint.KnownObjects.ContainsKey(PhysicsObj.ID);
+
+                    if (cut == null)
+                        cut = new List<KeyValuePair<PhysicsObj, bool>>();
+
+                    cut.Add(new KeyValuePair<PhysicsObj, bool>(player, heldOwner));
+                }
+
+                if (cut == null)
+                    return EmptyCut;
+
+                foreach (var entry in cut)
+                {
+                    // the player's side first (it may still know this owner), then this owner's, as the flush does
+                    entry.Key.ObjMaint?.RemoveObject(PhysicsObj);
+                    RemoveObject(entry.Key);
+                }
+
+                return cut;
+            }
+            finally
+            {
+                rwLock.ExitWriteLock();
+            }
+        }
+
+        private static readonly KeyValuePair<PhysicsObj, bool>[] EmptyCut = Array.Empty<KeyValuePair<PhysicsObj, bool>>();
+
+        /// <summary>
         /// Removes a known player for this object
         /// </summary>
         public bool RemoveKnownPlayer(PhysicsObj obj)
@@ -1005,7 +1158,8 @@ namespace ACE.Server.Physics.Common
             else if (PhysicsObj.WeenieObj.IsFactionMob)
             {
                 // only tracking players, combat pets, and monsters of differing faction
-                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && (!obj.WeenieObj.IsMonster || PhysicsObj.WeenieObj.SameFaction(obj)))
+                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && (!obj.WeenieObj.IsMonster || PhysicsObj.WeenieObj.SameFaction(obj))
+                    && !WorldEventHooks.PhysicsIsHoldKnightTargetFor(obj.WeenieObj.HoldKnightRunId, PhysicsObj.WeenieObj.IsMonster, PhysicsObj.WeenieObj.HoldMonsterRunId))
                 {
                     Console.WriteLine($"{PhysicsObj.Name}.ObjectMaint.AddVisibleTarget({obj.Name}): tried to add a non-player / non-combat pet / non-opposing faction mob");
                     return false;
@@ -1033,7 +1187,9 @@ namespace ACE.Server.Physics.Common
                 }
 
                 // only tracking players and combat pets
-                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.FoeType == null)
+                // (WaffleACE fork, World Events Hold: and a knight of this monster's own run)
+                if (!obj.IsPlayer && !obj.WeenieObj.IsCombatPet && PhysicsObj.WeenieObj.FoeType == null
+                    && !WorldEventHooks.PhysicsIsHoldKnightTargetFor(obj.WeenieObj.HoldKnightRunId, PhysicsObj.WeenieObj.IsMonster, PhysicsObj.WeenieObj.HoldMonsterRunId))
                 {
                     Console.WriteLine($"{PhysicsObj.Name}.ObjectMaint.AddVisibleTarget({obj.Name}): tried to add a non-player / non-combat pet");
                     return false;
@@ -1062,7 +1218,8 @@ namespace ACE.Server.Physics.Common
             VisibleTargets.Add(obj.ID, obj);
 
             // maintain inverse for monsters / combat pets
-            if (!obj.IsPlayer)
+            // (WaffleACE fork, World Events Hold: not for a knight - it never thinks, so it tracks nothing)
+            if (!obj.IsPlayer && !WorldEventHooks.PhysicsIsHoldKnight(obj.WeenieObj.HoldKnightRunId))
                 obj.ObjMaint.AddVisibleTarget(PhysicsObj);
 
             return true;

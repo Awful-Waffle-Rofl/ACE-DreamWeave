@@ -241,7 +241,9 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var use = PooledLootSourceText.MethodBody(handler, "public static bool TryHandleUse(Gem gem, Player player)");
             StringAssert.Contains(use, "ComposeLongDesc(spec, run.Dungeon.Name, gem.Structure ?? 0, gem.MaxStructure ?? 0, run.IsGroup)");
-            StringAssert.Contains(use, "DungeonGemRules.EntryMessage(charge, gem.Name, run.Dungeon.Name, gem.Structure ?? 0)");
+            // The cleared return is false for every group run that is not Cleared (DungeonGemRules.IsClearedReturn), so a key's free
+            // entry into a live run still gets the first-entry line.
+            StringAssert.Contains(use, "DungeonGemRules.EntryMessage(charge, gem.Name, run.Dungeon.Name, gem.Structure ?? 0, clearedReturn)");
 
             var grant = PooledLootSourceText.MethodBody(handler, "private static void GrantKey(");
             var attuned = grant.IndexOf("key.Attuned = AttunedStatus.Attuned;", StringComparison.Ordinal);

@@ -176,10 +176,10 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void JoinResultText_BelowMinLevel_FillsLevel()
+        public void JoinResultText_NoThreadCleared_IsTheThreadLine()
         {
-            var result = new PvpJoinResult(PvpJoinRefusal.BelowMinLevel, "1v1", MinLevel: 50);
-            Assert.AreEqual("[Arena] You must be at least level 50 to enter the arena.", JoinResultText(result));
+            var result = new PvpJoinResult(PvpJoinRefusal.NoThreadCleared, "1v1");
+            Assert.AreEqual("[Arena] You must complete at least one Thread before you can join PvP Arenas or Battlegrounds. The Thread-Guide's first Thread counts.", JoinResultText(result));
         }
 
         // ---------------- ForfeitResultText ----------------

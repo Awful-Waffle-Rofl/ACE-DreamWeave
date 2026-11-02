@@ -57,39 +57,9 @@ namespace ACE.Server.Pvp.Battlegrounds
             if (percent <= 0.0)
                 return null;
 
-            var range = dials.AdKillRange;
-
-            if (double.IsNaN(range) || double.IsInfinity(range) || range <= 0.0 || deathPosition == null || deathPosition.Instance != matchInstance)
-                return null;
-
-            var sequence = plan.Sequence;
-            var index = -1;
-
-            if (sequence != null)
-            {
-                var current = sequence.Current;
-
-                if (current >= 0 && current < plan.Count && (isStanding?.Invoke(current) ?? true) && DistanceToSite(deathPosition, plan.Crystals[current].Site, matchLandblock, matchInstance) <= range)
-                    index = current;
-            }
-            else
-            {
-                var best = double.MaxValue;
-
-                foreach (var crystal in plan.Crystals)
-                {
-                    if (!(isStanding?.Invoke(crystal.Index) ?? true))
-                        continue;
-
-                    var distance = DistanceToSite(deathPosition, crystal.Site, matchLandblock, matchInstance);
-
-                    if (distance <= range && distance < best)
-                    {
-                        best = distance;
-                        index = crystal.Index;
-                    }
-                }
-            }
+            // Range, instance and which crystal: the one shared definition of "near the vulnerable crystal", which the performance
+            // ledger also uses (Docs/Pvp/BATTLEGROUNDS.md "Performance stats").
+            var index = CrystalProximity.VulnerableIndexNear(plan.Crystals, plan.Sequence, matchLandblock, matchInstance, dials.AdKillRange, deathPosition, isStanding);
 
             return index < 0 ? null : new CrystalKillEffect(index, isChip, percent);
         }
@@ -117,13 +87,6 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// (ACE.Entity.Position.DistanceTo: plain x, y, z in the landblock frame for two points in one landblock). Pure.
         /// </summary>
         public static double DistanceToSite(Position deathPosition, BattlegroundCrystalSite site, uint matchLandblock, uint matchInstance)
-        {
-            if (deathPosition == null || site == null)
-                return double.MaxValue;
-
-            var sitePosition = new Position(((matchLandblock & 0xFFFF) << 16) | site.CellLow, site.X, site.Y, site.Z, 0f, 0f, 0f, 1f, matchInstance);
-
-            return deathPosition.DistanceTo(sitePosition);
-        }
+            => CrystalProximity.DistanceToSite(deathPosition, site, matchLandblock, matchInstance);
     }
 }

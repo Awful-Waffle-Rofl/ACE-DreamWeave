@@ -487,6 +487,14 @@ namespace ACE.Server.Tests
                 "targetCreature is not Player",
                 "targetCreature.AbsorbMonsterEffectDamage(this, DamageType.Health, (uint)-tryBoost, boostOrigin);");
 
+            // S4c (Pinnacle review C5): a Drain Health writes the victim's Health inside HandleCastSpell_Transfer, so it
+            // is a fourth incoming path; only a drain of someone else, and only a non-player victim, is filtered, and
+            // the caster's gain is scaled with it (MonsterDrainAfterAbsorb)
+            AssertSource("S4c incoming drain", "Source/ACE.Server/WorldObjects/WorldObject_Magic.cs",
+                "if (spell.Source == PropertyAttribute2nd.Health && transferSource is not Player && !ReferenceEquals(transferSource, caster) && srcVitalChange > 0)",
+                "(srcVitalChange, destVitalChange) = MonsterDrainAfterAbsorb(transferSource, this, srcVitalChange, destVitalChange, spell.LossPercent, boostMod);",
+                "var absorbed = victim.AbsorbMonsterEffectDamage(caster, DamageType.Health, loss, IncomingDamageOrigin.DirectHit);");
+
             AssertSource("S5 monster spell hit", "Source/ACE.Server/WorldObjects/SpellProjectile.cs",
                 "if (sourceCreature != null && player == null)",
                 "sourceCreature.ApplySpellHitMonsterEffects(creatureTarget, this, ref spellDamage);");
@@ -502,6 +510,27 @@ namespace ACE.Server.Tests
 
             AssertSource("S8 lifecycle", "Source/ACE.Server/WorldObjects/Creature_Tick.cs",
                 "MonsterEffectHeartbeat();");
+        }
+
+        /// <summary>
+        /// S4c ordering: the monster filter runs AFTER every cap and the cloak proc (which recompute the gain from the
+        /// loss) and BEFORE the fellow split and the Health write, so the split shares out only what was really drained
+        /// (no free heal from an immune monster) and the victim loses only the absorbed amount.
+        /// </summary>
+        [TestMethod]
+        public void DrainFilter_RunsBeforeTheFellowSplitAndTheHealthWrite()
+        {
+            var src = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/WorldObject_Magic.cs");
+            var body = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.MethodBody(src, "private void HandleCastSpell_Transfer(");
+
+            var cloak = body.IndexOf("Cloak.GetReducedAmount(this, targetCreature, srcVitalChange)", StringComparison.Ordinal);
+            var filter = body.IndexOf("MonsterDrainAfterAbsorb(transferSource, this, srcVitalChange, destVitalChange, spell.LossPercent, boostMod)", StringComparison.Ordinal);
+            var split = body.IndexOf("DrainSurplusDistribution.ApplyShare(", StringComparison.Ordinal);
+            var ward = body.IndexOf("mitigationTarget.ApplyPreWriteDamageClassAbilities(this, DamageType.Health, srcVitalChange, isSpell: true)", StringComparison.Ordinal);
+            var write = body.IndexOf("transferSource.UpdateVitalDelta(transferSource.Health, -(int)srcVitalChange)", StringComparison.Ordinal);
+
+            Assert.IsTrue(cloak >= 0 && filter > cloak && split > filter && ward > split && write > ward, "cloak, monster filter, split, player ward, write");
+            Assert.IsFalse(body.Contains("AbsorbMonsterEffectDamage("), "no second, gain-blind absorb at the Health write");
         }
 
         // ---- fixture helpers ---------------------------------------------------------------------------

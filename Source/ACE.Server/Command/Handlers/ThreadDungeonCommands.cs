@@ -57,7 +57,7 @@ namespace ACE.Server.Command.Handlers
         /// (commands are dispatched from WorldManager's inbound queue), so reading the run and its caches here
         /// never overlaps the landblock tick; the placement itself is queued onto the run landblock.
         /// </summary>
-        [CommandHandler("spawncache", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0, "Threads: form your Thread Cache beside you, or move it to you", "")]
+        [CommandHandler("spawncache", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0, "Threads: gather your Thread Cache(s) to you, and form new ones for any unclaimed loot", "")]
         public static void HandleSpawnCache(Session session, params string[] parameters)
         {
             var player = session.Player;
@@ -73,13 +73,13 @@ namespace ACE.Server.Command.Handlers
             var holdsItems = run != null && (run.IsGroup ? ThreadLootPool.AnyCacheHoldsItemsFor(run, player.Guid.Full) : ThreadLootPool.AnyCacheHoldsItems(run));
 
             var refusal = SpawnCacheRules.FirstRefusal(run != null, inside, state,
-                run != null && run.SpawnCacheCooldownElapsed(now),
+                run != null && run.SpawnCacheCooldownElapsed(player.Guid.Full, now),
                 run != null && run.IsCachePlacementInProgress(now),
                 hasUnclaimed,
                 holdsItems);
 
             if (run != null && SpawnCacheRules.StampsCooldown(refusal))
-                run.StampSpawnCacheCooldown(now);
+                run.StampSpawnCacheCooldown(player.Guid.Full, now);
 
             if (refusal != SpawnCacheRefusal.None)
             {

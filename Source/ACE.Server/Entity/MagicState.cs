@@ -115,6 +115,71 @@ namespace ACE.Server.Entity
         /// </summary>
         public bool AlwaysTurn;
 
+        /// <summary>
+        /// WaffleACE (FastTick): when the current phase of this cast (before the windup, or after the launch
+        /// gesture) first began waiting on the player to face the target - a server turn-to (TurnTo_Magic) or a
+        /// held client turn key (PendingTurnRelease). DateTime.MinValue while the cast is not waiting.
+        /// Re-issuing the turn does NOT restart it (BeginTurnWait keeps the first value), so a turn that client
+        /// movement keeps cancelling and the cast keeps re-issuing is still bounded by spellcast_turn_timeout_seconds
+        /// (see CastTurnTimeout, Player.CheckCastTurnTimeout).
+        /// </summary>
+        public DateTime TurnWaitStart { get; private set; } = DateTime.MinValue;
+
+        /// <summary>Starts the turn-wait clock for this phase, unless it is already running.</summary>
+        public void BeginTurnWait(DateTime now)
+        {
+            if (TurnWaitStart == DateTime.MinValue)
+            {
+                TurnWaitStart = now;
+                TurnWaitLastCheck = now;
+                TurnWaitPausedSeconds = 0;
+            }
+        }
+
+        /// <summary>When the per-tick turn-wait check last ran (DateTime.MinValue while not waiting).</summary>
+        public DateTime TurnWaitLastCheck { get; private set; } = DateTime.MinValue;
+
+        /// <summary>Total seconds this phase's clock has been paused behind a healthy animation (capped).</summary>
+        public double TurnWaitPausedSeconds { get; private set; }
+
+        /// <summary>
+        /// Per-tick clock step: time spent with the turn held behind a healthy (not yet stale) animation queue is not
+        /// counted against the cast (CastTurnTimeout.AdvanceWaitStart), up to maxPauseSeconds in total for the phase
+        /// (CastTurnTimeout.MaxPauseSeconds). Past the cap the hold is ignored and the clock runs, so a queue that keeps
+        /// looking healthy forever cannot hold the cast open forever.
+        /// </summary>
+        public void TickTurnWait(DateTime now, bool heldByHealthyAnimation, double maxPauseSeconds)
+        {
+            var remaining = maxPauseSeconds - TurnWaitPausedSeconds;
+            var held = heldByHealthyAnimation && remaining > 0;
+
+            var advanced = CastTurnTimeout.AdvanceWaitStart(TurnWaitStart, TurnWaitLastCheck, now, held);
+
+            if (held && advanced != TurnWaitStart)
+            {
+                var credit = (advanced - TurnWaitStart).TotalSeconds;
+                if (credit > remaining)
+                {
+                    credit = remaining;
+                    advanced = TurnWaitStart.AddSeconds(credit);
+                }
+                TurnWaitPausedSeconds += credit;
+            }
+
+            TurnWaitStart = advanced;
+
+            if (TurnWaitStart != DateTime.MinValue)
+                TurnWaitLastCheck = now;
+        }
+
+        /// <summary>The cast stopped waiting on its facing and moved on (windup started, or the spell released).</summary>
+        public void EndTurnWait()
+        {
+            TurnWaitStart = DateTime.MinValue;
+            TurnWaitLastCheck = DateTime.MinValue;
+            TurnWaitPausedSeconds = 0;
+        }
+
         public MagicState(Player player)
         {
             Player = player;
@@ -134,6 +199,7 @@ namespace ACE.Server.Entity
             CanQueue = false;
             CastQueue = null;
             AlwaysTurn = false;
+            EndTurnWait();
 
             StartTime = DateTime.UtcNow;
             CastGestureStartTime = DateTime.MinValue;
@@ -166,6 +232,7 @@ namespace ACE.Server.Entity
             CanQueue = false;
             CastQueue = null;
             AlwaysTurn = false;
+            EndTurnWait();
 
             CastGesture = MotionCommand.Invalid;
             CastGestureStartTime = DateTime.MinValue;

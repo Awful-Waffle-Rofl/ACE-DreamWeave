@@ -17,13 +17,10 @@ namespace ACE.Server.Pvp
         bool IsTeleporting,
         bool AlreadyQueued,
         bool AlreadyInMatch,
-        int CharacterLevel,
-        int MinLevel,
+        bool HasClearedThread,
         bool IsDenylisted = false,
         bool IsTemplateAccount = false,
-        bool IsPvpTemplated = false,
-        bool RequiresPkFacet = false,
-        bool OnPkFacet = true);
+        bool IsPvpTemplated = false);
 
     public static class PvpAdmission
     {
@@ -55,11 +52,9 @@ namespace ACE.Server.Pvp
             if (r.AlreadyInInstance)
                 return PvpAdmissionRefusal.AlreadyInInstance;
 
-            // Owner ruling 2026-10-03 (Docs/Pvp/TEMPLATES.md "Rulings"): the PK facet is not required for a templated
-            // mode, which is every mode by default; any character may queue from any facet. Only a room whose modes all
-            // opted out of templates (none today) still requires it, in the position this check always had.
-            if (r.RequiresPkFacet && !r.OnPkFacet)
-                return PvpAdmissionRefusal.NotOnPkFacet;
+            // The PK facet is never checked here: owner ruling 2026-10-03 (Docs/Pvp/TEMPLATES.md "Rulings") dropped it for every
+            // templated mode, and owner ruling 2026-10-15 (one Thread clear replaces the level and PK facet requirements) dropped
+            // it for the rest, so any character may queue from any facet.
 
             // A character still carrying a template restore record (a restore that failed) is inert until staff
             // restore it, and a second apply would refuse anyway.
@@ -84,8 +79,10 @@ namespace ACE.Server.Pvp
             if (r.IsTeleporting)
                 return PvpAdmissionRefusal.IsTeleporting;
 
-            if (r.CharacterLevel < r.MinLevel)
-                return PvpAdmissionRefusal.BelowMinLevel;
+            // Owner ruling 2026-10-15: one Thread clear replaces the level and PK facet requirements. HasClearedThread is
+            // PvpEligibility.HasClearedAThread, the same predicate the one-time eligibility notice uses.
+            if (!r.HasClearedThread)
+                return PvpAdmissionRefusal.NoThreadCleared;
 
             return PvpAdmissionRefusal.None;
         }

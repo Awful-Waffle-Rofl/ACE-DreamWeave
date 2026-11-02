@@ -134,7 +134,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void SpellstormTunables_AreRegisteredWithTheSpecifiedDefaults()
         {
-            Assert.AreEqual(0.14, D("class_ability_spellstorm_chance"), 1e-9);
+            // Spellsword pass 2026-10-24: one flat 0.14 -> three ranks at 5/10/15%
+            Assert.AreEqual(0.05, D("class_ability_spellstorm_chance_r1"), 1e-9);
+            Assert.AreEqual(0.10, D("class_ability_spellstorm_chance_r2"), 1e-9);
+            Assert.AreEqual(0.15, D("class_ability_spellstorm_chance_r3"), 1e-9);
         }
 
         [TestMethod]
@@ -159,8 +162,8 @@ namespace ACE.Server.Tests
         {
             Assert.AreEqual(5, L("class_ability_resonance_max_stacks"));
             Assert.AreEqual(0.012, D("class_ability_resonance_per_stack_r1"), 1e-9);
-            Assert.AreEqual(0.018, D("class_ability_resonance_per_stack_r2"), 1e-9);
-            Assert.AreEqual(0.024, D("class_ability_resonance_per_stack_r3"), 1e-9);
+            Assert.AreEqual(0.024, D("class_ability_resonance_per_stack_r2"), 1e-9);
+            Assert.AreEqual(0.036, D("class_ability_resonance_per_stack_r3"), 1e-9);
             Assert.AreEqual(6.0, D("class_ability_resonance_window_seconds"), 1e-9);
         }
 
@@ -168,14 +171,20 @@ namespace ACE.Server.Tests
         public void SpellsurgeTunables_AreRegisteredWithTheSpecifiedDefaults()
         {
             Assert.AreEqual(5, L("class_ability_spellsurge_max_stacks"));
-            Assert.AreEqual(0.02, D("class_ability_spellsurge_per_stack"), 1e-9);
+            // Spellsword pass 2026-10-24: one flat 0.02 -> per-rank 0.67/1.33/2 points per stack
+            Assert.AreEqual(0.0067, D("class_ability_spellsurge_per_stack_r1"), 1e-9);
+            Assert.AreEqual(0.0133, D("class_ability_spellsurge_per_stack_r2"), 1e-9);
+            Assert.AreEqual(0.02, D("class_ability_spellsurge_per_stack_r3"), 1e-9);
             Assert.AreEqual(10.0, D("class_ability_spellsurge_window_seconds"), 1e-9);
         }
 
         [TestMethod]
         public void CascadeTunables_AreRegisteredWithTheSpecifiedDefaults()
         {
-            Assert.AreEqual(0.25, D("class_ability_cascade_chance"), 1e-9);
+            // Spellsword pass 2026-10-24: one flat 0.25 -> three ranks at 5/10/15%
+            Assert.AreEqual(0.05, D("class_ability_cascade_chance_r1"), 1e-9);
+            Assert.AreEqual(0.10, D("class_ability_cascade_chance_r2"), 1e-9);
+            Assert.AreEqual(0.15, D("class_ability_cascade_chance_r3"), 1e-9);
             Assert.AreEqual(8.0, D("class_ability_cascade_radius"), 1e-9);
         }
 

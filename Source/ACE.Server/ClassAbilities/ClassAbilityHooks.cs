@@ -173,6 +173,39 @@ namespace ACE.Server.ClassAbilities
         public bool IsDamageOverTime { get; init; }
 
         /// <summary>
+        /// TRUE when the hit is SPELL damage: a spell projectile (SpellProjectile.DamageTarget), a Harm
+        /// (HandleCastSpell_Boost), a Drain Health (HandleCastSpell_Transfer) or a DoT tick
+        /// (EnchantmentManager.ApplyDamageTick). FALSE for the physical path (Player.TakeDamage), which
+        /// passes nothing. Read by a handler that treats spell damage differently from weapon damage.
+        /// </summary>
+        public bool IsSpell { get; init; }
+
+        /// <summary>
+        /// How much of the hit AS THROWN is spell damage from an ENEMY CREATURE - a live non-player
+        /// creature other than the defender, decided by <see cref="ClassAbilityAttackerFilter.EnemyCreature"/>,
+        /// the same predicate that fills <see cref="Attacker"/>. 0 for every physical hit, every PvP or
+        /// self-inflicted spell, and every spell with no creature behind it.
+        ///
+        /// A SHARE RATHER THAN A FLAG because a DoT tick is the sum of every enchantment on the victim and
+        /// can mix casters: a monster's Incantation of Flame Bane and a PvP rival's poison land as ONE tick
+        /// with a null source. The tick site sums only the contributions whose caster passes the filter and
+        /// hands that in, so a handler can act on the creature part without touching the rest. For the three
+        /// single-source spell sites it is simply the whole hit or nothing. Never greater than the hit.
+        /// </summary>
+        public uint SpellDamageFromEnemyCreature { get; init; }
+
+        /// <summary>
+        /// TRUE when the hit comes from the hazard library (HazardContext.HitPlayers: rolling balls, wisp pillars), whose
+        /// damage is a fixed share of max health and is the mechanic's whole threat, or from the Marae Lassel digsite boss
+        /// mechanics (MlDigsiteBossMechanics.Hit, owner ruling 2026-10-24). Every WARD skips such a hit (owner rulings R3
+        /// and "hazards bypass all wards", 2026-10-19): Sanguine Ward, Mana Barrier, Runic Ward and Reflect Magic's
+        /// immunity window. Berserk Rage reads it too (2026-10-24): a hazard never triggers the rage, and the rage's
+        /// immunity window does not block one. Soul Jump (a death save) and the damage-neutral Adrenaline and Kinetic
+        /// Charge are unaffected, as is every other damage source. It applies to admin /hazard runs too.
+        /// </summary>
+        public bool IsHazard { get; init; }
+
+        /// <summary>
         /// The damage still heading for Health. Each handler lowers it (never raises it); the dispatch
         /// returns the final value and the call site writes THAT to the vital. It may already be 0 by the
         /// time a later handler runs, so every handler must tolerate a zero and leave it alone.
@@ -291,6 +324,15 @@ namespace ACE.Server.ClassAbilities
             incomingDamage != 0 || mitigationOrder == Observe;
 
         /// <summary>
+        /// Short immunity windows that cancel a whole class of damage outright for a moment (Reflect's
+        /// creature-spell immunity). AFTER the observers, so Adrenaline and Kinetic Charge still see a
+        /// blocked hit as having reached the defender, and AHEAD OF EVERY ABSORB POOL, so a hit the window
+        /// cancels never drains a finite ward or charges the barrier Mana for damage that was never going
+        /// to land. It is a mitigation, so a hit already at 0 does not dispatch it.
+        /// </summary>
+        public const int Immunity = 75;
+
+        /// <summary>
         /// Finite absorb pools that eat damage outright (Sanguine Ward, Runic Ward). First of the
         /// mitigations, so a pool is spent against the full hit rather than against whatever a proportional
         /// mitigation left of it - which is the order these abilities have run in at every site since they
@@ -311,6 +353,14 @@ namespace ACE.Server.ClassAbilities
         /// Last, because any mitigation running after one would invalidate the decision it just made.
         /// </summary>
         public const int DeathSave = 900;
+
+        /// <summary>
+        /// A death save that must yield to every OTHER death save (Berserk Rage, 2026-10-24). After
+        /// <see cref="DeathSave"/>, so a Soul Jump that saves the player has already lifted the blow below
+        /// their Health by the time this runs, and the rage - with its own cooldown - is not spent on a death
+        /// that was already averted. Owner ruling: if Soul Jump saves, Rage must not fire.
+        /// </summary>
+        public const int LastResortDeathSave = 950;
     }
 
     /// <summary>

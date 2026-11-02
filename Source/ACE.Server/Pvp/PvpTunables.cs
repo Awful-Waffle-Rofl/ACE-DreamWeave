@@ -23,7 +23,6 @@ namespace ACE.Server.Pvp
         int TimeLimitSecondsFfa,
         int PostMatchSeconds,
         int MaxConcurrentMatches,
-        int MinLevel,
         bool BlockSameIp,
         bool FriendlyFire,
         bool DeathKeepsEnchantments,
@@ -77,10 +76,11 @@ namespace ACE.Server.Pvp
         // pvp_arena_overtime_damage_ramp_per_minute - damage between arena opponents is multiplied by
         // 1 + ramp x (whole minutes of overtime), after the PvP damage cap. 0 = off. Defaults 0.0.
         double OvertimeDamageRampPerMinute = 0.0,
-        // pvp_arena_blood_enabled - arena matches pay the cosmetic Blood currency (Docs/Pvp/DESIGN.md "Rewards").
-        // Off = no Blood is paid at all. Defaults ON (owner ruling 2026-10-08, with the next deploy; it was OFF from 2026-10-01). Read when the match resolves.
+        // pvp_arena_blood_enabled - master switch for Mark of the Hopeslayer payouts, shared by arena and battleground matches
+        // (Docs/Pvp/DESIGN.md "Rewards"). The arena amounts below default to 2 / 1 / 1 (win / loss / draw; owner ruling 2026-10-18).
+        // Off = no Marks are paid at all. Defaults ON (owner ruling 2026-10-08, with the next deploy; it was OFF from 2026-10-01). Read when the match resolves.
         bool BloodEnabled = true,
-        // pvp_arena_blood_win - Blood paid to a winner (FFA: first place, shared first included). Defaults 2.
+        // pvp_arena_blood_win - Blood paid to a winner (FFA: first place, shared first included). Defaults 2 (owner ruling 2026-10-18; it was 0 from 2026-10-15).
         int BloodWin = 2,
         // pvp_arena_blood_loss - Blood paid to a loser who did not forfeit (FFA: every other non-forfeiter). Defaults 1.
         int BloodLoss = 1,
@@ -100,7 +100,14 @@ namespace ACE.Server.Pvp
         double DmgModFfa = 1.0,
         // pvp_arena_ffa_ring_dmg - Tugak Brawl only: multiplies the damage of any-school ring-shape spell projectiles (today Curse
         // of Raven Fury) between two players bound to the same Live FFA match. Defaults 1.0 (unchanged).
-        double FfaRingDmg = 1.0);
+        double FfaRingDmg = 1.0,
+        // pvp_arena_crier_results_enabled - the Arena Crier posts one /lfg line for every resolved match (arena and battleground).
+        // Gated by Enabled, NOT by CrierEnabled. Defaults true.
+        bool CrierResultsEnabled = true,
+        // pvp_arena_multi_queue_enabled - a player may wait in several queues at once, one entry per room (Docs/Pvp/DESIGN.md
+        // "Joining the queue"). OFF = a second queue is refused; players already in several are left alone; offline queued
+        // players are still dropped. Read at every join. Defaults true.
+        bool MultiQueueEnabled = true);
 
     /// <summary>
     /// Test seam for the pvp_* tunables, following <c>Player_Facets.FacetTunables</c> exactly:
@@ -127,7 +134,6 @@ namespace ACE.Server.Pvp
             TimeLimitSecondsFfa: 300,
             PostMatchSeconds: 10,
             MaxConcurrentMatches: 10,
-            MinLevel: 50,
             BlockSameIp: true,
             FriendlyFire: false,
             DeathKeepsEnchantments: true,
@@ -174,7 +180,8 @@ namespace ACE.Server.Pvp
             BloodDraw: 1,
             BloodDailyCap: 10,
             BloodResetTimezone: "America/New_York",
-            BloodResetHour: 0);
+            BloodResetHour: 0,
+            MultiQueueEnabled: true);
 
         private static PvpArenaDials ReadFromProperties()
         {
@@ -195,7 +202,6 @@ namespace ACE.Server.Pvp
                     TimeLimitSecondsFfa: (int)PropertyManager.GetLong("pvp_arena_time_limit_seconds_ffa", d.TimeLimitSecondsFfa).Item,
                     PostMatchSeconds: (int)PropertyManager.GetLong("pvp_arena_post_match_seconds", d.PostMatchSeconds).Item,
                     MaxConcurrentMatches: (int)PropertyManager.GetLong("pvp_arena_max_concurrent_matches", d.MaxConcurrentMatches).Item,
-                    MinLevel: (int)PropertyManager.GetLong("pvp_arena_min_level", d.MinLevel).Item,
                     BlockSameIp: PropertyManager.GetBool("pvp_arena_block_same_ip", d.BlockSameIp).Item,
                     FriendlyFire: PropertyManager.GetBool("pvp_arena_friendly_fire", d.FriendlyFire).Item,
                     DeathKeepsEnchantments: PropertyManager.GetBool("pvp_arena_death_keeps_enchantments", d.DeathKeepsEnchantments).Item,
@@ -244,7 +250,9 @@ namespace ACE.Server.Pvp
                     BloodResetTimezone: PropertyManager.GetString("pvp_arena_blood_reset_timezone", d.BloodResetTimezone).Item,
                     BloodResetHour: (int)Math.Clamp(PropertyManager.GetLong("pvp_arena_blood_reset_hour", d.BloodResetHour).Item, 0L, 23L),
                     DmgModFfa: PropertyManager.GetDouble("pvp_arena_dmg_mod_ffa", d.DmgModFfa).Item,
-                    FfaRingDmg: PropertyManager.GetDouble("pvp_arena_ffa_ring_dmg", d.FfaRingDmg).Item);
+                    FfaRingDmg: PropertyManager.GetDouble("pvp_arena_ffa_ring_dmg", d.FfaRingDmg).Item,
+                    CrierResultsEnabled: PropertyManager.GetBool("pvp_arena_crier_results_enabled", d.CrierResultsEnabled).Item,
+                    MultiQueueEnabled: PropertyManager.GetBool("pvp_arena_multi_queue_enabled", d.MultiQueueEnabled).Item);
             }
             catch (Exception ex)
             {

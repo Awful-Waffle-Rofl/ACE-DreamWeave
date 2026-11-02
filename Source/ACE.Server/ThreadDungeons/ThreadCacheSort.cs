@@ -96,8 +96,9 @@ namespace ACE.Server.ThreadDungeons
     /// NEITHER run kind is touched here as of the owner ruling 2026-09-22: a solo run now fills through the
     /// exact same merge-sort-before-placement path a group run always has (ThreadGroupCacheDelivery.FillFromPile,
     /// reused unchanged - see ThreadCacheFiller.BuildPile and ThreadCachePlacer.Execute), keyed by
-    /// ThreadLootStacking.SortPileForPlacement's OWNER key: stackables grouped by wcid (by the group's total
-    /// Value descending), then everything else by Value descending. <see cref="VaultDisplaySort.Order"/> is a
+    /// ThreadLootStacking.SortPileForPlacement's OWNER key: the Knot family first, then the fixed boss bonus
+    /// (note, key, salvage), then stackables grouped by wcid (by the group's total Value descending), then
+    /// everything else by Value descending. <see cref="VaultDisplaySort.Order"/> is a
     /// DIFFERENT key entirely (item-type category, then weapon class or equip slot, then material, name,
     /// workmanship, and only THEN Value descending as a late tiebreaker - VaultDisplaySort.cs:111-146), so
     /// running it here would silently reorder a cache out of the very order the merge-sort feature exists to

@@ -16,5 +16,5 @@ namespace ACE.Server.Pvp
     /// DeathPosition is a copy of where the victim stood when a Death was reported (Attack/Defend's kill chip and heal range check,
     /// Docs/Pvp/ATTACK-DEFEND.md "Kill chip and heal"); null for every other kind, and for a death reported without one.
     /// </remarks>
-    public sealed record PvpIntent(PvpIntentKind Kind, uint CharacterId, Guid MatchId, ParticipantExit ExitReason, DateTime OccurredAtUtc, uint KillerId = 0, int Count = 0, int Survivors = 0, bool PlayerCaused = false, bool Retryable = false, ACE.Entity.Position DeathPosition = null);
+    public sealed record PvpIntent(PvpIntentKind Kind, uint CharacterId, Guid MatchId, ParticipantExit ExitReason, DateTime OccurredAtUtc, uint KillerId = 0, int Count = 0, int Survivors = 0, bool PlayerCaused = false, bool Retryable = false, ACE.Entity.Position DeathPosition = null, bool ServerCaused = false);
 }

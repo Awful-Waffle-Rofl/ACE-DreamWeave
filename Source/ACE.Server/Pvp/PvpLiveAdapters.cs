@@ -44,9 +44,9 @@ namespace ACE.Server.Pvp
             return new PvpPlayerFacts(
                 CharacterId: p.Guid.Full,
                 Name: p.Name,
-                Level: p.Level ?? 1,
-                // Same-IP key: the session endpoint address (DESIGN "Rating" same-IP rules).
-                IpKey: p.Session?.EndPointC2S?.Address?.ToString(),
+                // Same-household key (DESIGN "Rating" same-IP rules): the address for an ordinary account, the cluster or
+                // exempt-account household otherwise. Only ever via IpLimitManager.HouseholdKey.
+                IpKey: IpLimitManager.HouseholdKey(p.Session),
                 // "Already in any instance": an ephemeral instance, not merely a non-zero instance id (realm routing
                 // gives every non-retail realm a non-zero instance even outside any ephemeral copy).
                 InInstance: p.Location?.IsEphemeralRealm ?? false,
@@ -56,13 +56,22 @@ namespace ACE.Server.Pvp
                 IsMule: p.IsMule,
                 IsDead: p.IsDead,
                 IsTeleporting: p.Teleporting,
-                OnPkFacet: p.IsOnPkFacet,
                 FellowshipMemberIds: fellows,
                 PreferredTemplateKey: p.PvpTemplatePreference,
                 IsTemplateAccount: IsOnTemplateAccount(p),
                 IsPvpTemplated: p.IsPvpTemplated,
                 // The allegiance monarch, for the battleground clanmate split (0 = no allegiance).
-                MonarchId: p.MonarchId ?? 0);
+                MonarchId: p.MonarchId ?? 0,
+                // The repeat-pairing key: the same rule every account-pooled board uses.
+                AccountId: ACE.Server.Entity.AccountLeaderboard.AccountKeyFor(p),
+                // The /arena norematch opt-in (PropertyBool 9075); absent = off.
+                RefuseUnpaidRematch: p.PvpArenaRefuseUnpaidRematch,
+                // The stored deserter record (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"); absent = 0.
+                DeserterStrikes: p.GetProperty(PropertyInt.PvpDeserterStrikes) ?? 0,
+                DeserterLastStrikeAt: p.GetProperty(PropertyInt64.PvpDeserterLastStrikeAt) ?? 0,
+                DeserterLockoutUntil: p.GetProperty(PropertyInt64.PvpDeserterLockoutUntil) ?? 0,
+                // Owner ruling 2026-10-15: admission needs one Thread clear. The same Player property the eligibility notice reads.
+                HasClearedThread: p.HasClearedAThread);
         }
 
         /// <summary>PvP Template Facets: true when the player's account is pvp_template_account (compared by name, ignoring case).</summary>
@@ -89,6 +98,9 @@ namespace ACE.Server.Pvp
             var location = p.Location;
             var inInstance = location != null && location.Instance == matchInstance;
 
+            // The conduct activity stamp (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): one volatile reference, read once.
+            var activity = p.PvpActivity;
+
             return new BattlegroundZoneSample(
                 characterId,
                 TeamIndex: 0,
@@ -98,7 +110,9 @@ namespace ACE.Server.Pvp
                 IsTeleporting: p.Teleporting,
                 X: inInstance ? location.PositionX : 0,
                 Y: inInstance ? location.PositionY : 0,
-                Z: inInstance ? location.PositionZ : 0);
+                Z: inInstance ? location.PositionZ : 0,
+                LastActivityUtc: activity?.AtUtc,
+                ActivityMatchId: activity?.MatchId);
         }
 
         public void DrainVitals(uint characterId, Guid matchId, uint matchInstance, int health, int stamina, int mana, bool lethal)
@@ -140,6 +154,69 @@ namespace ACE.Server.Pvp
         {
             var location = Online(characterId)?.Location;
             return location != null ? new Position(location) : null;
+        }
+
+        /// <summary>
+        /// The match exit (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"), on the world thread at dispatch. A player standing in a
+        /// Thread copy as a roster member is recorded as away from that run (ThreadPvpAway, with the spot they stand on and the
+        /// dynamic_dungeons_pvp_hold_minutes hold) and exits to the Thread's outer stamp; the choice itself is PvpReturnRules.ChooseExit.
+        /// </summary>
+        public Position GetExitPoint(uint characterId)
+        {
+            var p = Online(characterId);
+            var location = p?.Location;
+
+            if (location == null)
+                return null;
+
+            var run = location.IsEphemeralRealm ? ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(location.Instance) : null;
+            var inThreadAsMember = run != null && ACE.Server.ThreadDungeons.ThreadRunPresence.IsMemberInside(run, p);
+
+            var choice = PvpReturnRules.ChooseExit(location, p.GetPosition(PositionType.EphemeralRealmExitTo), inThreadAsMember, run?.ExitTo, p.Sanctuary, p.Instantiation);
+
+            // A new pull always supersedes an entry left from an earlier match (ThreadPvpAway.BeginPull): that entry is dropped first,
+            // and a new one is registered only when this pull is from inside a Thread.
+            var hold = choice.RegisterThreadAway ? ACE.Server.ThreadDungeons.ThreadPvpAway.ClampHold(ReadPvpHoldMinutes()) : TimeSpan.Zero;
+            var dropped = ACE.Server.ThreadDungeons.ThreadPvpAway.BeginPull(characterId, choice.RegisterThreadAway ? run : null, location, DateTime.UtcNow, hold);
+
+            if (dropped != null)
+                log.Info($"[PVP] {p.Name} (0x{characterId:X8}): an earlier Thread away entry ({dropped.Run}) is dropped by this new match");
+
+            if (choice.RegisterThreadAway)
+                log.Info($"[PVP] {p.Name} (0x{characterId:X8}) pulled into a match from inside {run}; Thread held {hold.TotalMinutes:0} min, exit stamped at the Thread's outer exit {choice.Exit}");
+            else if (location.IsEphemeralRealm)
+                log.Info($"[PVP] {p.Name} (0x{characterId:X8}) pulled into a match from ephemeral instance 0x{location.Instance:X8}; exit stamped at {choice.Exit}, not inside it");
+
+            return choice.Exit;
+        }
+
+        /// <summary>dynamic_dungeons_pvp_hold_minutes, read with its default (a failed or unseeded read falls back to it).</summary>
+        private static long ReadPvpHoldMinutes()
+        {
+            try
+            {
+                return PropertyManager.GetLong("dynamic_dungeons_pvp_hold_minutes", ACE.Server.ThreadDungeons.ThreadPvpAway.HoldMinutesDefault).Item;
+            }
+            catch (Exception ex)
+            {
+                log.Error("[PVP] reading dynamic_dungeons_pvp_hold_minutes threw; using the default", ex);
+                return ACE.Server.ThreadDungeons.ThreadPvpAway.HoldMinutesDefault;
+            }
+        }
+
+        /// <summary>
+        /// Participation ended (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread"): ThreadPvpAway.ParticipationEndedAction decides. An online
+        /// player already out of the match copy (a walk-out, a failed rejoin) left without the return resolver, so their entry is
+        /// released; anyone else keeps it with the hold shrunk to the run's empty grace.
+        /// </summary>
+        public void OnParticipationEnded(uint characterId, uint matchInstance)
+        {
+            var p = Online(characterId);
+            var action = ACE.Server.ThreadDungeons.ThreadPvpAway.ApplyParticipationEnded(characterId, p != null, p?.Teleporting ?? false,
+                matchInstance != 0 && p?.Location?.Instance == matchInstance, DateTime.UtcNow);
+
+            if (action == ACE.Server.ThreadDungeons.ThreadPvpAway.EndAction.Release)
+                log.Info($"[PVP] {p.Name} (0x{characterId:X8}) left match instance 0x{matchInstance:X8} without the return; Thread away entry released");
         }
 
         public PvpPresence GetPresence(uint characterId, uint matchInstance)
@@ -264,7 +341,7 @@ namespace ACE.Server.Pvp
             if (p == null || exitTo == null)
                 return;
 
-            var destination = new Position(exitTo);
+            var seatExit = new Position(exitTo);
 
             p.EnqueueAction(new ActionEventDelegate(() =>
             {
@@ -275,7 +352,16 @@ namespace ACE.Server.Pvp
                     if (!p.Teleporting && p.Location?.Instance != matchInstance)
                         return;
 
-                    p.SetPosition(PositionType.EphemeralRealmExitTo, null);
+                    // The one PvP return resolver: back inside the Thread they were pulled from when it still takes them, else the
+                    // stamped exit (the coordinator's copy of it as the fallback), else home.
+                    var destination = p.ResolvePvpReturn("match exit", seatExit);
+
+                    if (destination == null)
+                    {
+                        log.Warn($"[PVP] {p.Name} (0x{p.Guid.Full:X8}): nowhere to return to from match instance 0x{matchInstance:X8}");
+                        return;
+                    }
+
                     WorldManager.ThreadSafeTeleport(p, destination);
                 }
                 catch (Exception ex)
@@ -327,6 +413,12 @@ namespace ACE.Server.Pvp
 
             return p == null ? null : p.CheckPvpTemplateRoom(template);
         }
+
+        public IReadOnlyCollection<uint> ClothingPalettes(uint clothingBase) => PvpClothingPalettes.Palettes(clothingBase);
+
+        public uint ClothingPaletteIcon(uint clothingBase, uint palette) => PvpClothingPalettes.Icon(clothingBase, palette);
+
+        public PvpLookSource WorldLookSource(uint wcid) => PvpWorldLooks.Get(wcid);
 
         public void RunTemplateBackstop(uint characterId, Guid matchId)
         {
@@ -876,6 +968,13 @@ namespace ACE.Server.Pvp
         public MatchSpaceReadiness GetReadiness(MatchSpace space) => provider.GetReadiness(space);
 
         public void Release(MatchSpace space) => provider.Release(space);
+
+        public bool AdmitLate(MatchSpace space, uint characterId)
+        {
+            var p = PlayerManager.GetOnlinePlayer(characterId);
+
+            return p != null && provider.AdmitLate(space, p);
+        }
     }
 
     /// <summary>The live <see cref="IPvpResultSink"/>: the SerializedShardDatabase wrappers from PR B.</summary>
@@ -893,6 +992,7 @@ namespace ACE.Server.Pvp
 
         public void LoadLatestParticipantTemplates(Action<List<PvpLatestParticipantTemplateRecord>, PvpTemplateStoreStatus> callback)
             => DatabaseManager.Shard.GetLatestPvpParticipantTemplates(callback);
+
     }
 
     /// <summary>

@@ -92,15 +92,33 @@ namespace ACE.Server.WorldEvents
             }
         }
 
+        /// <summary>
+        /// The claim policy the pipeline runs under for <paramref name="evt"/>: its objective's
+        /// <see cref="Objectives.IWorldEventObjective.ClaimPolicy"/>, or <see cref="WorldEventClaimPolicy.Default"/>
+        /// when there is no run, no objective, the objective answers null, or the read throws.
+        /// </summary>
+        internal static WorldEventClaimPolicy ClaimPolicyFor(WorldEvent evt)
+        {
+            try
+            {
+                return evt?.Objective?.ClaimPolicy ?? WorldEventClaimPolicy.Default;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt?.RunId} objective ClaimPolicy threw; claiming under the default policy", ex);
+                return WorldEventClaimPolicy.Default;
+            }
+        }
+
         private static bool Handle(WorldObject cache, Player player)
         {
-            var evt = WorldEventManager.Current;
             var runId = cache.GetProperty(PropertyInt.WorldEventId);
+            var evt = runId == null ? null : WorldEventManager.FindRun((uint)runId.Value);
 
             // A cache left over from a finished run must never pay. The run id stamp is applied at spawn
             // time by WorldEventRewardDelivery, so an unstamped cache (hand-spawned by an admin, say) also
             // lands here.
-            if (evt == null || runId == null || (uint)runId.Value != evt.RunId)
+            if (evt == null)
             {
                 TrySendTransientError(player, "This cache is spent.");
                 return true;
@@ -118,6 +136,7 @@ namespace ACE.Server.WorldEvents
             var characterGuid = player.Guid.Full;
             var accountId = player.Session?.AccountId ?? 0;
             var ip = player.Session?.EndPointC2S?.Address?.ToString();
+            var householdKey = IpLimitManager.HouseholdKey(player.Session);
 
             // 1. The window. Rewarding is the only state a claim is legal in, and ClaimWindowEndsAt is set
             //    the moment the run enters it. A 0 end time means "not yet armed", which the state check has
@@ -135,17 +154,13 @@ namespace ACE.Server.WorldEvents
 
             var exemptIps = WorldEventClaimRules.ParseExemptIps(PropertyManager.GetString("world_events_ip_exempt").Item);
 
-            // 3. The crate this outcome pays, resolved BEFORE the lock so a misconfigured reward axis is
-            //    refused without ever entering the critical section. A Failed* outcome still opens a claim
-            //    window and pays the consolation crate; Aborted* outcomes never reach Rewarding at all.
-            var crateWcid = WorldEvent.PaysSuccessCrate(evt.Outcome) ? reward.SuccessCrateWcid : reward.ConsolationCrateWcid;
-
-            if (crateWcid == 0)
-            {
-                log.Error($"[WORLDEVENT] run={evt.RunId} claim refused: reward axis {reward.Id} has no crate wcid for outcome {evt.Outcome}");
-                TrySendTransientError(player, "The cache holds nothing you can take.");
-                return true;
-            }
+            // 3. The claim pipeline's pure stages (WorldEventClaimRules: ResolveEligibility -> ResolvePayout ->
+            //    ResolveExtras), all resolved BEFORE the lock from plain values. Under
+            //    WorldEventClaimPolicy.Default with no bonus crates every decision below is the pre-pipeline one.
+            //    The policy is the run's objective's (IWorldEventObjective.ClaimPolicy), which is that default for
+            //    every objective that does not supply its own, so the thresholds are off for those.
+            var policy = ClaimPolicyFor(evt);
+            var paysSuccess = WorldEvent.PaysSuccessCrate(evt.Outcome);
 
             // Participation payout (repo owner decision, 2026-09-07; widened 2026-10-04): a claimant who
             // neither dealt damage to nor took damage from a run creature during the fight - so has no
@@ -155,9 +170,76 @@ namespace ACE.Server.WorldEvents
             // account sibling snapshot. A null ledger (should not happen - WorldEvent always constructs one -
             // but guarded anyway) reads as "credit unknown", which resolves to hasCredit true so the fallback
             // is fail-open toward the ordinary crate, never toward coal.
-            var participationPayoutEnabled = PropertyManager.GetBool("world_events_participation_payout_enabled").Item;
-            var hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid);
-            var payCoal = WorldEventClaimRules.PaysCoal(participationPayoutEnabled, reward.CoalWcid, hasCredit);
+            //
+            // Presence payout (repo owner rulings 2026-10-19): while world_events_presence_payout_enabled is on,
+            // presence inside the arena REPLACES the credit rule - a known presence of 0 pays coal, anything else
+            // pays the outcome crate, stamped below with its multiplier. Switched off, ResolvePresencePayout says
+            // UsesCreditRule and the credit rule runs exactly as it did before. The ledger read is lock-protected
+            // inside WorldEventPresence and the window is closed by the time the run reaches Rewarding, so the
+            // answer is stable for the whole claim window.
+            //
+            // The threshold inputs (present seconds, damage share) are read only while their threshold is on.
+            var presencePayoutEnabled = PropertyManager.GetBool("world_events_presence_payout_enabled", true).Item;
+            var presenceFraction = 0.0;
+            var presenceKnown = presencePayoutEnabled && evt.Presence != null && evt.Presence.TryGetFraction(characterGuid, out presenceFraction);
+
+            var creditEnabled = false;
+            var hasCredit = true;
+
+            if (!presencePayoutEnabled)
+            {
+                creditEnabled = PropertyManager.GetBool("world_events_participation_payout_enabled").Item;
+                hasCredit = WorldEventParticipation.HasCreditOrUnknown(evt.Participation, characterGuid);
+            }
+
+            var presentSeconds = 0.0;
+            var presentSecondsKnown = policy.Thresholds.PresenceOn && evt.Presence != null && evt.Presence.TryGetPresentSeconds(characterGuid, out presentSeconds);
+
+            var damageShare = 0.0;
+            var damageShareKnown = policy.Thresholds.ContributionOn && evt.Participation != null
+                && WorldEventClaimRules.TryComputeDamageShare(evt.Participation.Records, characterGuid, out damageShare);
+
+            var eligibility = WorldEventClaimRules.ResolveEligibility(new ClaimInputs
+            {
+                PresenceEnabled = presencePayoutEnabled,
+                PresenceKnown = presenceKnown,
+                PresenceFraction = presenceFraction,
+                PresentSecondsKnown = presentSecondsKnown,
+                PresentSeconds = presentSeconds,
+                CreditEnabled = creditEnabled,
+                HasCredit = hasCredit,
+                DamageShareKnown = damageShareKnown,
+                DamageShare = damageShare,
+                PaysSuccess = paysSuccess,
+                CoalWcid = reward.CoalWcid,
+                Policy = policy
+            });
+
+            var payout = WorldEventClaimRules.ResolvePayout(eligibility, reward, evt.Outcome, policy);
+
+            // A policy that pays nothing for this outcome refuses the claim through the fixed denial line.
+            // Unreachable under the default policy.
+            if (payout.Denial != ClaimDenial.None)
+                return Deny(evt, cache, player, payout.Denial, characterGuid, accountId, ip);
+
+            // The crate this outcome pays, checked BEFORE the lock so a misconfigured reward axis is refused
+            // without ever entering the critical section. A Failed* outcome still opens a claim window and pays
+            // the consolation crate; Aborted* outcomes never reach Rewarding at all.
+            var crateWcid = payout.CrateWcid;
+
+            if (crateWcid == 0)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} claim refused: reward axis {reward.Id} has no crate wcid for outcome {evt.Outcome}");
+                TrySendTransientError(player, "The cache holds nothing you can take.");
+                return true;
+            }
+
+            var payCoal = payout.PayCoal;
+
+            // Bonus crates (owner ruling 2026-11-01). A run outside a chain is its own final stage. Empty for every
+            // reward profile that ships today.
+            // TODO(chain slice H8): pass the run's real final-stage flag once chains exist.
+            var extras = WorldEventClaimRules.ResolveExtras(payout, reward, isFinalChainStage: true);
 
             // The account sibling snapshot reads PlayerManager, not event state, so it is taken OUTSIDE the
             // claim lock: holding the claim lock across PlayerManager's own read lock would nest two
@@ -169,16 +251,23 @@ namespace ACE.Server.WorldEvents
             var denial = ClaimDenial.None;
             var createFailed = false;
             var giveFailed = false;
+            var roomShort = false;
+            var freeSlots = 0;
+            var extrasGiven = 0;
             var attemptedWcid = crateWcid;
 
-            // ONE critical section: evaluate, sibling-check, create, give, mark. See the class comment for
-            // why the check and the mark must not be separate acquisitions.
+            // What the presence rule stamped on the created crate (WorldEventClaimRules.ResolveStamp), decided
+            // inside the lock once the coal-to-crate fallback is known, and read again by the claim line.
+            (bool Stamp, double Multiplier) stamp = (false, 0);
+
+            // ONE critical section: evaluate, sibling-check, room precheck, create, give the primary, give the
+            // extras, mark. See the class comment for why the check and the mark must not be separate acquisitions.
             lock (evt.ClaimedCharacters)
             {
                 // Rules 1 and 2 (character, then the account SET). The IP gate is suppressed on this call so
                 // the sibling rule can slot in ahead of it and the reported reason still follows the fixed
                 // character -> account -> IP order of 5.6.
-                denial = WorldEventClaimRules.Evaluate(characterGuid, accountId, ip,
+                denial = WorldEventClaimRules.Evaluate(characterGuid, accountId, ip, householdKey,
                     evt.ClaimedCharacters, evt.ClaimedAccounts, evt.ClaimedIps, exemptIps,
                     gateByCharacter, gateByAccount, false);
 
@@ -192,18 +281,28 @@ namespace ACE.Server.WorldEvents
 
                 // Rule 3 (IP), last.
                 if (denial == ClaimDenial.None)
-                    denial = WorldEventClaimRules.Evaluate(characterGuid, accountId, ip,
+                    denial = WorldEventClaimRules.Evaluate(characterGuid, accountId, ip, householdKey,
                         evt.ClaimedCharacters, evt.ClaimedAccounts, evt.ClaimedIps, exemptIps,
                         false, false, gateByIp);
 
-                if (denial == ClaimDenial.None)
+                // Room for the primary AND every extra, before anything is created (owner ruling 2026-11-01): no
+                // room means nothing given and nothing marked, so the claim stays retryable. Only checked when
+                // there ARE extras - a claim with none fails on a full pack exactly as it always has, through
+                // TryCreateForGive's own line and claim-give-failed below.
+                if (denial == ClaimDenial.None && extras.Count > 0)
+                {
+                    freeSlots = player.GetFreeInventorySlots();
+                    roomShort = freeSlots < WorldEventClaimRules.RequiredFreeSlots(extras);
+                }
+
+                if (denial == ClaimDenial.None && !roomShort)
                 {
                     // The payout wcid: coal when the rule above says so, otherwise the ordinary outcome
                     // crate. A content mistake in coalWcid must never deny a claim, so a failed coal create
                     // falls back to the ordinary crate right here rather than surfacing createFailed - that
                     // is the ONLY special case; giveFailed below still applies to whichever object this
                     // resolves to.
-                    var payoutWcid = payCoal ? reward.CoalWcid : crateWcid;
+                    var payoutWcid = payout.PayoutWcid;
                     attemptedWcid = payoutWcid;
                     var crate = WorldObjectFactory.CreateNewWorldObject(payoutWcid);
 
@@ -215,6 +314,19 @@ namespace ACE.Server.WorldEvents
                         payoutWcid = crateWcid;
                         attemptedWcid = payoutWcid;
                         crate = WorldObjectFactory.CreateNewWorldObject(payoutWcid);
+                    }
+
+                    // Presence payout: the multiplier and the reward profile go on the crate BEFORE the give, so the
+                    // object a player receives already carries what its roll needs. Only a success crate is
+                    // stamped (the consolation crate is not scaled); a crate that stood in for a failed coal
+                    // create carries m 1.0 (unknown), never the coal's 0 - and never the presence multiplier either,
+                    // whichever rule decided the coal (payout.PayCoal is the decision, payCoal what was paid).
+                    stamp = WorldEventClaimRules.ResolveStamp(payout.Presence, payout.PayCoal, payCoal, paysSuccess);
+
+                    if (crate != null && stamp.Stamp)
+                    {
+                        crate.SetProperty(PropertyFloat.WorldEventRewardMultiplier, stamp.Multiplier);
+                        crate.SetProperty(PropertyString.WorldEventRewardProfile, reward.Id);
                     }
 
                     if (crate == null)
@@ -231,22 +343,47 @@ namespace ACE.Server.WorldEvents
                     else
                     {
                         // Marked strictly AFTER a successful give (2.7 idempotency rule), inside the same
-                        // critical section the check ran in.
+                        // critical section the check ran in - and BEFORE the extras, so nothing an extra does
+                        // (a throw included) can leave a paid primary unmarked and let a retry pay it twice.
                         evt.ClaimedCharacters.Add(characterGuid);
 
                         if (accountId != 0)
                             evt.ClaimedAccounts.Add(accountId);
 
-                        var ipKey = WorldEventClaimRules.NormalizeIp(ip);
+                        var ipKey = WorldEventClaimRules.NormalizeIp(householdKey);
 
                         if (ipKey.Length > 0)
                             evt.ClaimedIps.Add(ipKey);
+
+                        // The extras, still inside the lock, after the primary landed and the claim is marked. The
+                        // room precheck above makes a failure here rare (a unique item, a template gate); one that
+                        // fails or throws is logged and dropped, and the claim stays marked.
+                        extrasGiven = GiveExtras(evt, cache, player, extras);
                     }
                 }
             }
 
             if (denial != ClaimDenial.None)
+            {
+                // Pooled loot: a character who has already claimed and clicks again retries a share whose chest never
+                // reached the world. Outside the claim lock, like the first attempt below. No other denial reaches
+                // a share: an account or IP sibling's claim is gate-denied and gets nothing.
+                if (denial == ClaimDenial.AlreadyClaimedCharacter)
+                    WorldEventShareDelivery.TryDeliver(evt, cache, player);
+
                 return Deny(evt, cache, player, denial, characterGuid, accountId, ip);
+            }
+
+            if (roomShort)
+            {
+                // Like a full pack: neither granted nor denied, still retryable, so not the 5.2 claim line.
+                var needed = WorldEventClaimRules.RequiredFreeSlots(extras);
+
+                log.Info($"[WORLDEVENT] run={evt.RunId} claim-room-short char={player.Name} guid=0x{characterGuid:X8} need={needed} free={freeSlots} - not marked claimed, still retryable");
+                TrySendTransientError(player, $"You need {needed} free pack slots to take this reward. Make room and use the {cache.Name} again.");
+
+                return true;
+            }
 
             if (createFailed)
             {
@@ -283,15 +420,115 @@ namespace ACE.Server.WorldEvents
             if (cache.UseSound > 0)
                 player.Session?.Network?.EnqueueSend(new GameMessageSound(player.Guid, cache.UseSound));
 
-            if (payCoal)
-                TrySendTransientError(player, "You did not fight here. The cache offers you what you earned.");
+            // A threshold coal (a policy threshold, never the default) gets its own line; every other claim gets
+            // exactly the line it got before the pipeline.
+            var thresholdMessage = payCoal ? WorldEventClaimRules.ThresholdMessage(payout.CoalReason) : null;
+
+            if (thresholdMessage != null)
+                TrySendTransientError(player, thresholdMessage);
+            else if (payout.Presence.UsesCreditRule)
+            {
+                if (payCoal)
+                    TrySendTransientError(player, "You did not fight here. The cache offers you what you earned.");
+            }
+            else
+            {
+                // Presence payout: the crate's percentage and multiplier, or the Non Participation line for coal.
+                // No line is sent when a coal-DECIDED claim (presence or threshold) fell back to the crate: that crate
+                // carries m 1.0, so neither the coal line nor the "carries a Nx reward" line is true of it.
+                var presenceMessage = payout.PayCoal && !payCoal ? null : WorldEventClaimRules.PresenceMessage(payout.Presence);
+
+                if (presenceMessage != null)
+                    TrySendTransientError(player, presenceMessage);
+            }
 
             // payout= is a SEPARATE field appended after result=granted - never fold it into that token, or
             // "result=granted:coal" would break the monitoring queries that parse result= as exactly
-            // granted or denied:<ClaimDenial name> (see ClaimDenial's doc comment).
-            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")}");
+            // granted or denied:<ClaimDenial name> (see ClaimDenial's doc comment). The presence suffix
+            // (presence= mult=) follows payout= under the presence rule and is empty under the credit rule, so
+            // the line is unchanged byte for byte with the switch off. mult= is the multiplier actually stamped,
+            // or "none" when nothing was (coal, or an unscaled consolation crate). The pipeline suffix (tier=,
+            // extras=) comes last and is empty for every default claim, so the line is unchanged byte for byte
+            // under WorldEventClaimPolicy.Default with no bonus crates.
+            var presenceLogSuffix = WorldEventClaimRules.PresenceLogSuffix(payout.Presence, stamp);
+            var pipelineLogSuffix = WorldEventClaimRules.PipelineLogSuffix(payout, payCoal, extrasGiven, extras.Count);
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} claim char={player.Name} guid=0x{characterGuid:X8} account={accountId} ip={FormatIp(ip)} result=granted payout={(payCoal ? "coal" : "crate")}{presenceLogSuffix}{pipelineLogSuffix}");
+
+            // Pooled loot (world_events_pooled_loot_enabled): the claimant's share, built into their own chest. AFTER the
+            // crate is given and OUTSIDE the claim lock - the fill is a multi-tick chain and must never hold the lock
+            // other claimants wait on. TryDeliver never throws and is a no-op with no pool, no seat or an empty share,
+            // so the crate claim above is unaffected whatever happens here. It is the pipeline's fourth stage and the
+            // ONLY delivery outside the lock.
+            //
+            // KNOWN LIMITATION under the presence rule (world_events_presence_payout_enabled): the seats are still
+            // the participation ledger's credit records (WorldEvent.DealLootPool), while the crate-or-coal answer
+            // above comes from presence. So a claimant with combat credit but zero presence receives coal AND a
+            // share, and one who was present but never fought or was hit receives a scaled crate and NO share. Left
+            // unchanged deliberately (the owner has pooled loot switched off); revisit before enabling both.
+            WorldEventShareDelivery.TryDeliver(evt, cache, player);
 
             return true;
+        }
+
+        /// <summary>
+        /// Gives each bonus crate after the primary. Must be called under lock (evt.ClaimedCharacters); like the
+        /// primary give, TryCreateForGive is synchronous and never re-enters it. Returns how many landed. A crate
+        /// that fails to create or to give, or throws, is logged and dropped (destroyed when it was created), and
+        /// the loop goes on to the next one. The claim is already marked by the time this runs.
+        /// </summary>
+        private static int GiveExtras(WorldEvent evt, WorldObject cache, Player player, ClaimExtras extras)
+        {
+            var given = 0;
+
+            foreach (var wcid in extras.Wcids)
+            {
+                WorldObject extra = null;
+
+                try
+                {
+                    extra = WorldObjectFactory.CreateNewWorldObject(wcid);
+
+                    if (extra == null)
+                    {
+                        log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {wcid} failed to create for {player.Name}");
+                        continue;
+                    }
+
+                    if (!player.TryCreateForGive(cache, extra))
+                    {
+                        var refused = extra;
+                        extra = null;
+                        refused.Destroy();
+                        log.Warn($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {wcid} could not be given to {player.Name} (0x{player.Guid.Full:X8})");
+                        continue;
+                    }
+
+                    given++;
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={evt.RunId} bonus crate wcid {wcid} threw for {player.Name} (0x{player.Guid.Full:X8})", ex);
+
+                    if (extra != null)
+                        TryDestroy(extra);
+                }
+            }
+
+            return given;
+        }
+
+        /// <summary>Destroys a dropped bonus crate without letting a second throw escape the claim lock.</summary>
+        private static void TryDestroy(WorldObject wo)
+        {
+            try
+            {
+                wo.Destroy();
+            }
+            catch (Exception ex)
+            {
+                log.Debug($"[WORLDEVENT] could not destroy dropped bonus crate 0x{wo.Guid.Full:X8}", ex);
+            }
         }
 
         /// <summary>

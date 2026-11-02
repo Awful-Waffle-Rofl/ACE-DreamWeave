@@ -1122,7 +1122,7 @@ namespace ACE.Server.Managers.Market
             }
 
             if (listing.ItemGuid != null)
-                return MarketSnapshot.FromItem(item);
+                return MarketSnapshot.FromItem(item, includeSuit: true);
 
             // The production store can build a real probe of the wcid through the account's own
             // world source; anything else (a test double) falls back to the shared weenie

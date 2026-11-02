@@ -77,6 +77,36 @@ namespace ACE.Server.Tests
             return true;
         }
 
+        public int ListCalls;
+
+        /// <summary>TryListPublished hands rows back in DESCENDING character id order (the service must not depend on the repo's order).</summary>
+        public bool ListDescending;
+
+        /// <summary>Names handed back by TryListPublished per character; a character absent here lists as "Name{id}".</summary>
+        public readonly Dictionary<uint, string> Names = new Dictionary<uint, string>();
+
+        public bool TryListPublished(out List<(uint CharacterId, string Slug, string Name)> rows)
+        {
+            Interlocked.Increment(ref ListCalls);
+            rows = new List<(uint CharacterId, string Slug, string Name)>();
+
+            if (FailReads)
+                return false;
+
+            lock (gate)
+            {
+                foreach (var r in ListDescending ? byCharacter.Values.OrderByDescending(r => r.CharacterId) : byCharacter.Values.OrderBy(r => r.CharacterId))
+                    rows.Add((r.CharacterId, r.Slug, Names.TryGetValue(r.CharacterId, out var n) ? n : "Name" + r.CharacterId));
+            }
+
+            AfterList?.Invoke();
+
+            return true;
+        }
+
+        /// <summary>Runs after TryListPublished has snapshotted its rows, before it returns them (a link write landing mid-build).</summary>
+        public Action AfterList;
+
         /// <summary>Runs at the start of every Upsert, outside the lock (e.g. a racing writer inserting a row).</summary>
         public Action BeforeUpsert;
 

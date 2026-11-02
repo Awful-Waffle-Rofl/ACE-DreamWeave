@@ -42,7 +42,12 @@ namespace ACE.Server.ClassAbilities.Abilities
                           "target, matching the damage type of the swing - one projectile on your target and " +
                           "the rest cleaving through a 90 degree cone. Rank raises the spell level cap " +
                           "(III / V / the Incantation), not the chance; the level you actually throw is also " +
-                          "limited by your War Magic. Higher Magic Item Tinkering increases the chance.",
+                          "limited by your Item Enchantment, which also sets how hard the spell is to resist " +
+                          "and its skill damage bonus. A Nether weapon casts a Void blast instead. " +
+                          "Higher Magic Item Tinkering increases the chance. " +
+                          "A swing at full power casts a Wall instead once your Blast reaches the Wall's " +
+                          "level (a Nether weapon keeps its Blast), and every proc hits harder the more " +
+                          "power you put into the swing.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -114,10 +119,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 
+            // Item Enchantment picks the level (SpellswordSpellTables.LevelSkillFor).
             var spellId = SpellswordSpellTables.SelectSpell(SpellswordSpellTables.BlastByType,
                 SpellswordSpellTables.BlastLevels,
                 damageType,
-                attacker.GetCreatureSkill(Skill.WarMagic).Current,
+                attacker.GetCreatureSkill(SpellswordSpellTables.LevelSkillFor(damageType)).Current,
                 rank,
                 PropertyManager.GetDouble("class_ability_spellsword_level_skill_scale").Item);
 
@@ -126,6 +132,33 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var spell = new Spell(spellId.Value);
 
+            // Nether parity: 1.0 for every elemental type; for Nether, the Fire Blast at the same rung over
+            // this Nether Blast, times the tunable. See SpellbladeAbility. Computed against the BLAST that was
+            // selected, before any Wall swap below (a Nether weapon never walls, so the two cannot disagree).
+            var procDamageScale = SpellswordSpellTables.ProcDamageScaleFor(
+                SpellswordSpellTables.ParityReferenceFor(SpellswordSpellTables.BlastByType, damageType, spellId.Value),
+                spell,
+                PropertyManager.GetDouble("class_ability_spellsword_nether_parity").Item);
+
+            // Full-power upgrade (2026-11-01): a swing at a full bar casts the Wall instead of the Blast, but
+            // only when the Blast rung that would have fired is at least the Wall's level (so the swap never
+            // down-levels a cast). Nether has no Wall and keeps its Blast. A Riposte counter reads as power 0.
+            var swingPower = SpellswordSpellTables.SwingPowerLevel(damageEvent);
+
+            if (SpellswordSpellTables.UseFullPowerShape(PropertyManager.GetBool("class_ability_spellsword_full_power_shape").Item, swingPower)
+                && SpellswordSpellTables.WallByType.TryGetValue(damageType, out var wallId))
+            {
+                var wall = new Spell(wallId);
+
+                if (!wall.NotFound && wall.Level > 0 && SpellswordSpellTables.WallReplacesBlast(spell.Level, wall.Level))
+                    spell = wall;
+            }
+
+            // Power-scaled proc damage: x(1 + a x PowerLevel), composed with the parity scale. Exactly 1.0 on
+            // an empty bar.
+            procDamageScale *= SpellswordSpellTables.PowerProcScale(swingPower,
+                PropertyManager.GetDouble("class_ability_spellsword_power_proc_scale").Item);
+
             // Player as caster, wielded weapon as launcher, fromProc to suppress item procs. Projectiles are
             // deliberately left unflagged (design Q10) so Echo Cast and Elemental Rend can fire off them;
             // no recursion is possible because the trigger is a landed melee hit, never a spell hit.
@@ -133,7 +166,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             // SpellProjectile.IsClassAbilityProc - the signal Cascade gates on. See SpellbladeAbility for
             // why fromProc alone is not that signal, and note Cascade fails CLOSED without this wrapper.
             attacker.CastClassAbilityProc(() =>
-                attacker.CreateSpellProjectiles(spell, target, damageEvent.Weapon, false, fromProc: true, suppressPetAssist: true));
+                attacker.CreateSpellProjectiles(spell, target, damageEvent.Weapon, false, fromProc: true, suppressPetAssist: true),
+                procDamageScale,
+                damageEvent.OriginalDamageType);   // Volatile Elements: the re-typed hit's original type, for the proc's rend max
 
             // A landed war proc feeds Spellsurge (design section 5e).
             attacker.AddSpellsurgeStack();

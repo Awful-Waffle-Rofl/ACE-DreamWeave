@@ -66,7 +66,15 @@ namespace ACE.Server.WorldEvents
         Decor,
         Npc,
         InertObjective,
-        Add
+        Add,
+
+        /// <summary>
+        /// World Events Hold H5: a protected target (a knight / envoy). A Creature placed on the creature path with its
+        /// WorldEventHoldTag (Kind Knight) set before EnterWorld; adopted WITH the P_WorldEvent back-reference so its death
+        /// reaches the run, but filed in its own knight lists - never wave pressure, never LiveTotal, never sourceGuids.
+        /// Not hostility-normalized (it is a friendly). See WorldEventSpawner.SpawnProtected.
+        /// </summary>
+        Protected
     }
 
     /// <summary>
@@ -116,7 +124,7 @@ namespace ACE.Server.WorldEvents
         public override string ToString() => $"wave={WaveIndex} clear={ClearSeconds:F1}s";
     }
 
-    public sealed class WorldEventSpawner
+    public sealed partial class WorldEventSpawner
     {
         private static readonly ILog log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -478,6 +486,16 @@ namespace ACE.Server.WorldEvents
         public uint BossGuid
         {
             get { lock (sync) return bossGuid; }
+        }
+
+        /// <summary>
+        /// True from the moment a boss is adopted until its death is recorded (world_events_boss_phase_trash_multiplier).
+        /// <see cref="BossGuid"/> stays non-zero after the boss dies, so liveness is bossGuid != 0 with no
+        /// death stamp, read under the same lock <see cref="OnDied"/> writes it under.
+        /// </summary>
+        public bool BossAlive
+        {
+            get { lock (sync) return bossGuid != 0 && bossDiedAt <= 0; }
         }
 
         /// <summary>
@@ -943,6 +961,12 @@ namespace ACE.Server.WorldEvents
             }
 
             public SpawnEntry(uint wcid, bool overflowChampion, WorldEventWaveEntryKind kind, bool synthetic, int upliftLevel, int slotLevel)
+                : this(wcid, overflowChampion, kind, synthetic, upliftLevel, slotLevel, null)
+            {
+            }
+
+            public SpawnEntry(uint wcid, bool overflowChampion, WorldEventWaveEntryKind kind, bool synthetic, int upliftLevel, int slotLevel,
+                ACE.Server.WorldEvents.Hold.WorldEventHoldTag tag)
             {
                 Wcid = wcid;
                 OverflowChampion = overflowChampion;
@@ -950,7 +974,15 @@ namespace ACE.Server.WorldEvents
                 Synthetic = synthetic;
                 UpliftLevel = upliftLevel;
                 SlotLevel = slotLevel;
+                Tag = tag;
             }
+
+            /// <summary>
+            /// World Events Hold H5: the Hold tag this entry's creature carries, set in TryPlace before EnterWorld (null for
+            /// every non-Hold spawn). A Hold wave entry's tag is built after construction instead (Spawn's holdPrepare), because
+            /// it depends on the constructed creature's ranged check.
+            /// </summary>
+            public readonly ACE.Server.WorldEvents.Hold.WorldEventHoldTag Tag;
         }
 
         /// <summary>One constructed creature and the entry it came from.</summary>
@@ -980,6 +1012,9 @@ namespace ACE.Server.WorldEvents
             public uint AuthoredStartingValue { get; set; }
 
             public uint AuthoredBaseMax { get; set; }
+
+            /// <summary>World Events Hold H5: the tag TryPlace sets before EnterWorld (null for every non-Hold spawn).</summary>
+            public ACE.Server.WorldEvents.Hold.WorldEventHoldTag HoldTag { get; set; }
         }
 
         /// <summary>
@@ -1002,6 +1037,17 @@ namespace ACE.Server.WorldEvents
         /// used exactly as given.
         /// </summary>
         public void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre)
+        {
+            SpawnDecor(evt, decor, centre, holdScene: false);
+        }
+
+        /// <summary>
+        /// World Events Hold H5: <paramref name="holdScene"/> true places the Hold knights' scene (shrines, pennants, campfires,
+        /// portals) - each object checked by <see cref="DecorVerdict"/> (a weenie type with its own use behaviour is refused,
+        /// plain decor made unusable, a shrine configured by <see cref="ConfigureHoldShrine"/>) and placed Stuck. False is the
+        /// original sky-decor path, unchanged.
+        /// </summary>
+        private void SpawnDecor(WorldEvent evt, IReadOnlyList<DecorDef> decor, Position centre, bool holdScene)
         {
             if (evt == null || decor == null || decor.Count == 0)
                 return;
@@ -1046,7 +1092,10 @@ namespace ACE.Server.WorldEvents
                     continue;
                 }
 
-                candidates.Add(new DecorCandidate(wo, entry));
+                if (holdScene && !PrepareHoldSceneObject(evt, wo, entry))
+                    continue;
+
+                candidates.Add(new DecorCandidate(wo, entry, stuck: holdScene));
             }
 
             if (candidates.Count == 0)
@@ -1080,6 +1129,263 @@ namespace ACE.Server.WorldEvents
                     log.Error($"[WORLDEVENT] run={runId} decor placement threw", ex);
                 }
             }));
+        }
+
+        /// <summary>
+        /// Presence payout: the ring of wisps (<see cref="ArenaDef.RingWcid"/>) that marks the nominal arena
+        /// circle. Purely decorative - presence is measured on the nominal circle, never from these objects.
+        ///
+        /// The wisps are adopted as <see cref="WorldEventSpawnKind.Decor"/>, so they share decor's whole
+        /// lifecycle: counted as nothing, destroyed by the creature pass at Finish with the sky decor, and swept
+        /// again by the final pass.
+        ///
+        /// THREADING. A ring that crosses the anchor block's edge has points on the neighbouring blocks, and a
+        /// landblock's pendingAdditions is a plain Dictionary, so adding to a NEIGHBOUR from the anchor's queue
+        /// would race that neighbour's own tick. The points are therefore grouped by landblock and each group is
+        /// placed on ITS OWN landblock's action queue. Construction stays on the world thread, as in every other
+        /// placement path here. A point whose block the run does not hold is skipped with a log line.
+        ///
+        /// HEIGHT. Each wisp stands on whatever is really under its rim point, roof included: a throwaway sphere
+        /// is swept straight down (WorldEventGroundProbe) from terrain + probeHeight, retried once 40 m higher
+        /// when the start is inside geometry; failing that, AdjustMapCoords' terrain/building snap; failing that,
+        /// the point is skipped. ringDz is added on top in both cases.
+        /// </summary>
+        public void SpawnRing(WorldEvent evt, ArenaDef def, IReadOnlyList<Position> points)
+        {
+            if (evt == null || def == null || def.RingWcid == 0 || points == null || points.Count == 0)
+                return;
+
+            var anchorBlock = evt.AnchorLandblock;
+
+            if (anchorBlock == null)
+            {
+                log.Warn($"[WORLDEVENT] run={evt.RunId} presence ring skipped: no anchor landblock is held");
+                return;
+            }
+
+            var blocks = new List<Landblock> { anchorBlock };
+
+            try
+            {
+                var adjacents = anchorBlock.Adjacents;
+
+                if (adjacents != null)
+                    blocks.AddRange(adjacents.Where(a => a != null));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} presence ring: could not read the anchor's adjacent landblocks; only anchor-block points are placed", ex);
+            }
+
+            var groups = new Dictionary<Landblock, List<RingCandidate>>();
+            var unheld = 0;
+            var failedCreate = 0;
+
+            foreach (var point in points)
+            {
+                if (point == null)
+                    continue;
+
+                var block = evt.IsHeldLandblock(point.InstancedLandblock)
+                    ? blocks.FirstOrDefault(b => b.LongId == point.InstancedLandblock)
+                    : null;
+
+                if (block == null)
+                {
+                    unheld++;
+                    log.Info($"[WORLDEVENT] run={evt.RunId} presence ring point {point.ToLOCString()} is on a landblock the run does not hold; skipped");
+                    continue;
+                }
+
+                WorldObject wo;
+
+                try
+                {
+                    wo = WorldObjectFactory.CreateNewWorldObject(def.RingWcid);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={evt.RunId} could not create ring wcid {def.RingWcid}", ex);
+                    wo = null;
+                }
+
+                if (wo == null)
+                {
+                    failedCreate++;
+                    continue;
+                }
+
+                if (!groups.TryGetValue(block, out var list))
+                    groups[block] = list = new List<RingCandidate>();
+
+                list.Add(new RingCandidate(wo, new Position(point)));
+            }
+
+            if (failedCreate > 0)
+                log.Error($"[WORLDEVENT] run={evt.RunId} presence ring: wcid {def.RingWcid} failed to create {failedCreate} time(s)");
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} presence ring points={points.Count} blocks={groups.Count} unheld={unheld}");
+
+            var runId = evt.RunId;
+            var radius = WorldEventGroundProbe.BaseSphereRadius * (def.RingScale > 0f ? def.RingScale : 1f);
+
+            foreach (var pair in groups)
+            {
+                var target = pair.Key;
+                var candidates = pair.Value;
+
+                target.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    if (!evt.RunValid(runId) || IsClosed || evt.AnchorLandblock == null)
+                    {
+                        foreach (var candidate in candidates)
+                        {
+                            if (!candidate.Object.IsDestroyed)
+                                candidate.Object.Destroy();
+                        }
+
+                        return;
+                    }
+
+                    try
+                    {
+                        PlaceRing(evt, def, target, candidates, radius);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[WORLDEVENT] run={runId} presence ring placement threw on landblock 0x{target.Id.Raw:X8}", ex);
+                    }
+                }));
+            }
+        }
+
+        /// <summary>One constructed ring wisp and its nominal rim point, carried into the landblock closure.</summary>
+        private sealed class RingCandidate
+        {
+            public RingCandidate(WorldObject wo, Position point)
+            {
+                Object = wo;
+                Point = point;
+            }
+
+            public WorldObject Object { get; }
+
+            public Position Point { get; }
+        }
+
+        /// <summary>The ring half of the placement recipe. Runs on <paramref name="landblock"/>'s own action queue.</summary>
+        private void PlaceRing(WorldEvent evt, ArenaDef def, Landblock landblock, List<RingCandidate> candidates, float radius)
+        {
+            var probed = 0;
+            var snapped = 0;
+            var skipped = 0;
+
+            foreach (var candidate in candidates)
+            {
+                var wo = candidate.Object;
+
+                if (wo.IsDestroyed)
+                    continue;
+
+                if (!TryRingPosition(evt, def, candidate.Point, radius, out var position, out var probe))
+                {
+                    skipped++;
+                    wo.Destroy();
+                    continue;
+                }
+
+                if (probe)
+                    probed++;
+                else
+                    snapped++;
+
+                wo.Location = position;
+
+                // Stamped BEFORE the object enters the world, like every other event object (TECH-DESIGN 2.9).
+                wo.SetProperty(PropertyInt.WorldEventId, (int)evt.RunId);
+                wo.SetProperty(PropertyFloat.DefaultScale, def.RingScale);
+
+                // Mandatory, as for decor: no Generator back-reference, so the heartbeat would rot it otherwise.
+                wo.TimeToRot = -1;
+
+                var entered = false;
+
+                try
+                {
+                    entered = wo.EnterWorld();
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={evt.RunId} ring wisp failed to enter the world at {position.ToLOCString()}", ex);
+                }
+
+                if (!entered || !Adopt(evt, wo, WorldEventSpawnKind.Decor))
+                {
+                    if (!entered)
+                        log.Info($"[WORLDEVENT] run={evt.RunId} ring wisp at {position.ToLOCString()} did not enter the world; skipped");
+
+                    if (!wo.IsDestroyed)
+                        wo.Destroy();
+
+                    skipped++;
+                    continue;
+                }
+            }
+
+            log.Info($"[WORLDEVENT] run={evt.RunId} presence ring landblock=0x{landblock.Id.Raw:X8} placed={probed + snapped} probe={probed} snap={snapped} skipped={skipped}");
+        }
+
+        /// <summary>
+        /// The height chain for one ring point: probe, then AdjustMapCoords, then skip (false, with a log line).
+        /// <paramref name="probe"/> is true when the physics probe supplied the height. When the probe's sphere
+        /// came to rest on the same landblock it started on, its resting point is used whole (it may have slid a
+        /// little off a pitched roof); otherwise only its height is taken over the nominal point.
+        /// </summary>
+        private static bool TryRingPosition(WorldEvent evt, ArenaDef def, Position point, float radius, out Position position, out bool probe)
+        {
+            position = new Position(point);
+            probe = false;
+
+            try
+            {
+                var terrainZ = position.GetTerrainZ();
+
+                var result = WorldEventGroundProbe.ProbeDown(position.LandblockId.Raw, position.Instance,
+                    position.PositionX, position.PositionY, terrainZ, def.ProbeHeight, radius, out _);
+
+                if (result.Landed)
+                {
+                    if ((result.Cell >> 16) == (position.LandblockId.Raw >> 16))
+                    {
+                        position.LandblockId = new LandblockId(result.Cell);
+                        position.PositionX = result.Rest.X;
+                        position.PositionY = result.Rest.Y;
+                    }
+
+                    position.PositionZ = result.Rest.Z + def.RingDz;
+                    probe = true;
+
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} ring probe threw at {point.ToLOCString()}; falling back to the terrain snap", ex);
+            }
+
+            try
+            {
+                position = new Position(point);
+                position.AdjustMapCoords();
+                position.PositionZ += def.RingDz;
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} ring point {point.ToLOCString()} could be neither probed nor snapped; skipped", ex);
+                return false;
+            }
         }
 
         /// <summary>
@@ -1217,6 +1523,9 @@ namespace ACE.Server.WorldEvents
 
                 liveWave.Remove(creature);
                 liveObjective.Remove(creature);
+
+                // World Events Hold H5: a fallen knight leaves the live knight list (under sync, like the rest).
+                RemoveHoldKnight(creature);
 
                 Prune();
 
@@ -1429,6 +1738,7 @@ namespace ACE.Server.WorldEvents
             {
                 liveWave.Clear();
                 liveObjective.Clear();
+                ClearHoldKnights();
 
                 // Cleared on both passes: the creature pass already queued every decor destroy (decor is not
                 // a cache), so DecorCount must read 0 from that point rather than only after the final sweep.
@@ -1552,7 +1862,8 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void Spawn(WorldEvent evt, IReadOnlyList<SpawnEntry> entries, IReadOnlyList<Position> anchors,
             WorldEventSpawnKind kind, int waveIndex, LevelBand band, double healthMult,
-            IReadOnlyList<float> dzByAnchor = null)
+            IReadOnlyList<float> dzByAnchor = null,
+            Func<int, Creature, ACE.Server.WorldEvents.Hold.WorldEventHoldTag> holdPrepare = null)
         {
             if (evt == null || entries == null || entries.Count == 0)
                 return;
@@ -1585,8 +1896,13 @@ namespace ACE.Server.WorldEvents
             // Steps 1 and 2 of the recipe are pure object construction and may run on the world thread.
             var candidates = new List<SpawnCandidate>();
 
+            // World Events Hold H5: the entry's index in the batch, for holdPrepare (a skipped entry keeps its index).
+            var entryIndex = -1;
+
             foreach (var entry in entries)
             {
+                entryIndex++;
+
                 var wcid = entry.Wcid;
 
                 if (wcid == 0)
@@ -1695,6 +2011,25 @@ namespace ACE.Server.WorldEvents
                 // EnterWorld, so the create packet the client first sees already carries the new name.
                 if (entry.Synthetic)
                     ApplySyntheticPromotion(evt, creature, entry.Kind);
+
+                // World Events Hold H5: the creature's Hold tag, carried to TryPlace, which sets it before EnterWorld.
+                // holdPrepare applies the role's pre-spawn writes (health, appearance, name, scale) and returns the tag it
+                // built from the constructed creature (a wave monster's ranged check); a pre-built entry tag (a knight) wins
+                // over it. Still construction, on the world thread, before anything is shared. Null for every non-Hold spawn.
+                if (entry.Tag != null || holdPrepare != null)
+                {
+                    try
+                    {
+                        var prepared = holdPrepare?.Invoke(entryIndex, creature);
+                        candidate.HoldTag = entry.Tag ?? prepared;
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[WORLDEVENT] run={evt.RunId} hold preparation of wcid {wcid} threw; not spawned", ex);
+                        creature.Destroy();
+                        continue;
+                    }
+                }
 
                 candidates.Add(candidate);
             }
@@ -1829,12 +2164,19 @@ namespace ACE.Server.WorldEvents
 
                     var success = false;
 
+                    // World Events Hold H5: set when the previous attempt's terrain snap put a Hold wave spawn inside a
+                    // building, so the next attempt re-picks a point elsewhere on the spawn ring instead of jittering a
+                    // metre or two around the same indoor spot.
+                    var lastWasIndoors = false;
+
                     for (var attempt = 0; attempt < attempts && !success; attempt++)
                     {
                         Position candidate;
 
                         if (attempt == 0 && !reused)
                             candidate = new Position(basePosition);
+                        else if (lastWasIndoors)
+                            candidate = NextHoldRingSample(evt.Composition?.AnchorPosition, basePosition) ?? NextJitter(basePosition);
                         else if (resample)
                             // Falls back to a jitter if the theme cannot produce a sample (no anchor
                             // position), so a resampling theme is never worse off than a jittering one.
@@ -1847,7 +2189,7 @@ namespace ACE.Server.WorldEvents
                         else
                             candidate = NextJitter(basePosition);
 
-                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, postSnapDz);
+                        success = TryPlace(evt, creature, candidate, skyDropDz, kind, out lastWasIndoors, postSnapDz, candidateEntry.HoldTag);
 
                         if (!success)
                         {
@@ -1908,8 +2250,11 @@ namespace ACE.Server.WorldEvents
         }
 
         private bool TryPlace(WorldEvent evt, Creature creature, Position candidate, float skyDropDz,
-            WorldEventSpawnKind kind, float postSnapDz = 0f)
+            WorldEventSpawnKind kind, out bool refusedIndoors, float postSnapDz = 0f,
+            ACE.Server.WorldEvents.Hold.WorldEventHoldTag holdTag = null)
         {
+            refusedIndoors = false;
+
             if (creature.IsDestroyed || candidate == null)
                 return false;
 
@@ -1939,6 +2284,15 @@ namespace ACE.Server.WorldEvents
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={evt.RunId} terrain snap failed at {candidate.ToLOCString()}", ex);
+                return false;
+            }
+
+            // World Events Hold H5: a Hold wave spawn the snap put inside a building (an indoor cell, while the anchor is
+            // outdoors) is refused, so the attackers never start hidden in a house; the caller re-picks on the spawn ring.
+            if (ACE.Server.WorldEvents.WorldEventHoldRules.RefusesIndoorSpawn(holdTag != null, kind == WorldEventSpawnKind.Wave,
+                    candidate.Indoors, evt.Composition?.AnchorPosition?.Indoors ?? false))
+            {
+                refusedIndoors = true;
                 return false;
             }
 
@@ -1989,6 +2343,15 @@ namespace ACE.Server.WorldEvents
             }
 
             ApplyBossTether(evt, creature, kind);
+
+            // World Events Hold H5: the creature's Hold tag, set exactly once and BEFORE EnterWorld, so every engine hook
+            // sees it from the first tick. SetWorldEventHoldTag is write-once: a placement retry through here on the same
+            // object finds this very tag already set and skips; any OTHER tag already set is a defect and refuses the spawn.
+            if (holdTag != null && !ReferenceEquals(creature.WorldEventHold, holdTag) && !creature.SetWorldEventHoldTag(holdTag))
+            {
+                log.Error($"[WORLDEVENT] run={evt.RunId} wcid {creature.WeenieClassId} already carries a different hold tag; not placed");
+                return false;
+            }
 
             try
             {
@@ -2202,15 +2565,19 @@ namespace ACE.Server.WorldEvents
         /// <summary>One constructed decor object and the entry it came from, carried into the landblock closure.</summary>
         private sealed class DecorCandidate
         {
-            public DecorCandidate(WorldObject wo, DecorDef def)
+            public DecorCandidate(WorldObject wo, DecorDef def, bool stuck = false)
             {
                 Object = wo;
                 Def = def;
+                Stuck = stuck;
             }
 
             public WorldObject Object { get; }
 
             public DecorDef Def { get; }
+
+            /// <summary>World Events Hold H5 scene props: placed Stuck so a player can never pick a pennant or a crate up.</summary>
+            public bool Stuck { get; }
         }
 
         /// <summary>
@@ -2279,6 +2646,9 @@ namespace ACE.Server.WorldEvents
                 // Mandatory - see the class remarks. Decor has no Generator back-reference either, so the
                 // landblock heartbeat would otherwise decay it out from under the run.
                 wo.TimeToRot = -1;
+
+                if (candidate.Stuck)
+                    wo.Stuck = true;
 
                 var entered = false;
 
@@ -3404,7 +3774,12 @@ namespace ACE.Server.WorldEvents
                     // the pick, so a creature whose placement failed is never counted as part of a wave the
                     // pace controller then waits forever to see cleared.
                     NoteWaveSpawn(waveIndex, creature.Guid.Full, overflowChampion);
+
+                    // World Events Hold H5: a finale boss is noted for PublishHoldTo (its enrage clock).
+                    NoteHoldFinaleBoss(creature);
                 }
+                else if (kind == WorldEventSpawnKind.Protected)
+                    AdoptHoldKnight(creature);
                 else
                     liveObjective.Add(creature);
 
@@ -3623,6 +3998,9 @@ namespace ACE.Server.WorldEvents
         {
             if (kind != WorldEventSpawnKind.Wave)
                 return;
+
+            // World Events Hold H5: every wave index resolves once (ResolvedWaveCount), however many batches it came in.
+            NoteWaveResolved(waveIndex);
 
             log.Info($"[WORLDEVENT] run={evt.RunId} wave={waveIndex} band={band.Low}-{band.High} spawned={placed} alive={LiveCount}");
         }

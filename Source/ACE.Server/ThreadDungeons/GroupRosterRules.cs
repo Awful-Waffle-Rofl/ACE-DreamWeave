@@ -462,6 +462,15 @@ namespace ACE.Server.ThreadDungeons
         public const string ThreadStaysClosedText = "The Thread stays closed.";
 
         /// <summary>
+        /// Sent to a seated member of a CLEARED group run whose share waits inside while they are outside: on death
+        /// in the cleared copy, or when their pile is dealt while they are away (ThreadGroupCacheDelivery.ServeMember).
+        /// Re-entering costs nothing then (DungeonGemRules.IsClearedReturn). The owner holds the gem, everyone else a
+        /// key, so the line names the right item, as GroupClearedMessage does.
+        /// </summary>
+        public static string ShareWaitsInsideText(bool isOwner)
+            => $"Your share of this Thread waits inside. Re-enter with your {(isOwner ? "gem" : "key")} to collect it - it costs nothing while the run stands.";
+
+        /// <summary>
         /// Yes arrived, but the roster no longer forms a group (a fellow moved, the fellowship disbanded, group
         /// mode was switched off). The owner confirmed a GROUP start and nothing else, so nothing opens; the gem
         /// is untouched and can be used again.
@@ -492,7 +501,7 @@ namespace ACE.Server.ThreadDungeons
         private static RosterCandidate CandidateFrom(Player player, bool inRange)
         {
             var session = player.Session;
-            var ipKey = RewardClaimRules.NormalizeIpKey(session?.EndPointC2S?.Address, IpLimitManager.IsExempt(session));
+            var ipKey = IpLimitManager.IsExempt(session) ? null : IpLimitManager.HouseholdKey(session);
 
             return new RosterCandidate(
                 player.Guid.Full,

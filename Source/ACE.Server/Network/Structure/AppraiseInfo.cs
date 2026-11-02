@@ -8,6 +8,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
+using ACE.Server.KnotLoot;
 using ACE.Server.Managers;
 using ACE.Server.Network.Enum;
 using ACE.Server.WeaponMods;
@@ -378,6 +379,10 @@ namespace ACE.Server.Network.Structure
             if (PropertyManager.GetBool("weapon_mods_enabled").Item)
                 propertyDetails.AddRange(WeaponModDisplay.GetAppraisalLines(wo));
 
+            // Knot loot traits (WaffleACE). Ungated here: each line is gated by its own mechanic switch inside
+            // KnotTraitValue.ResolveOn, so a disabled trait contributes no line.
+            propertyDetails.AddRange(KnotTraitDisplay.GetAppraisalLines(wo));
+
             // Multi-charge salvage tools (WaffleACE) - the Hammer items. UNGATED on purpose: unlike the two
             // blocks above, the remaining charge count is the item's OWN state rather than a rendering of a
             // feature's effect, so a player must be able to read what they are holding regardless of which of
@@ -414,10 +419,12 @@ namespace ACE.Server.Network.Structure
 
         /// <summary>
         /// Last word on the Value the identify response reports, after every type-specific mask above.
-        /// A zero-value pickable item is reported as worth 1, matching the create-object header
+        /// A zero-value pickable item is reported as worth 1 per unit, matching the create-object header
         /// (WorldObject.ClientValue), so appraising the item after a mule opens no longer resets the
         /// client's local Value to 0 and re-triggers its sell-pane drag refusal. Only an EXISTING
-        /// Value entry is rewritten, and only ever to 1: an object with no Value at all keeps sending
+        /// Value entry is rewritten, and only ever to the spoofed ClientValue (StackSize, so 1 for a
+        /// single item - the client divides by StackSize before its zero test, see
+        /// WorldObject.ClientValue): an object with no Value at all keeps sending
         /// none, and an entry a mask above set to 0 for an item whose REAL Value is positive (the
         /// Container block masks a salvage bag's accumulated Value to its base weenie's) stays 0 -
         /// the decision is keyed on WorldObject.IsClientValueSpoofed, never on the real Value itself
@@ -426,7 +433,7 @@ namespace ACE.Server.Network.Structure
         internal static void ApplyClientValue(WorldObject wo, Dictionary<PropertyInt, int> propertiesInt)
         {
             if (propertiesInt.TryGetValue(PropertyInt.Value, out var value) && value <= 0 && WorldObject.IsClientValueSpoofed(wo))
-                propertiesInt[PropertyInt.Value] = 1;
+                propertiesInt[PropertyInt.Value] = WorldObject.GetClientValue(wo);
         }
 
         /// <summary>
@@ -524,8 +531,9 @@ namespace ACE.Server.Network.Structure
         {
             if (wo == null) return;
 
+            // Knot loot: Shield of the Rose's armor bonus is shown on the item for any viewer (item-centric, wielder null).
             if (PropertiesInt.ContainsKey(PropertyInt.ArmorLevel))
-                PropertiesInt[PropertyInt.ArmorLevel] += wo.EnchantmentManager.GetArmorMod();
+                PropertiesInt[PropertyInt.ArmorLevel] += wo.EnchantmentManager.GetArmorMod() + KnotTraitCombat.ShieldArmorBonus(wo, null);
 
             if (wo.ItemSkillLimit != null)
                 PropertiesInt[PropertyInt.AppraisalItemSkill] = (int)wo.ItemSkillLimit;
@@ -740,7 +748,8 @@ namespace ACE.Server.Network.Structure
             var netherResistRating = creature.GetNetherResistRating();
 
             var lifeResistRating = creature.GetLifeResistRating();  // drain / harm resistance
-            var gearMaxHealth = creature.GetGearMaxHealth();
+            // Knot loot: a Player shows the network value, which carries the Shield of the Rose max-health penalty
+            var gearMaxHealth = creature is Player ap ? ap.GetNetworkGearMaxHealth() : creature.GetGearMaxHealth();
 
             var pkDamageRating = creature.GetPKDamageRating();
             var pkDamageResistRating = creature.GetPKDamageResistRating();

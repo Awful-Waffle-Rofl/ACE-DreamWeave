@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 using ACE.Database;
 
 using CharacterSheetLink = ACE.Database.Models.Shard.CharacterSheetLink;
@@ -18,6 +20,9 @@ namespace ACE.Server.Managers.CharacterSheets
         /// <summary>False = read failed; true with a null row = the character has no public sheet.</summary>
         bool TryGetByCharacter(uint characterId, out CharacterSheetLink row);
 
+        /// <summary>Every published sheet of a non-deleted character. False = read failed (rows empty).</summary>
+        bool TryListPublished(out List<(uint CharacterId, string Slug, string Name)> rows);
+
         /// <summary>Insert or rotate. False = nothing written; <paramref name="slugCollision"/> true = duplicate key, draw a new slug.</summary>
         bool Upsert(CharacterSheetLink row, out bool slugCollision);
 
@@ -36,6 +41,8 @@ namespace ACE.Server.Managers.CharacterSheets
         public bool TryGetBySlug(string slug, out CharacterSheetLink row) => Db.TryGetCharacterSheetLinkBySlug(slug, out row);
 
         public bool TryGetByCharacter(uint characterId, out CharacterSheetLink row) => Db.TryGetCharacterSheetLinkByCharacter(characterId, out row);
+
+        public bool TryListPublished(out List<(uint CharacterId, string Slug, string Name)> rows) => Db.TryListPublishedCharacterSheetLinks(out rows);
 
         public bool Upsert(CharacterSheetLink row, out bool slugCollision) => Db.UpsertCharacterSheetLink(row, out slugCollision);
 

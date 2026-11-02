@@ -28,22 +28,11 @@ namespace ACE.Server.Entity
 
         public bool ShouldBeAddedToThisLandblockGroup(Landblock landblock)
         {
+            // The same pairwise rule LandblockGroup grows by, so a split can never separate what growing joined.
             foreach (var value in landblocks)
             {
-                var distance = Math.Max(
-                Math.Abs(value.Id.LandblockX - landblock.Id.LandblockX),
-                Math.Abs(value.Id.LandblockY - landblock.Id.LandblockY));
-
-                if (value.IsDormant || landblock.IsDormant)
-                {
-                    if (distance < LandblockGroup.LandblockGroupMinSpacingWhenDormant)
-                        return true;
-                }
-                else
-                {
-                    if (distance < LandblockGroup.LandblockGroupMinSpacing)
-                        return true;
-                }
+                if (LandblockGroupClustering.MayCluster(value, landblock))
+                    return true;
             }
 
             return false;

@@ -33,6 +33,20 @@ namespace ACE.Server.Command.Handlers
         internal const string JoinUsage = "[Arena] Usage: /arena join <1v1|2v2|tugak> [duo] [template] or /arena join bg [group] [template]";
 
         /// <summary>
+        /// pvp_bg_group_join_enabled (owner ruling 2026-10-15), read through the battleground dial seam so it never throws.
+        /// The coordinator enforces it; this only decides whether the usage lines advertise "group".
+        /// </summary>
+        private static bool GroupJoinEnabled() => BattlegroundTunables.DialSource().GroupJoinEnabled;
+
+        /// <summary>
+        /// A usage line with "[group]" removed when group queueing is disabled, so it is not advertised. Pure. The
+        /// <see cref="JoinUsage"/> and <see cref="ArenaUsage"/> constants keep the full form (it is what an enabled server shows);
+        /// the /arena command's static help text cannot be composed, so it does not mention group at all (the syntax lives in Docs/Pvp/BATTLEGROUNDS.md).
+        /// </summary>
+        internal static string UsageFor(string usage, bool groupEnabled) =>
+            groupEnabled ? usage : usage.Replace("bg [group] [template]", "bg [template]");
+
+        /// <summary>
         /// The handler behind "/arena join ...". PvP Template Facets (Docs/Pvp/TEMPLATES.md "Commands"): a template key
         /// on the line becomes the remembered preference (when it is offered for that mode) and is joined on; with no
         /// key the remembered one is used; with neither, the template list is shown instead of queuing.
@@ -43,12 +57,13 @@ namespace ACE.Server.Command.Handlers
 
             if (parsed.Outcome == JoinArenaParseOutcome.BadUsage)
             {
-                Msg(player, JoinUsage);
+                Msg(player, UsageFor(JoinUsage, GroupJoinEnabled()));
                 return;
             }
 
             // Every mode is templated by default (owner ruling 2026-10-03); for bg the key is checked against the modes the room can form.
-            if (parsed.TemplateKey != null && PvpMatchManager.IsTemplateOffered(parsed.TemplateKey, parsed.ModeKey))
+            // A group join the toggle will refuse must not overwrite the remembered template.
+            if (parsed.TemplateKey != null && !(parsed.Group && !GroupJoinEnabled()) && PvpMatchManager.IsTemplateOffered(parsed.TemplateKey, parsed.ModeKey))
                 player.PvpTemplatePreference = parsed.TemplateKey;
 
             var result = PvpMatchManager.Join(player, parsed.ModeKey, parsed.Duo, parsed.TemplateKey, parsed.Group);
@@ -61,6 +76,11 @@ namespace ACE.Server.Command.Handlers
             }
 
             Msg(player, JoinResultText(result));
+
+            var multi = JoinedMultiText(result);
+
+            if (multi != null)
+                Msg(player, multi);
         }
 
         internal enum JoinArenaParseOutcome
@@ -202,7 +222,7 @@ namespace ACE.Server.Command.Handlers
         {
             if (args.Length != 1)
             {
-                Msg(player, ArenaUsage);
+                Msg(player, UsageFor(ArenaUsage, GroupJoinEnabled()));
                 return;
             }
 
@@ -222,19 +242,21 @@ namespace ACE.Server.Command.Handlers
         // ---------------- /arena ----------------
 
         internal const string ArenaUsage =
-            "[Arena] Usage: /arena <join <1v1|2v2|tugak> [duo] [template]|join bg [group] [template]|templates|template <key>|leave [confirm]|status|accept|decline|rating [name]|top <1v1|2v2|tugak|bg> [count]>";
+            "[Arena] Usage: /arena <join <1v1|2v2|tugak> [duo] [template]|join bg [group] [template]|templates|template <key>|leave [mode|confirm]|status|dailies|accept|decline|rating [name]|top <1v1|2v2|tugak|bg> [count]|norematch [on|off]>";
 
         [CommandHandler("arena", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
             "PvP arena: templates, join, leave, status, accept/decline, ratings and leaderboards.",
             "join <1v1|2v2|tugak> [duo] [template] - queue for a PvP arena match on a template (duo: queue as your 2-player fellowship; a partner uses their own template)\n" +
-            "join bg [group] [template] - queue for a battleground on a template (group: queue as your whole fellowship; each member uses their own template)\n" +
+            "join bg [template]      - queue for a battleground on a template\n" +
             "templates               - the arena templates on offer, and the modes each is offered in\n" +
             "template <key>          - remember the template you fight on (kept across relogs)\n" +
-            "leave [confirm]         - leave the queue, or forfeit a match in progress (confirm skips the popup)\n" +
-            "status                  - your current queue/match status\n" +
+            "leave [mode|confirm]    - leave every queue (or just one mode's), or forfeit a match in progress (confirm skips the popup)\n" +
+            "status                  - your queues (you may wait in several; entering a match leaves the others) and match status\n" +
+            "dailies                 - where you stand on your PvP dailies and weekly, and any turn-in cooldown\n" +
             "accept | decline        - answer a pending match invite\n" +
             "rating [name]           - your rating on every ladder, or a named character's\n" +
-            "top <1v1|2v2|tugak|bg> [n] - the top of a ladder (default 10, max 25)")]
+            "top <1v1|2v2|tugak|bg> [n] - the top of a ladder (default 10, max 25)\n" +
+            "norematch [on|off]      - on: never be matched into an unrewarded rematch (wait for a fresh opponent); off: accept one; no argument shows the setting")]
         public static void HandleArena(Session session, params string[] parameters)
         {
             var player = session?.Player;
@@ -244,7 +266,7 @@ namespace ACE.Server.Command.Handlers
 
             if (parameters == null || parameters.Length == 0)
             {
-                Msg(player, ArenaUsage);
+                Msg(player, UsageFor(ArenaUsage, GroupJoinEnabled()));
                 return;
             }
 
@@ -273,6 +295,10 @@ namespace ACE.Server.Command.Handlers
                     HandleArenaStatus(player);
                     break;
 
+                case "dailies":
+                    player.SendPvpDailyStatus();
+                    break;
+
                 case "accept":
                     HandleArenaAccept(player);
                     break;
@@ -289,25 +315,119 @@ namespace ACE.Server.Command.Handlers
                     HandleArenaTop(player, rest);
                     break;
 
+                case "norematch":
+                    HandleArenaNoRematch(player, rest);
+                    break;
+
                 default:
-                    Msg(player, ArenaUsage);
+                    Msg(player, UsageFor(ArenaUsage, GroupJoinEnabled()));
                     break;
             }
         }
 
+        // ---- norematch ----
+
+        internal enum NoRematchParseOutcome
+        {
+            Show,
+            On,
+            Off,
+            BadUsage
+        }
+
+        /// <summary>Parses the tokens after "/arena norematch": none shows the state, "on" or "off" (any case) sets it. Pure.</summary>
+        internal static NoRematchParseOutcome ParseNoRematch(string[] args)
+        {
+            if (args == null || args.Length == 0)
+                return NoRematchParseOutcome.Show;
+
+            if (args.Length > 1)
+                return NoRematchParseOutcome.BadUsage;
+
+            if (string.Equals(args[0], "on", StringComparison.OrdinalIgnoreCase))
+                return NoRematchParseOutcome.On;
+
+            if (string.Equals(args[0], "off", StringComparison.OrdinalIgnoreCase))
+                return NoRematchParseOutcome.Off;
+
+            return NoRematchParseOutcome.BadUsage;
+        }
+
+        /// <summary>The chat line for a norematch state. Pure.</summary>
+        internal static string NoRematchStateText(bool refusing) => refusing ? PvpArenaText.NoRematchOn : PvpArenaText.NoRematchOff;
+
+        private static void HandleArenaNoRematch(Player player, string[] args)
+        {
+            var parsed = ParseNoRematch(args);
+
+            switch (parsed)
+            {
+                case NoRematchParseOutcome.BadUsage:
+                    Msg(player, PvpArenaText.NoRematchUsage);
+                    return;
+
+                case NoRematchParseOutcome.Show:
+                    Msg(player, NoRematchStateText(player.PvpArenaRefuseUnpaidRematch));
+                    return;
+            }
+
+            var refuse = parsed == NoRematchParseOutcome.On;
+
+            player.PvpArenaRefuseUnpaidRematch = refuse;
+
+            // Already waiting in a queue: the unit's copy of the choice changes now, not at the next join.
+            PvpMatchManager.SetRefuseUnpaidRematch(player, refuse);
+
+            Msg(player, NoRematchStateText(refuse));
+        }
+
         // ---- leave ----
+
+        internal enum LeaveParseOutcome
+        {
+            /// <summary>"/arena leave": the pending match, else every queue.</summary>
+            Default,
+
+            /// <summary>"/arena leave confirm": forfeit without the popup.</summary>
+            Confirm,
+
+            /// <summary>"/arena leave &lt;mode&gt;": just that queue.</summary>
+            Mode,
+
+            BadUsage
+        }
+
+        /// <summary>
+        /// Parses the tokens after "/arena leave": none, "confirm" (any case), or one mode word (1v1, 2v2, tugak or its alias ffa, bg),
+        /// canonicalized exactly as /arena join does. Pure.
+        /// </summary>
+        internal static (LeaveParseOutcome Outcome, string ModeKey) ParseLeave(string[] args)
+        {
+            if (args == null || args.Length == 0)
+                return (LeaveParseOutcome.Default, null);
+
+            if (args.Length > 1)
+                return (LeaveParseOutcome.BadUsage, null);
+
+            if (string.Equals(args[0], "confirm", StringComparison.OrdinalIgnoreCase))
+                return (LeaveParseOutcome.Confirm, null);
+
+            var mode = ArenaMapCatalog.CanonicalModeWord(args[0]);
+
+            return IsJoinableMode(mode) ? (LeaveParseOutcome.Mode, mode) : (LeaveParseOutcome.BadUsage, null);
+        }
 
         private static void HandleArenaLeave(Player player, string[] args)
         {
-            var isConfirmForm = args.Length == 1 && string.Equals(args[0], "confirm", StringComparison.OrdinalIgnoreCase);
+            var parsed = ParseLeave(args);
 
-            if (args.Length > 1 || (args.Length == 1 && !isConfirmForm))
+            if (parsed.Outcome == LeaveParseOutcome.BadUsage)
             {
-                Msg(player, ArenaUsage);
+                Msg(player, UsageFor(ArenaUsage, GroupJoinEnabled()));
                 return;
             }
 
-            if (isConfirmForm)
+            if (parsed.Outcome == LeaveParseOutcome.Confirm)
             {
                 var forfeit = PvpMatchManager.Forfeit(player);
                 var text = ForfeitResultText(forfeit);
@@ -318,26 +438,46 @@ namespace ACE.Server.Command.Handlers
                 return;
             }
 
-            var result = PvpMatchManager.Leave(player);
+            var result = PvpMatchManager.Leave(player, parsed.Outcome == LeaveParseOutcome.Mode ? parsed.ModeKey : null);
 
+            if (result.Outcome == PvpLeaveOutcome.InMatchNeedsConfirm)
+            {
+                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_PvpArenaLeave(player.Guid, result.MatchId ?? Guid.Empty), PvpArenaText.LeaveConfirmPopup))
+                    Msg(player, PvpArenaText.LeaveConfirmFallback);
+
+                return;
+            }
+
+            var line = LeaveResultText(result);
+
+            if (line != null)
+                Msg(player, line);
+        }
+
+        /// <summary>
+        /// The chat line for a <see cref="PvpLeaveResult"/>, except InMatchNeedsConfirm (the popup). Pure. Null for DeclinedMatch: the
+        /// coordinator's DeclineBeforePlacement already sent PvpArenaText.YouDeclined. Leaving several queues at once is one LeftAll line.
+        /// </summary>
+        internal static string LeaveResultText(PvpLeaveResult result)
+        {
             switch (result.Outcome)
             {
                 case PvpLeaveOutcome.NotQueued:
-                    Msg(player, PvpArenaText.NotQueuedOrInMatch);
-                    break;
+                    return PvpArenaText.NotQueuedOrInMatch;
+
+                case PvpLeaveOutcome.NotInMode:
+                    return PvpArenaText.Fill(PvpArenaText.NotInMode, ("mode", PvpArenaText.ModeLabel(result.ModeKey)));
 
                 case PvpLeaveOutcome.LeftQueue:
-                    Msg(player, PvpArenaText.Fill(PvpArenaText.Left, ("mode", PvpArenaText.ModeLabel(result.ModeKey))));
-                    break;
+                    if (result.ModeKeys != null && result.ModeKeys.Count > 1)
+                        return PvpArenaText.Fill(PvpArenaText.LeftAll, ("modes", PvpArenaText.ModeList(result.ModeKeys)));
+
+                    return PvpArenaText.Fill(PvpArenaText.Left, ("mode", PvpArenaText.ModeLabel(result.ModeKey)));
 
                 case PvpLeaveOutcome.DeclinedMatch:
-                    // The coordinator's DeclineBeforePlacement already sent PvpArenaText.YouDeclined.
-                    break;
-
                 case PvpLeaveOutcome.InMatchNeedsConfirm:
-                    if (!player.ConfirmationManager.EnqueueSend(new Confirmation_PvpArenaLeave(player.Guid, result.MatchId ?? Guid.Empty), PvpArenaText.LeaveConfirmPopup))
-                        Msg(player, PvpArenaText.LeaveConfirmFallback);
-                    break;
+                default:
+                    return null;
             }
         }
 
@@ -372,8 +512,58 @@ namespace ACE.Server.Command.Handlers
             Msg(player, StatusResultText(result));
         }
 
-        /// <summary>The chat line for a <see cref="PvpStatusResult"/>. Pure.</summary>
+        /// <summary>
+        /// The chat text for a <see cref="PvpStatusResult"/>. Pure. One queue is the single StatusQueued line, as before; several are a
+        /// header and one line per queue. In a match, any queues the player still holds follow the match line, each marked paused
+        /// while the match is pending.
+        /// </summary>
         internal static string StatusResultText(PvpStatusResult result)
+        {
+            var main = StatusMainText(result);
+            var queues = result.Queues;
+
+            if (queues == null || queues.Count == 0 || (result.Kind == PvpStatusKind.Queued && queues.Count == 1))
+                return main;
+
+            var lines = new List<string>();
+
+            if (result.Kind != PvpStatusKind.Queued)
+                lines.Add(main);
+
+            lines.Add(PvpArenaText.StatusQueuesHeader);
+            lines.AddRange(queues.Select(q => StatusQueueLineText(q, result.Kind == PvpStatusKind.Queued ? null : result.ModeKey)));
+
+            return string.Join("\n", lines);
+        }
+
+        /// <summary>
+        /// One /arena status queue line. Pure. A held entry (its match pending) is the paused line naming <paramref name="matchModeKey"/>
+        /// (the pending match's mode; the entry's own mode when null); otherwise the waiting line, with the template when known.
+        /// </summary>
+        internal static string StatusQueueLineText(PvpQueueEntry entry, string matchModeKey)
+        {
+            if (entry.Held)
+                return PvpArenaText.Fill(PvpArenaText.StatusQueueHeld, ("mode", PvpArenaText.ModeLabel(entry.ModeKey)), ("matchMode", PvpArenaText.ModeLabel(matchModeKey ?? entry.ModeKey)));
+
+            if (entry.TemplateLabel != null)
+                return PvpArenaText.Fill(PvpArenaText.StatusQueueLineTemplate, ("mode", PvpArenaText.ModeLabel(entry.ModeKey)), ("template", entry.TemplateLabel), ("waited", FormatDuration(entry.Waited)), ("count", entry.WaitingCount));
+
+            return PvpArenaText.Fill(PvpArenaText.StatusQueueLine, ("mode", PvpArenaText.ModeLabel(entry.ModeKey)), ("waited", FormatDuration(entry.Waited)), ("count", entry.WaitingCount));
+        }
+
+        /// <summary>
+        /// The extra line after a successful join that left the player in more than one queue (<see cref="PvpJoinResult.QueuedModeKeys"/>);
+        /// null otherwise. Pure.
+        /// </summary>
+        internal static string JoinedMultiText(PvpJoinResult result)
+        {
+            if (!result.Joined || result.QueuedModeKeys == null || result.QueuedModeKeys.Count < 2)
+                return null;
+
+            return PvpArenaText.Fill(PvpArenaText.JoinedMulti, ("count", result.QueuedModeKeys.Count), ("modes", PvpArenaText.ModeList(result.QueuedModeKeys)));
+        }
+
+        private static string StatusMainText(PvpStatusResult result)
         {
             switch (result.Kind)
             {
@@ -621,6 +811,8 @@ namespace ACE.Server.Command.Handlers
         internal static void HandleArenaTop(Player player, string[] args, string badUsageText = ArenaUsage)
         {
             var parsed = ParseTop(args);
+
+            badUsageText = UsageFor(badUsageText, GroupJoinEnabled());
 
             if (parsed.Outcome == TopParseOutcome.BadUsage)
             {

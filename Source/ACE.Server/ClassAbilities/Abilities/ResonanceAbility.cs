@@ -8,7 +8,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
     /// Spellsword T1: landing ANY magic damage grants a Resonance stack (cap 5, 6 second idle window), and
-    /// each stack adds +1.2/1.8/2.4% by rank to ALL of the player's magic damage. Full ramp +6/9/12%.
+    /// each stack adds +1.2/2.4/3.6% by rank to ALL of the player's magic damage. Full ramp +6/12/18%.
     /// SPELLSWORD-DESIGN.md sec 5d.
     ///
     /// WHY THIS CARRIES NO HOOK INTERFACE OF ITS OWN. The stack pool lives on the Player
@@ -44,8 +44,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "resonance",
             DisplayName = "Resonance",
             Description = "Landing any magic damage grants a Resonance stack (up to 5, lapsing after 6 seconds " +
-                          "without a hit). Each stack adds 1.2/1.8/2.4% by rank to all of your magic damage - " +
-                          "+6/9/12% at a full stack.",
+                          "without a hit). Each stack adds 1.2/2.4/3.6% by rank to all of your magic damage - " +
+                          "+6/12/18% at a full stack.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
@@ -84,7 +84,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// The per-stack magic-damage fraction at a given rank: r1/r2/r3 tunables (0.02 / 0.03 / 0.04).
+        /// The per-stack magic-damage fraction at a given rank: r1/r2/r3 tunables (0.012 / 0.024 / 0.036).
         /// Ranks above 3 clamp to the rank-3 value rather than extrapolating, which is the same shape
         /// BloodChargeMath.StackCap uses - a rank the ladder does not define must not silently invent one.
         /// </summary>

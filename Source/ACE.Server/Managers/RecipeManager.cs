@@ -96,7 +96,7 @@ namespace ACE.Server.Managers
             // or a ManaStone.
             if (TinkerLock.IsRefused(source, target))
             {
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat(TinkerLock.RefusalMessage(target), ChatMessageType.Craft));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(TinkerLock.RefusalMessage(source, target), ChatMessageType.Craft));
                 player.SendUseDoneEvent();
                 return;
             }
@@ -221,6 +221,23 @@ namespace ACE.Server.Managers
             if (!VerifyRequirements(recipe, player, source, target))
             {
                 player.SendUseDoneEvent(WeenieError.YouDoNotPassCraftingRequirements);
+                return;
+            }
+
+            // Drift Atlan conversion (WaffleACE): an Atlan Drift infusion used on a non-Drift weapon destroys the
+            // target and replaces it, so ask first. Reuses Confirmation_CraftInteration, whose Yes replays this
+            // method with confirmed = true (re-finding both items in the player's reach and re-running the
+            // TinkerLock and recipe checks above); No sends YouChickenOut and nothing else happens. A re-imbue of
+            // a Drift weapon is not a conversion and is never prompted.
+            if (!confirmed && TinkerLock.IsDriftConversion(source, target))
+            {
+                if (!player.ConfirmationManager.EnqueueSend(new Confirmation_CraftInteration(player.Guid, source.Guid, target.Guid), TinkerLock.DriftConversionPrompt(target.Name)))
+                {
+                    player.SendUseDoneEvent(WeenieError.ConfirmationInProgress);
+                    return;
+                }
+
+                player.SendUseDoneEvent();
                 return;
             }
 

@@ -176,6 +176,30 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void StartArgs_Hazard_DefaultsToNull_AndAcceptsEachWordCaseInsensitively()
+        {
+            Assert.IsTrue(WorldEventCommands.TryParseStartArgs(new[] { "random", "--here" }, out var parsed, out _));
+            Assert.IsNull(parsed.Hazard, "omitting the flag is the source default");
+
+            foreach (var word in new[] { "random", "none", "wisps", "balls", "rain" })
+            {
+                Assert.IsTrue(WorldEventCommands.TryParseStartArgs(new[] { "--here", "--hazard", word.ToUpperInvariant() }, out parsed, out var error), error);
+                Assert.AreEqual(word, parsed.Hazard);
+            }
+        }
+
+        [TestMethod]
+        public void StartArgs_Hazard_RejectsAnUnknownWordAndAMissingValue()
+        {
+            Assert.IsFalse(WorldEventCommands.TryParseStartArgs(new[] { "--here", "--hazard", "lava" }, out _, out var wordError));
+            StringAssert.Contains(wordError, "--hazard");
+            StringAssert.Contains(wordError, "wisps");
+
+            Assert.IsFalse(WorldEventCommands.TryParseStartArgs(new[] { "--here", "--hazard" }, out _, out var missingError));
+            StringAssert.Contains(missingError, "needs a value");
+        }
+
+        [TestMethod]
         public void StartArgs_Preset_IsCapturedVerbatim()
         {
             var ok = WorldEventCommands.TryParseStartArgs(

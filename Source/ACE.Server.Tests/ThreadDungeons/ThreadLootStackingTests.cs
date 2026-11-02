@@ -516,5 +516,69 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(held.Count < 480, $"merged into {held.Count} objects");
             Assert.IsTrue(held.All(i => i.StackSize <= 100));
         }
+
+        // ------------------------------------------------------------------------------------------------------
+        // Fixed boss bonus first (owner ruling 2026-10-30): notes, Durable Legendary Key, salvage lead the first cache.
+        // ------------------------------------------------------------------------------------------------------
+
+        [TestMethod]
+        public void SortPileForPlacement_puts_the_fixed_bonus_first_in_its_own_order_ahead_of_knots_stackables_and_gear()
+        {
+            var richGear = Item(9800);
+            richGear.Value = 9_000_000;
+            var richStack = Stack(9801, 50, unitValue: 100_000);
+            var fixedNote = Stack(9802, 1, unitValue: 5);
+            var fixedKey = Item(9803);
+            fixedKey.Value = 1;
+            var fixedBag = Item(9804);
+            fixedBag.Value = 2;
+
+            // Pile order is deliberately scrambled: the fixed rank, not arrival or Value, decides.
+            var pile = new List<HeldPileItem>
+            {
+                new HeldPileItem(richGear, null, 1),
+                new HeldPileItem(fixedBag, null, 2, null, 2),
+                new HeldPileItem(richStack, null, 1),
+                new HeldPileItem(fixedKey, null, 2, null, 1),
+                new HeldPileItem(fixedNote, null, 2, null, 0),
+            };
+
+            var sorted = ThreadLootStacking.SortPileForPlacement(pile);
+
+            CollectionAssert.AreEqual(new WorldObject[] { fixedNote, fixedKey, fixedBag, richStack, richGear }, sorted.Select(h => h.Item).ToList(),
+                "note, key, salvage first (rank order), then stackables, then gear by Value");
+        }
+
+        [TestMethod]
+        public void ConsolidatePile_keeps_the_fixed_rank_on_a_merged_note_survivor()
+        {
+            var fixedNote = Stack(9810, 10);
+            var lootNote = Stack(9810, 5);
+
+            var pile = new List<HeldPileItem>
+            {
+                new HeldPileItem(lootNote, null, 1),
+                new HeldPileItem(fixedNote, null, 2, null, 0),
+            };
+
+            var merged = ThreadLootStacking.ConsolidatePile(pile, out var removed);
+
+            Assert.AreEqual(1, removed);
+            Assert.AreEqual(1, merged.Count);
+            Assert.AreEqual(0, merged[0].FixedOrder, "the merged survivor stays in the fixed block");
+        }
+
+        [TestMethod]
+        public void A_pile_with_no_fixed_items_sorts_exactly_as_before()
+        {
+            var stackA = Stack(9820, 3, unitValue: 20);
+            var gear = Item(9821);
+            gear.Value = 10;
+
+            var sorted = ThreadLootStacking.SortPileForPlacement(new List<HeldPileItem> { new HeldPileItem(gear, null, 1), new HeldPileItem(stackA, null, 1) });
+
+            CollectionAssert.AreEqual(new WorldObject[] { stackA, gear }, sorted.Select(h => h.Item).ToList());
+            Assert.IsNull(sorted[0].FixedOrder);
+        }
     }
 }

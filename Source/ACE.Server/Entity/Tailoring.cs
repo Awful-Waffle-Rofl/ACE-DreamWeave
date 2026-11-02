@@ -9,6 +9,7 @@ using ACE.Server.Factories;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 using log4net;
@@ -285,11 +286,136 @@ namespace ACE.Server.Entity
             // (ClothingBase / PaletteTemplate / Shade / Setup) describes only the retail half of it.
             CopyObjDescRows(source, target);
 
+            CopyWornModelProperties(source, target);
+
+            BindPrestigeIntermediate(source, target);
+
             // Assigned directly rather than through Player.UpdateProperty: this is a fork-allocated
             // PropertyDataId (9000) and the two shipped writers - /vfxprop and WeaponModManager - both
             // set it without emitting a property update to the client, which has no notion of it.
-            // A null source clears it, which is correct: the target must not keep its old effect.
-            target.VisualEffectScript = source.VisualEffectScript;
+            // A weapon-quality aura (Exceptional/Elite/God) belongs to the weapon it was earned on, not to
+            // the look, so the intermediate never carries one; see IntermediateScript.
+            target.VisualEffectScript = IntermediateScript(source.VisualEffectScript);
+        }
+
+        /// <summary>
+        /// The VisualEffectScript a tailoring intermediate (kit) takes from its source: the source's script,
+        /// unless it is a weapon-quality tier aura, in which case none. Internal for ACE.Server.Tests.
+        /// </summary>
+        internal static uint? IntermediateScript(uint? sourceScript) =>
+            WeaponQualityTiers.IsTierScript(sourceScript) ? null : sourceScript;
+
+        /// <summary>
+        /// The VisualEffectScript a tailoring target ends with. A non-zero kit script that is not a tier
+        /// aura is look-owned and wins (one slot; reachable only via admin /vfxprop or preview content).
+        /// Otherwise the target keeps the aura it has earned from its own specials, or none. That also
+        /// strips tier scripts off kits already in the wild. The native effect of the tailored look comes
+        /// from the copied Setup and layers additively with this script. Internal for ACE.Server.Tests.
+        /// </summary>
+        internal static uint? ResolveTailoredScript(WorldObject kit, WorldObject target)
+        {
+            var kitScript = kit.VisualEffectScript;
+
+            if (kitScript.HasValue && kitScript.Value != 0 && !WeaponQualityTiers.IsTierScript(kitScript))
+                return kitScript;
+
+            return WeaponQualityTiers.ScriptFor(WeaponQualityTiers.Evaluate(target));
+        }
+
+        /// <summary>
+        /// Carries the two fork worn-look strings, PropertyString.WornModelOverrides (9020) and
+        /// PropertyString.ClothingPartExclusions (9019), from the source onto the target. Both are part
+        /// of the worn look just as much as ClothingBase is: without them a tailored copy of an override
+        /// item (Asheron's Regalia, a prestige suit) lost its whole body swap, and a normal look tailored
+        /// onto such an item kept the old override on top of the new ClothingBase.
+        ///
+        /// Replacement, not merge, like CopyObjDescRows: a source WITHOUT the property CLEARS it on the
+        /// target, so tailoring a normal look onto an override item removes the override and the normal
+        /// look shows.
+        ///
+        /// Set directly (SetProperty / RemoveProperty), never through Player.UpdateProperty: both ids are
+        /// fork-allocated and the client has no notion of them. Internal for ACE.Server.Tests.
+        /// </summary>
+        internal static void CopyWornModelProperties(WorldObject source, WorldObject target)
+        {
+            CopyStringOrClear(source, target, PropertyString.WornModelOverrides);
+            CopyStringOrClear(source, target, PropertyString.ClothingPartExclusions);
+        }
+
+        /// <summary>
+        /// A PvP prestige look (source carries PropertyBool.PvpPrestigeGated = true, e.g. Guise of the Hopeslayer 1006654)
+        /// must not become a tradeable tailoring kit, or a qualified buyer could tailor the suit off and sell the look to
+        /// someone who never met the purchase gate. So the intermediate created from such a source is made Attuned and
+        /// Bonded. Every other source is left exactly as before: retail attuned items keep tradeable intermediates.
+        ///
+        /// Called from SetCommonProperties, where the source is the piece being tailored and the target is the new
+        /// intermediate (TailorArmor / TailorWeapon pass them in that order). Internal for ACE.Server.Tests.
+        /// </summary>
+        internal static void BindPrestigeIntermediate(WorldObject source, WorldObject intermediate)
+        {
+            if (source?.GetProperty(PropertyBool.PvpPrestigeGated) != true || intermediate == null)
+                return;
+
+            intermediate.SetProperty(PropertyInt.Attuned, (int)AttunedStatus.Attuned);
+            intermediate.SetProperty(PropertyInt.Bonded, (int)BondedStatus.Bonded);
+
+            // The flag travels with the look, so applying this kit binds whatever it lands on (BindPrestigeTarget).
+            intermediate.SetProperty(PropertyBool.PvpPrestigeGated, true);
+        }
+
+        /// <summary>The message sent when a prestige look binds itself to the piece it was tailored onto.</summary>
+        internal const string PrestigeBindMessage = "The Hopeslayer's likeness binds itself to your armor. It can no longer be traded.";
+
+        /// <summary>
+        /// The prestige look stays with the character who earned it. Applying a kit that carries PropertyBool.PvpPrestigeGated
+        /// makes the target piece Attuned, Bonded and PvpPrestigeGated too, so re-tailoring it later yields a gated kit
+        /// (BindPrestigeIntermediate) and the look can never land on a tradeable item. A kit WITHOUT the flag clears the flag on
+        /// the target (a normal look tailored over a prestige piece removes it) but deliberately leaves Attuned and Bonded alone:
+        /// once bound, the piece stays bound.
+        ///
+        /// The flag on a player's own piece never reaches the vendor purchase gate: that gate reads only a vendor's
+        /// DefaultItemsForSale / UniqueItemsForSale, and an attuned item can be neither sold nor stored (Player_Commerce's
+        /// IsAttunedOrContainsAttuned refusal) nor resold (Vendor.ProcessItemsForPurchase).
+        ///
+        /// NEITHER STATUS OVERWRITES A DELIBERATE ONE (same guards as PrismaticDriftStone): Attuned is only RAISED, because
+        /// Sticky outranks Attuned; Bonded is set only FROM Normal (or absent), because Destroy (-2) and Slippery (-1) are the
+        /// opposite intent of Bonded, not weaker forms of it, and Sticky outranks it. The flag is set either way.
+        ///
+        /// Properties are set directly on the object; the caller (UpdateCommonProps) sends Attuned and Bonded to the client
+        /// with Player.UpdateProperty. Returns true only when the piece was NOT already Attuned (or Sticky) before this call,
+        /// i.e. when it has just become untradeable, which is when the player is told. Internal for ACE.Server.Tests.
+        /// </summary>
+        internal static bool BindPrestigeTarget(WorldObject kit, WorldObject target)
+        {
+            if (kit == null || target == null)
+                return false;
+
+            if (kit.GetProperty(PropertyBool.PvpPrestigeGated) != true)
+            {
+                target.RemoveProperty(PropertyBool.PvpPrestigeGated);
+                return false;
+            }
+
+            var wasUntradeable = (target.Attuned ?? AttunedStatus.Normal) >= AttunedStatus.Attuned;
+
+            if (!wasUntradeable)
+                target.Attuned = AttunedStatus.Attuned;
+
+            if ((target.Bonded ?? BondedStatus.Normal) == BondedStatus.Normal)
+                target.Bonded = BondedStatus.Bonded;
+
+            target.SetProperty(PropertyBool.PvpPrestigeGated, true);
+            return !wasUntradeable;
+        }
+
+        private static void CopyStringOrClear(WorldObject source, WorldObject target, PropertyString property)
+        {
+            var value = source.GetProperty(property);
+
+            if (value == null)
+                target.RemoveProperty(property);
+            else
+                target.SetProperty(property, value);
         }
 
         /// <summary>
@@ -699,8 +825,29 @@ namespace ACE.Server.Entity
             // SearchLocations.MyInventory alone - so no wearer's ObjDesc can be stale as a result.
             CopyObjDescRows(source, target);
 
+            // Fork-allocated strings the client has no notion of: set directly, never through
+            // Player.UpdateProperty, for the same reason as VisualEffectScript just below. The
+            // GameMessageUpdateObject both callers send next re-runs CalculateObjDesc.
+            CopyWornModelProperties(source, target);
+
+            // A prestige look binds the piece it lands on (and a normal look clears the prestige flag); see BindPrestigeTarget.
+            // GameMessageUpdateObject does not carry Attuned or Bonded, so both are sent here as property updates, like the
+            // neighbouring lines. 9076 is a fork id the client has no notion of, so it is never sent.
+            var newlyBound = BindPrestigeTarget(source, target);
+
+            if (source.GetProperty(PropertyBool.PvpPrestigeGated) == true)
+            {
+                player.UpdateProperty(target, PropertyInt.Attuned, target.GetProperty(PropertyInt.Attuned));
+                player.UpdateProperty(target, PropertyInt.Bonded, target.GetProperty(PropertyInt.Bonded));
+            }
+
+            if (newlyBound)
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(PrestigeBindMessage, ChatMessageType.Broadcast));
+
+            // The target keeps its own earned quality aura; the kit's script only wins when it is a look-owned
+            // (non-tier) effect. See ResolveTailoredScript.
             var scriptBefore = target.VisualEffectScript;
-            target.VisualEffectScript = source.VisualEffectScript;
+            target.VisualEffectScript = ResolveTailoredScript(source, target);
 
             // Only on an actual change, and deliberately a Forget rather than a send. The item is in
             // the pack right now, where the client knows it but does not draw it; sending there

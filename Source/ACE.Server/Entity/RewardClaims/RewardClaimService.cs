@@ -41,9 +41,13 @@ namespace ACE.Server.Entity.RewardClaims
         public uint AccountId { get; set; }
         public uint CharacterId { get; set; }
         public string CharacterName { get; set; }
+        /// <summary>The raw client address. Stored in ip_Address and logged only; the claim is keyed by <see cref="HouseholdKey"/>.</summary>
         public IPAddress Address { get; set; }
 
-        /// <summary>IpLimitManager.IsExempt(session) in production. Null reads as not exempt.</summary>
+        /// <summary>IpLimitManager.HouseholdKey(session) in production: the ip_Key this claim is held under (an address for an ordinary account, "cluster:name" or "acct:id" otherwise). Ignored when the session is a true bypass.</summary>
+        public string HouseholdKey { get; set; }
+
+        /// <summary>IpLimitManager.IsExempt(session) in production (the true bypasses only). Null reads as not exempt.</summary>
         public Func<bool> IsExempt { get; set; }
 
         /// <summary>Whether the player can hold one of the reward wcid. Null reads as room available.</summary>
@@ -261,7 +265,9 @@ namespace ACE.Server.Entity.RewardClaims
                 return new RewardClaimDecision(RewardClaimBranch.None, storeFailedMessage, ResultFailed);
             }
 
-            var ipKey = RewardClaimRules.NormalizeIpKey(request.Address, exempt);
+            // A request that carries no household key (a caller that forgot to set it) falls back to the address key
+            // rather than failing open as a null key, which would make the IP rule vanish.
+            var ipKey = exempt ? null : (request.HouseholdKey ?? IpLimitManager.HouseholdKeyCore(request.AccountId, null, request.Address, null));
 
             var outcome = TryClaim(storedKey, request.AccountId, request.CharacterId, entry.NpcWcid, ipKey, address);
 

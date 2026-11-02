@@ -107,6 +107,35 @@ namespace ACE.Server.Pvp
             rows[(row.CharacterId, row.Ladder)] = Copy(row);
         }
 
+        /// <summary>
+        /// The highest stored Peak of <paramref name="characterId"/> across every ladder it has played (a row with at least one game), or 0
+        /// when it has none or the store is not available. Peak is never decayed. World thread, like every other read here.
+        /// </summary>
+        public int PeakAcrossLadders(uint characterId)
+        {
+            var peak = 0;
+
+            foreach (var kvp in rows)
+            {
+                if (kvp.Key.CharacterId == characterId && kvp.Value.Games > 0 && kvp.Value.Peak > peak)
+                    peak = kvp.Value.Peak;
+            }
+
+            return peak;
+        }
+
+        /// <summary>
+        /// The stored Wins of <paramref name="characterId"/> on one ladder, or 0 when it has no row there or the store is not available.
+        /// Not decayed (only Rating decays). World thread, like every other read here.
+        /// </summary>
+        public int WinsOn(uint characterId, string ladder)
+        {
+            if (ladder == null)
+                return 0;
+
+            return rows.TryGetValue((characterId, ladder), out var row) ? Math.Max(0, row.Wins) : 0;
+        }
+
         /// <summary>The top <paramref name="count"/> of a ladder by decayed rating (then wins, then name), computed from memory.</summary>
         public IReadOnlyList<PvpRatingView> Top(string ladder, int count, DateTime utcNow, PvpArenaDials dials)
         {

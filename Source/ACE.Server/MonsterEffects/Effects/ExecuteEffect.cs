@@ -20,6 +20,15 @@ namespace ACE.Server.MonsterEffects.Effects
         public string Kind => "execute";
 
         /// <summary>
+        /// The largest bonus= Validate accepts. bonus= is a MULTIPLIER of the landed hit, not a flat
+        /// amount: the handler adds damage * bonus, so 0.4 is +40% and 40 would be +4000% (a 41x hit,
+        /// bounded only by monster_effect_damage_rider_cap). A value above this is almost certainly an
+        /// author who read bonus= as a flat amount or a percent, so the record is rejected whole at
+        /// construction rather than run.
+        /// </summary>
+        public const double MaxBonus = 2.0;
+
+        /// <summary>
         /// Runs ahead of every reader on its hooks: this effect CHANGES the damage figure they size
         /// themselves from. See the ordering paragraph in MonsterEffectHooks.cs.
         /// </summary>
@@ -27,9 +36,16 @@ namespace ACE.Server.MonsterEffects.Effects
 
         public bool Validate(MonsterEffectSpec spec, out string error)
         {
-            if (spec.GetDouble("bonus", 0.0) <= 0.0)
+            var bonus = spec.GetDouble("bonus", 0.0);
+            if (bonus <= 0.0)
             {
                 error = "execute requires bonus= > 0";
+                return false;
+            }
+
+            if (bonus > MaxBonus)
+            {
+                error = $"execute bonus= is a MULTIPLIER of the landed hit (0.4 = +40%), not a flat amount, and must be <= {MaxBonus}";
                 return false;
             }
 

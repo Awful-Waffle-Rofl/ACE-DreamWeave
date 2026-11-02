@@ -8,9 +8,9 @@ namespace ACE.Server.ClassAbilities
     /// Two halves, both keyed off ONE number - the health basis Martyr's Hecatomb / Curse of Raven Fury
     /// computes at the cast site (a percentage of the caster's CURRENT health):
     ///  - the basis is still spent in full for damage, but the caster only actually LOSES
-    ///    <see cref="SelfCostFraction"/> of it (80/65/50% by rank);
+    ///    <see cref="SelfCostFraction"/> of it (75/55/35% by rank at the shipped defaults);
     ///  - the health that is lost comes back as a damage-absorbing ward worth
-    ///    <see cref="WardFraction"/> of the lost amount (50/75/100% by rank), for a fixed duration.
+    ///    <see cref="WardFraction"/> of the lost amount (60/90/120% by rank at the shipped defaults, multiplied by the Cooking affinity), for a fixed duration.
     ///
     /// THREE LOAD-BEARING PROPERTIES, each modelled explicitly here so they are unit-testable without a
     /// live Player (Player's static initializer cannot run under the test host, so anything left inline on
@@ -63,7 +63,7 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
-        /// The fraction of the spell's health basis the caster ACTUALLY loses: 80/65/50% at ranks 1/2/3,
+        /// The fraction of the spell's health basis the caster ACTUALLY loses: 75/55/35% at ranks 1/2/3 (shipped defaults),
         /// from the class_ability_sanguine_ward_selfcost_rN tunables.
         ///
         /// Returns 1.0 (the full retail cost) for rank 0 / unlearned, so a caster without the ability is
@@ -87,7 +87,7 @@ namespace ACE.Server.ClassAbilities
         }
 
         /// <summary>
-        /// The fraction of the health ACTUALLY LOST that comes back as ward: 50/75/100% at ranks 1/2/3,
+        /// The fraction of the health ACTUALLY LOST that comes back as ward: 60/90/120% at ranks 1/2/3 (shipped defaults),
         /// from the class_ability_sanguine_ward_absorb_rN tunables. 0 for rank 0 / unlearned.
         ///
         /// Deliberately NOT clamped to 1.0 at the top: the tunable is the authority, and a value above
@@ -102,19 +102,33 @@ namespace ACE.Server.ClassAbilities
         /// self-cost is the ability's own bargain, the same ruling that keeps Blood Price's health cost
         /// unmoddable (DESIGN.md 2.3). Gear buys a bigger ward, never a cheaper cast.
         /// </summary>
-        public static double WardFraction(int rank, double absorbR1, double absorbR2, double absorbR3, double gear = 0.0)
+        public static double WardFraction(int rank, double absorbR1, double absorbR2, double absorbR3, double gear = 0.0) =>
+            ScaledWardFraction(rank, absorbR1, absorbR2, absorbR3, 1.0, gear);
+
+        /// <summary>
+        /// <see cref="WardFraction"/> with the COOKING affinity applied: the rank's absorb fraction MULTIPLIED
+        /// by <paramref name="affinityMultiplier"/>, then the CLOTTING gear term added outside the multiply
+        /// (amount = rankFraction * multiplier + gear), so an item never compounds with the skill. A rank-1
+        /// ward of 0.60 at a 2.0 multiplier with 0.10 of gear is 0.60 * 2.0 + 0.10 = 1.30.
+        ///
+        /// THE AFFINITY RIDES THE ABSORB ONLY. <see cref="SelfCostFraction"/> takes neither gear nor affinity.
+        ///
+        /// The multiplier is floored at 1.0, the NEUTRAL factor. A separately named method rather than an
+        /// overload, because tests reflect on <see cref="WardFraction"/> by name.
+        /// </summary>
+        public static double ScaledWardFraction(int rank, double absorbR1, double absorbR2, double absorbR3, double affinityMultiplier, double gear = 0.0)
         {
             if (rank <= 0)
                 return 0.0;
 
-            var fraction = (rank switch
+            var rankFraction = rank switch
             {
                 1 => absorbR1,
                 2 => absorbR2,
                 _ => absorbR3,
-            }) + gear;
+            };
 
-            return Math.Max(0.0, fraction);
+            return Math.Max(0.0, rankFraction * Math.Max(1.0, affinityMultiplier) + gear);
         }
 
         /// <summary>

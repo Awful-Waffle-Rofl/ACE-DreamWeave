@@ -97,7 +97,7 @@ namespace ACE.Server.WeaponMods
     /// same terms as every prior retirement in this file: the ids are RETIRED_DO_NOT_REUSE in
     /// Source/property-registry.tsv, weapons on dev shards may still carry stale records at them, and
     /// ClearSpecials can no longer reverse those records. In their place, nine new Tier B utility rows -
-    /// Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender and Panic
+    /// Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender (renamed Defensive Weapon 2026-10-25) and Panic
     /// Reload, PropertyFloat 8027-8035 (<see cref="TierBV4BandStart"/>-<see cref="TierBV4BandEnd"/>) - were
     /// registered.
     ///
@@ -112,7 +112,8 @@ namespace ACE.Server.WeaponMods
     /// Player.ApplyWeaponModOutgoingDamage and Player.ApplyWeaponModSpellHit through the shared
     /// TryWeaponModSiphon helper; Quick Refresh composes Player.GetWeaponModCastSpeedMod
     /// (Player_WeaponMods_Casting.cs) into Player_Magic's castSpeedMultiplier at both cast entry points; Arcane
-    /// Defender adds a no-shield branch to Creature.GetShieldMod; and Panic Reload composes
+    /// Defender (renamed Defensive Weapon and widened to every class 2026-10-25) adds a no-shield branch to
+    /// Creature.GetShieldMod and, since 2026-10-25, adds to an equipped shield and to Thorns; and Panic Reload composes
     /// Player.GetWeaponModPanicReloadMod into GetWeaponModAttackSpeedMod(includeConditional: true), which only
     /// Creature_Combat.GetAnimSpeed calls.
     ///
@@ -202,7 +203,7 @@ namespace ACE.Server.WeaponMods
 
         /// <summary>
         /// Inclusive lower bound of the v4 TIER B CATALOG EXPANSION band (2026-08-17) - Efficiency, Recovery,
-        /// Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender and Panic Reload. A THIRD,
+        /// Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Defensive Weapon and Panic Reload. A THIRD,
         /// disjoint band, immediately after the v3 expansion band above (8021-8026), taking the next free ids
         /// 8027-8035. All nine rows are hooked (2026-08-17 follow-up commits d66bfa995/0fa5fdb8e/ba0218211) -
         /// see the class remarks above and each row's own comment for its hook site. A Tier B record is valid
@@ -680,7 +681,8 @@ namespace ACE.Server.WeaponMods
                 Record = PropertyFloat.WeaponModLongevity,
                 // HOOK: EnchantmentManager.Add's refresh path AND BuildEntry, both immediately after the
                 // pre-existing AugmentationIncreasedSpellDuration term - both sites are required, or Longevity
-                // would be dead on either a fresh cast or a re-cast. Self-cast only.
+                // would be dead on either a fresh cast or a re-cast. Self-cast only: the caster, or an item the caster
+                // is currently wearing/wielding (a bane cast on their own worn armor) - see IsLongevitySelfTarget.
                 MaxRoll = 0.25,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = false,
@@ -724,21 +726,36 @@ namespace ACE.Server.WeaponMods
             },
             new WeaponModDefinition
             {
-                Id = WeaponModId.ArcaneDefender,
+                Id = WeaponModId.DefensiveWeapon,
                 Tier = WeaponModTier.B,
-                DisplayName = "Arcane Defender",
-                Record = PropertyFloat.WeaponModArcaneDefender,
-                // HOOK: Creature_Combat.GetShieldMod, a new no-shield branch treating the wand as a virtual
-                // shield of MaxRoll armor level (CalcArmorMod(25) = 0.7273), skipping the Shield-skill cap that
-                // would otherwise zero it for a caster. Frontal (180 degree cone) physical only, via
-                // WeaponModCombat.ArcaneShieldMod. Does NOT enable Shield Block or Thorns - both gate directly
-                // on GetEquippedShield() != null and never read GetShieldMod.
+                // RENAMED from "Arcane Defender" and widened from caster-only to EVERY weapon class on
+                // 2026-10-25 (owner ruling). The enum member was renamed with it, because the market filter
+                // token derives from the member name; WeaponModId 32 and PropertyFloat 8034 did NOT move, so
+                // every item already carrying the record keeps it.
+                DisplayName = "Defensive Weapon",
+                Record = PropertyFloat.WeaponModDefensiveWeapon,
+                // HOOKS, all through Player.GetDefensiveWeaponShieldLevel (one carrier, stance-bound):
+                //  - Creature_Combat.GetShieldMod, NO shield: a virtual shield of this armor level on the
+                //    uncapped path, summed with the ward shield, via WeaponModCombat.ArcaneShieldMod.
+                //  - Creature_Combat.GetShieldMod, a real SHIELD: added after the Shield-skill cap and before the
+                //    ignore-shield term, summed with the ward (DefensiveWeaponMath.AfterShieldCap).
+                //  - Player.ApplyThornsReflect: added to the shield armor level Thorns reflects from. Thorns
+                //    still requires an equipped shield, so with no shield this enables neither Thorns nor
+                //    Shield Block.
+                // Frontal (180 degree cone) physical only, like a shield.
+                //
                 // MaxRoll corrected from 50 to 40, then revised again to 25 (repo-owner correction, 2026-08-17).
-                MaxRoll = 25,
+                // RAISED FROM 25 TO 200 on 2026-10-25 (owner ruling), with a PER-ITEM ceiling: a one-handed
+                // melee carrier reaches half, 100 (DefensiveWeaponMath.CeilingFactor); two-handed melee,
+                // missile and caster carriers reach the full 200. Still the 0..max roll model, no floor (an
+                // explicit owner choice). Retroactive, like every Tier B retune: existing wands move from 25 to
+                // up to 200.
+                MaxRoll = 200,
+                CeilingFactor = DefensiveWeaponMath.CeilingFactor,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = false,
-                Classes = WeaponClass.Caster,
-                DisplayFormat = "deflects frontal blows as a {0:0} armor level shield",
+                Classes = WeaponClass.All,
+                DisplayFormat = "+{0:0} shield armor level against frontal blows",
             },
             new WeaponModDefinition
             {
@@ -751,7 +768,8 @@ namespace ACE.Server.WeaponMods
                 // passes true, so the /classabilities readout (which uses the parameterless overload) stays
                 // unconditional and does not change with position. Fires while a hostile is within 6 m cylinder
                 // distance (WeaponModCombat.IsPanicReloadThreat / PanicReloadRangeSq).
-                MaxRoll = 0.10,
+                // RAISED FROM 0.10 TO 0.50 on 2026-10-25 (owner ruling: up to +50%, the 0..max roll model).
+                MaxRoll = 0.50,
                 NativeDefault = 0,
                 AffectsSingleTargetDamage = true,
                 Classes = WeaponClass.Missile,
@@ -847,7 +865,7 @@ namespace ACE.Server.WeaponMods
         /// rather than left to inspection:
         ///
         ///   gate OFF (the default) - melee 4, missile 4, caster 3
-        ///   gate ON                - melee 16, missile 17, caster 16
+        ///   gate ON                - melee 17, missile 18, caster 16
         ///
         /// UNCHANGED AT THE GATE-OFF DEPTHS BY EVERY TIER B EXPANSION SO FAR (v3 2026-08-06, v4 2026-08-17):
         /// every row each expansion adds is Tier B (see TierBExpansionBandStart, TierBV4BandStart), so none

@@ -48,6 +48,9 @@ namespace ACE.Server.ThreadDungeons
     /// dynamic_dungeons_min_eligible_families as the extra term, and the fit filter's switch and headroom
     /// margin are folded into the caller's fit key. An admin who edits one of those gets a cache MISS on the
     /// new value and a HIT again on the old one, which is both correct and cheaper than flushing.
+    /// Any OBJECT passed into a memoised measure (a roster classifier, a delegate's configuration) contributes its
+    /// own inputs to the key too: a key that names only the measure's direct arguments serves one roster's answer to
+    /// another roster built from different tunables (code review 2026-10-23, the archetype standards' roster floor).
     ///
     /// WHAT STILL NEEDS AN EXPLICIT INVALIDATE: the live WEENIE data behind levelOf/healthOf/profileOf and the
     /// fit predicate. That comes from DatabaseManager.World's weenie cache, which an admin can clear or
@@ -127,7 +130,31 @@ namespace ACE.Server.ThreadDungeons
             public readonly BoundedMap<BandKey, int> FamilyCounts = new BoundedMap<BandKey, int>(MaxBandEntries);
             public readonly BoundedMap<BandKey, uint> BandMedians = new BoundedMap<BandKey, uint>(MaxBandEntries);
             public readonly BoundedMap<BandKey, DungeonBandStandard> BandStandards = new BoundedMap<BandKey, DungeonBandStandard>(MaxBandEntries);
+
+            // The archetype uplift (dynamic_dungeons_archetype_uplift). Read only by a plan with an uplifted entry and the
+            // switch on, so a run that tags nothing never touches these maps.
+            public readonly BoundedMap<uint, DungeonStatProfile> ArchetypeProfiles = new BoundedMap<uint, DungeonStatProfile>(MaxProfileEntries);
+            public readonly BoundedMap<BandKey, RosterArchetypes> Rosters = new BoundedMap<BandKey, RosterArchetypes>(MaxRosterEntries);
+            public readonly BoundedMap<BandKey, DungeonArchetypeStandards> ArchetypeStandards = new BoundedMap<BandKey, DungeonArchetypeStandards>(MaxBandEntries);
+
+            // The damage ceiling (dynamic_dungeons_damage_ceiling). Read only by a plan built with the switch on and a
+            // per-hit delegate, so a run without either never touches these maps. The per-wcid read, and the whole baseline
+            // (code review 2026-10-26, F5 option b) keyed on the tables, the level and the FULL limits value (BaselineKey),
+            // so it can never be served under a key that misses one of the dials it reads.
+            // Code review 2026-10-26 F2: these two CLEAR and start over at their cap (logged once) instead of silently
+            // ceasing to cache, so a long-lived server that fills one keeps paying the miss cost once per entry, not forever.
+            public readonly BoundedMap<uint, CreaturePerHit> PerHits = new BoundedMap<uint, CreaturePerHit>(MaxProfileEntries, "PerHits");
+            public readonly BoundedMap<BaselineKey, DamageCeilingBaseline> DamageCeilingBaselines = new BoundedMap<BaselineKey, DamageCeilingBaseline>(MaxBandEntries, "DamageCeilingBaselines");
         }
+
+        /// <summary>
+        /// Cap on the roster-classifier map: one entry per (species tables, roster band, band low floor), so the live
+        /// universe is one per distinct dial setting. Each entry memoises up to one classification per roster wcid and
+        /// one cross-archetype standard per authored level, roughly 1 MB at the shipped roster.
+        /// </summary>
+        public const int MaxRosterEntries = 16;
+
+        private static readonly log4net.ILog log = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         private static State state = new State();
 
@@ -141,11 +168,21 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         private static bool lastEnabled = DefaultPlanCacheEnabled;
 
+        /// <summary>The last archetype key <see cref="ForRun"/> saw (the spell strip's dials). World thread only.</summary>
+        private static string lastArchetypeKey;
+
         /// <summary>
         /// Drops every memoised value. Called from the content-reload and weenie-cache-clear paths; safe from
         /// any thread and safe to call while a plan is being built.
         /// </summary>
-        public static void Invalidate() => Volatile.Write(ref state, new State());
+        public static void Invalidate()
+        {
+            Volatile.Write(ref state, new State());
+
+            // The archetype uplift's live resolver memoises spell and wielded-treasure reductions read off the same world
+            // cache, so it is dropped with everything else.
+            ArchetypeFactsResolver.ResetLive();
+        }
 
         /// <summary>
         /// The memo for ONE plan build, or NULL when the cache is switched off - which the builder reads as
@@ -162,17 +199,29 @@ namespace ACE.Server.ThreadDungeons
         /// is computed and not stored; a delegate alone cannot be a cache key.
         /// </summary>
         public static ThreadPlanMemo ForRun(bool enabled, string fitKey, Func<uint, int> levelOf, Func<uint, uint> healthOf,
-            Func<uint, DungeonStatProfile> profileOf)
+            Func<uint, DungeonStatProfile> profileOf, Func<uint, DungeonStatProfile> archetypeProfileOf = null, string archetypeKey = null,
+            Func<uint, CreaturePerHit> perHitOf = null)
         {
             if (enabled && !lastEnabled)
                 Invalidate();
+
+            // The archetype maps hold classifications read off the post-strip spell book, so a changed strip setting
+            // (archetypeKey, SpellStripConfig.Key) must not be served the old ones. A dial change is rare; the whole
+            // generation is dropped rather than tracking which map depends on it.
+            if (enabled && archetypeKey != null)
+            {
+                if (lastArchetypeKey != null && lastArchetypeKey != archetypeKey)
+                    Invalidate();
+
+                lastArchetypeKey = archetypeKey;
+            }
 
             lastEnabled = enabled;
 
             if (!enabled)
                 return null;
 
-            return new ThreadPlanMemo(Volatile.Read(ref state), fitKey, levelOf, healthOf, profileOf);
+            return new ThreadPlanMemo(Volatile.Read(ref state), fitKey, levelOf, healthOf, profileOf, archetypeProfileOf, perHitOf);
         }
 
         /// <summary>How many entries each map currently holds. Diagnostics and tests only.</summary>
@@ -183,7 +232,8 @@ namespace ACE.Server.ThreadDungeons
                 var s = Volatile.Read(ref state);
 
                 return new ThreadPlanCacheCounts(s.Levels.Count, s.Healths.Count, s.Profiles.Count, s.Projections.Count,
-                    s.EligibilityBands.Count, s.FamilyCounts.Count, s.BandMedians.Count, s.BandStandards.Count);
+                    s.EligibilityBands.Count, s.FamilyCounts.Count, s.BandMedians.Count, s.BandStandards.Count,
+                    s.ArchetypeProfiles.Count, s.Rosters.Count, s.ArchetypeStandards.Count, s.PerHits.Count, s.DamageCeilingBaselines.Count);
             }
         }
 
@@ -200,9 +250,19 @@ namespace ACE.Server.ThreadDungeons
         {
             private readonly ConcurrentDictionary<TKey, TValue> map = new ConcurrentDictionary<TKey, TValue>();
             private readonly int max;
+            private readonly string clearWhenFull;
             private int count;
+            private int warned;
 
-            public BoundedMap(int max) => this.max = max;
+            /// <param name="clearWhenFull">
+            /// Null (every original map): stop storing at the cap, never evict. A name: at the cap, CLEAR the map and keep
+            /// storing, logging one Warn per map instance naming it.
+            /// </param>
+            public BoundedMap(int max, string clearWhenFull = null)
+            {
+                this.max = max;
+                this.clearWhenFull = clearWhenFull;
+            }
 
             public int Count => Volatile.Read(ref count);
 
@@ -210,11 +270,20 @@ namespace ACE.Server.ThreadDungeons
 
             public bool TryGet(TKey key, out TValue value) => map.TryGetValue(key, out value);
 
-            /// <summary>Stores <paramref name="value"/> unless the map is already at its cap. Never evicts.</summary>
+            /// <summary>Stores <paramref name="value"/> unless the map is already at its cap (or, for a clear-when-full map, clears it first).</summary>
             public void TryStore(TKey key, TValue value)
             {
                 if (Volatile.Read(ref count) >= max)
-                    return;
+                {
+                    if (clearWhenFull == null)
+                        return;
+
+                    map.Clear();
+                    Volatile.Write(ref count, 0);
+
+                    if (Interlocked.Exchange(ref warned, 1) == 0)
+                        log.Warn($"[DYNDUNGEON] plan cache: {clearWhenFull} reached its cap of {max} entries and was cleared; it refills from here");
+                }
 
                 if (map.TryAdd(key, value))
                     Interlocked.Increment(ref count);
@@ -258,8 +327,13 @@ namespace ACE.Server.ThreadDungeons
             private readonly double lowFloor;
             private readonly int extra;
             private readonly double levelScale;
+            private readonly double rosterFloor;
 
-            public BandKey(object tables, int level, DungeonRosterBand band, double lowFloor, int extra, double levelScale = 1.0)
+            /// <param name="rosterFloor">
+            /// The band floor the measure's ROSTER classifier was built with, for a memo whose result depends on a roster
+            /// (the archetype standards); 0 for every key that takes no roster.
+            /// </param>
+            public BandKey(object tables, int level, DungeonRosterBand band, double lowFloor, int extra, double levelScale = 1.0, double rosterFloor = 0.0)
             {
                 this.tables = tables;
                 this.level = level;
@@ -268,17 +342,55 @@ namespace ACE.Server.ThreadDungeons
                 this.lowFloor = lowFloor;
                 this.extra = extra;
                 this.levelScale = levelScale;
+                this.rosterFloor = rosterFloor;
             }
 
             public bool Equals(BandKey other)
                 => ReferenceEquals(tables, other.tables) && level == other.level && bandLow.Equals(other.bandLow)
                    && bandHigh.Equals(other.bandHigh) && lowFloor.Equals(other.lowFloor) && extra == other.extra
-                   && levelScale.Equals(other.levelScale);
+                   && levelScale.Equals(other.levelScale) && rosterFloor.Equals(other.rosterFloor);
 
             public override bool Equals(object obj) => obj is BandKey other && Equals(other);
 
             public override int GetHashCode()
-                => HashCode.Combine(RuntimeHelpers.GetHashCode(tables), level, bandLow, bandHigh, lowFloor, extra, levelScale);
+                => HashCode.Combine(RuntimeHelpers.GetHashCode(tables), level, bandLow, bandHigh, lowFloor, extra, levelScale, rosterFloor);
+        }
+
+        /// <summary>
+        /// The key for the damage ceiling's baseline memo: the species tables by reference (same reasoning as
+        /// <see cref="BandKey"/>), the gem level, the WHOLE <see cref="DungeonPopulationLimits"/> value with its per-run group
+        /// snapshot dropped (DungeonPopulationLimits.WithoutGroup; the baseline never reads the group), the solo plan's
+        /// additive DamageRating (the archetype prediction's DamageRating offset reads it), and whether a band-standard and
+        /// an archetype profile delegate were supplied. The limits compare by the struct's own field-by-field value equality,
+        /// so a dial added to it later is in the key without anyone listing it here; one lookup per plan build is cheap.
+        /// </summary>
+        internal readonly struct BaselineKey : IEquatable<BaselineKey>
+        {
+            private readonly object tables;
+            private readonly int level;
+            private readonly DungeonPopulationLimits limits;
+            private readonly int gemDamageRating;
+            private readonly bool hasProfiles;
+            private readonly bool hasArchetypeProfiles;
+
+            public BaselineKey(object tables, int level, DungeonPopulationLimits limits, int gemDamageRating, bool hasProfiles, bool hasArchetypeProfiles)
+            {
+                this.tables = tables;
+                this.level = level;
+                this.limits = limits.WithoutGroup();
+                this.gemDamageRating = gemDamageRating;
+                this.hasProfiles = hasProfiles;
+                this.hasArchetypeProfiles = hasArchetypeProfiles;
+            }
+
+            public bool Equals(BaselineKey other)
+                => ReferenceEquals(tables, other.tables) && level == other.level && gemDamageRating == other.gemDamageRating
+                   && hasProfiles == other.hasProfiles && hasArchetypeProfiles == other.hasArchetypeProfiles && limits.Equals(other.limits);
+
+            public override bool Equals(object obj) => obj is BaselineKey other && Equals(other);
+
+            public override int GetHashCode()
+                => HashCode.Combine(RuntimeHelpers.GetHashCode(tables), level, gemDamageRating, hasProfiles, hasArchetypeProfiles);
         }
 
         /// <summary>
@@ -310,8 +422,14 @@ namespace ACE.Server.ThreadDungeons
     public readonly struct ThreadPlanCacheCounts
     {
         public ThreadPlanCacheCounts(int levels, int healths, int profiles, int projections, int eligibilityBands,
-            int familyCounts, int bandMedians, int bandStandards)
+            int familyCounts, int bandMedians, int bandStandards, int archetypeProfiles = 0, int rosters = 0, int archetypeStandards = 0,
+            int perHits = 0, int damageCeilingBaselines = 0)
         {
+            PerHits = perHits;
+            DamageCeilingBaselines = damageCeilingBaselines;
+            ArchetypeProfiles = archetypeProfiles;
+            Rosters = rosters;
+            ArchetypeStandards = archetypeStandards;
             Levels = levels;
             Healths = healths;
             Profiles = profiles;
@@ -331,9 +449,20 @@ namespace ACE.Server.ThreadDungeons
         public int BandMedians { get; }
         public int BandStandards { get; }
 
+        /// <summary>The archetype uplift's three maps (profiles with facts, roster classifiers, per-archetype standards).</summary>
+        public int ArchetypeProfiles { get; }
+        public int Rosters { get; }
+        public int ArchetypeStandards { get; }
+
+        /// <summary>The damage ceiling's two maps (per-wcid per-hit reads, whole baselines).</summary>
+        public int PerHits { get; }
+        public int DamageCeilingBaselines { get; }
+
         public override string ToString()
             => $"levels={Levels} healths={Healths} profiles={Profiles} projections={Projections} " +
-               $"eligibilityBands={EligibilityBands} familyCounts={FamilyCounts} bandMedians={BandMedians} bandStandards={BandStandards}";
+               $"eligibilityBands={EligibilityBands} familyCounts={FamilyCounts} bandMedians={BandMedians} bandStandards={BandStandards} " +
+               $"archetypeProfiles={ArchetypeProfiles} rosters={Rosters} archetypeStandards={ArchetypeStandards} " +
+               $"perHits={PerHits} damageCeilingBaselines={DamageCeilingBaselines}";
     }
 
     /// <summary>
@@ -357,18 +486,144 @@ namespace ACE.Server.ThreadDungeons
         private readonly Func<uint, int> innerLevelOf;
         private readonly Func<uint, uint> innerHealthOf;
         private readonly Func<uint, DungeonStatProfile> innerProfileOf;
+        private readonly Func<uint, DungeonStatProfile> innerArchetypeProfileOf;
+        private readonly Func<uint, CreaturePerHit> innerPerHitOf;
 
         private int lookups;
         private int hits;
 
         internal ThreadPlanMemo(ThreadPlanCache.State state, string fitKey, Func<uint, int> levelOf, Func<uint, uint> healthOf,
-            Func<uint, DungeonStatProfile> profileOf)
+            Func<uint, DungeonStatProfile> profileOf, Func<uint, DungeonStatProfile> archetypeProfileOf = null,
+            Func<uint, CreaturePerHit> perHitOf = null)
         {
             this.state = state;
             this.fitKey = fitKey;
             innerLevelOf = levelOf;
             innerHealthOf = healthOf;
             innerProfileOf = profileOf;
+            innerArchetypeProfileOf = archetypeProfileOf;
+            innerPerHitOf = perHitOf;
+        }
+
+        /// <summary>
+        /// A memo over a PRIVATE, fresh cache generation, unconnected to <see cref="ThreadPlanCache"/>'s shared one and to its
+        /// kill switch: for a caller with the plan cache off that still needs a memo-shaped helper for one computation (the
+        /// damage ceiling's archetype context), and whose result must equal the cache-on one. Thrown away with the caller.
+        /// </summary>
+        internal static ThreadPlanMemo Scratch(Func<uint, int> levelOf, Func<uint, DungeonStatProfile> profileOf,
+            Func<uint, DungeonStatProfile> archetypeProfileOf, Func<uint, CreaturePerHit> perHitOf)
+            => new ThreadPlanMemo(new ThreadPlanCache.State(), null, levelOf, null, profileOf, archetypeProfileOf, perHitOf);
+
+        /// <summary>True when this memo was handed a per-hit delegate (<see cref="PerHitOf"/> is then usable).</summary>
+        public bool HasPerHits => innerPerHitOf != null;
+
+        /// <summary>The damage ceiling's per-wcid read (<see cref="CreaturePerHit"/>), memoised in its own map.</summary>
+        public CreaturePerHit PerHitOf(uint wcid)
+        {
+            if (state.PerHits.TryGet(wcid, out var cached))
+                return cached;
+
+            var value = innerPerHitOf?.Invoke(wcid) ?? CreaturePerHit.Empty;
+            state.PerHits.TryStore(wcid, value);
+
+            return value;
+        }
+
+        /// <summary>True when this memo was handed an archetype profile delegate (<see cref="ArchetypeProfileOf"/> is then usable).</summary>
+        public bool HasArchetypeProfiles => innerArchetypeProfileOf != null;
+
+        /// <summary>
+        /// The archetype uplift's profile (DungeonStatProfile with ArchetypeFacts), memoised per wcid in its OWN map: the
+        /// plain profile map must keep holding fact-free profiles, or a plan with no uplift would start paying for facts.
+        /// </summary>
+        public DungeonStatProfile ArchetypeProfileOf(uint wcid)
+        {
+            if (state.ArchetypeProfiles.TryGet(wcid, out var cached))
+                return cached;
+
+            var value = innerArchetypeProfileOf?.Invoke(wcid) ?? DungeonStatProfile.Empty;
+            state.ArchetypeProfiles.TryStore(wcid, value);
+
+            return value;
+        }
+
+        /// <summary>
+        /// The roster classifier for (tables, band, floor), memoised. Its key carries every input the classification
+        /// reads: the tables by reference, both roster band edges and the band low floor (the cross-archetype standard the
+        /// melee split divides by is measured with them). The classifier thresholds are compile-time constants, and the
+        /// profile delegate is this memo's own (weenie data, invalidated with the whole cache). Level and scale are fixed
+        /// at 0 and 1: a classification is unprojected by definition.
+        /// </summary>
+        public RosterArchetypes Roster(IReadOnlyDictionary<string, SpeciesTableDef> tables, DungeonRosterBand band, double lowFloorRatio,
+            Func<uint, DungeonStatProfile> profileOf)
+        {
+            var key = new ThreadPlanCache.BandKey(tables, 0, band, lowFloorRatio, 0, 1.0);
+            lookups++;
+
+            if (state.Rosters.TryGet(key, out var cached))
+            {
+                hits++;
+                return cached;
+            }
+
+            var value = new RosterArchetypes(tables, band, lowFloorRatio, profileOf);
+            state.Rosters.TryStore(key, value);
+
+            return value;
+        }
+
+        /// <summary>
+        /// <see cref="DungeonArchetypeStandards.Measure"/>, memoised. THE TUNABLES ARE IN THE KEY: the tables reference,
+        /// the level, both roster band edges, the SAMPLE's band low floor (each archetype's sample widens down to it; the
+        /// natural-only run-level measurement passes 1.0 here), the reach-up scale of the sample's profiles, and the
+        /// ROSTER's band floor <paramref name="rosterFloor"/>. The roster partitions the sample, and it classifies each
+        /// member against the cross-archetype standard measured with ITS floor (RosterArchetypes.StandardAt), so the
+        /// sample floor and the roster floor are separate inputs and can differ: a run-level measurement at sample floor
+        /// 1.0 still depends on the configured band_low_floor through its roster. The run's offense and defense ratios,
+        /// the stat curve's softening and the health curve are applied AFTER this measurement (ArchetypeUpliftContext),
+        /// so they are deliberately not part of what is cached. The roster must be the one <see cref="Roster"/> returns
+        /// for the same tables and band at <paramref name="rosterFloor"/>.
+        /// </summary>
+        public DungeonArchetypeStandards ArchetypeStandards(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level,
+            Func<uint, DungeonStatProfile> profileOf, RosterArchetypes roster, DungeonRosterBand natural, double lowFloorRatio, double levelScale,
+            double rosterFloor)
+        {
+            var key = new ThreadPlanCache.BandKey(tables, level, natural, lowFloorRatio, 0, levelScale, rosterFloor);
+            lookups++;
+
+            if (state.ArchetypeStandards.TryGet(key, out var cached))
+            {
+                hits++;
+                return cached;
+            }
+
+            var value = DungeonArchetypeStandards.Measure(tables, level, profileOf, roster, natural, lowFloorRatio);
+            state.ArchetypeStandards.TryStore(key, value);
+
+            return value;
+        }
+
+        /// <summary>
+        /// The damage ceiling's whole baseline (DungeonPopulationBuilder.DamageCeilingBaselineFor), memoised on
+        /// <see cref="ThreadPlanCache.BaselineKey"/>. <paramref name="compute"/> runs on a miss and must be the pure
+        /// function of exactly the key's inputs (plus this memo's own weenie delegates).
+        /// </summary>
+        public DamageCeilingBaseline DamageCeilingBaseline(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level, DungeonPopulationLimits limits,
+            int gemDamageRating, bool hasProfiles, bool hasArchetypeProfiles, Func<DamageCeilingBaseline> compute)
+        {
+            var key = new ThreadPlanCache.BaselineKey(tables, level, limits, gemDamageRating, hasProfiles, hasArchetypeProfiles);
+            lookups++;
+
+            if (state.DamageCeilingBaselines.TryGet(key, out var cached))
+            {
+                hits++;
+                return cached;
+            }
+
+            var value = compute();
+            state.DamageCeilingBaselines.TryStore(key, value);
+
+            return value;
         }
 
         /// <summary>Structural memo lookups this build made.</summary>

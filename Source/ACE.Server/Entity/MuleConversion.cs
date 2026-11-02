@@ -23,6 +23,8 @@ namespace ACE.Server.Entity
         /// repeat pack grants). Eligibility is re-checked HERE rather than trusted from the NPC dialogue:
         /// reaching the emote proves only that the player clicked through the confirmations (or already carries
         /// IsMule), and state can change (or the NPC can be reached by another route) in between.
+        /// Both paths also hand over an Aetheria Mana Stone when the character does not already carry one -
+        /// a mule cannot quest for it, and revealing aetheria is routine mule work.
         /// </summary>
         public static void HandleMuleRequest(Player player)
         {
@@ -32,6 +34,7 @@ namespace ACE.Server.Entity
             if (player.IsMule)
             {
                 GrantMulePack(player);
+                GrantAetheriaManaStoneIfMissing(player);
                 return;
             }
 
@@ -50,6 +53,37 @@ namespace ACE.Server.Entity
             player.SendMessage("You are now a mule. You can carry, trade and store, but you will never again earn experience, fight, or advance. This cannot be undone.", ChatMessageType.Broadcast);
 
             GrantMulePack(player);
+            GrantAetheriaManaStoneIfMissing(player);
+        }
+
+        /// <summary>
+        /// Hands over one Aetheria Mana Stone (retail wcid 42645) unless the character already carries one
+        /// anywhere in its inventory, side packs included. Using the stone on aetheria does not consume it
+        /// (Aetheria.ActivateSigil never touches the source), so one is all a mule ever needs. Same
+        /// create / try-add / destroy-on-failure pattern as GrantMulePack.
+        /// </summary>
+        private static void GrantAetheriaManaStoneIfMissing(Player player)
+        {
+            if (player.GetInventoryItemsOfWCID(Aetheria.AetheriaManaStone).Count > 0)
+                return;
+
+            var stone = WorldObjectFactory.CreateNewWorldObject(Aetheria.AetheriaManaStone);
+
+            if (stone == null)
+            {
+                log.Warn($"[MULE] {player.Name} (0x{player.Guid}) - failed to create Aetheria Mana Stone: weenie {Aetheria.AetheriaManaStone} couldn't be found.");
+                return;
+            }
+
+            if (!player.TryCreateInInventoryWithNetworking(stone))
+            {
+                stone.Destroy();
+                player.SendMessage("You have no room for an Aetheria Mana Stone. Come back when you can carry it.", ChatMessageType.Broadcast);
+                return;
+            }
+
+            log.Info($"[MULE] {player.Name} (0x{player.Guid}) granted an Aetheria Mana Stone (wcid {Aetheria.AetheriaManaStone}).");
+            player.SendMessage("You receive an Aetheria Mana Stone.", ChatMessageType.Broadcast);
         }
 
         /// <summary>

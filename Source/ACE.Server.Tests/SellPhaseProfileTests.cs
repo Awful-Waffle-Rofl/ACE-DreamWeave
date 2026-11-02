@@ -956,7 +956,8 @@ namespace ACE.Server.Tests
                     " sell_purchase_n=1 sell_purchase_ms=18.6" +
                     " sell_deposit_n=76 sell_deposit_ms=271.29" +
                     " sell_payout_n=0 sell_payout_ms=0" +
-                    " sell_panel_n=1 sell_panel_ms=23.77"),
+                    " sell_panel_n=1 sell_panel_ms=23.77" +
+                    " sell_combine_n=0 sell_combine_ms=0"),
                 line);
 
             TestContext.WriteLine(line);
@@ -990,7 +991,7 @@ namespace ACE.Server.Tests
                 sum += Field("sell_" + tag + "_ms");
 
             Assert.AreEqual(Field("sell_ms"), sum, 0.06,
-                "THE INVARIANT as an operator reads it: the ten sell_<phase>_ms plus sell_rest_ms are sell_ms");
+                "THE INVARIANT as an operator reads it: every sell_<phase>_ms plus sell_rest_ms is sell_ms");
 
             Assert.IsTrue(Field("sell_ms") <= Field("op1_ms"),
                 "sell_ms measures the handler; op1_ms additionally covers the payload parse and the dispatch around it");

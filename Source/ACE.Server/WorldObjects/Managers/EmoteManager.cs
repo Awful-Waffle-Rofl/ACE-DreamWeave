@@ -362,6 +362,20 @@ namespace ACE.Server.WorldObjects.Managers
 
                     break;
 
+                case EmoteType.PvpDailyStatus:
+
+                    // Non-retail: the giver's standing readout (Message = giver name). A failure here must cost one readout, not the chain.
+                    try
+                    {
+                        player?.SendPvpDailyStatus(emote.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[EMOTE] {WorldObject?.Name}.EmoteManager.ExecuteEmote(): PvpDailyStatus threw on 0x{WorldObject?.Guid}:{WorldObject?.WeenieClassId} for {emote.Message}", ex);
+                    }
+
+                    break;
+
                 case EmoteType.EraseMyQuest:
                 case EmoteType.EraseQuest:
 
@@ -1424,7 +1438,7 @@ namespace ACE.Server.WorldObjects.Managers
                                 var destination = new Position(emote.ObjCellId.Value, emote.OriginX.Value, emote.OriginY.Value, emote.OriginZ.Value, emote.AnglesX.Value, emote.AnglesY.Value, emote.AnglesZ.Value, emote.AnglesW.Value, 0);
 
                                 WorldObject.AdjustDungeon(destination);
-                                WorldManager.ThreadSafeTeleport(player, destination);
+                                WorldManager.ThreadSafeTeleport(player, destination, source: TeleportSource.Emote);
                             }
                             else // position is relative to WorldObject's current location
                             {
@@ -1434,7 +1448,7 @@ namespace ACE.Server.WorldObjects.Managers
                                 relativeDestination.LandblockId = new LandblockId(relativeDestination.GetCell());
 
                                 WorldObject.AdjustDungeon(relativeDestination);
-                                WorldManager.ThreadSafeTeleport(player, relativeDestination);
+                                WorldManager.ThreadSafeTeleport(player, relativeDestination, source: TeleportSource.Emote);
                             }
                         }
                     }
@@ -1442,7 +1456,8 @@ namespace ACE.Server.WorldObjects.Managers
 
                 case EmoteType.Tell:
 
-                    if (player != null)
+                    // a WoundedTaunt Tell can be delayed past the hit that fired it; never deliver it to a source that died since
+                    if (player != null && (emoteSet.Category != EmoteCategory.WoundedTaunt || IsTauntSourcePresent(player)))
                     {
                         message = Replace(emote.Message, WorldObject, player, emoteSet.Quest);
                         player.Session.Network.EnqueueSend(new GameEventTell(WorldObject, message, player, ChatMessageType.Tell));
@@ -1868,6 +1883,7 @@ namespace ACE.Server.WorldObjects.Managers
                 CharacterId = player.Guid.Full,
                 CharacterName = player.Name,
                 Address = session.EndPointC2S?.Address,
+                HouseholdKey = IpLimitManager.HouseholdKey(session),
                 IsExempt = () => IpLimitManager.IsExempt(session),
                 HasRoomForReward = rewardWcid =>
                 {
@@ -2064,7 +2080,7 @@ namespace ACE.Server.WorldObjects.Managers
         public static bool PlaysStyledIdle(MotionStance stance, WorldObject worldObject)
         {
             return stance == MotionStance.NonCombat
-                || (worldObject is Creature creature && creature.WorldEventStyledIdle);
+                || (worldObject is Creature creature && ACE.Server.WorldEvents.WorldEventHooks.IsStyledIdleNpc(creature));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2147,8 +2163,32 @@ namespace ACE.Server.WorldObjects.Managers
             ExecuteEmoteSet(EmoteCategory.Taunt, null, target);
         }
 
+        /// <summary>
+        /// Whether a wounded taunt may still be addressed to <paramref name="source"/>. A damage-over-time tick
+        /// keeps landing after its caster dies, logs out or is destroyed (the enchantment outlives the caster),
+        /// and each tick used to fire the creature's WoundedTaunt Tell at that source anyway, so a creature kept
+        /// /telling a dead player. A non-player source (a creature or a null one) is never filtered here.
+        /// </summary>
+        public static bool IsTauntSourcePresent(WorldObject source)
+        {
+            if (!(source is Player player))
+                return true;
+
+            return IsTauntSourcePresent(player.IsAlive, player.IsInDeathProcess, player.IsLoggingOut, player.IsDestroyed);
+        }
+
+        /// <summary>The pure rule: a player is a valid taunt target only if alive and not dying, logging out or destroyed.</summary>
+        public static bool IsTauntSourcePresent(bool isAlive, bool inDeath, bool loggingOut, bool destroyed)
+            => isAlive && !inDeath && !loggingOut && !destroyed;
+
         public void OnDamage(Creature attacker)
         {
+            // A dead or departed source must not be a taunt TARGET: the Tell/TellFellow actions of the set still
+            // run for a null target as no-ops, while milestone actions (Generate, StartEvent, ...) are unaffected.
+            // IsTauntSourcePresent is re-tested when each Tell fires, since a delayed Tell can outlive the source.
+            if (!IsTauntSourcePresent(attacker))
+                attacker = null;
+
             // in-band wounded taunt selection - see ShouldFireInBand: a milestone band fires only on the
             // hit that crosses into it, a plain "while wounded" taunt still fires every hit.
             ExecuteEmoteSet(EmoteCategory.WoundedTaunt, null, attacker);

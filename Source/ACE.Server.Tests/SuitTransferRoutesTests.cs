@@ -362,5 +362,101 @@ namespace ACE.Server.Tests
             var (_, json) = await Send(Get(token, "unknown"));
             Assert.AreEqual("transfer_not_found", json.GetProperty("error").GetString());
         }
+
+        // ---- shared mules: vault_key on the wire ----
+
+        [TestMethod]
+        public async Task Post_AMalformedVaultKey_IsInvalidTransfer_AndNothingIsRecorded()
+        {
+            var token = await LoginAsync();
+
+            foreach (var key in new[] { "\"\"", "\"s:\"", "\"s:0\"", "\"s:abc\"", "\"x:5\"", "\"s:-5\"", "\"s:99999999999\"" })
+            {
+                var body = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"vk\",\"items\":[{{\"wcid\":{RingWcid},\"count\":1,\"vault_key\":{key}}}]}}";
+
+                var (status, json) = await Send(Post(token, body));
+
+                Assert.AreEqual(HttpStatusCode.BadRequest, status, key);
+                Assert.AreEqual("invalid_transfer", json.GetProperty("error").GetString(), key);
+            }
+
+            Assert.AreEqual(0, world.WorldQueue.Count, "no malformed vault_key reached the service");
+        }
+
+        [TestMethod]
+        public async Task Status_EchoesEachLinesVaultKey_AndOmitsItForAnOwnLine()
+        {
+            var ring = SeedRing();
+            var token = await LoginAsync();
+
+            var body = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"vk-echo\",\"items\":[" +
+                       $"{{\"item_guid\":{ring.Guid.Full},\"wcid\":{RingWcid},\"count\":1}}," +
+                       $"{{\"wcid\":{RingWcid},\"count\":1,\"vault_key\":\"s:77\"}}]}}";
+
+            var (status, json) = await Send(Post(token, body));
+            Assert.AreEqual(HttpStatusCode.Accepted, status);
+
+            var (_, queued) = await Send(Get(token, json.GetProperty("transfer_id").GetString()));
+            var items = queued.GetProperty("items");
+
+            Assert.IsFalse(items[0].TryGetProperty("vault_key", out _), "an own-vault line carries no vault_key");
+            Assert.AreEqual("s:77", items[1].GetProperty("vault_key").GetString());
+        }
+
+        // ---- holder lines: holder_guid on the wire ----
+
+        private const uint AltGuid = 0x50000959;
+
+        [TestMethod]
+        public async Task Post_AHolderLine_Is202_AndTheStatusEchoesHolderGuid()
+        {
+            world.Roster[(AccountId, AltGuid)] = "Altmover";
+            var token = await LoginAsync();
+
+            var body = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"h-echo\",\"items\":[" +
+                       $"{{\"item_guid\":2134900001,\"wcid\":{RingWcid},\"count\":1,\"holder_guid\":{AltGuid}}}]}}";
+
+            var (status, json) = await Send(Post(token, body));
+            Assert.AreEqual(HttpStatusCode.Accepted, status, json.ValueKind == JsonValueKind.Object ? json.ToString() : "no body");
+
+            var (_, queued) = await Send(Get(token, json.GetProperty("transfer_id").GetString()));
+            var item = queued.GetProperty("items")[0];
+
+            Assert.AreEqual(AltGuid, item.GetProperty("holder_guid").GetUInt32());
+            Assert.IsFalse(item.TryGetProperty("vault_key", out _));
+        }
+
+        [TestMethod]
+        public async Task Post_AMalformedOrForeignHolderGuid_IsRefused_AndNothingIsRecorded()
+        {
+            world.Roster[(AccountId, AltGuid)] = "Altmover";
+            var token = await LoginAsync();
+
+            foreach (var holder in new[] { "0", "-5", "99999999999", "\"x\"" })
+            {
+                var body = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"hb\",\"items\":[{{\"item_guid\":2134900002,\"wcid\":{RingWcid},\"count\":1,\"holder_guid\":{holder}}}]}}";
+                var (status, json) = await Send(Post(token, body));
+
+                Assert.AreEqual(HttpStatusCode.BadRequest, status, holder);
+                Assert.AreEqual("invalid_transfer", json.GetProperty("error").GetString(), holder);
+            }
+
+            var foreign = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"hf\",\"items\":[{{\"item_guid\":2134900003,\"wcid\":{RingWcid},\"count\":1,\"holder_guid\":{OtherCharacterGuid}}}]}}";
+            var (foreignStatus, foreignJson) = await Send(Post(token, foreign));
+            Assert.AreEqual("not_owner", foreignJson.GetProperty("error").GetString());
+            Assert.AreEqual(HttpStatusCode.Forbidden, foreignStatus);
+
+            var both = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"hv\",\"items\":[{{\"item_guid\":2134900004,\"wcid\":{RingWcid},\"count\":1,\"holder_guid\":{AltGuid},\"vault_key\":\"s:77\"}}]}}";
+            var (bothStatus, _) = await Send(Post(token, both));
+            Assert.AreEqual(HttpStatusCode.BadRequest, bothStatus, "holder_guid and vault_key together");
+
+            world.CharacterMoves = false;
+            var off = $"{{\"character_guid\":{CharacterGuid},\"idempotency_key\":\"ho\",\"items\":[{{\"item_guid\":2134900005,\"wcid\":{RingWcid},\"count\":1,\"holder_guid\":{AltGuid}}}]}}";
+            var (offStatus, offJson) = await Send(Post(token, off));
+            Assert.AreEqual(HttpStatusCode.BadRequest, offStatus, "the kill switch refuses holder lines");
+            Assert.AreEqual("invalid_transfer", offJson.GetProperty("error").GetString());
+
+            Assert.AreEqual(0, world.WorldQueue.Count, "no refused holder line reached the world");
+        }
     }
 }

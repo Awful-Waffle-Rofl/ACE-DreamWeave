@@ -167,9 +167,10 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Starts a run toward the owner. Returns FALSE, issuing nothing, while the pet is not ready to move.
         /// The broadcast and the server-side MoveTo use the same parameters as a passive pet's follow
-        /// (Pet.MoveTo / Pet.StartFollow): always run, stop at FollowArriveDistance, no Sticky.
+        /// (Pet.MoveTo / Pet.StartFollow): always run, stop at FollowArriveDistance, no Sticky. Takes any
+        /// WorldObject so a caster pet can run the same MoveTo at a sibling pet it means to heal (TickMoveToAlly).
         /// </summary>
-        private bool IssueFollowMove(Player owner)
+        private bool IssueFollowMove(WorldObject owner)
         {
             // the same gate StartTurn uses: not before NextMoveTime (an attack's recovery), not mid-animation
             if (!MoveReady())
@@ -185,6 +186,11 @@ namespace ACE.Server.WorldObjects
             motion.MoveToParameters.DistanceToObject = PetFollowRules.FollowArriveDistance;
             motion.MoveToParameters.WalkRunThreshold = 0.0f;
 
+            // the pet speed floor (CombatPet_SpeedFloor.cs): the WIRE half. The server half is mvp.Speed below, and
+            // the two must carry the same number or client and server disagree about where the pet is.
+            var speed = MovementSpeedFactor;
+            motion.MoveToParameters.Speed = speed;
+
             motion.RunRate = RunRate;
 
             CurrentMotionState = motion;
@@ -195,6 +201,7 @@ namespace ACE.Server.WorldObjects
             var mvp = new MovementParameters();
             mvp.DistanceToObject = PetFollowRules.FollowArriveDistance;
             mvp.WalkRunThreshold = 0.0f;
+            mvp.Speed = speed;
 
             PhysicsObj.MoveToObject(owner.PhysicsObj, mvp);
 

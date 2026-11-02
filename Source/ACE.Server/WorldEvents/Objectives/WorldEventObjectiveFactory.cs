@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using log4net;
+
 using ACE.Server.WorldEvents.Defs;
+using ACE.Server.WorldEvents.Hold;
 
 namespace ACE.Server.WorldEvents.Objectives
 {
@@ -71,10 +74,31 @@ namespace ACE.Server.WorldEvents.Objectives
 
                 case GoalType.Hold:
 
-                    // C6: Hold is deferred to P2. The enum value exists so a later WP can add the
-                    // implementation without a rename, but the factory must refuse it in the meantime.
-                    error = "goal type Hold is deferred to P2 (C6)";
-                    return null;
+                    // World Events Hold: the owner's master switch world_events_hold_enabled ships OFF (the composer
+                    // refuses a pinned Hold goal while it is off, too). Off - or unreadable - refuses the
+                    // start and names the property, so an admin sees exactly what to turn on.
+                    if (!HoldEnabled(goal))
+                    {
+                        error = $"goal type Hold is off ({HoldEnabledProperty} is false)";
+                        return null;
+                    }
+
+                    if (goal.Protect == null)
+                    {
+                        error = $"goal '{goal.Id}' is a Hold goal with no protect block";
+                        return null;
+                    }
+
+                    var hold = new HoldObjective(goal, new WorldEventHoldRun(evt.RunId), () => evt.ActiveAt, evt.Participation,
+                        () => evt.Audience.Count, () => evt.Composition?.FamilyDisplayName);
+
+                    // H5: the start-spot rule's portal plan (WorldEventHoldStartSpotRule), null when it made none.
+                    hold.SetAreaPlan(evt.Composition?.AreaPlan);
+
+                    // H6: the production run - the knights, the wave cadence, the run ticks and the run-shaping hooks.
+                    hold.AttachEvent(evt);
+
+                    return hold;
 
                 default:
 
@@ -82,6 +106,46 @@ namespace ACE.Server.WorldEvents.Objectives
                     return null;
             }
         }
+
+        /// <summary>The master switch a Hold goal needs (world_events_hold_enabled).</summary>
+        public const string HoldEnabledProperty = HoldKeys.PropertyPrefix + HoldKeys.Enabled;
+
+        /// <summary>world_events_hold_enabled through the Hold settings resolver; false when it cannot be read.</summary>
+        private static bool HoldEnabled(GoalDef goal)
+        {
+            try
+            {
+                return WorldEventHoldSettingsResolver.Flag(goal, HoldKeys.Enabled);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"[WORLDEVENT] could not read {HoldEnabledProperty} for goal '{goal?.Id}'; treating Hold as off", ex);
+                return false;
+            }
+        }
+
+        private static readonly ILog log = LogManager.GetLogger(typeof(WorldEventObjectiveFactory));
+
+        /// <summary>
+        /// The start-spot rule for <paramref name="goal"/>: where a run of it may really start. WorldEventManager.TryStart
+        /// applies it after composing and before building the candidate run. A Hold goal gets WorldEventHoldStartSpotRule
+        /// (clear area and town reach, H5); every other goal the no-op rule (the composed spot stands).
+        ///
+        /// THREADING: TryStart applies the rule UNDER the manager's lock, on the caller's thread (a command or the scheduler),
+        /// not on the world thread. A rule that needs landblock or physics queries (clear-area checks, ground probes) must
+        /// therefore resolve its spot BEFORE TryStart takes the lock and only check or apply the result here; doing the
+        /// queries inside the rule would hold the manager lock across them. The Hold rule reads no landblock or physics state
+        /// at all - only the client dat and the town list - so it resolves in place (see its remarks).
+        /// </summary>
+        public static IWorldEventStartSpotRule StartSpotRuleFor(GoalDef goal) =>
+            StartSpotRuleOverride?.Invoke(goal)
+            ?? (goal?.TypeKind == GoalType.Hold ? ACE.Server.WorldEvents.Hold.WorldEventHoldStartSpotRule.Instance : (IWorldEventStartSpotRule)WorldEventNoStartSpotRule.Instance);
+
+        /// <summary>
+        /// Test seam: when set, <see cref="StartSpotRuleFor"/> returns this function's rule (a null result falls back to the
+        /// no-op). Production never sets it. Process-wide, so a test that sets it must restore it in a finally.
+        /// </summary>
+        internal static Func<GoalDef, IWorldEventStartSpotRule> StartSpotRuleOverride;
 
         /// <summary>
         /// The union of a theme's objective (rift/source) guids and its spawn-time npc guids (WP-16), read

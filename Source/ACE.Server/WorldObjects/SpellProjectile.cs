@@ -7,6 +7,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.ClassAbilities;
+using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
@@ -105,15 +106,19 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Copies the three per-cast stamps a child projectile must inherit from the projectile it was spawned
+        /// Copies the per-cast stamps a child projectile must inherit from the projectile it was spawned
         /// from, rather than from whatever the live player fields hold by then (which may belong to a later
-        /// cast): <see cref="SpellweaveDamageMod"/>, <see cref="LifeProjectileDamage"/> and
-        /// <see cref="LifeProjectileStamp"/>. Every child-spawn site - Echo Cast's recast, a Spell AOE child, a
+        /// cast): <see cref="SpellweaveDamageMod"/>, <see cref="LifeProjectileDamage"/>,
+        /// <see cref="LifeProjectileStamp"/>, <see cref="ProcDamageScale"/> and <see cref="RendSourceDamageType"/>. Every child-spawn site - Echo Cast's recast, a Spell AOE child, a
         /// Cascade child - must call this, because an unstamped <see cref="LifeProjectileDamage"/> defaults to 0
         /// and a life-projectile spell (Martyr's Hecatomb, Curse of Raven Fury) then lands for 0 damage.
         ///
         /// Does NOT set <see cref="IsEchoCopy"/> - that flag is Echo Cast's own "never echo again" guard, not a
         /// property of the per-cast stamps, so callers that are not Echo Cast must not set it via this helper.
+        ///
+        /// Deliberately does NOT copy <see cref="VolatileWallCounter"/> (owner ruling 2026-10-24): Volatile Wall
+        /// counts only the wall's OWN projectiles, so a Spell AOE child or a Cascade re-fire neither ramps nor
+        /// advances the parent's counter, and an Echo Cast keeps the fresh counter its own launch created.
         ///
         /// Public and static so the inheritance rule is unit-testable on two plain projectiles.
         /// </summary>
@@ -125,7 +130,26 @@ namespace ACE.Server.WorldObjects
             child.SpellweaveDamageMod = parent.SpellweaveDamageMod;
             child.LifeProjectileDamage = parent.LifeProjectileDamage;
             child.LifeProjectileStamp = parent.LifeProjectileStamp;
+            child.ProcDamageScale = parent.ProcDamageScale;
+            child.RendSourceDamageType = parent.RendSourceDamageType;
         }
+
+        /// <summary>
+        /// Volatile Wall (Archmage T3): the landed-hit counter SHARED by every projectile of the player wall cast
+        /// that launched this one, created once per cast in WorldObject_Magic.LaunchSpellProjectiles. Null for
+        /// any projectile that is not one of a player wall cast's own projectiles - including a Spell AOE child
+        /// or a Cascade re-fire spawned off one, since CopyPerCastStamps never copies it. Read and advanced only by
+        /// Player.ApplyVolatileWall, from the war/void branch of CalculateDamage. See VolatileWallAbility.
+        /// </summary>
+        public VolatileWallAbility.CastCounter VolatileWallCounter { get; set; }
+
+        /// <summary>
+        /// The health damage DamageTarget actually applied to the target's vital on this projectile's hit (after
+        /// every reduction and the clamp at zero health), 0 until it lands or for a stamina/mana drain. Set before
+        /// the post-hit class-ability dispatch (ApplySpellHitClassAbilities), so an ISpellHitAbility handler can
+        /// read it - Elemental Proficiency sizes its Acid DoT from it.
+        /// </summary>
+        public uint LastAppliedDamage { get; private set; }
 
         /// <summary>
         /// TRUE when this projectile is a derived/secondary emission aimed at something other than what the
@@ -184,6 +208,38 @@ namespace ACE.Server.WorldObjects
         public bool IsClassAbilityProc { get; set; }
 
         /// <summary>
+        /// True on an Echo Cast recast of a Spellsword class-ability proc (set by EchoCastAbility.StampEchoCopy).
+        /// The echo is the same proc spell off the same sword, so it reads the proc's caster skill, but it is
+        /// deliberately NOT flagged <see cref="IsClassAbilityProc"/>: that flag is also Cascade's gate, and an
+        /// echo must not start a cascade it never could before. Skill selection only.
+        /// </summary>
+        public bool InheritsProcCasterSkill { get; set; }
+
+        /// <summary>
+        /// The caster skill a Spellsword class-ability proc (<see cref="IsClassAbilityProc"/>, Cascade children
+        /// and Echo Cast recasts included - see <see cref="InheritsProcCasterSkill"/>) reads in place of the
+        /// spell's school for its resist roll, imbue scaling (attackSkill) and skill damage bonus: Item
+        /// Enchantment. Null for every other projectile, which keeps reading the spell's own school. The single
+        /// source of truth for both the resist call and <see cref="GetCasterMagicCreatureSkill"/>, so the three
+        /// sites cannot drift. Proficiency credit, the PvP hit profiles and the school-keyed class-ability
+        /// multipliers deliberately keep Spell.School.
+        /// </summary>
+        public Skill? CasterSkillOverride => IsClassAbilityProc || InheritsProcCasterSkill ? Skill.ItemEnchantment : (Skill?)null;
+
+        /// <summary>
+        /// The caster's <see cref="CreatureSkill"/> named by <see cref="CasterSkillOverride"/>, else the spell's school.
+        /// </summary>
+        public CreatureSkill GetCasterMagicCreatureSkill(Creature caster) =>
+            PickCasterSkill(caster, CasterSkillOverride, CasterSkillOverride.HasValue ? default : Spell.School);
+
+        /// <summary>
+        /// The pure selection behind <see cref="GetCasterMagicCreatureSkill"/>: the override skill when there is
+        /// one, otherwise exactly the lookup an ordinary cast always did (GetCreatureSkill(school)).
+        /// </summary>
+        public static CreatureSkill PickCasterSkill(Creature caster, Skill? skillOverride, MagicSchool school) =>
+            skillOverride.HasValue ? caster.GetCreatureSkill(skillOverride.Value) : caster.GetCreatureSkill(school);
+
+        /// <summary>
         /// Spellweave (Spellsword T1): the spell-damage multiplier of the CAST that launched this projectile
         /// (1.0 = none), captured once in WorldObject_Magic.LaunchSpellProjectiles from
         /// Player.GetSpellweaveSpellDamageMod and read at impact by SpellProjectile.CalculateDamage.
@@ -200,6 +256,35 @@ namespace ACE.Server.WorldObjects
         /// children with the parent projectile's capture.
         /// </summary>
         public float SpellweaveDamageMod { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Spellsword Nether parity (owner ruling 2026-10-27): the damage scale of the class-ability proc CAST
+        /// that launched this projectile, 1.0 for everything else. A Nether weapon's Spellblade / Runeblade /
+        /// Spellstorm proc fires the void ladder, whose retail rungs hit 1.19-2.04x the elemental ones; the
+        /// proc handler computes Fire-rung average / Nether-rung average x class_ability_spellsword_nether_parity
+        /// (SpellswordSpellTables.NetherParityScale) and Player.CastClassAbilityProc hands it to
+        /// LaunchSpellProjectiles, which stamps it here. Read once in the war/void branch of CalculateDamage.
+        ///
+        /// Captured at launch for the same reason as <see cref="SpellweaveDamageMod"/>, and inherited by every
+        /// child (Cascade, Echo Cast, Spell AOE) through <see cref="CopyPerCastStamps"/>: each of those re-fires
+        /// the SAME spell, so the parent's scale is the right one. An elemental proc is never stamped, and a
+        /// multiply by exactly 1.0f is the identity, so its damage is bit-identical.
+        /// </summary>
+        public float ProcDamageScale { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Volatile Elements (Spellsword T2, owner ruling 2026-10-30): the ORIGINAL damage type of the weapon hit
+        /// whose Spellblade / Runeblade / Spellstorm proc launched this projectile, when Volatile Elements re-typed
+        /// that hit; null for everything else. The proc fires the ROLLED element's spell, so the war/void branch
+        /// of CalculateDamage takes the better of the launcher's rend for the spell's own type and its rend for
+        /// this type - a fire-rend weapon whose hit rolled cold keeps its fire rend on the cold proc.
+        ///
+        /// Stamped at launch from Player.ClassAbilityProcRendSourceDamageType, armed by
+        /// Player.CastClassAbilityProc(cast, scale, rendSourceDamageType) for exactly one synchronous proc cast,
+        /// and inherited by every child (Cascade, Echo Cast, Spell AOE) through <see cref="CopyPerCastStamps"/>,
+        /// for the same reason as <see cref="ProcDamageScale"/>. Null leaves the rend lookup exactly as before.
+        /// </summary>
+        public DamageType? RendSourceDamageType { get; set; }
 
         /// <summary>
         /// Class ability "Spell AOE": damage scale applied to this projectile's landed hit. 1.0 for a
@@ -493,6 +578,10 @@ namespace ACE.Server.WorldObjects
 
             ProjectileImpact();
 
+            // a cosmetic projectile (a Reflect return bolt) only shows the flight: the bounce's damage is
+            // resolved by Player.ApplyReflectBounce when it arrives, so whatever this touches takes nothing
+            if (IsCosmeticProjectile) return;
+
             // ensure valid creature target
             var creatureTarget = target as Creature;
             if (creatureTarget == null || target == ProjectileSource)
@@ -504,6 +593,12 @@ namespace ACE.Server.WorldObjects
             // ensure caster can damage target
             var sourceCreature = ProjectileSource as Creature;
             if (sourceCreature != null && !sourceCreature.CanDamage(creatureTarget))
+                return;
+
+            // Open World Threads R12: a projectile whose source (a player, or a player's pet judged at its own position)
+            // stands past R lands NOTHING on a run creature - no damage, no enchantment, no class-ability or weapon-mod
+            // hit, no OnAttackMonster. DamageTarget keeps its own gate as a backstop.
+            if (creatureTarget.P_OutdoorPerimeter != null && creatureTarget.RefusesOutdoorPerimeterDamage(ProjectileSource))
                 return;
 
             // if player target, ensure matching PK status
@@ -525,6 +620,10 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // PropertyBool.PveOnly (PvpPveOnlyRule.BlocksDamage): a spell launched by a PvE-only weapon lands nothing on a player.
+            if (player != null && player.PveOnlyBlocksSpellHit(creatureTarget, ProjectileLauncher))
+                return;
+
             var critical = false;
             var critDefended = false;
             var overpower = false;
@@ -536,40 +635,52 @@ namespace ACE.Server.WorldObjects
             if (targetPlayer != null && player == null)
                 targetPlayer.NoteSurvivalEngagement(sourceCreature);
 
+            // Reflect (Vanguard T3): set when the target player bounced this projectile back at its caster. Read
+            // again at the item-proc site below - nothing of a bounced shot reaches the player, the caster's
+            // on-hit item procs included.
+            var reflectedProjectile = false;
+
             if (damage != null)
             {
                 if (Spell.MetaSpellType == ACE.Entity.Enum.SpellType.EnchantmentProjectile)
                 {
                     // handle EnchantmentProjectile successfully landing on target
-                    ProjectileSource.CreateEnchantment(creatureTarget, ProjectileSource, ProjectileLauncher, Spell, false, FromProc);
+                    ProjectileSource.CreateEnchantment(creatureTarget, ProjectileSource, ProjectileLauncher, Spell, false, FromProc, procSourced: IncomingDamageOrigin == IncomingDamageOrigin.Secondary);
                 }
                 else
                 {
                     // Spell AOE secondary blasts land at a reduced fraction (1.0 = no scaling for a normal cast)
                     var spellDamage = damage.Value * ClassAbilityAoeDamageMultiplier;
 
-                    // Monster combat effects: a monster caster's landed spell hit. Dispatched BEFORE the hit
-                    // is applied, because the hook scales the damage by ref (a magic-damage ramp); the player
-                    // mirror below runs after the hit instead, since nothing it does changes the number.
-                    if (sourceCreature != null && player == null)
-                        sourceCreature.ApplySpellHitMonsterEffects(creatureTarget, this, ref spellDamage);
-
                     // Reflect (Vanguard T3): a MONSTER's war or void projectile bounces straight back at its
-                    // caster. Placed after the monster-effect scaling above so the number reflected is
-                    // exactly the number this player would otherwise have taken, and before DamageTarget so
-                    // the player takes nothing at all (DamageTarget is the site that writes their vital).
-                    // `player == null` keeps this to a monster caster, so a reflected projectile can never
-                    // resolve against another player; the player-side hooks below are already
-                    // `player != null` gated and are therefore unreachable on this branch.
-                    var reflectedProjectile = targetPlayer != null && sourceCreature != null && player == null
-                        && targetPlayer.TryReflectProjectile(sourceCreature, CombatType.Magic, Spell.DamageType, spellDamage);
+                    // caster. Decided BEFORE the monster-effect dispatch below, so a bounced bolt's riders
+                    // (debuff, dispel, castspell) never touch this player; the bounce then resolves against
+                    // the caster's own defenses, keeping the magic-damage ramp as part of the attack
+                    // (Player.LaunchReflectedSpell). `player == null` keeps this to a monster caster, so a
+                    // reflected projectile can never resolve against another player; the player-side hooks
+                    // below are already `player != null` gated and are therefore unreachable on this branch.
+                    reflectedProjectile = targetPlayer != null && sourceCreature != null && player == null
+                        && targetPlayer.TryReflectProjectile(sourceCreature, CombatType.Magic, Spell.DamageType, spellDamage, IncomingDamageOrigin);
 
-                    if (!reflectedProjectile)
+                    if (reflectedProjectile)
+                    {
+                        targetPlayer.LaunchReflectedSpell(sourceCreature, this, critical, spellDamage);
+                    }
+                    else
+                    {
+                        // Monster combat effects: a monster caster's landed spell hit. Dispatched BEFORE the hit
+                        // is applied, because the hook scales the damage by ref (a magic-damage ramp); the player
+                        // mirror below runs after the hit instead, since nothing it does changes the number.
+                        if (sourceCreature != null && player == null)
+                            sourceCreature.ApplySpellHitMonsterEffects(creatureTarget, this, ref spellDamage);
+
                         DamageTarget(creatureTarget, spellDamage, critical, critDefended, overpower);
+                    }
 
                     // Class ability hook: a player's landed damaging-spell hit can radiate (Spell AOE),
                     // recast (Echo Cast), apply Vulnerability (Elemental Rend), chain (Cascade), pin
-                    // (Pinning Shot) or strip a buff (Dispelling Edge).
+                    // (Pinning Shot), strip a buff and cleanse the caster (Dispelling Dance) or apply
+                    // Sundermark's vulnerability.
                     //
                     // NO SCHOOL TEST as of 2026-09-13. It was `Spell.School == MagicSchool.WarMagic` until
                     // then; war, void and life projectiles now all dispatch, and every handler on the hook
@@ -588,7 +699,7 @@ namespace ACE.Server.WorldObjects
                     // Cast self-excluding on AOE children via IsClassAbilitySpawned to avoid cascade, Echo
                     // Cast also refusing its own recasts via IsEchoCopy (an echo is otherwise a full cast, so
                     // Spell AOE radiates off it), and Cascade's generation counter. Rend, Pinning Shot and
-                    // Dispelling Edge fire on every landed copy.
+                    // Dispelling Dance (internal name DispellingEdge) and Sundermark fire on every landed copy.
                     if (player != null)
                         player.ApplySpellHitClassAbilities(creatureTarget, this);
 
@@ -613,7 +724,7 @@ namespace ACE.Server.WorldObjects
                 // TODO: instead of ProjectileLauncher is Caster, perhaps a SpellProjectile.CanProc bool that defaults to true,
                 // but is set to false if the source of a spell is from a proc, to prevent multi procs?
 
-                if (sourceCreature != null && ProjectileTarget != null && !FromProc)
+                if (sourceCreature != null && ProjectileTarget != null && !FromProc && !reflectedProjectile)
                 {
                     // TODO figure out why cross-landblock group operations are happening here. We shouldn't need this code Mag-nus 2021-02-09
                     bool threadSafe = true;
@@ -696,13 +807,13 @@ namespace ACE.Server.WorldObjects
 
             var resistSource = IsWeaponSpell ? weapon : source;
 
-            var resisted = source.TryResistSpell(target, Spell, resistSource, true);
+            var resisted = source.TryResistSpell(target, Spell, resistSource, true, CasterSkillOverride);
             if (resisted && !overpower)
                 return null;
 
             CreatureSkill attackSkill = null;
             if (sourceCreature != null)
-                attackSkill = sourceCreature.GetCreatureSkill(Spell.School);
+                attackSkill = GetCasterMagicCreatureSkill(sourceCreature);
 
             // PvP via the one classifier. A self hit cannot reach here: OnCollideObject, this method's only
             // caller, returns when target == ProjectileSource, so this equals the old both-players test.
@@ -716,6 +827,12 @@ namespace ACE.Server.WorldObjects
             // GetWeaponMagicCritFrequency returns early when there is no wand. A no-op unless source and target are
             // two distinct players in the same Live arena or battleground match and the projectile is war magic.
             criticalChance = PvpContextTuning.ApplyCritChance(PvpChokePoint.CC2, source, target, PvpHitProfile.ForSpell(Spell.School, SpellType), criticalChance);
+
+            // Elemental Proficiency Slash (Archmage T3): +5/10/15 percentage points of crit chance on a Slash spell
+            // against a monster. A separate line so the PvpContextTuning line above stays as pinned. Zero for a
+            // non-player caster, rank 0, a non-Slash spell or an ineligible target.
+            if (sourceCreature is Player proficiencyCritCaster)
+                criticalChance += proficiencyCritCaster.GetElementalProficiencySlashCritBonus(Spell.DamageType, target);
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) < criticalChance)
             {
@@ -783,6 +900,11 @@ namespace ACE.Server.WorldObjects
 
                 resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod));
 
+                // Reflect (Vanguard T3): the caster's own attack half, before anything about THIS target
+                // scales it, for CalculateReflectedDamage
+                ReflectAttackDamage = (lifeMagicDamage + critDamageBonus) * elementalDamageMod * slayerMod;
+                ReflectWeaponResistanceMod = weaponResistanceMod;
+
                 finalDamage = (lifeMagicDamage + critDamageBonus) * elementalDamageMod * slayerMod * resistanceMod * absorbMod;
 
                 // class abilities: the Blood Mage life-strike package on the two life projectiles -
@@ -818,6 +940,11 @@ namespace ACE.Server.WorldObjects
                     finalDamage *= lifeClassAbilityCaster.ApplyLifeProjectileClassAbilityDamage(target,
                         grantCharge: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoCopy), castStamp: LifeProjectileStamp,
                         spellweaveDamageMod: SpellweaveDamageMod);
+
+                    // FORK: Focus spell damage (magic_damage_per_focus_point). A direct cast only: a proc, cascade,
+                    // echo recast or AOE child is Secondary and never earns it. PvE only (targetPlayer == null).
+                    if (Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, targetPlayer != null, FromProc, IsClassAbilityProc))
+                        finalDamage *= lifeClassAbilityCaster.GetFocusSpellDamageMod();
                 }
             }
             // war/void magic projectiles
@@ -865,7 +992,7 @@ namespace ACE.Server.WorldObjects
                  */
                 if (sourcePlayer != null)
                 {
-                    var magicSkill = sourcePlayer.GetCreatureSkill(Spell.School).Current;
+                    var magicSkill = GetCasterMagicCreatureSkill(sourcePlayer).Current;
 
                     if (magicSkill > Spell.Power)
                     {
@@ -876,12 +1003,26 @@ namespace ACE.Server.WorldObjects
                 }
                 baseDamage = ThreadSafeRandom.Next(spellMinDamage, spellMaxDamage);
 
-                weaponResistanceMod = GetWeaponResistanceModifier(weapon, sourceCreature, attackSkill, Spell.DamageType);
+                // Volatile Elements: a proc launched off a re-typed weapon hit keeps the better of the launcher's
+                // rend for the spell's own type and for the hit's original type (RendSourceDamageType). Null
+                // (every other projectile) is the plain lookup.
+                weaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(weapon, sourceCreature, attackSkill, RendSourceDamageType, Spell.DamageType);
 
                 // if attacker/weapon has IgnoreMagicResist directly, do not transfer to spell projectile
                 // only pass if SpellProjectile has it directly, such as 2637 - Invoking Aun Tanua
 
-                resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod));
+                // Elemental Inversion + Arcane Hollow (Archmage T1/T2, PvE only, war/void magic): a replacement
+                // for the target's INNATE resist term only. The lookup stays on resistanceType, so the original
+                // type's rend, vulnerabilities and protections all still apply. Null (unchanged) for a player
+                // target or a type outside the seven (Nether, a life health bolt). One roll per projectile hit.
+                // The same call decides Elemental Proficiency Pierce for this hit (ignore, folded in here, or
+                // flat, applied below); the final-damage site reads that one decision.
+                var elementalPierceShape = ElementalProficiencySpellMath.PierceShape.None;
+                var archmageInnate = sourceCreature is Player archmageCaster
+                    ? archmageCaster.GetArchmageInnateOverride(target, resistanceType, true, out elementalPierceShape)
+                    : null;
+
+                resistanceMod = (float)Math.Max(0.0f, target.GetResistanceMod(resistanceType, this, null, weaponResistanceMod, archmageInnate));
 
                 if (isPVP && Spell.DamageType == DamageType.Nether)
                 {
@@ -894,6 +1035,16 @@ namespace ACE.Server.WorldObjects
 
                 finalDamage = baseDamage + critDamageBonus + skillBonus;
 
+                // Spellsword Nether parity: a void proc's whole roll (base, crit bonus, skill bonus) scaled to
+                // the elemental rung's average. Applied here, before Reflect's snapshot and every multiplier
+                // below, so the proc behaves everywhere as if it were the weaker spell. 1.0 for anything that is
+                // not a Nether class-ability proc. See ProcDamageScale.
+                finalDamage *= ProcDamageScale;
+
+                // Reflect (Vanguard T3): the caster's own attack half, as in the life branch above
+                ReflectAttackDamage = finalDamage * elementalDamageMod * slayerMod;
+                ReflectWeaponResistanceMod = weaponResistanceMod;
+
                 finalDamage *= elementalDamageMod * slayerMod * resistanceMod * absorbMod;
 
                 // class abilities: flat void/war spell-damage multipliers (PvE only). Applies to radiated
@@ -901,6 +1052,22 @@ namespace ACE.Server.WorldObjects
                 if (sourceCreature is Player classAbilityCaster && target is not Player)
                 {
                     finalDamage *= classAbilityCaster.GetClassAbilitySpellDamageMod(Spell, SpellweaveDamageMod);
+
+                    // FORK: Focus spell damage (magic_damage_per_focus_point), direct casts only - a proc, cascade,
+                    // echo recast or AOE child is Secondary and never earns it. PvE only (the enclosing gate).
+                    if (Player.QualifiesForFocusSpellDamage(IncomingDamageOrigin == IncomingDamageOrigin.DirectHit, target is Player, FromProc, IsClassAbilityProc))
+                        finalDamage *= classAbilityCaster.GetFocusSpellDamageMod();
+
+                    // Volatile Wall (Archmage T3): each landed projectile of one wall cast after the first hits
+                    // harder (1 + priorLanded x b). Reads the cast's shared counter, then records this hit on it.
+                    // 1.0 and no count for anything that is not a player wall cast.
+                    finalDamage *= classAbilityCaster.ApplyVolatileWall(this, target);
+
+                    // Elemental Proficiency (Archmage T3) instant damage effects: Fire x (1 + fire magnitude), and
+                    // Pierce x (1 + pierce magnitude) when this hit's Pierce decision (the override call above)
+                    // chose the flat shape over the resistance ignore. Applies to Spell AOE and Echo copies like
+                    // any landed spell. 1.0 for rank 0 or an ineligible target.
+                    finalDamage *= classAbilityCaster.GetElementalProficiencyDamageMod(Spell.DamageType, target, elementalPierceShape);
 
                     // Sanguine Reserve on a LIFE HEALTH BOLT (Bloodstone Bolt): a harmful life spell of
                     // MetaSpellType Projectile lands HERE, not in the LifeProjectile branch above, so it takes
@@ -911,13 +1078,8 @@ namespace ACE.Server.WorldObjects
                     finalDamage *= classAbilityCaster.ApplyLifeHealthBoltBloodCharge(Spell,
                         aimedNonEchoProjectile: GrantsLifeProjectileCharge(ProjectileTarget != null, IsEchoCopy), castStamp: LifeProjectileStamp);
 
-                    // Runic Ward (Spellsword T2): a landed WAR spell cashes the whole standing ward into
-                    // this spell's damage. ADDED, not multiplied, because the ward is a number of points
-                    // rather than a percentage of anything - and added AFTER the multipliers above, so the
-                    // cashed ward is worth its face value rather than being scaled by the caster's other
-                    // damage abilities. Returns 0 for every non-war school and for an empty pool, which is
-                    // every cast by everyone who is not a Spellsword mid-fight.
-                    finalDamage += classAbilityCaster.SpendRunicWardIntoWarSpell(Spell);
+                    // (Runic Ward's war-spell spend used to be read here; the 2026-10-24 Spellsword pass
+                    // removed it - the ward now drains only by absorbing incoming damage.)
                 }
 
                 // Tier B weapon mods: Ambush's spell half, read off the equipped WAND. Same PvE-only
@@ -945,6 +1107,10 @@ namespace ACE.Server.WorldObjects
             // A no-op for a non-ring projectile and outside a SAME Live FFA match; applied before the C2 cap in DamageTarget.
             finalDamage = Pvp.Rules.PvpArenaOneVOneRules.ApplyFfaRingDmg(source, target, SpellType == ProjectileSpellType.Ring, finalDamage);
 
+            // AM1 for the battleground ring: pvp_bg_ring_dmg, same position and the same any-school ring rule, for a SAME Live battleground
+            // match of any mode. Mutually exclusive with the Tugak ring call above (a match has one mode key), so no ring is scaled by both.
+            finalDamage = Pvp.Rules.PvpArenaOneVOneRules.ApplyBgRingDmg(source, target, SpellType == ProjectileSpellType.Ring, finalDamage);
+
             // show debug info
             if (sourceCreature != null && sourceCreature.DebugDamage.HasFlag(Creature.DebugDamageType.Attacker))
             {
@@ -955,6 +1121,60 @@ namespace ACE.Server.WorldObjects
                 ShowInfo(target, Spell, attackSkill, criticalChance, criticalHit, critDefended, overpower, weaponCritDamageMod, skillBonus, baseDamage, critDamageBonus, elementalDamageMod, slayerMod, weaponResistanceMod, resistanceMod, absorbMod, LifeProjectileDamage, lifeMagicDamage, finalDamage);
             }
             return finalDamage;
+        }
+
+        /// <summary>
+        /// Reflect (Vanguard T3): the ATTACK half of this projectile's last CalculateDamage - the rolled base
+        /// (or life damage), plus the critical bonus and skill bonus, times the caster's elemental and slayer
+        /// mods, before the target's resistance and absorb touched it. Never persisted; written on every
+        /// CalculateDamage that reaches the damage branches and read only by
+        /// <see cref="CalculateReflectedDamage"/>, immediately after, on the same collision.
+        /// </summary>
+        public float ReflectAttackDamage { get; private set; }
+
+        /// <summary>The caster's weapon resistance-cleaving mod from the same CalculateDamage (1.0 = none).</summary>
+        public float ReflectWeaponResistanceMod { get; private set; } = 1.0f;
+
+        /// <summary>
+        /// Reflect (Vanguard T3): the damage this projectile deals to its own CASTER when a player bounces it.
+        /// The caster's attack half is kept (<see cref="ReflectAttackDamage"/>, times the Spell AOE fraction
+        /// and the caster's magic-damage ramp, <paramref name="rampMultiplier"/>); the defender half is
+        /// resolved against the CASTER, mirroring CalculateDamage and DamageTarget: its elemental resistance
+        /// (with the same weapon resistance-cleaving mod), its magic absorb, the caster's own damage rating
+        /// against its own damage resist rating, and the crit damage / crit damage resist ratings on a crit.
+        ///
+        /// NO RESIST ROLL - the bounce is not a new cast, and the player-side roll was already won. PvE only
+        /// (Player.TryReflectProjectile refuses a Player caster), so the rating scales resolve to the neutral
+        /// identity and no PK term exists; they are read through the scaler anyway, like every rating read in
+        /// this file.
+        /// </summary>
+        internal float CalculateReflectedDamage(Creature firer, bool critical, double rampMultiplier)
+        {
+            // an Invincible caster takes nothing, matching DamageEvent.CalculateReflectedMissile
+            if (firer == null || firer.Invincible || ReflectAttackDamage <= 0.0f)
+                return 0.0f;
+
+            var reflectResistanceType = Creature.GetResistanceType(Spell.DamageType);
+
+            var reflectResistanceMod = (float)Math.Max(0.0f, firer.GetResistanceMod(reflectResistanceType, this, null, ReflectWeaponResistanceMod));
+
+            var reflectAbsorbMod = GetAbsorbMod(firer);
+
+            var damage = ReflectAttackDamage * ClassAbilityAoeDamageMultiplier * (float)rampMultiplier * reflectResistanceMod * reflectAbsorbMod;
+
+            var ratingScales = PvpRatingScales.Resolve(PvpChokePoint.R2, firer, firer);
+
+            var reflectDamageRatingMod = Creature.GetPositiveRatingMod(ratingScales.ScaleDamageRating(firer.GetDamageRating()));
+
+            var reflectDamageResistRatingMod = firer.GetDamageResistRatingMod(CombatType.Magic, true, firer, ratingScales.DamageRatingScale, out _, out _);
+
+            if (critical)
+            {
+                reflectDamageRatingMod = Creature.AdditiveCombine(reflectDamageRatingMod, Creature.GetPositiveRatingMod(ratingScales.ScaleCritDamageRating(firer.GetCritDamageRating())));
+                reflectDamageResistRatingMod = Creature.AdditiveCombine(reflectDamageResistRatingMod, Creature.GetNegativeRatingMod(ratingScales.ScaleCritDamageResistRating(firer.GetCritDamageResistRating())));
+            }
+
+            return damage * reflectDamageRatingMod * reflectDamageResistRatingMod;
         }
 
         public float GetAbsorbMod(Creature target)
@@ -1091,6 +1311,11 @@ namespace ACE.Server.WorldObjects
             if (targetPlayer != null && targetPlayer.Invincible || target.IsDead)
                 return;
 
+            // Open World Threads R12: a projectile writes the target's vitals directly, never through TakeDamage, so it
+            // is judged here: a player (or a player's pet) past an outdoor run's circle deals nothing on impact.
+            if (target.P_OutdoorPerimeter != null && target.RefusesOutdoorPerimeterDamage(ProjectileSource))
+                return;
+
             var sourceCreature = ProjectileSource as Creature;
             var sourcePlayer = ProjectileSource as Player;
 
@@ -1100,6 +1325,11 @@ namespace ACE.Server.WorldObjects
 
             var amount = 0u;
             var percent = 0.0f;
+
+            // the hit as it stood going INTO the player pre-write class-ability mitigation, as a fraction of
+            // max health; stays null for every other path (non-player target, non-health category), where the
+            // cloak spell proc keeps rolling on `percent`
+            float? cloakProcPercent = null;
 
             var damageRatingMod = 1.0f;
             var heritageMod = 1.0f;
@@ -1126,7 +1356,7 @@ namespace ACE.Server.WorldObjects
 
                 // World Events combat contact (2026-10-04 follow-up): a landed stamina-lowering bolt never
                 // writes health, so it never reaches DamageHistory.Add.
-                ACE.Server.WorldEvents.WorldEventCombatCreditHook.OnCombatContact(target, ProjectileSource);
+                ACE.Server.WorldEvents.WorldEventHooks.OnCombatContact(target, ProjectileSource);
             }
             else if (Spell.Category == SpellCategory.ManaLowering)
             {
@@ -1134,7 +1364,7 @@ namespace ACE.Server.WorldObjects
                 amount = (uint)-target.UpdateVitalDelta(target.Mana, (int)-Math.Round(damage));
 
                 // World Events combat contact, as above, for a mana-lowering bolt.
-                ACE.Server.WorldEvents.WorldEventCombatCreditHook.OnCombatContact(target, ProjectileSource);
+                ACE.Server.WorldEvents.WorldEventHooks.OnCombatContact(target, ProjectileSource);
             }
             else
             {
@@ -1226,6 +1456,19 @@ namespace ACE.Server.WorldObjects
                     percent = damage / target.Health.MaxValue;
                 }
 
+                // World Events Hold: a run monster's bolt on a player takes its role's (or the finale boss's) multiplier, before
+                // the class barrier like the physical path's. 1 after one field read for everyone else.
+                if (targetPlayer != null)
+                {
+                    var holdMult = ACE.Server.WorldEvents.WorldEventHooks.HoldPlayerDamageMult(sourceCreature);
+
+                    if (holdMult != 1.0)
+                    {
+                        damage = (float)(damage * holdMult);
+                        percent = damage / target.Health.MaxValue;
+                    }
+                }
+
                 // Pre-write class ability mitigation (Sanguine Ward, then Mana Barrier). Spell damage never
                 // reaches Player.TakeDamage, so a mitigation wired only there covers melee and missile but
                 // not the spell damage a caster actually faces - which is exactly the bug both of these
@@ -1233,9 +1476,11 @@ namespace ACE.Server.WorldObjects
                 // from; do not "simplify" it away.
                 //
                 // A REDUCTION applied before the vital write. `damage` is genuinely replaced and `percent`
-                // recomputed, so everything below (the vital write, the cloak spell proc, the reported
-                // number, the target.IsAlive / OnDeath branch) sees the reduced hit, exactly as the
-                // physical path in Player.TakeDamage does. The victim's damage line therefore reports the
+                // recomputed, so everything below (the vital write, the reported number, the
+                // target.IsAlive / OnDeath branch) sees the reduced hit, exactly as the physical path in
+                // Player.TakeDamage does. The ONE exception is the cloak spell proc, which rolls on
+                // `cloakProcPercent` - the hit going INTO this call - so an absorbed hit still counts as a
+                // hit for proc chance. The victim's damage line therefore reports the
                 // POST-mitigation number, which is intended: it plus the "absorbs N points" lines add up to
                 // the hit that was thrown.
                 //
@@ -1250,7 +1495,8 @@ namespace ACE.Server.WorldObjects
                 if (targetPlayer != null)
                 {
                     var beforeMitigation = (uint)Math.Round(damage);
-                    var afterMitigation = targetPlayer.ApplyPreWriteDamageClassAbilities(ProjectileSource, Spell.DamageType, beforeMitigation);
+                    cloakProcPercent = damage / target.Health.MaxValue;
+                    var afterMitigation = targetPlayer.ApplyPreWriteDamageClassAbilities(ProjectileSource, Spell.DamageType, beforeMitigation, isSpell: true);
 
                     if (afterMitigation != beforeMitigation)
                     {
@@ -1270,6 +1516,20 @@ namespace ACE.Server.WorldObjects
                     damage = target.ApplyBattlegroundDefenderReduction(ProjectileSource, damage);
 
                     if (damage != beforeDefenderReduction)
+                        percent = damage / target.Health.MaxValue;
+                }
+
+                // World Events Hold: the ward on a warded ranged wave monster (a spell is magic), then a run monster's bolt on
+                // a knight re-sized like its melee hits - the twin of the call in Creature.TakeDamage, which this path never
+                // reaches. Both unchanged after one field read for every creature with no Hold tag.
+                if (targetPlayer == null && damage > 0.0f)
+                {
+                    var beforeHold = damage;
+
+                    damage = ACE.Server.WorldEvents.WorldEventHooks.HoldWardDamage(target, ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Magic, damage);
+                    damage = ACE.Server.WorldEvents.WorldEventHooks.ScaleHoldKnightHit(target, ProjectileSource, damage);
+
+                    if (damage != beforeHold)
                         percent = damage / target.Health.MaxValue;
                 }
 
@@ -1296,7 +1556,11 @@ namespace ACE.Server.WorldObjects
                 }
 
                 amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage));
-                target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount);
+
+                // the damage actually applied to the vital, for the Elemental Proficiency Acid DoT sizing
+                LastAppliedDamage = amount;
+
+                target.DamageHistory.Add(ProjectileSource, Spell.DamageType, amount, thrown: (uint)Math.Round(damage));
 
                 // Thorns on a direct spell hit (user ruling 2026-10-07): after the health write, the same slot
                 // the physical hook occupies in Player.TakeDamage, so it fires on a killing bolt and on one
@@ -1330,7 +1594,7 @@ namespace ACE.Server.WorldObjects
                 // redundant with the one there. It must sit BEFORE the "full amount for debugging"
                 // reassignment of `amount` below, which overwrites the applied number with the pre-vital
                 // roll.
-                ACE.Server.WorldEvents.WorldEventBossDamageHook.NoteHit(ProjectileSource, targetPlayer, (int)amount, critical);
+                ACE.Server.WorldEvents.WorldEventHooks.NoteBossHit(ProjectileSource, targetPlayer, (int)amount, critical);
 
                 //if (targetPlayer != null && targetPlayer.Fellowship != null)
                     //targetPlayer.Fellowship.OnVitalUpdate(targetPlayer);
@@ -1407,7 +1671,7 @@ namespace ACE.Server.WorldObjects
                 if (!nonHealth)
                 {
                     if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
-                        Cloak.TryProcSpell(target, ProjectileSource, equippedCloak, percent);
+                        Cloak.TryProcSpell(target, ProjectileSource, equippedCloak, cloakProcPercent ?? percent);
 
                     target.EmoteManager.OnDamage(sourcePlayer);
 

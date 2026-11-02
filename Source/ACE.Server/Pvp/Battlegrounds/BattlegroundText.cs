@@ -6,8 +6,9 @@ namespace ACE.Server.Pvp.Battlegrounds
 {
     /// <summary>
     /// Every player-facing battleground line, authored by the orchestrator and used verbatim. Chat lines carry the
-    /// "[Battleground] " prefix. Team 0 is named West and team 1 East, after the wing each one spawns in
-    /// (Docs/Pvp/BATTLEGROUNDS.md "Map: 0x016C"). Plain ASCII.
+    /// "[Battleground] " prefix. Unbound, team 0 is named West and team 1 East, after the wing each one spawns in
+    /// (Docs/Pvp/BATTLEGROUNDS.md "Map: 0x016C"); in a live match King of the Hill names each team by its colour instead (Red /
+    /// Blue, Docs/Pvp/TEMPLATES.md "Team hue"), through the string overloads below. Plain ASCII.
     /// </summary>
     public static class BattlegroundText
     {
@@ -22,11 +23,22 @@ namespace ACE.Server.Pvp.Battlegrounds
         };
 
         /// <summary>"West 120, East 45": both scores, West first.</summary>
-        public static string ScorePair(int west, int east) => $"West {west}, East {east}";
+        public static string ScorePair(int west, int east) => ScorePair(TeamName(0), west, TeamName(1), east);
+
+        /// <summary>"Red 120, Blue 45": two named scores, in the order given (Docs/Pvp/TEMPLATES.md "Team hue").</summary>
+        public static string ScorePair(string firstName, int first, string secondName, int second) => $"{firstName} {first}, {secondName} {second}";
+
+        /// <summary>"Red" / "Blue": a team named by its colour.</summary>
+        public static string ColourTeamName(PvpTeamColour colour) => PvpTeamColours.Name(colour);
+
+        /// <summary>" (Red)": the colour tag added where a mode keeps its own team name (Attack/Defend). Empty for no colour.</summary>
+        public static string ColourTag(string colourName) => string.IsNullOrEmpty(colourName) ? "" : $" ({colourName})";
 
         // ---------------- the hill ----------------
 
-        public static string ZoneHeld(int teamIndex) => $"{Prefix}{TeamName(teamIndex)} holds the hill!";
+        public static string ZoneHeld(int teamIndex) => ZoneHeld(TeamName(teamIndex));
+
+        public static string ZoneHeld(string teamName) => $"{Prefix}{teamName} holds the hill!";
 
         public static string ZoneContested() => $"{Prefix}The hill is contested!";
 
@@ -35,7 +47,10 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// <summary>Announced to every participant when the hill moves; the direction is a compass word from the map centre.</summary>
         public static string HillMoved(string direction) => $"{Prefix}The hill has moved! Head to the {direction}.";
 
-        public static string Scores(int west, int east) => $"{Prefix}Score: {ScorePair(west, east)}.";
+        public static string Scores(int west, int east) => Scores(ScorePair(west, east));
+
+        /// <summary>The score announcement for an already-built <see cref="ScorePair(string, int, string, int)"/>.</summary>
+        public static string Scores(string scorePair) => $"{Prefix}Score: {scorePair}.";
 
         // ---------------- deaths and respawn ----------------
 
@@ -47,18 +62,40 @@ namespace ACE.Server.Pvp.Battlegrounds
 
         public static string PenCountdown(int seconds) => $"{Prefix}Returning in {seconds}...";
 
+        // ---------------- disconnect and rejoin (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and rejoin") ----------------
+
+        /// <summary>To the rest of the match when a seat goes into its rejoin grace.</summary>
+        public static string SeatHeld(string name, int seconds) => $"{Prefix}{name} has disconnected. Their place is held for {seconds} seconds.";
+
+        /// <summary>To the rest of the match when a held seat's player is back in the fight.</summary>
+        public static string Rejoined(string name) => $"{Prefix}{name} has rejoined the match.";
+
+        /// <summary>To the returning player, once they stand in the match again.</summary>
+        public const string RejoinedYou = Prefix + "You have rejoined the match.";
+
+        /// <summary>To a returning player whose way back in failed: the held seat is given up.</summary>
+        public const string RejoinFailedYou = Prefix + "You could not be returned to the match, and your place in it has been given up.";
+
         // ---------------- results ----------------
 
-        public static string ScoreWin(int teamIndex, int west, int east) => $"{Prefix}{TeamName(teamIndex)} has taken the hill! Final score: {ScorePair(west, east)}.";
+        public static string ScoreWin(int teamIndex, int west, int east) => ScoreWin(TeamName(teamIndex), ScorePair(west, east));
 
-        public static string TimeUpWin(int teamIndex, int west, int east) => $"{Prefix}Time is up. {TeamName(teamIndex)} wins, {ScorePair(west, east)}.";
+        public static string ScoreWin(string teamName, string scorePair) => $"{Prefix}{teamName} has taken the hill! Final score: {scorePair}.";
 
-        public static string TimeUpDraw(int west, int east) => $"{Prefix}Time is up. The match is a draw, {ScorePair(west, east)}.";
+        public static string TimeUpWin(int teamIndex, int west, int east) => TimeUpWin(TeamName(teamIndex), ScorePair(west, east));
+
+        public static string TimeUpWin(string teamName, string scorePair) => $"{Prefix}Time is up. {teamName} wins, {scorePair}.";
+
+        public static string TimeUpDraw(int west, int east) => TimeUpDraw(ScorePair(west, east));
+
+        public static string TimeUpDraw(string scorePair) => $"{Prefix}Time is up. The match is a draw, {scorePair}.";
 
         // ---------------- status ----------------
 
         /// <summary>Appended to the /arena status in-match line for a battleground.</summary>
-        public static string StatusScore(int west, int east, int target) => $" Score: {ScorePair(west, east)}, first to {target} wins.";
+        public static string StatusScore(int west, int east, int target) => StatusScore(ScorePair(west, east), target);
+
+        public static string StatusScore(string scorePair, int target) => $" Score: {scorePair}, first to {target} wins.";
 
         // ---------------- mode labels ----------------
 
@@ -186,22 +223,23 @@ namespace ACE.Server.Pvp.Battlegrounds
         /// <summary>Sent once to each attacker when the match goes Live; a single crystal reads "the Warding Crystal".</summary>
         /// <param name="total">The crystal count.</param>
         /// <param name="crystals">The <see cref="CrystalList"/> line, appended after a space when not empty.</param>
-        public static string RoleAttackerBody(int total, string crystals = null) =>
+        /// <param name="colour">The team colour word ("Red"), added as "You are an Attacker (Red)."; null adds nothing.</param>
+        public static string RoleAttackerBody(int total, string crystals = null, string colour = null) =>
             (total == 1
-                ? "You are an Attacker. Destroy the Warding Crystal before time runs out!"
-                : $"You are an Attacker. Destroy all {total} Warding Crystals before time runs out!")
+                ? $"You are an Attacker{ColourTag(colour)}. Destroy the Warding Crystal before time runs out!"
+                : $"You are an Attacker{ColourTag(colour)}. Destroy all {total} Warding Crystals before time runs out!")
             + (string.IsNullOrEmpty(crystals) ? "" : " " + crystals);
 
-        public static string RoleAttacker(int total, string crystals = null) => Prefix + RoleAttackerBody(total, crystals);
+        public static string RoleAttacker(int total, string crystals = null, string colour = null) => Prefix + RoleAttackerBody(total, crystals, colour);
 
         /// <summary>Sent once to each defender when the match goes Live; a single crystal reads "the Warding Crystal".</summary>
-        public static string RoleDefenderBody(int total, string crystals = null) =>
+        public static string RoleDefenderBody(int total, string crystals = null, string colour = null) =>
             (total == 1
-                ? "You are a Defender. Protect the Warding Crystal until time runs out!"
-                : "You are a Defender. Protect the Warding Crystals until time runs out!")
+                ? $"You are a Defender{ColourTag(colour)}. Protect the Warding Crystal until time runs out!"
+                : $"You are a Defender{ColourTag(colour)}. Protect the Warding Crystals until time runs out!")
             + (string.IsNullOrEmpty(crystals) ? "" : " " + crystals);
 
-        public static string RoleDefender(int total, string crystals = null) => Prefix + RoleDefenderBody(total, crystals);
+        public static string RoleDefender(int total, string crystals = null, string colour = null) => Prefix + RoleDefenderBody(total, crystals, colour);
 
         /// <summary>"mm:ss" for a whole number of seconds (at least 0).</summary>
         public static string Clock(int seconds)
@@ -296,10 +334,10 @@ namespace ACE.Server.Pvp.Battlegrounds
         }
 
         /// <summary>The attacker's role line in sequential mode: "You are an Attacker. Destroy the Warding Crystals in order: 1. ..., 2. ... before time runs out!"</summary>
-        public static string RoleAttackerOrdered(IEnumerable<BattlegroundCrystalSite> sites) => Prefix + "You are an Attacker. " + CrystalOrder("Destroy", sites).TrimEnd('.') + " before time runs out!";
+        public static string RoleAttackerOrdered(IEnumerable<BattlegroundCrystalSite> sites, string colour = null) => Prefix + $"You are an Attacker{ColourTag(colour)}. " + CrystalOrder("Destroy", sites).TrimEnd('.') + " before time runs out!";
 
         /// <summary>The defender's role line in sequential mode: "You are a Defender. Protect the Warding Crystals in order: 1. ..., 2. ... until time runs out!"</summary>
-        public static string RoleDefenderOrdered(IEnumerable<BattlegroundCrystalSite> sites) => Prefix + "You are a Defender. " + CrystalOrder("Protect", sites).TrimEnd('.') + " until time runs out!";
+        public static string RoleDefenderOrdered(IEnumerable<BattlegroundCrystalSite> sites, string colour = null) => Prefix + $"You are a Defender{ColourTag(colour)}. " + CrystalOrder("Protect", sites).TrimEnd('.') + " until time runs out!";
 
         /// <summary>"Vulnerable crystal: West Cavern (hint)." Sent to a player whose respawn is confirmed, in sequential mode.</summary>
         public static string VulnerableCrystal(string site, string where) =>
@@ -313,6 +351,8 @@ namespace ACE.Server.Pvp.Battlegrounds
         public const string GroupNeedsFellowship = "[Battleground] To queue as a group you must be in a fellowship of 2 to {max} players, and every member must be eligible.";
 
         public const string GroupMemberIneligible = "[Battleground] {member} cannot join the battleground right now.";
+
+        public const string GroupJoinDisabled = "[Arena] Group queueing for battlegrounds is disabled. Queue on your own with /arena join bg - teams are balanced for you.";
 
         public const string GroupNotSupportedForMode = "[Battleground] Only the battleground queue takes a group. Use /arena join bg group.";
     }

@@ -64,7 +64,7 @@ namespace ACE.Server.ClassAbilities
         /// </summary>
         public double Effective { get; init; }
 
-        /// <summary>Display unit: one of "%", "" (flat), "s", "m", "x".</summary>
+        /// <summary>Display unit: one of "%", "" (flat), "s", "ms", "m", "x".</summary>
         public string Unit { get; init; }
 
         /// <summary>

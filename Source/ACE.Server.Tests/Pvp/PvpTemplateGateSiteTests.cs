@@ -854,6 +854,32 @@ namespace ACE.Server.Tests.Pvp
         }
 
         [TestMethod]
+        public void HandleSalvaging_ASalvageHammerIsRefused()
+        {
+            var player = Plain();
+            var rec = new Recorder(player);
+            var squelches = (SquelchManager)RuntimeHelpers.GetUninitializedObject(typeof(SquelchManager));
+            squelches.Squelches = new ACE.Server.Network.Structure.SquelchDB(new List<ACE.Database.Models.Shard.CharacterPropertiesSquelch>(), SquelchMask.None);
+            Recorder.SetInstanceFieldWithoutClassInit(typeof(Player), player, "SquelchManager", squelches);
+            var tool = Seed<GenericObject>(false, (uint)ACE.Entity.Enum.WeenieClassName.W_TINKERINGTOOL_CLASS);
+            var hammer = Seed<GenericObject>(false);
+            // the shipped Hammer shape (Content/sql/weenies/1001910 Tourmaline Hammer.sql): a workmanship and a
+            // MaterialType, which is everything the salvage loop otherwise asks of loot
+            hammer.SetProperty(PropertyInt.MaterialType, (int)MaterialType.Tourmaline);
+            hammer.SetProperty(PropertyInt.ItemWorkmanship, 10);
+            hammer.SetProperty(PropertyInt.Structure, 7);
+            hammer.SetProperty(PropertyInt.MaxStructure, 10);
+            hammer.SetProperty(PropertyInt.SalvageToolCharges, 10);
+            Pack(player, tool);
+            Pack(player, hammer);
+
+            player.HandleSalvaging(tool.Guid.Full, new List<uint> { hammer.Guid.Full });
+
+            Assert.IsTrue(player.Inventory.ContainsKey(hammer.Guid), "the Hammer was not consumed");
+            Assert.IsTrue(rec.Chat().Any(c => c.Contains("cannot be salvaged")), $"[{string.Join(" | ", rec.Chat())}]");
+        }
+
+        [TestMethod]
         public void HandleActionBuyItem_RefusedWhileTemplated_BeforeTheVendorIsLookedUp()
         {
             var player = Templated(3);

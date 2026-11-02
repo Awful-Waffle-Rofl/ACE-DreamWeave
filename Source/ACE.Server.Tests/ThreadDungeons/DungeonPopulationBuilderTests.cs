@@ -45,7 +45,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             }
         };
 
-        private static ThreadDungeonStore Store() => ThreadDungeonStore.Parse(
+        private static ThreadDungeonStore Store(string weakPointsJson = null) => ThreadDungeonStore.Parse(
             "{\"dungeons\":[]}",
             "{\"bosses\":[{\"wcid\":10981,\"name\":\"Aun Tanua\",\"level\":110,\"families\":[],\"modifiers\":[\"boss_guarded\"]}]}",
             "{\"modifiers\":[" +
@@ -54,7 +54,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             "{\"id\":\"boss_guarded\",\"target\":\"boss\",\"minMagnitude\":1.5,\"maxMagnitude\":3.0,\"monsterEffectKind\":\"health_mult\"}," +
             "{\"id\":\"boss_enraged\",\"target\":\"boss\",\"minMagnitude\":20,\"maxMagnitude\":60,\"monsterEffectKind\":\"damage_rating\"}]," +
             "\"xpLadder\":[{\"level\":20,\"xp\":3500},{\"level\":100,\"xp\":80000},{\"level\":200,\"xp\":1100000}]}",
-            new Dictionary<string, string>());
+            new Dictionary<string, string>(), weakPointsJson: weakPointsJson);
 
         // rewardScalingEnabled: false - this file's tests are written against the RAW xpScale/lumScale/loot
         // values, not the gem-level reward-scale curve (see DungeonRewardScaleTests for that). Most specs
@@ -89,12 +89,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         // coverage is opt-in, in ThreadsRunCeilingTests (against the shipped roster).
         private static DungeonPopulationLimits Limits(int max = 120, double trashHealthFloorRatio = DungeonPopulationLimits.DefaultTrashHealthFloorRatio,
             bool bossAnyAllBands = DungeonPopulationLimits.DefaultBossAnyAllBands, int minMonsters = 0,
-            double modifierRewardScale = DungeonPopulationLimits.DefaultModifierRewardScale)
+            double modifierRewardScale = DungeonPopulationLimits.DefaultModifierRewardScale,
+            bool weakPoint = DungeonPopulationLimits.DefaultWeakPoint, double weakPointArmorCut = DungeonPopulationLimits.DefaultWeakPointArmorCut)
             => new DungeonPopulationLimits(max, 2.0, 3.0, 8, 0.5,
                 modifierRewardScale: modifierRewardScale,
                 rewardScalingEnabled: false, trashHealthFloorRatio: trashHealthFloorRatio, healthCurveEnabled: false,
                 bossAnyAllBands: bossAnyAllBands, minMonsters: minMonsters, modifierLevelExponent: 0.0,
-                reachUp: false, statCurve: false);
+                reachUp: false, statCurve: false, weakPoint: weakPoint, weakPointArmorCut: weakPointArmorCut);
 
         private static DungeonGemSpec Spec(params (string, double)[] mods) => new DungeonGemSpec("filos_doom", 100, 6, "any", 1, mods, 0, 0);
 
@@ -221,7 +222,7 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var plan = DungeonPopulationBuilder.Build(Spec(("hardy", 1.6)), Dungeon(4), Store(), Species(), LevelOf, HealthOf, Limits(), new Random(3));
             Assert.AreEqual(1.6, plan.HealthMultiplier, 1e-9);
-            Assert.AreEqual(1.6 * 1.5, plan.BossHealthMultiplier, 1e-9, "boss folds boss_guarded at its MinMagnitude");
+            Assert.AreEqual(1.6, plan.BossHealthMultiplier, 1e-9, "boss takes the greatest of hardy 1.6 and its boss_guarded at MinMagnitude 1.5, not the product");
             Assert.AreEqual(1.4, plan.XpMultiplier, 1e-9);
             Assert.AreEqual(6, plan.Profile.Tier);
             Assert.AreEqual(0u, plan.Profile.Id);
@@ -1516,6 +1517,260 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(plan.BandStandard.MedianFor(Skill.MeleeDefense) > 0);
         }
 
+        // ---- archetype uplift (dynamic_dungeons_archetype_uplift): plan-side switch and determinism ----------------
+
+        private static DungeonPopulationLimits ArchetypeLimits(bool archetypeUplift, double offense = 1.0, double defense = 1.0,
+            double defenseCap = DungeonPopulationLimits.DefaultUpliftDefenseCap,
+            double defenseRate = DungeonPopulationLimits.DefaultDefenseCurveRateAbove375,
+            double magicRate = DungeonPopulationLimits.DefaultMagicDefenseCurveRateAbove300,
+            double damageRate = DungeonPopulationLimits.DefaultDamageCurveRateAbovePivot)
+            => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5,
+                rewardScalingEnabled: false,
+                minMonsters: 0,
+                reachUp: false, statCurve: false,
+                archetypeUplift: archetypeUplift, upliftOffenseRatio: offense, upliftDefenseRatio: defense, upliftDefenseCap: defenseCap,
+                defenseCurveRateAbove375: defenseRate, magicDefenseCurveRateAbove300: magicRate,
+                damageCurveRateAbovePivot: damageRate);
+
+        [TestMethod]
+        public void The_archetype_context_receives_each_defense_rate_from_its_own_limits_field()
+        {
+            var spec = WideSpec("wide");
+
+            // Distinct, non-default values, so a swap of the two adjacent double arguments cannot pass.
+            var plan = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true, defenseRate: 0.25, magicRate: 0.75, damageRate: 0.6), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+
+            Assert.IsNotNull(plan.ArchetypeUplift, "positive control: the fixture builds an archetype context");
+            Assert.AreEqual(0.25, plan.ArchetypeUplift.DefenseRate, 1e-12, "melee/missile dial");
+            Assert.AreEqual(0.75, plan.ArchetypeUplift.MagicDefenseRate, 1e-12, "magic dial");
+            Assert.AreEqual(0.6, plan.ArchetypeUplift.DamageRate, 1e-12, "damage dial");
+
+            var shipped = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+            Assert.AreEqual(0.5, shipped.ArchetypeUplift.DefenseRate, 1e-12);
+            Assert.AreEqual(0.0, shipped.ArchetypeUplift.MagicDefenseRate, 1e-12);
+            Assert.AreEqual(0.75, shipped.ArchetypeUplift.DamageRate, 1e-12);
+        }
+
+        /// <summary>Everything a plan carries that the archetype switch could plausibly move, in one comparable string.</summary>
+        private static string ArchetypeShape(DungeonSpawnPlan plan, bool withNotes = true)
+            => string.Join("|", plan.Entries.Select(e => $"{e.Wcid}:{e.Role}:{e.Point?.Cell}:{e.Point?.X}:{e.UpliftLevel}:{e.StampLevel}"))
+               + $"||boss={plan.BossWcid} bossLevel={plan.BossLevel} family={plan.FamilyId} natural={plan.NaturalBandLow} effective={plan.EffectiveBandLow} "
+               + $"trashFloor={plan.TrashHealthFloor} normalize={plan.HealthNormalizeRatio:R} hp={plan.HealthMultiplier:R} bossHp={plan.BossHealthMultiplier:R} "
+               + $"std={plan.BandStandard.SampleCount}/{plan.BandStandard.MaxBodyDamage}/{plan.BandStandard.MaxBaseArmor}/{plan.BandStandard.SpellTier} "
+               + (withNotes ? $"notes={string.Join(";", plan.Notes)}" : "");
+
+        private static DungeonStatProfile Throwing(uint wcid) => throw new InvalidOperationException("the archetype profile must not be read with the switch off");
+
+        [TestMethod]
+        public void Archetype_switch_off_is_the_pre_feature_plan_byte_for_byte_and_never_reads_the_archetype_profile()
+        {
+            var spec = WideSpec("wide");
+
+            var legacy = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(false), new Random(4), WideProfileOf);
+            var off = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(false), new Random(4), WideProfileOf, archetypeProfileOf: Throwing);
+
+            Assert.IsTrue(off.Entries.Any(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss), "the fixture must tag an uplifted non-boss entry");
+            Assert.IsNull(off.ArchetypeUplift);
+            Assert.AreEqual(ArchetypeShape(legacy), ArchetypeShape(off));
+
+            foreach (var e in off.Entries)
+                Assert.IsNull(ThreadDungeonSpawner.ArchetypeInfoFor(e, off), "every spawner site then takes the BandUplift path");
+        }
+
+        [TestMethod]
+        public void Archetype_switch_on_attaches_the_context_without_moving_any_roster_decision()
+        {
+            var spec = WideSpec("wide");
+
+            var off = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(false), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+            var on = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true, 1.5, 0.5), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+
+            Assert.AreEqual(ArchetypeShape(off, withNotes: false), ArchetypeShape(on, withNotes: false), "the context only annotates the plan");
+            CollectionAssert.AreEqual(off.Notes, on.Notes.Where(n => !n.StartsWith("archetype uplift:")).ToList(), "one note added, nothing else changed");
+
+            Assert.IsNotNull(on.ArchetypeUplift);
+            Assert.AreEqual(1.5, on.ArchetypeUplift.OffenseRatio, 1e-12);
+            Assert.AreEqual(0.5, on.ArchetypeUplift.DefenseRatio, 1e-12);
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftArchetypeCap, on.ArchetypeUplift.CapRatio, 1e-12, "the offense cap rides the limits");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftDefenseCap, on.ArchetypeUplift.DefenseCapRatio, 1e-12, "the defense cap rides the limits");
+            Assert.AreEqual(spec.Level, on.ArchetypeUplift.RunLevel);
+
+            var uplifted = on.Entries.First(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss);
+            var info = ThreadDungeonSpawner.ArchetypeInfoFor(uplifted, on);
+            Assert.IsNotNull(info, "the fixture's creatures carry no offense skill: Unclassified, against everyone");
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftDefenseCap, info.DefenseCapRatio, 1e-12, "the per-creature info carries the defense cap");
+
+            // A non-default defense cap reaches the context and the per-creature info, and does not move the offense cap.
+            var headroom = DungeonPopulationBuilder.Build(spec, Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true, 1.5, 0.5, defenseCap: 1.1), new Random(4), WideProfileOf, archetypeProfileOf: WideProfileOf);
+            Assert.AreEqual(1.1, headroom.ArchetypeUplift.DefenseCapRatio, 1e-12);
+            Assert.AreEqual(DungeonPopulationLimits.DefaultUpliftArchetypeCap, headroom.ArchetypeUplift.CapRatio, 1e-12);
+            Assert.AreEqual(1.1, ThreadDungeonSpawner.ArchetypeInfoFor(headroom.Entries.First(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss), headroom).DefenseCapRatio, 1e-12);
+            Assert.AreEqual(CreatureArchetype.Unclassified, info.Source);
+            Assert.AreEqual(WideLevelOf(uplifted.Wcid), info.OwnLevel);
+
+            var plain = on.Entries.FirstOrDefault(e => e.UpliftLevel == 0 && e.Role != DungeonRole.Boss);
+            if (plain != null)
+                Assert.IsNull(ThreadDungeonSpawner.ArchetypeInfoFor(plain, on), "an untagged entry is never archetype-uplifted");
+
+            foreach (var boss in on.Entries.Where(e => e.Role == DungeonRole.Boss))
+                Assert.IsNull(ThreadDungeonSpawner.ArchetypeInfoFor(boss, on), "bosses never");
+        }
+
+        [TestMethod]
+        public void The_plan_carries_the_uplift_resist_floor_switch_from_the_limits()
+        {
+            DungeonSpawnPlan PlanWith(bool on) => DungeonPopulationBuilder.Build(WideSpec("wide"), Dungeon(20), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5, rewardScalingEnabled: false, minMonsters: 0, reachUp: false, statCurve: false, upliftResistFloor: on),
+                new Random(4), WideProfileOf);
+
+            Assert.IsTrue(PlanWith(true).UpliftResistFloor);
+            Assert.IsFalse(PlanWith(false).UpliftResistFloor);
+            Assert.IsTrue(new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5).UpliftResistFloor, "ships on");
+        }
+
+        [TestMethod]
+        public void Archetype_switch_on_with_nothing_uplifted_builds_no_context()
+        {
+            var spec = WideSpec("deep");
+
+            var on = DungeonPopulationBuilder.Build(spec, Dungeon(6), Store(), WideSpecies(), WideLevelOf, HealthOf,
+                ArchetypeLimits(true), new Random(9), WideProfileOf, archetypeProfileOf: Throwing);
+
+            Assert.IsFalse(on.Entries.Any(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss), "fixture: deep never widens");
+            Assert.IsNull(on.ArchetypeUplift, "and the archetype profile was never read (the delegate throws)");
+        }
+
+        /// <summary>
+        /// The run-level archetype standards S_A(L) are measured over the NATURAL band only (orchestrator ruling 2026-10-23,
+        /// option a), so dynamic_dungeons_band_low_floor cannot move the uplift's target: a band floor of 0.25 and of 1.0 give
+        /// the same S_A(L) on the same roster. The fixture holds 3 trash in the natural band [400, 460] (under MinSample) and
+        /// 6 much weaker ones down at 200-250, so a widened walk WOULD sample them - the control assertion proves that.
+        /// </summary>
+        [TestMethod]
+        public void The_run_level_archetype_standard_ignores_the_band_low_floor()
+        {
+            var levels = new Dictionary<uint, int>
+            {
+                [700] = 405, [701] = 420, [702] = 450,
+                [710] = 200, [711] = 210, [712] = 220, [713] = 230, [714] = 240, [715] = 250,
+            };
+            var tables = new Dictionary<string, SpeciesTableDef>
+            {
+                ["mixed"] = new SpeciesTableDef { Id = "mixed", Members = levels.Keys.Select(w => new SpeciesMemberDef { Wcid = w, Role = 0 }).ToList() },
+            };
+
+            DungeonStatProfile ProfileOf(uint wcid)
+            {
+                var level = levels[wcid];
+                return new DungeonStatProfile(level, (uint)(level * 10), new Dictionary<Skill, uint> { [Skill.MeleeDefense] = (uint)(level * 2) },
+                    (uint)level, (uint)(level * 3));
+            }
+
+            DungeonPopulationLimits Limits(double floor) => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5,
+                rewardScalingEnabled: false, bandLowFloorRatio: floor, minMonsters: 0, reachUp: false, statCurve: false, archetypeUplift: true);
+
+            var spec = new DungeonGemSpec("filos_doom", 400, 6, "mixed", 1, new (string, double)[0], 0, 0);
+
+            string Shape(DungeonArchetypeStandards s) => string.Join(";", new[] { CreatureArchetype.Unclassified }.Concat(DungeonArchetypeStandards.Partitioned)
+                .Select(a => s.Get(a)).Select(x => $"{x.SampleCount}/{x.SampleLowRatio:R}/{x.EffectiveDamage:R}/{x.Health:R}/{x.Core.MaxBodyDamage}/{x.Core.MaxBaseArmor}/{x.Core.MedianFor(Skill.MeleeDefense)}"));
+
+            var wide = DungeonPopulationBuilder.BuildArchetypeContext(spec, tables, Limits(0.25), null, ProfileOf);
+            var natural = DungeonPopulationBuilder.BuildArchetypeContext(spec, tables, Limits(1.0), null, ProfileOf);
+
+            Assert.AreEqual(Shape(natural.RunMeasured), Shape(wide.RunMeasured), "S_A(L) must not depend on the band floor");
+            Assert.AreEqual(3, wide.RunMeasured.All.SampleCount, "only the natural band's three members");
+
+            // Control: the same walk with the floor applied DOES reach the weak members, so the equality above discriminates.
+            var band = new DungeonRosterBand(DungeonPopulationLimits.DefaultRosterBandLow, DungeonPopulationLimits.DefaultRosterBandHigh);
+            var roster = new RosterArchetypes(tables, band, 0.25, ProfileOf);
+            var widened = DungeonArchetypeStandards.Measure(tables, 400, ProfileOf, roster, band, 0.25);
+            Assert.IsTrue(widened.All.SampleCount > 3, "a widened walk would have sampled the level 200-250 members");
+            Assert.AreNotEqual(Shape(widened), Shape(wide.RunMeasured));
+        }
+
+        /// <summary>
+        /// The same invariant through the RATIO TRANSFER: a caster thin in the run's natural band takes S_A(L) from the
+        /// highest band below where casters are adequate in THEIR natural band (level 300 here), whatever the band floor.
+        /// Under floor 0.25 a widened reference walk would already be adequate at 375 (reaching the level-300 and level-200
+        /// casters together) and transfer a different ratio; the resolved run-level standard must not move.
+        /// </summary>
+        [TestMethod]
+        public void A_ratio_transferred_run_level_standard_ignores_the_band_low_floor()
+        {
+            TestGameTables.EnsureInitialized();
+
+            var attrs = new Dictionary<ACE.Entity.Enum.Properties.PropertyAttribute, uint>
+            {
+                [ACE.Entity.Enum.Properties.PropertyAttribute.Strength] = 300,
+                [ACE.Entity.Enum.Properties.PropertyAttribute.Coordination] = 300,
+                [ACE.Entity.Enum.Properties.PropertyAttribute.Focus] = 300,
+                [ACE.Entity.Enum.Properties.PropertyAttribute.Self] = 300,
+            };
+
+            DungeonStatProfile Caster(int level, uint dval) => new DungeonStatProfile(level, (uint)(level * 10),
+                new Dictionary<Skill, uint> { [Skill.WarMagic] = (uint)level, [Skill.MeleeDefense] = (uint)level }, dval, 100, 6, 0.0, attrs,
+                new ArchetypeFacts(null, false, false, new Dictionary<Skill, int> { [Skill.WarMagic] = 1 },
+                    new[] { new SpellRoll(0.6, Skill.WarMagic) }, effectiveMaxDamage: dval, bestProjectileMean: dval * 2.0));
+
+            DungeonStatProfile Melee(int level, uint dval) => new DungeonStatProfile(level, (uint)(level * 30),
+                new Dictionary<Skill, uint> { [Skill.Sword] = (uint)level, [Skill.MeleeDefense] = (uint)level }, dval, 1000, 0, 0.0, attrs,
+                new ArchetypeFacts(null, false, false, null, effectiveMaxDamage: dval));
+
+            var profiles = new Dictionary<uint, DungeonStatProfile>();
+            uint next = 800;
+
+            void Add(int count, Func<int, DungeonStatProfile> make, int baseLevel)
+            {
+                for (var i = 0; i < count; i++)
+                    profiles[next++] = make(baseLevel + i);
+            }
+
+            Add(5, l => Melee(l, 400), 400);    // run natural band [400, 460]: melee adequate
+            Add(2, l => Caster(l, 100), 410);   // casters thin there
+            Add(5, l => Melee(l, 300), 300);    // natural band at 300: both adequate - the natural-only reference
+            Add(5, l => Caster(l, 150), 300);
+            Add(5, l => Melee(l, 200), 200);    // the own end (level 200), and what a widened walk would also reach
+            Add(5, l => Caster(l, 20), 200);
+            var uplifted = next - 5;            // the level-200 caster: its own natural band [200, 230] holds all ten
+
+            var tables = new Dictionary<string, SpeciesTableDef>
+            {
+                ["mixed"] = new SpeciesTableDef { Id = "mixed", Members = profiles.Keys.Select(w => new SpeciesMemberDef { Wcid = w, Role = 0 }).ToList() },
+            };
+
+            DungeonStatProfile ProfileOf(uint w) => profiles.TryGetValue(w, out var p) ? p : null;
+
+            DungeonPopulationLimits Limits(double floor) => new DungeonPopulationLimits(120, 2.0, 3.0, 8, 0.5,
+                rewardScalingEnabled: false, bandLowFloorRatio: floor, minMonsters: 0, reachUp: false, statCurve: false, archetypeUplift: true);
+
+            var spec = new DungeonGemSpec("filos_doom", 400, 6, "mixed", 1, new (string, double)[0], 0, 0);
+
+            var wide = DungeonPopulationBuilder.BuildArchetypeContext(spec, tables, Limits(0.25), null, ProfileOf);
+            var natural = DungeonPopulationBuilder.BuildArchetypeContext(spec, tables, Limits(1.0), null, ProfileOf);
+
+            var w = wide.For(uplifted);
+            var n = natural.For(uplifted);
+
+            Assert.IsNotNull(w);
+            Assert.IsNotNull(n);
+            Assert.AreEqual(CreatureArchetype.Caster, n.Archetype, $"the fixture's casters classify as casters ({natural.Roster.Classify(800).Archetype} for the melee)");
+            Assert.AreEqual(CreatureArchetype.Caster, n.Source, $"the fixture must resolve the caster's own archetype ({n.SourceDescription})");
+            Assert.AreEqual(300, n.RunSourceLevel, "thin at L: ratio-transferred from the level-300 natural band");
+            Assert.AreEqual(n.RunSourceLevel, w.RunSourceLevel, "the band floor must not move the reference band");
+            Assert.AreEqual(n.Run.EffectiveDamage, w.Run.EffectiveDamage, 1e-9);
+            Assert.AreEqual(n.Run.Health, w.Run.Health, 1e-9);
+            Assert.AreEqual(n.Run.SpellOutput, w.Run.SpellOutput, 1e-9);
+            Assert.AreEqual(n.Run.Core.MaxBaseArmor, w.Run.Core.MaxBaseArmor);
+            Assert.AreEqual(n.Run.Core.MedianFor(Skill.MeleeDefense), w.Run.Core.MedianFor(Skill.MeleeDefense));
+        }
+
         /// <summary>
         /// I-E: dynamic_dungeons_band_low_floor = 1.0 reproduces the pre-feature behaviour - no widening, no
         /// uplift tag, and so (since the spawner gates the prefix on the tag) no rename. The same fixture
@@ -1798,6 +2053,112 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void An_unset_plan_multiplier_is_neutral()
         {
             Assert.AreEqual(1.0, new DungeonSpawnPlan().LootQuantityMult, 1e-9);
+        }
+
+        // ---- the Threads weak point (plan-hash guard) ---------------------------------------------------------
+        //
+        // The weak point is a pure lookup in the builder: it draws nothing from the rng and adds no plan note (Notes are in
+        // the pinned plan fingerprint), so the plan a seed produces is the same with the feature on, off, or missing a row.
+
+        private const string BanderlingLow = "{\"version\":1,\"families\":[{\"family\":\"banderling\",\"height\":\"low\",\"bossHeight\":\"high\"}]}";
+
+        private static (DungeonSpawnPlan Plan, int NextDraw) BuildWeak(ThreadDungeonStore store, DungeonPopulationLimits limits)
+        {
+            var rng = new Random(3);
+            var plan = DungeonPopulationBuilder.Build(Spec(), Dungeon(12), store, Species(), LevelOf, HealthOf, limits, rng);
+
+            return (plan, rng.Next());
+        }
+
+        [TestMethod]
+        public void The_same_seed_builds_the_same_plan_and_weak_point()
+        {
+            var a = BuildWeak(Store(BanderlingLow), Limits());
+            var b = BuildWeak(Store(BanderlingLow), Limits());
+
+            Assert.IsNotNull(a.Plan.WeakPoint, "guard: the listed family resolved a weak point");
+            Assert.AreEqual(ShippedRosterFixture.Fingerprint(a.Plan), ShippedRosterFixture.Fingerprint(b.Plan));
+            Assert.AreEqual(a.Plan.WeakPoint.TrashHeight, b.Plan.WeakPoint.TrashHeight);
+            Assert.AreEqual(a.Plan.WeakPoint.BossHeight, b.Plan.WeakPoint.BossHeight);
+        }
+
+        [TestMethod]
+        public void The_plan_fingerprint_and_rng_stream_are_identical_with_the_weak_point_on_off_or_missing()
+        {
+            var on = BuildWeak(Store(BanderlingLow), Limits());
+            var switchedOff = BuildWeak(Store(BanderlingLow), Limits(weakPoint: false));
+            var cutZero = BuildWeak(Store(BanderlingLow), Limits(weakPointArmorCut: 0));
+            var otherFamily = BuildWeak(Store("{\"version\":1,\"families\":[{\"family\":\"drudge\",\"height\":\"low\"}]}"), Limits());
+            var noFile = BuildWeak(Store(), Limits());
+
+            Assert.IsNotNull(on.Plan.WeakPoint, "positive control: the weak point resolved");
+            Assert.AreEqual("banderling", on.Plan.FamilyId, "guard: the fixture draws the listed family");
+
+            var expected = ShippedRosterFixture.Fingerprint(on.Plan);
+
+            foreach (var (name, other) in new[] { ("switch off", switchedOff), ("cut 0", cutZero), ("family missing", otherFamily), ("no file", noFile) })
+            {
+                Assert.AreEqual(expected, ShippedRosterFixture.Fingerprint(other.Plan), $"{name}: the plan fingerprint moved");
+                Assert.AreEqual(on.NextDraw, other.NextDraw, $"{name}: the weak point drew from the rng");
+                Assert.AreEqual(on.Plan.Notes.Count, other.Plan.Notes.Count, $"{name}: a plan note was added");
+            }
+        }
+
+        [TestMethod]
+        public void The_switch_off_the_zero_cut_and_an_unlisted_family_leave_the_plan_without_a_weak_point()
+        {
+            Assert.IsNull(BuildWeak(Store(BanderlingLow), Limits(weakPoint: false)).Plan.WeakPoint, "switch off");
+            Assert.IsNull(BuildWeak(Store(BanderlingLow), Limits(weakPointArmorCut: 0)).Plan.WeakPoint, "cut 0");
+            Assert.IsNull(BuildWeak(Store("{\"version\":1,\"families\":[{\"family\":\"drudge\",\"height\":\"low\"}]}"), Limits()).Plan.WeakPoint, "family missing");
+            Assert.IsNull(BuildWeak(Store(), Limits()).Plan.WeakPoint, "no file");
+        }
+
+        [TestMethod]
+        public void A_run_with_no_drawn_family_still_gets_a_random_third_weak_point_without_a_draw_or_a_note()
+        {
+            var spec = new DungeonGemSpec("filos_doom", 100, 6, "no_such_family", 1, new (string, double)[0], 0, 0);
+
+            (DungeonSpawnPlan Plan, int NextDraw) Run(DungeonPopulationLimits limits)
+            {
+                var rng = new Random(3);
+                var plan = DungeonPopulationBuilder.Build(spec, Dungeon(4), Store(BanderlingLow), Species(), LevelOf, HealthOf, limits, rng);
+                return (plan, rng.Next());
+            }
+
+            var on = Run(Limits());
+            var off = Run(Limits(weakPoint: false));
+
+            Assert.IsNull(on.Plan.FamilyId, "guard: no family was drawn");
+            Assert.IsNotNull(on.Plan.WeakPoint);
+            Assert.IsNull(on.Plan.WeakPoint.TrashHeight);
+            Assert.IsNull(on.Plan.WeakPoint.BossHeight);
+            Assert.AreEqual(DungeonPopulationLimits.DefaultWeakPointArmorCut, on.Plan.WeakPoint.ArmorCut, 1e-12);
+            Assert.IsNull(off.Plan.WeakPoint, "switch off");
+            Assert.IsNull(Run(Limits(weakPointArmorCut: 0)).Plan.WeakPoint, "cut 0");
+            Assert.AreEqual(ShippedRosterFixture.Fingerprint(off.Plan), ShippedRosterFixture.Fingerprint(on.Plan));
+            Assert.AreEqual(off.NextDraw, on.NextDraw, "the weak point drew from the rng");
+            Assert.AreEqual(off.Plan.Notes.Count, on.Plan.Notes.Count, "a plan note was added");
+        }
+
+        [TestMethod]
+        public void The_plan_carries_the_listed_heights_and_the_cut()
+        {
+            var listed = BuildWeak(Store(BanderlingLow), Limits(weakPointArmorCut: 0.25)).Plan.WeakPoint;
+
+            Assert.AreEqual(AttackHeight.Low, listed.TrashHeight);
+            Assert.AreEqual(AttackHeight.High, listed.BossHeight);
+            Assert.AreEqual(0.25, listed.ArmorCut, 1e-12);
+
+            var noBossHeight = BuildWeak(Store("{\"version\":1,\"families\":[{\"family\":\"banderling\",\"height\":\"medium\"}]}"), Limits()).Plan.WeakPoint;
+
+            Assert.AreEqual(AttackHeight.Medium, noBossHeight.TrashHeight);
+            Assert.AreEqual(AttackHeight.Medium, noBossHeight.BossHeight, "an absent bossHeight is the trash height");
+
+            var random = BuildWeak(Store("{\"version\":1,\"families\":[{\"family\":\"banderling\",\"height\":\"random\"}]}"), Limits()).Plan.WeakPoint;
+
+            Assert.IsNotNull(random, "a random family still has a weak point");
+            Assert.IsNull(random.TrashHeight);
+            Assert.IsNull(random.BossHeight);
         }
     }
 }

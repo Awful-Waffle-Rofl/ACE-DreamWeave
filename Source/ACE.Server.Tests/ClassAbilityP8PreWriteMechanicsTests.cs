@@ -37,30 +37,23 @@ namespace ACE.Server.Tests
         // ---- Adrenaline ------------------------------------------------------------------------------
 
         [TestMethod]
-        public void Adrenaline_BonusIsTwoPercentPerRank_AndZeroUnlearned()
+        public void Adrenaline_BonusIsFourPercentPerRank_AndZeroUnlearned()
         {
+            // Berserker pass 2026-10-24: 0.02 -> 0.04 per rank, so +20% at rank 5
             var perRank = D("class_ability_adrenaline_percent_per_rank");
 
-            Assert.AreEqual(0.0, AdrenalineAbility.DamageBonus(0, perRank, 1.0), 1e-9, "rank 0 arms nothing worth anything");
-            Assert.AreEqual(0.02, AdrenalineAbility.DamageBonus(1, perRank, 1.0), 1e-9);
-            Assert.AreEqual(0.10, AdrenalineAbility.DamageBonus(5, perRank, 1.0), 1e-9, "+10% at rank 5, the signed-off top end");
+            Assert.AreEqual(0.04, perRank, 1e-12, "the shipped default");
+            Assert.AreEqual(0.0, AdrenalineAbility.DamageBonus(0, perRank), 1e-9, "rank 0 arms nothing worth anything");
+            Assert.AreEqual(0.04, AdrenalineAbility.DamageBonus(1, perRank), 1e-9);
+            Assert.AreEqual(0.20, AdrenalineAbility.DamageBonus(5, perRank), 1e-9, "+20% at rank 5, the signed-off top end");
         }
 
         [TestMethod]
-        public void Adrenaline_RecklessnessMultipliesTheRankBonusOnly()
+        public void Adrenaline_HasNoAffinity()
         {
-            var perRank = D("class_ability_adrenaline_percent_per_rank");
-
-            // a factor of exactly 1.0 is what a zero / Untrained / Inactive affinity skill produces
-            Assert.AreEqual(AdrenalineAbility.DamageBonus(5, perRank, 1.0), 5 * perRank, 1e-12,
-                "at zero effective Recklessness the bonus must be bit-identical to rank alone");
-
-            // 200 points of a Specialized source at the shared 0.17 rate = 1.34x the ability's own bonus
-            Assert.AreEqual(0.134, AdrenalineAbility.DamageBonus(5, perRank, 1.34), 1e-9);
-
-            // and it scales the rank term, so it is worth nothing at rank 0 - the whole point of the
-            // multiplicative model over an additive rider
-            Assert.AreEqual(0.0, AdrenalineAbility.DamageBonus(0, perRank, 1.34), 1e-12);
+            // Berserker pass 2026-10-24 (owner ruling): the Recklessness affinity was removed outright, so the bonus
+            // is rank x per-rank with no skill term at all
+            Assert.IsNull(new AdrenalineAbility().Definition.AffinitySkill);
         }
 
         // ---- Kinetic Charge --------------------------------------------------------------------------
@@ -115,31 +108,36 @@ namespace ACE.Server.Tests
         public void KineticCharge_TotalCleaveTargets_StacksWeaponWhirlwindAndKinetic()
         {
             // no weapon cleave, no Whirlwind, no Kinetic spend -> no cleave at all
-            Assert.AreEqual(0, Creature.TotalCleaveTargets(0, false, 0));
+            Assert.AreEqual(0, Creature.TotalCleaveTargets(0, 0, 0));
 
-            // a non-cleaving weapon still cleaves for exactly the Kinetic Charge extra
-            Assert.AreEqual(2, Creature.TotalCleaveTargets(0, false, 2));
+            // a non-cleaving weapon (or no weapon) still cleaves for exactly the Kinetic Charge extra
+            Assert.AreEqual(2, Creature.TotalCleaveTargets(0, 0, 2));
 
-            // a two-handed cleaving weapon (1), Whirlwind's +1 and a full Kinetic spend (2) all stack
-            Assert.AreEqual(4, Creature.TotalCleaveTargets(1, true, 2));
+            // a cleaving weapon (1), Whirlwind rank 1's +1 and a full Kinetic spend (2) all stack
+            Assert.AreEqual(4, Creature.TotalCleaveTargets(1, 1, 2));
 
-            // a negative Kinetic extra (should never happen - FlooredCleaveTargets guards the call site) is
+            // Whirlwind adds its RANK (2026-10-24): rank 3 on a non-cleaving weapon is 3 extra targets
+            Assert.AreEqual(3, Creature.TotalCleaveTargets(0, 3, 0));
+            Assert.AreEqual(4, Creature.TotalCleaveTargets(1, 3, 0));
+
+            // a negative Kinetic or Whirlwind extra (should never happen - the call sites floor them) is
             // floored at 0 here too, as a second line of defense
-            Assert.AreEqual(1, Creature.TotalCleaveTargets(1, false, -3));
+            Assert.AreEqual(1, Creature.TotalCleaveTargets(1, 0, -3));
+            Assert.AreEqual(1, Creature.TotalCleaveTargets(1, -2, 0));
         }
 
         // ---- Runic Ward ------------------------------------------------------------------------------
 
         [TestMethod]
-        public void RunicWard_GainIsThreeFiveSevenPercentByRank()
+        public void RunicWard_GainIsThreeSixNinePercentByRank()
         {
             var gainBase = D("class_ability_runicward_gain_base");
             var gainStep = D("class_ability_runicward_gain_step");
 
             Assert.AreEqual(0.0, RunicWardMath.GainFraction(0, gainBase, gainStep, 1.0), 1e-9);
             Assert.AreEqual(0.03, RunicWardMath.GainFraction(1, gainBase, gainStep, 1.0), 1e-9);
-            Assert.AreEqual(0.05, RunicWardMath.GainFraction(2, gainBase, gainStep, 1.0), 1e-9);
-            Assert.AreEqual(0.07, RunicWardMath.GainFraction(3, gainBase, gainStep, 1.0), 1e-9);
+            Assert.AreEqual(0.06, RunicWardMath.GainFraction(2, gainBase, gainStep, 1.0), 1e-9);
+            Assert.AreEqual(0.09, RunicWardMath.GainFraction(3, gainBase, gainStep, 1.0), 1e-9);
         }
 
         [TestMethod]
@@ -148,21 +146,29 @@ namespace ACE.Server.Tests
             var gainBase = D("class_ability_runicward_gain_base");
             var gainStep = D("class_ability_runicward_gain_step");
 
-            Assert.AreEqual(RunicWardMath.GainFraction(3, gainBase, gainStep, 1.0), 0.07, 1e-12,
+            Assert.AreEqual(RunicWardMath.GainFraction(3, gainBase, gainStep, 1.0), 0.09, 1e-12,
                 "at zero effective Item Tinkering the gain must be bit-identical to rank alone");
 
-            Assert.AreEqual(0.0938, RunicWardMath.GainFraction(3, gainBase, gainStep, 1.34), 1e-9);
+            Assert.AreEqual(0.1206, RunicWardMath.GainFraction(3, gainBase, gainStep, 1.34), 1e-9);
             Assert.AreEqual(0.0, RunicWardMath.GainFraction(0, gainBase, gainStep, 1.34), 1e-12);
         }
 
         [TestMethod]
-        public void RunicWard_PoolIsCappedAtFifteenPercentOfMaxHealth()
+        public void RunicWard_PoolIsCappedAtTenTwentyThirtyPercentOfMaxHealthByRank()
         {
-            var capFraction = D("class_ability_runicward_cap_fraction");
+            var r1 = D("class_ability_runicward_cap_fraction_r1");
+            var r2 = D("class_ability_runicward_cap_fraction_r2");
+            var r3 = D("class_ability_runicward_cap_fraction_r3");
 
-            Assert.AreEqual(0.15, capFraction, 1e-9);
-            Assert.AreEqual(75u, RunicWardMath.Cap(500, capFraction));
-            Assert.AreEqual(0u, RunicWardMath.Cap(0, capFraction), "no maximum health, no ward");
+            Assert.AreEqual(0.0, RunicWardMath.CapFraction(0, r1, r2, r3), 1e-9, "no rank, no ward");
+            Assert.AreEqual(0.10, RunicWardMath.CapFraction(1, r1, r2, r3), 1e-9);
+            Assert.AreEqual(0.20, RunicWardMath.CapFraction(2, r1, r2, r3), 1e-9);
+            Assert.AreEqual(0.30, RunicWardMath.CapFraction(3, r1, r2, r3), 1e-9);
+            Assert.AreEqual(0.30, RunicWardMath.CapFraction(4, r1, r2, r3), 1e-9, "a rank above the ladder clamps to rank 3");
+
+            Assert.AreEqual(50u, RunicWardMath.Cap(500, RunicWardMath.CapFraction(1, r1, r2, r3)));
+            Assert.AreEqual(150u, RunicWardMath.Cap(500, RunicWardMath.CapFraction(3, r1, r2, r3)));
+            Assert.AreEqual(0u, RunicWardMath.Cap(0, r3), "no maximum health, no ward");
         }
 
         [TestMethod]
@@ -225,17 +231,29 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0u, second.Remaining.Amount);
         }
 
+        /// <summary>
+        /// The war-spell spend was REMOVED on 2026-10-24: the ward drains only by absorbing. Pinned on the
+        /// source so neither the helper nor the SpellProjectile call site can quietly come back.
+        /// </summary>
         [TestMethod]
-        public void RunicWard_SpendIsAllOrNothing_AndEmptyOnceLapsed()
+        public void RunicWard_HasNoSpendPath_AnyMore()
         {
-            const double now = 10.0;
+            Assert.IsNull(typeof(RunicWardMath).GetMethod("Spend"), "RunicWardMath.Spend was removed");
+            Assert.IsNull(typeof(RunicWardMessages).GetMethod("DischargeMessage"), "the discharge line went with it");
+            Assert.IsNull(typeof(Player).GetMethod("SpendRunicWardIntoWarSpell"), "and so did the Player spend");
 
-            var ward = RunicWardMath.Inscribe(default, 1000, 0.07, 500, now, 12.0);
-            Assert.AreEqual(70u, ward.Amount);
+            var spellProjectile = System.IO.File.ReadAllText(System.IO.Path.Combine(SourceRoot(), "ACE.Server", "WorldObjects", "SpellProjectile.cs"));
+            Assert.IsFalse(spellProjectile.Contains("SpendRunicWard"), "SpellProjectile no longer cashes the ward");
+        }
 
-            Assert.AreEqual(70u, RunicWardMath.Spend(ward, now + 5.0), "a landed war spell cashes the WHOLE pool");
-            Assert.AreEqual(0u, RunicWardMath.Spend(ward, now + 13.0), "a lapsed ward is worth nothing to cash");
-            Assert.AreEqual(0u, RunicWardMath.Spend(default, now), "and an empty one likewise");
+        private static string SourceRoot()
+        {
+            var dir = new System.IO.DirectoryInfo(System.AppContext.BaseDirectory);
+            while (dir != null && !System.IO.Directory.Exists(System.IO.Path.Combine(dir.FullName, "ACE.Server", "WorldObjects")))
+                dir = dir.Parent;
+
+            Assert.IsNotNull(dir, "could not find Source/ by walking up from the test assembly");
+            return dir.FullName;
         }
 
         // ---- Runic Ward chat feedback -----------------------------------------------------------------
@@ -260,13 +278,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual("Your runic ward fades after absorbing 60 points of damage.",
                 RunicWardMessages.FadeMessage(60));
             Assert.AreEqual("Your runic ward fades.", RunicWardMessages.FadeMessage(0));
-        }
-
-        [TestMethod]
-        public void RunicWard_DischargeMessage_ExactText()
-        {
-            Assert.AreEqual("Your runic ward discharges 75 points of damage into Blast Wave!",
-                RunicWardMessages.DischargeMessage(75, "Blast Wave"));
         }
 
         [TestMethod]

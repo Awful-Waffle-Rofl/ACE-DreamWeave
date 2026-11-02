@@ -433,7 +433,10 @@ namespace ACE.Server.Managers.Market
                 return RefuseFill(MarketError.VaultUnavailable, channel, seller, orderId, order, count, "the buyer's vault is not ready");
 
             // A stored-biota delivery costs one entry per bag, so the preflight asks about `count` biotas.
-            // classKey null: a Wanted fill never draws on a class line (out of scope, 2026-09-27).
+            // classKey null even though the take may now draw on the seller's class lines: which lines it
+            // draws on is not known until the take runs, and asking about `count` separate biotas is the
+            // worst case for every source the take can draw on, so it can only refuse a fill that would
+            // have fitted, never admit one past the buyer's cap.
             if (!itemStore.CanReceive(order.BuyerAccountId, order.Wcid /* any non-null guid shape */, order.Wcid, classKey: null, count, out var roomError))
                 return RefuseFill(roomError, channel, seller, orderId, order, count, "the buyer's vault cannot receive it");
 
@@ -504,10 +507,11 @@ namespace ACE.Server.Managers.Market
 
             // ---- step 2: take from the seller, on the SELLER's queue. No BeginSale: the pre-withdraw hook auto-delists. ----
             //
-            // The RECEIPT travels with `taken` and is not optional bookkeeping. This take can draw on a
-            // collapsed ledger row as well as on stored biotas, and once withdrawn the two are
-            // indistinguishable objects; only the store that withdrew them knows which is which, and
-            // only step 3's unwind needs to know. Nothing here reads it - it is handed straight back.
+            // The RECEIPT travels with `taken` and is not optional bookkeeping. This take can draw on
+            // stored biotas, a collapsed ledger row and a counted class line, and once withdrawn the
+            // three are indistinguishable objects; only the store that withdrew them knows which is
+            // which (and which class line each came off), and only step 3's unwind needs to know.
+            // Nothing here reads it - it is handed straight back.
             List<WorldObject> taken = null; MarketTakeReceipt receipt = null;
             var takeError = MarketError.None; var took = false;
 

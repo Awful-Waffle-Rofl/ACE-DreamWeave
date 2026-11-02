@@ -285,7 +285,7 @@ namespace ACE.Server.WeaponMods
                 return 0.0;
 
             return definition.Tier == WeaponModTier.B
-                ? WeaponModValue.MagnitudeFromFraction(definition, record.Value, scale)
+                ? WeaponModValue.MagnitudeFromFraction(definition, record.Value, scale, weapon)
                 : record.Value;
         }
 
@@ -332,7 +332,7 @@ namespace ACE.Server.WeaponMods
             if (weapon == null || definition == null)
                 return 0.0;
 
-            var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale);
+            var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale, weapon);
 
             if (definition.Tier == WeaponModTier.B)
             {
@@ -381,7 +381,7 @@ namespace ACE.Server.WeaponMods
 
             var scale = WeaponModValue.MagnitudeScale();
 
-            weapon.SetProperty(definition.Record, WeaponModValue.FractionFor(definition, magnitude, scale));
+            weapon.SetProperty(definition.Record, WeaponModValue.FractionFor(definition, magnitude, scale, weapon));
         }
 
         /// <summary>

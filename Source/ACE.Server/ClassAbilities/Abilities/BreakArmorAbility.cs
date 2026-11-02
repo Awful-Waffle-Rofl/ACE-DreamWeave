@@ -11,7 +11,8 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Berserker T2 (replaces the retired Blood Fury, 2026-08-17): a landed MELEE hit has a flat 15% chance
+    /// Berserker T2 (replaces the retired Blood Fury, 2026-08-17): a landed MELEE OR MISSILE hit (missile added
+    /// 2026-10-24, Berserker pass) has a flat 15% chance
     /// to shatter the target's guard, applying Imperil III / V / VII (by rank) - a Life Magic BodyArmorValue
     /// debuff, the same family Malediction already amplifies (MaledictionAbility.AffectsSpell). Patterned on
     /// SundermarkAbility: applied directly through CreateEnchantment (no resist check on that path) plus a
@@ -37,7 +38,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "breakarmor",
             DisplayName = "Break Armor",
-            Description = "Your melee hits have a 15% chance to shatter the target's guard, casting Imperil " +
+            Description = "Your melee and missile hits have a 15% chance to shatter the target's guard, casting Imperil " +
                           "III / V / VII on it by rank. It cannot be resisted. Higher Weapon Tinkering raises " +
                           "the chance.",
             MaxRank = 3,
@@ -92,8 +93,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (attacker == null || target == null || damageEvent == null)
                 return;
 
-            // MELEE ONLY - the old Blood Fury melee gate, carried forward. Missile/magic hits never proc it.
-            if (damageEvent.CombatType != CombatType.Melee)
+            // MELEE AND MISSILE (owner ruling 2026-10-24, Berserker pass - it was melee only until then). Spells
+            // never reach this hook at all, so a magic hit still never procs it.
+            if (damageEvent.CombatType != CombatType.Melee && damageEvent.CombatType != CombatType.Missile)
                 return;
 
             // A dead target cannot be usefully debuffed (the strike that triggered this frequently kills).

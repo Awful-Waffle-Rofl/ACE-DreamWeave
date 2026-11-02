@@ -50,14 +50,18 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Forces this monster to attack the taunter for the given duration, waking it if idle.
         /// Mirrors the retaliate checks in Player_Monster.OnAttackMonster.
+        ///
+        /// The taunter is any Creature (Custom Summons: a Tank pet's pulse, CombatPet.TickTauntPulse); every
+        /// Player caller is unchanged, since nothing below reads a Player member. The pet pulse only ever
+        /// reaches an already-awake monster, so it never takes the WakeUp branch.
         /// </summary>
-        public void ApplyTaunt(Player taunter, double duration)
+        public void ApplyTaunt(Creature taunter, double duration)
         {
             if ((Tolerance & PlayerCombatPet_RetaliateExclude) != 0)
                 return;
 
             TauntTarget = taunter;
-            TauntExpiry = Timers.RunningTime + duration;
+            TauntExpiry = Timers.RunningTime + duration * GetMonsterEffectTauntHoldMultiplier();
 
             var prevAttackTarget = AttackTarget;
             AttackTarget = taunter;
@@ -75,6 +79,10 @@ namespace ACE.Server.WorldObjects
         {
             if (DebugMove)
                 Console.WriteLine($"{Name} ({Guid}).Sleep()");
+
+            // Open World Threads (R11c): every return-home leg ends here, in State.Return.
+            if (MonsterState == State.Return && P_OutdoorPerimeter != null)
+                OnOutdoorPerimeterHomeArrival();
 
             SetCombatMode(CombatMode.NonCombat);
 
@@ -103,7 +111,7 @@ namespace ACE.Server.WorldObjects
         public TargetingTactic TargetingTactic
         {
             get => (TargetingTactic)(GetProperty(PropertyInt.TargetingTactic) ?? 0);
-            set { if (value == 0) RemoveProperty(PropertyInt.TargetingTactic); else SetProperty(PropertyInt.TargetingTactic, (int)TargetingTactic); }
+            set { if (value == 0) RemoveProperty(PropertyInt.TargetingTactic); else SetProperty(PropertyInt.TargetingTactic, (int)value); }
         }
 
         /// <summary>
@@ -175,7 +183,9 @@ namespace ACE.Server.WorldObjects
 
                 SetNextTargetTime();
 
-                var visibleTargets = FilterTetheredTargets(GetAttackTargets());
+                // Open World Threads (R11b/R13): an outdoor run creature also drops players past the circle and, when
+                // interior-spawned, anything out of direct line of sight. Same list back for every other creature.
+                var visibleTargets = FilterOutdoorPerimeterTargets(FilterTetheredTargets(GetAttackTargets()));
 
                 // Taunt class ability - a still-valid forced target overrides tactic selection entirely.
                 // The hold requires direct line of sight: if the taunter breaks LoS (hides behind
@@ -200,6 +210,12 @@ namespace ACE.Server.WorldObjects
                     }
                     TauntTarget = null;
                 }
+
+                // WaffleACE fork, World Events Hold: a seeker goes for a knight of its run, a hunter for a player who healed
+                // one. After the Taunt hold on purpose, so a taunt still pulls a seeker off. Falls through to normal targeting
+                // when nothing is in reach. One field read for every creature with no Hold tag.
+                if (ACE.Server.WorldEvents.WorldEventHooks.TrySelectHoldTarget(this))
+                    return true;
 
                 if (visibleTargets.Count == 0)
                 {
@@ -304,6 +320,11 @@ namespace ACE.Server.WorldObjects
                 if (IsTethered && !visibleTargets.Contains(AttackTarget as Creature))
                     AttackTarget = BuildTargetDistance(visibleTargets)[0].Target;
 
+                // Open World Threads (R11b): the same snap for an outdoor run creature, whose filtered list can likewise
+                // exclude a LastDamager/TopDamager/Focused pick (a player who has left the circle).
+                if (P_OutdoorPerimeter != null && !visibleTargets.Contains(AttackTarget as Creature))
+                    AttackTarget = BuildTargetDistance(visibleTargets)[0].Target;
+
                 if (AttackTarget != null && AttackTarget != prevAttackTarget)
                     EmoteManager.OnNewEnemy(AttackTarget);
 
@@ -326,6 +347,10 @@ namespace ACE.Server.WorldObjects
             {
                 // ensure attackable
                 if (!creature.Attackable && creature.TargetingTactic == TargetingTactic.None || creature.Teleporting) continue;
+
+                // WaffleACE fork, World Events Hold: a knight is only ever chosen by a seeker (TrySelectHoldTarget), never by
+                // an ordinary tactic, so the rest of the wave keeps going for the players.
+                if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(creature)) continue;
 
                 // ensure within 'detection radius' ?
                 var chaseDistSq = creature == AttackTarget ? MaxChaseRangeSq : VisualAwarenessRangeSq;
@@ -565,6 +590,11 @@ namespace ACE.Server.WorldObjects
 
             var targetCreature = AttackTarget as Creature;
 
+            // WaffleACE fork, World Events Hold: a seeker going for a knight does not recruit the monsters around it, or one
+            // seeker would turn its whole pack onto the knight.
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(targetCreature))
+                return;
+
             var alerted = false;
 
             foreach (var obj in visibleObjs)
@@ -604,6 +634,10 @@ namespace ACE.Server.WorldObjects
                     }
 
                     alerted = true;
+
+                    // WaffleACE fork, World Events Hold: an alerted seeker goes for its knight, not the alert's target.
+                    if (ACE.Server.WorldEvents.WorldEventHooks.KeepsHoldSeekerLock(nearbyCreature, this))
+                        continue;
 
                     nearbyCreature.AttackTarget = AttackTarget;
                     nearbyCreature.WakeUp(false);

@@ -42,7 +42,8 @@ namespace ACE.Server.Pvp
         /// The refusal a spawn-protected target returns from Player.CheckPKStatusVsTarget. A distinct instance (its two entries are
         /// placeholders no caller may send) so the three call sites that report a PK error to the attacker and the target
         /// (Player_Combat DamageTarget, Player_Magic cast, SpellProjectile impact) recognise it by reference and send NOTHING: the
-        /// attacker already got the throttled "is protected" line, and the protected player is told nothing.
+        /// attacker already got the throttled "is protected" line, and the protected player is told nothing. The Tugak Brawl spell-only
+        /// refusal (pvp_arena_ffa_spell_only) reuses the same silent instance: its throttled line is the only message there too.
         /// </summary>
         internal static readonly System.Collections.Generic.List<ACE.Entity.Enum.WeenieErrorWithString> SpawnProtectedRefusal =
             new System.Collections.Generic.List<ACE.Entity.Enum.WeenieErrorWithString>
@@ -54,6 +55,105 @@ namespace ACE.Server.Pvp
         /// <summary>True when <paramref name="refusal"/> is <see cref="SpawnProtectedRefusal"/>: report nothing.</summary>
         internal static bool IsSpawnProtectedRefusal(System.Collections.Generic.List<ACE.Entity.Enum.WeenieErrorWithString> refusal)
             => ReferenceEquals(refusal, SpawnProtectedRefusal);
+
+        /// <summary>pvp_bg_spawn_refill_cooldown_seconds, read at each spawn-room refill. A seam so tests can set it without PropertyManager.</summary>
+        internal static Func<long> SpawnRefillCooldownSecondsSource = ReadSpawnRefillCooldownSeconds;
+
+        /// <summary>The code default of pvp_bg_spawn_refill_cooldown_seconds (also the fallback when PropertyManager is unreadable).</summary>
+        public const long SpawnRefillCooldownSecondsDefault = 10;
+
+        private static long ReadSpawnRefillCooldownSeconds()
+        {
+            try
+            {
+                return PropertyManager.GetLong("pvp_bg_spawn_refill_cooldown_seconds", SpawnRefillCooldownSecondsDefault).Item;
+            }
+            catch (Exception)
+            {
+                return SpawnRefillCooldownSecondsDefault;
+            }
+        }
+
+        /// <summary>pvp_match_free_components, read at each cast and at match bind, exit and login. A seam so tests can set it without PropertyManager.</summary>
+        internal static Func<bool> MatchFreeComponentsSource = ReadMatchFreeComponents;
+
+        /// <summary>The code default of pvp_match_free_components (also the fallback when PropertyManager is unreadable).</summary>
+        public const bool MatchFreeComponentsDefault = true;
+
+        private static bool ReadMatchFreeComponents()
+        {
+            try
+            {
+                return PropertyManager.GetBool("pvp_match_free_components", MatchFreeComponentsDefault).Item;
+            }
+            catch (Exception)
+            {
+                return MatchFreeComponentsDefault;
+            }
+        }
+
+        /// <summary>pvp_match_block_dual_wield, read at each equip into the off-hand and at match entry. A seam so tests can set it without PropertyManager.</summary>
+        internal static Func<bool> MatchBlockDualWieldSource = ReadMatchBlockDualWield;
+
+        /// <summary>The code default of pvp_match_block_dual_wield (also the fallback when PropertyManager is unreadable).</summary>
+        public const bool MatchBlockDualWieldDefault = true;
+
+        internal static bool ReadMatchBlockDualWield()
+        {
+            try
+            {
+                return PropertyManager.GetBool("pvp_match_block_dual_wield", MatchBlockDualWieldDefault).Item;
+            }
+            catch (Exception)
+            {
+                return MatchBlockDualWieldDefault;
+            }
+        }
+
+        /// <summary>pvp_match_grant_spells, read at each queue join and template apply. A seam so tests can set it without PropertyManager.</summary>
+        internal static Func<bool> MatchGrantSpellsSource = ReadMatchGrantSpells;
+
+        /// <summary>The code default of pvp_match_grant_spells (also the fallback when PropertyManager is unreadable).</summary>
+        public const bool MatchGrantSpellsDefault = true;
+
+        internal static bool ReadMatchGrantSpells()
+        {
+            try
+            {
+                return PropertyManager.GetBool("pvp_match_grant_spells", MatchGrantSpellsDefault).Item;
+            }
+            catch (Exception)
+            {
+                return MatchGrantSpellsDefault;
+            }
+        }
+
+        /// <summary>The professor spell lists the match grant reads (school, level). A seam so tests need no World database.</summary>
+        internal static Func<string, int, System.Collections.Generic.IReadOnlyList<uint>> MatchGrantSpellListSource = ACE.Server.Entity.SpellTutor.GetTaughtSpellIds;
+
+        /// <summary>The server-wide require_spell_comps flag, read by Player.ClientSpellComponentsRequired. A seam so tests can set it without PropertyManager (which throws unseeded).</summary>
+        internal static Func<bool> RequireSpellCompsSource = () => PropertyManager.GetBool("require_spell_comps").Item;
+
+        /// <summary>pvp_arena_ffa_spell_only, read per gated physical attack. A seam so tests can set it without PropertyManager.</summary>
+        internal static Func<bool> FfaSpellOnlySource = ReadFfaSpellOnly;
+
+        /// <summary>The code default of pvp_arena_ffa_spell_only (also the fallback when PropertyManager is unreadable).</summary>
+        public const bool FfaSpellOnlyDefault = true;
+
+        /// <summary>How often the "only Curse of Raven Fury can hurt" line may repeat: a swing, a cleave or a volley checks every target at once.</summary>
+        public const double FfaSpellOnlyNoticeIntervalSeconds = 3.0;
+
+        private static bool ReadFfaSpellOnly()
+        {
+            try
+            {
+                return PropertyManager.GetBool("pvp_arena_ffa_spell_only", FfaSpellOnlyDefault).Item;
+            }
+            catch (Exception)
+            {
+                return FfaSpellOnlyDefault;
+            }
+        }
 
         private static bool ReadFriendlyFire()
         {

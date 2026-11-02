@@ -97,7 +97,7 @@ namespace ACE.Server.Tests
             const int rowsAddedByTheV3Expansion = 6;
 
             // 2026-08-17: the v4 expansion (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick
-            // Refresh, Arcane Defender, Panic Reload) added nine more, currently inert - covered in detail in
+            // Refresh, Arcane Defender - now Defensive Weapon - Panic Reload) added nine more, currently inert - covered in detail in
             // WeaponModCatalogV4Tests.cs. Same reasoning as the v3 count above.
             const int rowsAddedByTheV4Expansion = 9;
 
@@ -200,15 +200,15 @@ namespace ACE.Server.Tests
 
                     var before = SnapshotFloats(weapon);
                     var fraction = WeaponModValue.RollFraction(1.0, workmanship);
-                    var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, 1.0);
+                    var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, 1.0, weapon);
 
                     Assert.AreEqual(workmanship / 10.0, fraction, 1e-12,
                         $"{definition.Id}: a perfect roll at workmanship {workmanship} is exactly that workmanship as a fraction, with no MaxRoll term in it");
 
-                    Assert.AreEqual(WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0), magnitude, 1e-12,
+                    Assert.AreEqual(WeaponModValue.Resolve(definition, 1.0, workmanship, 1.0, weapon), magnitude, 1e-12,
                         $"{definition.Id}: fraction storage must be substitutable for Resolve - if these diverge, a rolled weapon and a seeded one stop agreeing");
 
-                    Assert.AreEqual(definition.MaxRoll * workmanship / 10.0, magnitude, 1e-12,
+                    Assert.AreEqual(definition.MaxRollFor(weapon) * workmanship / 10.0, magnitude, 1e-12,
                         $"{definition.Id}: a perfect roll at workmanship {workmanship} is exactly the linear fraction, with no rounding");
 
                     WeaponModTinkerSet.ApplySpecialAtFraction(weapon, definition, fraction, 1.0);
@@ -425,7 +425,7 @@ namespace ACE.Server.Tests
             var weapon = WeaponModTestKit.MakeUntinkered(WeaponClass.Melee);
 
             foreach (var definition in WeaponModRegistry.TierBMods)
-                WeaponModTinkerSet.ApplySpecial(weapon, definition, definition.MaxRoll);
+                WeaponModTinkerSet.ApplySpecial(weapon, definition, definition.MaxRollFor(weapon));
 
             WithGate(false, () =>
             {
@@ -448,7 +448,7 @@ namespace ACE.Server.Tests
             {
                 foreach (var definition in WeaponModRegistry.TierBMods)
                 {
-                    Assert.AreEqual(definition.MaxRoll, WeaponModCombat.ReadWeaponOnly(weapon, definition.Id), 1e-15,
+                    Assert.AreEqual(definition.MaxRollFor(weapon), WeaponModCombat.ReadWeaponOnly(weapon, definition.Id), 1e-15,
                         $"{definition.Id} reads zero with weapon_mods_enabled TRUE, so its hook would never fire");
                 }
 
@@ -477,8 +477,8 @@ namespace ACE.Server.Tests
         {
             WithGate(true, () =>
             {
-                Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 5 Tier B v4");
-                Assert.AreEqual(17, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 6 Tier B v4");
+                Assert.AreEqual(17, WeaponModRegistry.Pool(WeaponClass.Melee).Count, "melee pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 6 Tier B v4 (Defensive Weapon joined melee 2026-10-25)");
+                Assert.AreEqual(18, WeaponModRegistry.Pool(WeaponClass.Missile).Count, "missile pool with the gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 7 Tier B v4 (Defensive Weapon joined missile 2026-10-25)");
                 Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Caster).Count, "caster pool with the gate on: 3 Tier A + 2 Tier B v2 + 3 Tier B v3 + 8 Tier B v4");
 
                 foreach (var (id, _, _, classes, _) in Expected)

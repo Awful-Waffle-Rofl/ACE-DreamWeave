@@ -275,8 +275,20 @@ namespace ACE.Server.ThreadDungeons
                     break;
             }
 
+            return FromSample(sample, lowRatio, formulaOf);
+        }
+
+        /// <summary>
+        /// The standard over an already-chosen sample (<see cref="Compute"/>'s reduction step, extracted unchanged so the
+        /// Threads archetype standards reduce each archetype's sample with exactly the same medians). <see cref="Empty"/>
+        /// for a null or empty sample. <paramref name="formulaOf"/> null reads as the production resolver.
+        /// </summary>
+        internal static DungeonBandStandard FromSample(List<DungeonStatProfile> sample, double lowRatio, Func<Skill, SkillFormula> formulaOf)
+        {
             if (sample == null || sample.Count == 0)
                 return Empty;
+
+            formulaOf ??= DefaultFormulaOf;
 
             return new DungeonBandStandard(SkillMediansOf(sample),
                 DungeonRosterSelector.LowerMedian(sample.Select(p => p.MaxBodyDamage).Where(v => v > 0)),
@@ -361,7 +373,7 @@ namespace ACE.Server.ThreadDungeons
         /// The distinct role-0 members of every table whose live level falls in <paramref name="band"/>'s
         /// trash band and whose profile carries at least one usable data point, in wcid-stable order.
         /// </summary>
-        private static List<DungeonStatProfile> SampleAt(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level,
+        internal static List<DungeonStatProfile> SampleAt(IReadOnlyDictionary<string, SpeciesTableDef> tables, int level,
             Func<uint, DungeonStatProfile> profileOf, DungeonRosterBand band, int maxHighEdge = int.MaxValue)
         {
             var b = DungeonRosterSelector.TrashBand(level, band);

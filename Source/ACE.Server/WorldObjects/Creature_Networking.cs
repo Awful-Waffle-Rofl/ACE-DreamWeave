@@ -213,8 +213,8 @@ namespace ACE.Server.WorldObjects
                         // AddSetupAsClothingBase fallback below is deliberately NOT used - it would
                         // dress the wearer in the item's own ground Setup - and the overrides replace
                         // it outright. hasModelOverrides guarantees at least one pair is applied here.
-                        // Only the item's texture_map rows for override parts are merged; its palette
-                        // rows are not emitted on this path.
+                        // The item's texture_map rows for override parts are merged, and its own
+                        // palette rows are appended (see ApplyWornModelOverrides).
                         ApplyWornModelOverrides(objDesc, w, modelOverrides, exclusions, coverage, mergeTextureRowsForOverrideParts: true);
                         continue;
                     }
@@ -457,8 +457,21 @@ namespace ACE.Server.WorldObjects
         /// merged for its override parts only, since every other part is one the item does not dress.
         /// On the ClothingTable path it is false, because that path's general item-row merge already
         /// covers every non-excluded part.
+        ///
+        /// On those same paths the item's own palette rows (weenie_properties_palette) are appended to
+        /// the wearer too, after everything already in the ObjDesc, so they win client-side the same way
+        /// the ClothingTable path's item-level palette rows do. Without this, an override item could set
+        /// its meshes but never their colour: its palette rows only ever reached its own ground/pack
+        /// model. An item with no palette rows (Asheron's Regalia, 1006363) appends nothing and is
+        /// unchanged. Each row gets the same base-appearance clip as the ClothingTable path's item rows
+        /// (only when the item carries a non-empty ClothingPartExclusions set), and rows the wire format
+        /// cannot carry are dropped (see AppendWornOverridePaletteRows).
+        ///
+        /// Internal rather than private so ACE.Server.Tests can pin it (InternalsVisibleTo,
+        /// ACE.Server.csproj:15). It reads no dat file: the caller has already reduced the overrides to
+        /// the applicable pairs.
         /// </summary>
-        private static void ApplyWornModelOverrides(ACE.Entity.ObjDesc objDesc, WorldObject w, SortedDictionary<byte, uint> modelOverrides, HashSet<byte> exclusions, List<uint> coverage, bool mergeTextureRowsForOverrideParts)
+        internal static void ApplyWornModelOverrides(ACE.Entity.ObjDesc objDesc, WorldObject w, SortedDictionary<byte, uint> modelOverrides, HashSet<byte> exclusions, List<uint> coverage, bool mergeTextureRowsForOverrideParts)
         {
             var applied = new HashSet<byte>();
 
@@ -480,15 +493,58 @@ namespace ACE.Server.WorldObjects
             var firstTextureChange = objDesc.TextureChanges.Count;
             var itemTextures = w.Biota.PropertiesTextureMap.Clone(w.BiotaDatabaseLock);
 
-            if (itemTextures == null)
+            if (itemTextures != null)
+            {
+                foreach (var row in itemTextures)
+                {
+                    if (!applied.Contains(row.PartIndex))
+                        continue;
+
+                    objDesc.MergeItemTextureChange(new PropertiesTextureMap { PartIndex = row.PartIndex, OldTexture = row.OldTexture, NewTexture = row.NewTexture }, firstTextureChange);
+                }
+            }
+
+            AppendWornOverridePaletteRows(objDesc.SubPalettes, w.Biota.PropertiesPalette.Clone(w.BiotaDatabaseLock), exclusions);
+        }
+
+        /// <summary>A palette holds 2048 colours, addressed in units of 8, so a sub-palette range must end at or before unit 256.</summary>
+        internal const int PaletteUnitCount = 256;
+
+        /// <summary>
+        /// Appends an override item's own palette rows to the wearer's sub-palettes, as copies. A row is
+        /// clipped out of the wearer's base-appearance region exactly as the ClothingTable path clips an
+        /// item's palette rows: only when <paramref name="exclusions"/> is non-empty
+        /// (ClothingPartExclusions.TryClipBaseAppearance), and a row with nothing left is skipped.
+        ///
+        /// ObjDesc serializes each row's offset and length as ONE byte (WorldObject_Networking.cs, the
+        /// SubPalettes loop), so a row whose offset or length is above 255 would be silently truncated
+        /// into a different range on the wire. Such a row is skipped instead, as is a zero-length one, and so is a
+        /// row that runs past the end of the palette (offset + length above <see cref="PaletteUnitCount"/>).
+        /// Pure; internal for ACE.Server.Tests.
+        /// </summary>
+        internal static void AppendWornOverridePaletteRows(IList<PropertiesPalette> subPalettes, IEnumerable<PropertiesPalette> itemPalettes, HashSet<byte> exclusions)
+        {
+            if (subPalettes == null || itemPalettes == null)
                 return;
 
-            foreach (var row in itemTextures)
+            foreach (var row in itemPalettes)
             {
-                if (!applied.Contains(row.PartIndex))
+                if (row == null)
                     continue;
 
-                objDesc.MergeItemTextureChange(new PropertiesTextureMap { PartIndex = row.PartIndex, OldTexture = row.OldTexture, NewTexture = row.NewTexture }, firstTextureChange);
+                var rowOffset = row.Offset;
+                var rowLength = row.Length;
+
+                if (exclusions != null && exclusions.Count > 0)
+                {
+                    if (!ACE.Server.Entity.ClothingPartExclusions.TryClipBaseAppearance(rowOffset, rowLength, out rowOffset, out rowLength))
+                        continue;
+                }
+
+                if (rowLength == 0 || rowOffset > byte.MaxValue || rowLength > byte.MaxValue || rowOffset + rowLength > PaletteUnitCount)
+                    continue;
+
+                subPalettes.Add(new PropertiesPalette { SubPaletteId = row.SubPaletteId, Offset = rowOffset, Length = rowLength });
             }
         }
 

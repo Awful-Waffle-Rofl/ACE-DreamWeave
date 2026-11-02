@@ -126,7 +126,16 @@ namespace ACE.Server.WorldObjects
             });
         }
 
-        public void SaveCharacterToDatabase()
+        public void SaveCharacterToDatabase() => SaveCharacterToDatabase(null);
+
+        /// <summary>
+        /// Saves the character and, once the save has completed, calls <paramref name="onSaved"/> with its
+        /// result. The callback runs on the shard database worker thread, AFTER the save-failed flag below is
+        /// set, so it must not touch Player state directly - marshal back to the world thread
+        /// (WorldManager.EnqueueAction) for that. Used by the class ability reprice migration, whose points and
+        /// stamp may only move once the erased ranks are confirmed saved.
+        /// </summary>
+        public void SaveCharacterToDatabase(Action<bool> onSaved)
         {
             CharacterLastRequestedDatabaseSave = DateTime.UtcNow;
             CharacterChangesDetected = false;
@@ -142,6 +151,8 @@ namespace ACE.Server.WorldObjects
                         CharacterSaveFailed = true;
                     }
                 }
+
+                onSaved?.Invoke(result);
             });
         }
     }

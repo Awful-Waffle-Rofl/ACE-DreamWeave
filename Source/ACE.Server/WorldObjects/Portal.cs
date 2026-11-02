@@ -455,6 +455,49 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Binds a weenie-derived destination to the instance the player will really arrive in, and only THEN
+        /// runs AdjustDungeon on it. The order is the whole point.
+        /// <para/>
+        /// A weenie-derived position is always instance 0 (Weenie.GetPosition hardcodes it), and AdjustDungeon
+        /// is not a pure geometry call: AdjustDungeonPos / AdjustDungeonCells reach LScape.get_landblock and
+        /// AdjustCell.Get with the position's OWN instance, and on the server LScape.get_landblock is
+        /// LandblockManager.GetLandblock, which fully activates the landblock (world objects, generators) if it
+        /// is not already loaded. Adjusting the raw destination therefore activated the realm-0 copy of every
+        /// destination landblock a realm-routed use was headed for, with nobody ever arriving in it: the prod
+        /// symptom was realm 0's Aerfalle Keep (0x01F5) loading ~250 times a day, once per use of a portal into
+        /// realm 1's Marketplace, which is the same landblock id. Adjusting the resolved position touches only
+        /// the landblock the teleport itself is about to load.
+        /// <para/>
+        /// AdjustDungeon can only move the cell within its landblock, never the landblock or the instance, so
+        /// resolving first does not change what <paramref name="resolveInstance"/> decides.
+        /// </summary>
+        internal static Position ResolveArrivalDestination(Position rawDestination, System.Func<Position, Position> resolveInstance)
+        {
+            var arrival = resolveInstance(new Position(rawDestination));
+            AdjustDungeon(arrival);
+            return arrival;
+        }
+
+        /// <summary>
+        /// Pure: whether AdjustDungeon may run on <paramref name="dest"/> without creating a landblock that should
+        /// not exist. A persistent instance always may (any landblock can live there). An ephemeral instance may only
+        /// when a live ephemeral landblock already backs that instance AND it is the same landblock id: on the server
+        /// AdjustDungeon reaches LandblockManager.GetLandblock(id, instance), which would otherwise create and Init a
+        /// plain landblock under the ephemeral id with no ephemeral realm and no registry entry.
+        /// <paramref name="liveEphemeralLandblockOf"/> returns the landblock id the live ephemeral landblock for an
+        /// instance holds, or null when none is live (LandblockManager.GetEphemeralLandblock in production).
+        /// </summary>
+        internal static bool MayAdjustInInstance(Position dest, System.Func<uint, ushort?> liveEphemeralLandblockOf)
+        {
+            if (!dest.IsEphemeralRealm)
+                return true;
+
+            var live = liveEphemeralLandblockOf(dest.Instance);
+
+            return live != null && live.Value == dest.LandblockShort;
+        }
+
+        /// <summary>
         /// Decides whether a PortalSameInstance-flagged portal may safely resolve via
         /// PlayerInstanceSelectMode.Same (the player's current instance, unchanged) rather than the normal
         /// HomeRealmDefault route. That mode only makes sense when the portal's own Destination is in the
@@ -534,6 +577,10 @@ namespace ACE.Server.WorldObjects
 
             Position portalDest;
 
+            // true while portalDest is still derived from this portal's own Destination, which is the only
+            // destination that gets AdjustDungeon (the season row and an EphemeralRealmExitTo stamp never did)
+            var adjustDestination = false;
+
             if (isSpeedChallenge)
             {
                 // The season row is already an exact, realm-qualified entry position, so it is built straight
@@ -589,8 +636,12 @@ namespace ACE.Server.WorldObjects
             }
             else
             {
+                // NOT adjusted here: Destination is weenie-derived, so it is instance 0 until it is resolved
+                // below, and AdjustDungeon activates the landblock in whatever instance it is handed. It runs
+                // once, on the FINAL destination, just before the teleport - see adjustDestination and
+                // ResolveArrivalDestination.
                 portalDest = new Position(Destination);
-                AdjustDungeon(portalDest);
+                adjustDestination = true;
 
                 // resolve which instance the destination lands in: house portals stay in
                 // the player's current instance; everything else routes to the default
@@ -681,6 +732,15 @@ namespace ACE.Server.WorldObjects
                         return;
                     }
 
+                    // Adjusted HERE, against the ephemeral copy that was just created and validated (so it loads
+                    // nothing new), and BEFORE the side effects below: anything AdjustDungeon throws must leave no
+                    // exit stamp or persisted challenge flag behind. Only for a Destination-derived position
+                    // (adjustDestination): the speed-season entry is excluded, exactly as in its own branch above,
+                    // which never adjusts the season row. Either way the deferred adjust is then skipped.
+                    if (adjustDestination)
+                        AdjustDungeon(instancedDest);
+                    adjustDestination = false;
+
                     player.SetPosition(PositionType.EphemeralRealmExitTo, new Position(player.Location));
                     portalDest = instancedDest;
                     player.Session.Network.EnqueueSend(new GameMessageSystemChat($"Entering a private instance (0x{ephemeralLandblock.Instance:X8})...", ChatMessageType.System));
@@ -727,6 +787,11 @@ namespace ACE.Server.WorldObjects
                         player.SpeedChallengeActive = true;
                         player.RushNextPlayerSave(5);
                         armSpeedChallenge = true;
+
+                        // A season with a speed course (speed-courses.json) gets its live controller for this instance:
+                        // Threads-scaled monsters, the puzzle gates, the Seal and the boss. A season with no course is a
+                        // strict no-op. Never throws.
+                        ACE.Server.SpeedCourses.SpeedCourseManager.Register(player, speedSeason, ephemeralLandblock);
                     }
                 }
                 else if (ephemeralLandblock != null)
@@ -773,6 +838,7 @@ namespace ACE.Server.WorldObjects
                 {
                     player.SetPosition(PositionType.EphemeralRealmExitTo, null);
                     portalDest = new Position(exitTo);
+                    adjustDestination = false;
                 }
                 else
                     log.Warn($"Portal {WeenieClassId} has PortalExitInstance but the player has no EphemeralRealmExitTo - using its fallback destination");
@@ -790,6 +856,20 @@ namespace ACE.Server.WorldObjects
                 player.Session.Network.EnqueueSend(new GameMessageSystemChat(InstanceRouting.SameLandblockRealmHopRefusal, ChatMessageType.System));
                 return;
             }
+
+            // AdjustDungeon on the FINAL destination only, now that its instance is decided (home realm default,
+            // PortalRealm, same instance, or the ephemeral copy created above) and every refusal is behind us. It
+            // activates the landblock in portalDest's instance, which is the landblock this teleport loads anyway;
+            // adjusting the raw instance-0 Destination earlier activated the realm-0 copy of it instead (see
+            // ResolveArrivalDestination). Cannot change the guard above: it only moves the cell within the landblock.
+            //
+            // Never into an ephemeral instance that does not already hold this landblock (MayAdjustInInstance): a
+            // HousePortal takes the Same-instance route with no same-landblock check, so from inside an ephemeral
+            // instance its destination can name a different landblock under that ephemeral id. AdjustDungeon there
+            // would create a plain, unregistered landblock under the ephemeral id, and the teleport is then refused
+            // by ValidateInstanceDestination anyway.
+            if (adjustDestination && MayAdjustInInstance(portalDest, instance => LandblockManager.GetEphemeralLandblock(instance)?.Id.Landblock))
+                AdjustDungeon(portalDest);
 
             // Mark the teleport as pending BEFORE it is queued: ThreadSafeTeleport defers Player.Teleport to the
             // next world tick, and until then nothing else tells a second activation that this use was already
@@ -856,7 +936,7 @@ namespace ACE.Server.WorldObjects
                 if (GetProperty(PropertyBool.PortalBlocksRareGems) == true)
                     player.StripRareGemBuffs();
 
-            }), true);
+            }), true, TeleportSource.Portal);
         }
     }
 }

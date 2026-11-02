@@ -125,5 +125,19 @@ namespace ACE.Server.Entity
             lock (player.VisualEffectsSent)
                 player.VisualEffectsSent.Remove(wo.Guid.Full);
         }
+
+        /// <summary>
+        /// <see cref="Forget(Session, WorldObject)"/> for a delete sent by guid alone, when the server may no longer
+        /// hold the object (the teleport_flush_scope 2 ledger).
+        /// </summary>
+        public static void Forget(Session session, uint objectGuid)
+        {
+            var player = session?.Player;
+            if (player == null)
+                return;
+
+            lock (player.VisualEffectsSent)
+                player.VisualEffectsSent.Remove(objectGuid);
+        }
     }
 }

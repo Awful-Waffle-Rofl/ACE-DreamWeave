@@ -60,7 +60,7 @@ namespace ACE.Server.Tests
             var result = new LinkResult(SheetOutcome.Ok, EnabledLink);
 
             Assert.AreEqual(
-                "Your character sheet is now public: https://char.example.test/Ab3dE5gH9k - anyone with this link can see your equipped gear, attributes, vitals, skills, class abilities and leaderboard ranks. Use /charsheet off to hide it, or /charsheet rotate for a new link.",
+                "Your character sheet is now public: https://char.example.test/Ab3dE5gH9k. It is listed in the Character Sheets directory, so anyone can find it, not just people with the link. It shows your name, level, heritage, equipped gear, attributes, vitals, skills, class abilities and leaderboard ranks. Use /charsheet off to remove it from the directory and hide it, or /charsheet rotate for a new link (the old link stops working).",
                 CharacterSheetCommandText.Reply(CharSheetCommandKind.Show, result, wasAlreadyOn: false));
         }
 
@@ -70,7 +70,7 @@ namespace ACE.Server.Tests
             var result = new LinkResult(SheetOutcome.Ok, EnabledLink);
 
             Assert.AreEqual(
-                "Your character sheet: https://char.example.test/Ab3dE5gH9k",
+                "Your character sheet: https://char.example.test/Ab3dE5gH9k (listed in the Character Sheets directory)",
                 CharacterSheetCommandText.Reply(CharSheetCommandKind.Show, result, wasAlreadyOn: true));
         }
 
@@ -163,7 +163,7 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(1, svc.GetLinkCalls);
             Assert.AreEqual(0, svc.EnableCalls);
-            Assert.AreEqual("Your character sheet: https://char.example.test/Ab3dE5gH9k", reply);
+            Assert.AreEqual("Your character sheet: https://char.example.test/Ab3dE5gH9k (listed in the Character Sheets directory)", reply);
         }
 
         [TestMethod]

@@ -42,7 +42,7 @@ namespace ACE.Server.WorldObjects
             if (netherRushStacks > 0 && now > netherRushExpireTime)
             {
                 netherRushStacks = 0;
-                SendClassAbilityBuffMessage("Your nether rush fades.");
+                SendClassAbilityBuffMessage("Your mana rush fades.");
                 ApplyVisualEffects(PlayScript.EnchantDownPurple);
             }
 
@@ -76,6 +76,10 @@ namespace ACE.Server.WorldObjects
                 ApplyVisualEffects(PlayScript.EnchantDownRed);
             }
 
+            // Hemomancy's heal-armed damage buff: announces the active -> inactive lapse once. Its state lives
+            // in Player_Hemomancy.cs; the hook is defined in Player_HemomancyTick.cs.
+            TickHemomancyExpiry();
+
             if (killerInstinctStacks > 0 && KillerInstinctExpired(now))
             {
                 killerInstinctStacks = 0;
@@ -83,31 +87,11 @@ namespace ACE.Server.WorldObjects
                 ApplyVisualEffects(PlayScript.EnchantDownRed);
             }
 
-            // Vengeance's per-attacker grudge windows: no player-facing "wears off" line (there can be
-            // several live at once, one per attacker, so a line per lapse would spam a multi-target fight) -
-            // this just prunes the dictionary so a long-dead grudge does not sit in it forever. Reads the
-            // backing field directly (not the lazy-init VengeanceAttackers property) so a player who has
-            // never taken a tracked hit pays only a null check here, never an allocation.
-            if (vengeanceAttackers is { Count: > 0 })
-            {
-                var window = PropertyManager.GetDouble("class_ability_vengeance_window_seconds").Item;
-                List<uint> expired = null;
+            // Vengeance's per-attacker grudge sweep lived here until 2026-10-24 (Vengeance retired, Berserker pass).
 
-                foreach (var kvp in vengeanceAttackers)
-                {
-                    if (now - kvp.Value > window)
-                    {
-                        expired ??= new List<uint>();
-                        expired.Add(kvp.Key);
-                    }
-                }
+            // Berserk Rage's immunity window: announces its end once (Player_BerserkRage.cs).
+            TickBerserkRageExpiry(now);
 
-                if (expired != null)
-                {
-                    foreach (var guid in expired)
-                        vengeanceAttackers.Remove(guid);
-                }
-            }
             // Adrenaline's window, Kinetic Charge's charges and Runic Ward's pool. Their state lives in
             // Player_ClassAbilityPreWriteBuffs.cs (same contract, own file - see its header) and joins the
             // sweep here, so this method stays the one heartbeat entry point for the whole buff family.
@@ -124,20 +108,23 @@ namespace ACE.Server.WorldObjects
         ///
         /// KEEP THIS LIST COMPLETE: a new transient class ability field in this file,
         /// Player_ClassAbilityPreWriteBuffs.cs or Player_EquipmentMods.cs belongs here too. Deliberately NOT
-        /// reset: soulJumpReadyTime (a cooldown - clearing it would hand out a free Soul Jump),
-        /// combatPetDiedPendingResummon (pet bookkeeping, not a buff) and ClassAbilityProcCastActive (a latch
-        /// that is only ever armed inside one synchronous cast).
+        /// reset: soulJumpReadyTime and Berserk Rage's static cooldown map (cooldowns - clearing one would hand out a free save),
+        /// combatPetDiedPendingResummon (pet bookkeeping, not a buff), and ClassAbilityProcCastActive and
+        /// ClassAbilityProcDamageScale (latches that are only ever armed inside one synchronous cast).
         /// </summary>
         public void ResetClassAbilityTransientState()
         {
-            // Frenzy / Nether Rush
+            // Frenzy / Mana Rush
             frenzyStacks = 0;
             frenzyLastHitTime = 0;
             netherRushStacks = 0;
             netherRushExpireTime = 0;
 
-            // Acid Proc DoTs: a pending tick finds its entry gone and stops (ScheduleAcidProcTick).
+            // Acid Proc DoTs: a pending tick finds its entry gone, or replaced by a newer instance, and stops (ScheduleAcidProcTick).
             acidProcDots.Clear();
+
+            // Elemental Proficiency Acid burns (their own table, same stale-chain rule)
+            ClearElementalProficiencyTransientState();
 
             // Blood Charge, the life-projectile stamp and Blood Price
             bloodChargeStacks = 0;
@@ -160,8 +147,9 @@ namespace ACE.Server.WorldObjects
             spellweaveSpellChargeArmed = false;
             spellweaveSpellDamageMod = 1.0f;
 
-            // Vengeance grudges
-            vengeanceAttackers?.Clear();
+            // Berserk Rage: the immunity / enrage window (NOT the cooldown - clearing that would hand out a free
+            // save, the same reason soulJumpReadyTime is kept)
+            berserkRageWindowEndTime = 0;
 
             // Killer Instinct
             killerInstinctStacks = 0;
@@ -179,7 +167,7 @@ namespace ACE.Server.WorldObjects
             bloodlustGearCarry = 0;
         }
 
-        // Transient runtime state for the stacking speed class abilities (Frenzy / Nether Rush).
+        // Transient runtime state for the stacking speed class abilities (Frenzy / Mana Rush).
         // None of this is persisted: the buffs are short-lived and naturally reset when the
         // Player object is rebuilt on login. All access is on the player's landblock thread (combat,
         // attack, and cast paths), so no locking is needed - the same threading assumption the rest
@@ -203,9 +191,9 @@ namespace ACE.Server.WorldObjects
         private bool FrenzyExpired(double now) => now - frenzyLastHitTime > FrenzyExpireSeconds();
 
         /// <summary>
-        /// TRUE while this player's current combat stance is one Frenzy is allowed on: two-handed melee or
-        /// dual-wielded melee (FINDINGS-LEDGER L6-73). Gates both the stack trigger and the attack-speed
-        /// application, so a bow neither builds stacks nor benefits from ones already held.
+        /// TRUE while this player's current combat stance is a MELEE stance (any melee style, unarmed included -
+        /// owner ruling 2026-10-24; it was two-handed / dual wield only until then). Gates both the stack trigger
+        /// and the attack-speed application, so a bow neither builds stacks nor benefits from ones already held.
         /// </summary>
         public bool IsFrenzyWeaponStyle => FrenzyAbility.IsQualifyingStance(CurrentMotionState?.Stance);
 
@@ -214,8 +202,7 @@ namespace ACE.Server.WorldObjects
         /// hook). Resets the stack if the window lapsed since the last hit, then adds one stack up to
         /// the rank's cap and refreshes the timer.
         ///
-        /// Gated on IsFrenzyWeaponStyle: a hit landed with anything other than a two-handed or
-        /// dual-wielded melee weapon is ignored outright - it neither adds a stack nor refreshes the
+        /// Gated on IsFrenzyWeaponStyle: a hit landed outside a melee stance is ignored outright - it neither adds a stack nor refreshes the
         /// expiry timer, so existing stacks still lapse on schedule while a bow is out.
         /// </summary>
         public void OnFrenzyLandedHit(int rank)
@@ -240,8 +227,8 @@ namespace ACE.Server.WorldObjects
                 {
                     // quotes the SAME per-stack rate the animation site applies - Recklessness rider and
                     // Frenzied Pace gear included - so the announced percentage cannot drift from what the
-                    // player actually gets. Announcing the bare tunable understated a 6.1%/stack player's
-                    // peak as 15% instead of 18.3%.
+                    // player actually gets. Announcing the bare tunable once understated a Recklessness-trained
+                    // player's peak.
                     var terms = GetFrenzyPerStackTerms();
                     var pct = (int)Math.Round(cap * (terms.Skill + terms.Affinity + terms.Gear) * 100);
                     SendClassAbilityBuffMessage($"Your frenzy reaches its peak! (+{pct}% attack speed)");
@@ -271,7 +258,7 @@ namespace ACE.Server.WorldObjects
         /// and the rate is bit-identical to the bare tunable.
         ///
         /// FRENZY'S OWN BONUS CARRIES NO RANK FACTOR, unlike every other migrated ability: rank buys stack
-        /// CAP (3/6/10), not per-stack strength. So the quantity being multiplied here is the flat
+        /// CAP (6/12/20), not per-stack strength. So the quantity being multiplied here is the flat
         /// per-stack tunable rather than rank * perRank.
         /// </summary>
         public (double Skill, double Affinity, double Gear) GetFrenzyPerStackTerms()
@@ -292,7 +279,7 @@ namespace ACE.Server.WorldObjects
         ///
         /// Gated on IsFrenzyWeaponStyle the same way the trigger is (FINDINGS-LEDGER L6-73): while a
         /// non-qualifying weapon is out the stacks go INERT rather than being consumed or cleared, so
-        /// swapping back to a two-handed or dual-wield style inside the expiry window resumes them.
+        /// swapping back to a melee stance inside the expiry window resumes them.
         /// </summary>
         public float GetFrenzyAttackSpeedMod()
         {
@@ -383,21 +370,32 @@ namespace ACE.Server.WorldObjects
             return (float)Math.Clamp(baseAnimSpeed * mod, baseAnimSpeed, ceiling);
         }
 
-        // ---- Nether Rush: stacking void-cast-speed buff ------------------------------------------
+        // ---- Mana Rush (internal name netherrush): stacking cast-speed buff, every school -------
 
         private int netherRushStacks;
         private double netherRushExpireTime;
 
         /// <summary>
-        /// Cast-speed multiplier applied to the CURRENT cast, then adds a stack for future casts.
-        /// Returns 1.0 (and does nothing) for non-void spells or when the skill isn't learned, so the
-        /// caller can call it unconditionally at cast start. The current cast benefits from stacks
-        /// accumulated so far (first void cast = no bonus, ramping up); the 20s timer refreshes here.
-        /// Must be called exactly once per committed cast.
+        /// Mana Rush (Void/Summon T1, internal name "netherrush"): the cast-speed multiplier applied to the
+        /// CURRENT cast, then adds a stack for future casts. Every school since 2026-10-24 (it was Void Magic
+        /// only before). Returns 1.0 (and does nothing) when the ability isn't learned, so the caller can call
+        /// it unconditionally at cast start. The current cast benefits from stacks accumulated so far (first
+        /// cast = no bonus, ramping up); the expiry timer refreshes here. Must be called exactly once per
+        /// committed cast.
+        ///
+        /// PvE ONLY: a harmful spell aimed at another player (<paramref name="target"/>, PvpClassifier.IsPvp)
+        /// neither takes the bonus nor builds or refreshes a stack - the ramp is simply untouched by that cast.
+        /// A beneficial spell on another player (a buff on a fellow) is not PvP and is treated like any cast.
+        ///
+        /// THE TOTAL IS CAPPED at class_ability_netherrush_max_bonus x the Loyalty multiplier (see
+        /// NetherRushAbility.CastSpeedMultiplier), and the peak announcement quotes that capped figure.
         /// </summary>
-        public float ApplyNetherRushCastSpeed(Spell spell)
+        public float ApplyNetherRushCastSpeed(Spell spell, WorldObject target = null)
         {
-            if (spell == null || spell.School != MagicSchool.VoidMagic)
+            if (spell == null)
+                return 1.0f;
+
+            if (spell.IsHarmful && PvpClassifier.IsPvp(this, target))
                 return 1.0f;
 
             if (!TryGetClassAbility(ClassAbilityId.NetherRush, out var rank))
@@ -412,14 +410,15 @@ namespace ACE.Server.WorldObjects
 
             // LOYALTY (moved off Arcane Lore, 2026-09-12) MULTIPLIES this ability's OWN per-stack rank
             // bonus. CastSpeedMultiplier still takes an additive rider, so what is passed is the AMOUNT the
-            // multiplier adds, making rank*perRank + added identical to rank*perRank*multiplier. At zero
-            // effective Loyalty the multiplier is exactly 1.0 and the per-stack rate is bit-identical to
-            // rank alone.
+            // multiplier adds, making rank*perRank + added identical to rank*perRank*multiplier. The same
+            // multiplier scales the cap. At zero effective Loyalty the multiplier is exactly 1.0.
+            var affinityMultiplier = GetClassAbilityAffinityMultiplier(Skill.Loyalty);
             var rankBonus = rank * perRank;
-            var loyalty = rankBonus * GetClassAbilityAffinityMultiplier(Skill.Loyalty) - rankBonus;
+            var loyalty = rankBonus * affinityMultiplier - rankBonus;
+            var maxBonus = NetherRushAbility.MaxBonus(PropertyManager.GetDouble("class_ability_netherrush_max_bonus").Item, affinityMultiplier);
 
             // this cast uses stacks accumulated so far
-            var mult = NetherRushAbility.CastSpeedMultiplier(netherRushStacks, rank, perRank, loyalty);
+            var mult = NetherRushAbility.CastSpeedMultiplier(netherRushStacks, rank, perRank, loyalty, maxBonus);
 
             // then build toward the next cast
             if (netherRushStacks < NetherRushAbility.MaxStacks)
@@ -429,10 +428,11 @@ namespace ACE.Server.WorldObjects
                 // announce once, on the cast that tops it off
                 if (netherRushStacks == NetherRushAbility.MaxStacks)
                 {
-                    // quotes the SAME perStack expression CastSpeedMultiplier applies above, Loyalty
-                    // affinity included, so the announced percentage cannot drift from what the next cast gets
-                    var pct = (int)Math.Round(NetherRushAbility.MaxStacks * (rankBonus + loyalty) * 100);
-                    SendClassAbilityBuffMessage($"Your nether rush surges to its peak! (+{pct}% cast speed)");
+                    // quotes the SAME capped expression CastSpeedMultiplier applies above, Loyalty affinity
+                    // included, so the announced percentage cannot drift from what the next cast gets
+                    var peak = NetherRushAbility.CastSpeedMultiplier(NetherRushAbility.MaxStacks, rank, perRank, loyalty, maxBonus) - 1.0;
+                    var pct = (int)Math.Round(peak * 100);
+                    SendClassAbilityBuffMessage($"Your mana rush surges to its peak! (+{pct}% cast speed)");
                     ApplyVisualEffects(PlayScript.EnchantUpPurple);
                 }
             }
@@ -442,68 +442,16 @@ namespace ACE.Server.WorldObjects
             return mult;
         }
 
-        // ---- Flat Cast Speed: constant war-magic cast-speed buff ---------------------------------
-
         /// <summary>
-        /// Constant cast-speed multiplier from the Flat Cast Speed class ability (1.0 = none), applied to
-        /// War Magic only. Stateless - safe to read anywhere, unlike the stack-building Nether Rush.
+        /// The combined class-ability cast-speed multiplier for a committed cast. Since the 2026-10-24 Archmage
+        /// pass retired Quickened Casting and Flat Cast Speed, Mana Rush is the only class-ability term, so this
+        /// is a thin wrapper kept as the single named entry point both cast sites in Player_Magic call (Quick
+        /// Refresh and the Knot trait compose with it there). Must be called exactly once per committed cast
+        /// because Mana Rush advances its stack as a side effect.
         /// </summary>
-        public float GetFlatCastSpeedMod(Spell spell)
+        public float ApplyClassAbilityCastSpeed(Spell spell, WorldObject target = null)
         {
-            if (spell == null || spell.School != MagicSchool.WarMagic)
-                return 1.0f;
-
-            if (!TryGetClassAbility(ClassAbilityId.FlatCastSpeed, out var rank))
-                return 1.0f;
-
-            return FlatCastSpeedAbility.CastSpeedMultiplier(rank, PropertyManager.GetDouble("class_ability_flatcastspeed_percent_per_rank").Item);
-        }
-
-        /// <summary>
-        /// Constant cast-speed multiplier from the Quickened Casting class ability (1.0 = none), applied to
-        /// buff/debuff spells of EVERY school - see QuickenedCastingAbility.AffectsSpell for the exact
-        /// MetaSpellType/IsDamageOverTime classification. Stateless - safe to read anywhere, unlike the
-        /// stack-building Nether Rush.
-        ///
-        /// COMPOSITION WITH THE OTHER TWO CAST-SPEED ABILITIES: Nether Rush gates on School == VoidMagic
-        /// (any spell of that school, not just projectiles) and Flat Cast Speed gates on School == WarMagic,
-        /// while Quickened Casting gates on MetaSpellType (buff/debuff, every school). A War Magic spell is
-        /// never Enchantment-shaped in this catalog (War Magic has no buffs), so Flat Cast Speed and
-        /// Quickened Casting never both apply to the same cast. Void Magic DOES have Enchantment-shaped
-        /// debuffs (a Nether Bane), so a Void debuff can take BOTH Nether Rush's ramp and this multiplier -
-        /// that overlap is real and multiplicative, matching the "composed product" shape
-        /// ApplyClassAbilityAttackSpeed uses for Frenzy x Attack Speed x weapon mods.
-        ///
-        /// NO CEILING IS APPLIED HERE, unlike that attack-speed product (class_ability_attack_speed_ceiling).
-        /// No equivalent cast-speed ceiling tunable exists in PropertyManager, and this method's own contract
-        /// (no PropertyManager edits) means one cannot be added here - see the class-ability build report for
-        /// the missing-tunable flag. The existing Nether Rush x Flat Cast Speed product already carried no
-        /// ceiling before this change, so composing a third factor in without one is a consistent shape, not
-        /// a new gap: at the worst case (rank-3 Nether Rush fully stacked x rank-5 Quickened Casting on a
-        /// Void debuff) the product is finite and bounded by each factor's own rank cap, just uncapped as a
-        /// PRODUCT the way it already was for two factors.
-        /// </summary>
-        public float GetQuickenedCastingMod(Spell spell)
-        {
-            if (spell == null || !QuickenedCastingAbility.AffectsSpell(spell.MetaSpellType, spell.IsDamageOverTime))
-                return 1.0f;
-
-            if (!TryGetClassAbility(ClassAbilityId.QuickenedCasting, out var rank))
-                return 1.0f;
-
-            return QuickenedCastingAbility.CastSpeedMultiplier(rank, PropertyManager.GetDouble("class_ability_quickenedcasting_percent_per_rank").Item);
-        }
-
-        /// <summary>
-        /// The combined class-ability cast-speed multiplier for a committed cast: Nether Rush (Void Magic,
-        /// stack-building) composed with Flat Cast Speed (War Magic, constant) and Quickened Casting
-        /// (buff/debuff, every school, constant). Must be called exactly once per committed cast because
-        /// Nether Rush advances its stack as a side effect. See GetQuickenedCastingMod for why the product
-        /// carries no ceiling.
-        /// </summary>
-        public float ApplyClassAbilityCastSpeed(Spell spell)
-        {
-            return ApplyNetherRushCastSpeed(spell) * GetFlatCastSpeedMod(spell) * GetQuickenedCastingMod(spell);
+            return ApplyNetherRushCastSpeed(spell, target);
         }
 
         /// <summary>
@@ -539,6 +487,13 @@ namespace ACE.Server.WorldObjects
             // wiring described on GetResonanceMagicDamageMod - the same three sites Blood Price uses,
             // for the same reason (there is no single choke point for magic damage).
             mod *= GetResonanceMagicDamageMod();
+
+            // Hemomancy (Blood Mage T1): the war/void leg of its heal-armed damage buff, school-agnostic and
+            // positioned beside Resonance for the same reason. 1.0 unless the buff is armed (Player_Hemomancy.cs).
+            mod *= GetHemomancyDamageMod();
+
+            // Berserk Rage (Berserker T3): the war/void leg of its enraged x1.5 (1.0 unless raging).
+            mod *= GetBerserkRageDamageMod();
 
             // Spellweave (Spellsword T1): the war/void leg of ITS three-site wiring too. Takes the stamp the
             // PROJECTILE captured when its cast launched it (SpellProjectile.SpellweaveDamageMod), never the
@@ -722,64 +677,6 @@ namespace ACE.Server.WorldObjects
                 : 0.0;
 
             return WitheringAbility.DotMultiplier(rank, perRank, leadership, gearMod);
-        }
-
-        /// <summary>
-        /// Hemomancy's multiplier on this caster's damage-over-time tick damage, EVERY school (1.0 = none):
-        /// +2%/rank, multiplied by the Healing affinity. Unlike GetWitheringVoidDotMod, there is no gear
-        /// term (this ability carries no equipment mod) and no damage-type gate - read unconditionally in
-        /// EnchantmentManager.ApplyDamageTick via a per-contribution sourcePlayer, PvE only (the tick's
-        /// target must not be a Player - checked at the call site, not here).
-        /// </summary>
-        public float GetHemomancyDotMod()
-        {
-            var owned = TryGetClassAbility(ClassAbilityId.Hemomancy, out var rank);
-
-            if (!owned)
-                return 1.0f;
-
-            // HEALING MULTIPLIES this ability's OWN rank bonus (2026-09-12 overhaul shape). TickMultiplier
-            // still takes an additive rider, so what is passed is the AMOUNT the multiplier adds.
-            var perRank = PropertyManager.GetDouble("class_ability_hemomancy_tick_percent_per_rank").Item;
-            var rankBonus = rank * perRank;
-
-            var healing = rankBonus * GetClassAbilityAffinityMultiplier(Skill.Healing) - rankBonus;
-
-            return HemomancyAbility.TickMultiplier(rank, perRank, healing);
-        }
-
-        /// <summary>
-        /// Hemomancy's multiplier on this caster's Drain spells (1.0 = none): +2%/rank, multiplied by the
-        /// Healing affinity. Read in WorldObject_Magic.HandleCastSpell_Transfer, folded into
-        /// effectiveTransferCap alongside the crit-cap multiplier - see that method's comment for why the
-        /// cap is the right lever rather than the roll. Independent of Transfusion's own rank gate.
-        /// </summary>
-        public float GetHemomancyDrainMod()
-        {
-            var owned = TryGetClassAbility(ClassAbilityId.Hemomancy, out var rank);
-
-            if (!owned)
-                return 1.0f;
-
-            var perRank = PropertyManager.GetDouble("class_ability_hemomancy_drain_percent_per_rank").Item;
-            var rankBonus = rank * perRank;
-
-            var healing = rankBonus * GetClassAbilityAffinityMultiplier(Skill.Healing) - rankBonus;
-
-            return HemomancyAbility.DrainMultiplier(rank, perRank, healing);
-        }
-
-        /// <summary>
-        /// Hemomancy's flat self-heal fraction (0.0 = none): 1% of a DoT tick's own APPLIED damage, credited
-        /// back to the caster, for any owned rank &gt;= 1. NOT per-rank and NOT affinity-scaled - see
-        /// HemomancyAbility's doc comment for why the sustain lever stays flat while the tick/Drain bonuses
-        /// compound with rank and Healing. Read in EnchantmentManager.ApplyDamageTick.
-        /// </summary>
-        public double GetHemomancyHealFraction()
-        {
-            var owned = TryGetClassAbility(ClassAbilityId.Hemomancy, out var rank);
-
-            return owned ? HemomancyAbility.HealFraction(rank, PropertyManager.GetDouble("class_ability_hemomancy_heal_fraction").Item) : 0.0;
         }
 
         // ---- Summon subsystem: Empowered Summons stats + Summon 2x second pet slot ---------------
@@ -1073,7 +970,9 @@ namespace ACE.Server.WorldObjects
                 return incomingDamage;
 
             // same attacker filter as ApplyIncomingDamageClassAbilities: monsters only, never PvP or self
-            if (source is not Creature attacker || PvpClassifier.IsPvp(attacker, this) || attacker == this || attacker.IsDead)
+            var attacker = ClassAbilityAttackerFilter.EnemyCreature(source, this);
+
+            if (attacker == null)
                 return incomingDamage;
 
             return AbsorbWithManaBarrierCore(attacker, incomingDamage);
@@ -1131,7 +1030,8 @@ namespace ACE.Server.WorldObjects
                 return incomingDamage;
 
             var absorbed = ManaBarrierAbility.AbsorbDamage(incomingDamage, share, Mana.Current,
-                PropertyManager.GetDouble("class_ability_manabarrier_mana_per_health").Item);
+                PropertyManager.GetDouble("class_ability_manabarrier_mana_per_health").Item,
+                PropertyManager.GetLong("class_ability_manabarrier_mana_floor").Item);
 
             if (absorbed.DamageAbsorbed == 0 || absorbed.ManaSpent == 0)
                 return incomingDamage;
@@ -1146,126 +1046,57 @@ namespace ACE.Server.WorldObjects
             return absorbed.DamageAfter;
         }
 
-        // ---- Whirlwind: per-swing 360°/+1-target cleave, paid for with a stamina surcharge ------
+        // ---- Whirlwind: per-swing 360-degree / +rank-target cleave, paid for with a stamina surcharge ---
 
         /// <summary>
-        /// TRUE while the current melee swing has paid the Whirlwind stamina surcharge and should cleave in
-        /// a full 360° arc for one extra target. Set by ApplyWhirlwindStamina at stamina-deduction time and
-        /// read in Creature.GetCleaveTarget. Reset each swing.
+        /// TRUE while the current melee swing has paid the Whirlwind stamina surcharge and should cleave in a
+        /// full 360-degree arc for <see cref="WhirlwindExtraTargets"/> extra targets. Set by
+        /// ApplyWhirlwindStamina at stamina-deduction time and read in Creature.GetCleaveTarget. Reset each swing.
         /// </summary>
         public bool WhirlwindSwingActive { get; private set; }
 
         /// <summary>
-        /// Applies the Whirlwind stamina surcharge to a two-handed or dual-wield melee swing: if the player
-        /// has Whirlwind and can afford the base cost plus the surcharge, returns the increased cost and
-        /// flags WhirlwindSwingActive (enabling the 360°/+1-target cleave, even on a non-cleaving weapon).
-        /// Otherwise returns the base cost unchanged and clears the flag (a normal swing). Called once per
-        /// swing.
+        /// Extra cleave targets the current paid Whirlwind swing adds on top of the weapon's own cleave: the
+        /// owned rank (1/2/3, WhirlwindAbility.ExtraTargets). 0 whenever WhirlwindSwingActive is false.
+        /// </summary>
+        public int WhirlwindExtraTargets { get; private set; }
+
+        /// <summary>
+        /// Applies the Whirlwind stamina surcharge to a melee swing in ANY melee stance (unarmed included, so
+        /// <paramref name="weapon"/> may be null - Berserker pass 2026-10-24): if the player has Whirlwind and
+        /// can afford the base cost plus this rank's surcharge (+35/75/100%), returns the increased cost and
+        /// flags WhirlwindSwingActive / WhirlwindExtraTargets (enabling the 360-degree, +rank-target cleave even
+        /// on a non-cleaving weapon or bare hands). Otherwise returns the base cost unchanged and clears both
+        /// (a normal swing). Called once per swing.
         /// </summary>
         public int ApplyWhirlwindStamina(WorldObject weapon, int baseStaminaCost)
         {
             WhirlwindSwingActive = false;
+            WhirlwindExtraTargets = 0;
 
-            // Berserker's two weapon styles: two-handed OR dual-wield. Works even on a weapon with no
-            // innate cleave - Whirlwind grants the extra target itself.
-            if (weapon == null || !(TwoHandedCombat || IsDualWieldAttack))
+            if (!FrenzyAbility.IsQualifyingStance(CurrentMotionState?.Stance))
                 return baseStaminaCost;
 
-            if (!TryGetClassAbility(ClassAbilityId.Whirlwind, out _))
+            if (!TryGetClassAbility(ClassAbilityId.Whirlwind, out var rank))
                 return baseStaminaCost;
 
-            var surcharge = (int)Math.Round(baseStaminaCost * PropertyManager.GetDouble("class_ability_whirlwind_stamina_surcharge").Item);
+            var surcharge = WhirlwindAbility.Surcharge(baseStaminaCost, PropertyManager.GetDouble(WhirlwindAbility.SurchargeKey(rank)).Item);
+            // a 0 surcharge means the tunable is off (Surcharge floors every positive fraction at 1): no Whirlwind
             if (surcharge <= 0)
                 return baseStaminaCost;
 
-            // affordability: need the base cost plus the surcharge, else fall back to a normal cleave
+            // affordability: need the base cost plus the surcharge, else fall back to a normal swing
             if (Stamina.Current < (uint)(baseStaminaCost + surcharge))
                 return baseStaminaCost;
 
             WhirlwindSwingActive = true;
+            WhirlwindExtraTargets = WhirlwindAbility.ExtraTargets(rank);
             return baseStaminaCost + surcharge;
         }
 
-        // ---- Savage Blows: per-swing melee damage bonus, paid for with a stamina surcharge -------
-
-        /// <summary>
-        /// TRUE while the current melee swing has paid the Savage Blows stamina surcharge and should get
-        /// the ability's damage bonus. Set by ApplySavageBlowsStamina at stamina-deduction time and read in
-        /// SavageBlowsAbility.ModifyOutgoingDamage. Reset each swing.
-        /// </summary>
-        public bool SavageBlowsSwingPaid { get; private set; }
-
-        /// <summary>
-        /// The Savage Blows stamina surcharge for a single swing: a fraction of the swing's base attack
-        /// stamina, rounded to the nearest whole point but never below 1 when the fraction is positive (the
-        /// base cost is a small positive int - see Player_Combat.GetAttackStamina - so a naive +25% would
-        /// round to 0 for a small cost, making the ability's "each swing costs extra stamina" text false).
-        /// Returns 0 when the fraction is zero or negative (a zeroed tunable is a free bonus).
-        /// </summary>
-        public static int SavageBlowsSurcharge(int baseStaminaCost, double fraction)
-        {
-            if (fraction <= 0)
-                return 0;
-
-            return Math.Max(1, (int)Math.Round(baseStaminaCost * fraction, MidpointRounding.AwayFromZero));
-        }
-
-        /// <summary>
-        /// The pure decision behind ApplySavageBlowsStamina, extracted so it can be exercised without a
-        /// live Player (Player's static initializer cannot run under the test host - see
-        /// SavageBlowsStaminaSurchargeTests.cs). Mirrors ApplySavageBlowsStamina's short-circuit order
-        /// exactly: class abilities disabled, then a Player target (PvP safety guard - damage dispatch
-        /// already excludes Player targets before this is ever called, see
-        /// Player_ClassAbilities.ApplyOutgoingDamageClassAbilities), then the ability not being learned, all
-        /// fail closed (not paid, cost unchanged) before the surcharge is even computed. Returns the new
-        /// SavageBlowsSwingPaid value and the new cost-so-far.
-        /// </summary>
-        public static (bool paid, int cost) DecideSavageBlowsStamina(bool classAbilitiesEnabled, bool targetIsPlayer, bool hasSavageBlows, uint staminaCurrent, int baseStaminaCost, int costSoFar, double surchargeFraction)
-        {
-            if (!classAbilitiesEnabled)
-                return (false, costSoFar);
-
-            if (targetIsPlayer)
-                return (false, costSoFar);
-
-            if (!hasSavageBlows)
-                return (false, costSoFar);
-
-            var surcharge = SavageBlowsSurcharge(baseStaminaCost, surchargeFraction);
-            if (surcharge == 0)
-                return (true, costSoFar);
-
-            if (staminaCurrent < (uint)(costSoFar + surcharge))
-                return (false, costSoFar);
-
-            return (true, costSoFar + surcharge);
-        }
-
-        /// <summary>
-        /// Applies the Savage Blows stamina surcharge to a melee swing: if the player has Savage Blows and
-        /// can afford the surcharge on top of the cost already spent this swing (baseStaminaCost plus
-        /// whatever Whirlwind already added), returns the increased cost and flags SavageBlowsSwingPaid
-        /// (enabling the ability's damage bonus for this swing). Otherwise returns costSoFar unchanged and
-        /// clears the flag (the swing lands with no Savage Blows bonus). Called once per swing, after
-        /// ApplyWhirlwindStamina - both surcharges are computed off the same base cost, so they stack
-        /// additively rather than compounding. The decision itself lives in the pure
-        /// DecideSavageBlowsStamina above; this just gathers the live inputs and applies the result.
-        /// </summary>
-        public int ApplySavageBlowsStamina(Creature target, int baseStaminaCost, int costSoFar)
-        {
-            var (paid, cost) = DecideSavageBlowsStamina(
-                PropertyManager.GetBool("class_abilities_enabled").Item,
-                target is Player,
-                TryGetClassAbility(ClassAbilityId.SavageBlows, out _),
-                Stamina.Current,
-                baseStaminaCost,
-                costSoFar,
-                PropertyManager.GetDouble("class_ability_savageblows_stamina_surcharge").Item);
-
-            SavageBlowsSwingPaid = paid;
-            return cost;
-        }
-
+        // ---- Savage Blows: RETIRED 2026-10-24 (Berserker pass). Its per-swing stamina surcharge
+        // (SavageBlowsSwingPaid / SavageBlowsSurcharge / DecideSavageBlowsStamina / ApplySavageBlowsStamina)
+        // was removed with the ability; Heavy Blows, which replaced it, charges no stamina. -------------
         // ---- Acid Proc: a refreshing acid DoT, keyed per target ---------------------------------
 
         private sealed class AcidProcDot
@@ -1285,11 +1116,18 @@ namespace ACE.Server.WorldObjects
         /// class_ability_acidproc_dot_ticks ticks. A re-proc refreshes the duration and tick amount instead
         /// of stacking (one running loop per target). Called from AcidProcAbility on a landed weapon hit.
         ///
-        /// DEALS ONE TICK IMMEDIATELY (2026-08-17 Berserker/Rogue balance pass reading of "the increased
-        /// poison damage applies to the initial DoT"): a proc no longer waits out a full
+        /// A NEW WOUND DEALS ONE TICK IMMEDIATELY (2026-08-17 Berserker/Rogue balance pass reading of "the
+        /// increased poison damage applies to the initial DoT"): a proc does not wait out a full
         /// class_ability_acidproc_dot_interval before the (possibly Acid-Proc-buffed) damage shows. This
         /// immediate hit counts as the first of the tick budget - <see cref="ApplyOneAcidTick"/> is the same
         /// TakeDamage + message code the scheduled loop uses, so the two paths cannot drift apart.
+        ///
+        /// A REFRESH (the target's loop is already running) only overwrites the tick amount and resets the
+        /// remaining count to the full budget (owner ruling 2026-10-15: "it should refresh the timer, but DoT
+        /// itself should not be firing fresh with every attack"). It deals NO immediate tick and starts no second
+        /// loop - the running loop keeps its own cadence, so fast attackers cannot out-tick the
+        /// class_ability_acidproc_dot_interval design. An entry whose loop is NOT running (a one-tick budget
+        /// leaves its entry behind with no loop) counts as a new wound, so a proc's damage is never dropped.
         /// </summary>
         public void ApplyAcidProcDot(Creature target, uint tickAmount)
         {
@@ -1304,16 +1142,34 @@ namespace ACE.Server.WorldObjects
                 acidProcDots[guid] = dot;
             }
 
-            dot.TickAmount = tickAmount;                                                          // refresh amount
-            dot.RemainingTicks = (int)PropertyManager.GetLong("class_ability_acidproc_dot_ticks").Item;   // refresh duration
+            var configuredTicks = (int)PropertyManager.GetLong("class_ability_acidproc_dot_ticks").Item;
+            var plan = PlanAcidProc(dot.LoopActive, configuredTicks);   // decided BEFORE any state is touched
 
-            ApplyOneAcidTick(target, dot);   // immediate first tick, counted against RemainingTicks above
+            dot.TickAmount = tickAmount;            // refresh amount
+            dot.RemainingTicks = configuredTicks;   // refresh duration
 
-            if (dot.RemainingTicks > 0 && !dot.LoopActive)
+            if (plan.TickNow)
+                ApplyOneAcidTick(target, dot);   // a new wound's immediate first tick, counted against RemainingTicks above
+
+            if (plan.StartLoop && dot.RemainingTicks > 0)
             {
                 dot.LoopActive = true;
-                ScheduleAcidProcTick(target, guid);
+                ScheduleAcidProcTick(target, guid, dot);
             }
+        }
+
+        /// <summary>
+        /// What an Acid Proc landing now does, given whether the target's loop is running and the configured
+        /// tick budget. Pure. A running loop means a pure refresh: no immediate tick and no second loop. No
+        /// running loop (a new wound, or an entry left behind with its loop finished) means a new wound: an
+        /// immediate first tick, which counts against the budget, and a loop only if ticks remain after it.
+        /// </summary>
+        internal static (bool TickNow, bool StartLoop) PlanAcidProc(bool loopActive, int configuredTicks)
+        {
+            if (loopActive)
+                return (false, false);
+
+            return (true, configuredTicks - 1 > 0);
         }
 
         /// <summary>
@@ -1335,13 +1191,16 @@ namespace ACE.Server.WorldObjects
             dot.RemainingTicks--;
         }
 
-        private void ScheduleAcidProcTick(Creature target, uint guid)
+        private void ScheduleAcidProcTick(Creature target, uint guid, AcidProcDot startedFor)
         {
             var chain = new ActionChain();
             chain.AddDelaySeconds(PropertyManager.GetDouble("class_ability_acidproc_dot_interval").Item);
             chain.AddAction(this, () =>
             {
-                if (!acidProcDots.TryGetValue(guid, out var dot))
+                // The loop owns ONE entry instance. After ResetClassAbilityTransientState clears the dictionary, a
+                // new wound on the same guid is a different instance with its own loop; a stale chain must not
+                // adopt it and run a second loop. Bail without removing anything.
+                if (!acidProcDots.TryGetValue(guid, out var dot) || !ReferenceEquals(dot, startedFor))
                     return;
 
                 if (target == null || target.IsDead)
@@ -1353,7 +1212,7 @@ namespace ACE.Server.WorldObjects
                 ApplyOneAcidTick(target, dot);
 
                 if (dot.RemainingTicks > 0)
-                    ScheduleAcidProcTick(target, guid);
+                    ScheduleAcidProcTick(target, guid, startedFor);
                 else
                     acidProcDots.Remove(guid);
             });
@@ -1402,11 +1261,16 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Clears all Blood Charge stacks immediately - Exsanguinate consumes the whole pool.
+        /// SETS the Blood Charge pool to <paramref name="stacks"/> and refreshes the idle-expiry clock, so the
+        /// charges an Exsanguinate burst keeps get a full idle window of their own rather than inheriting
+        /// whatever was left of the spent pool's. Exsanguinate calls this with
+        /// <see cref="ExsanguinateMath.ChargesKept"/> (always below the cap) instead of emptying the pool.
+        /// Negative input is floored to zero.
         /// </summary>
-        public void ClearBloodChargeStacks()
+        public void SetBloodChargeStacks(int stacks)
         {
-            bloodChargeStacks = 0;
+            bloodChargeStacks = Math.Max(0, stacks);
+            bloodChargeLastAddTime = Time.GetUnixTime();
         }
 
         /// <summary>
@@ -1454,10 +1318,23 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Sanguine Reserve's per-charge value, shared with Exsanguinate so the burst multiplier stays the
-        /// single containment lever (BLOOD-MAGE-DESIGN sec 3).
+        /// single containment lever (BLOOD-MAGE-DESIGN sec 3): the tunable MULTIPLIED by the caster's Creature
+        /// Enchantment affinity (BloodChargeMath.PerChargeValue). An instance method since the affinity is
+        /// per-player state. The burst reads this same value, so the affinity reaches Exsanguinate by design.
+        /// The Blood Charge gear term stays OUTSIDE it (BloodChargeGearPerStack, additive in the ramp).
         /// </summary>
-        private static double BloodChargePerStack() =>
-            PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item;
+        private double BloodChargePerStack() =>
+            BloodChargeMath.PerChargeValue(
+                PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item,
+                GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment));
+
+        /// <summary>
+        /// The public read of <see cref="BloodChargePerStack"/> for readouts that must quote the
+        /// affinity-scaled per-charge value without naming the affinity skill themselves - Exsanguinate's
+        /// /abilities line, whose handler file declares no affinity of its own (one affinity skill per
+        /// handler file, ClassAbilityAffinityDeclarationTests). Ungated: callers decide ownership.
+        /// </summary>
+        public double GetBloodChargePerStackValue() => BloodChargePerStack();
 
         /// <summary>
         /// The BLOOD CHARGE equipment mod's addition to that per-charge value. Machinery, so it is only ever
@@ -1483,7 +1360,7 @@ namespace ACE.Server.WorldObjects
         ///
         /// EVERY GAINED CHARGE IS ANNOUNCED, not just the one that tops the pool off (user, live test: "the
         /// amount of blood charges stacked up is not clear to me"). That is a deliberate departure from
-        /// Frenzy and Nether Rush, which announce at their peak only: those two are read off the attack or
+        /// Frenzy and Mana Rush, which announce at their peak only: those two are read off the attack or
         /// cast animation the player is already watching, whereas the Blood Charge pool has no tell at all
         /// until Exsanguinate spends it, so a peak-only notice leaves the whole ramp invisible.
         ///
@@ -1547,13 +1424,11 @@ namespace ACE.Server.WorldObjects
         ///  - never both. The outcome is one value from <see cref="ExsanguinateMath.Resolve"/>, so "both" is
         ///    not a representable state rather than a case someone has to remember to exclude.
         ///
-        /// WHAT MADE IT LOOK RANDOM BEFORE, since the fix only makes sense against it: the burst fired on ANY
-        /// non-empty pool, gated only by a 10-second internal cooldown. Two identical Hecatombs therefore
-        /// resolved differently based on wall-clock time the player could not see, at a magnitude that
-        /// depended on however many charges happened to be held (+21% at one charge, +105% at five) - and the
-        /// burst was immediately followed by a grant, so the pool refilled to 1 on the same cast that emptied
-        /// it. The full-pool gate replaces the invisible clock with a condition the player counted into
-        /// themselves; there is no cooldown any more, by design.
+        /// THE GATE IS A FULL POOL AND NOTHING ELSE: no cooldown, no clock, so two identical Hecatombs at the
+        /// same pool always resolve the same way, and the player can see the condition because they counted
+        /// every charge into it. After a burst the pool is SET to the Exsanguinate rank's kept charges
+        /// (ExsanguinateMath.ChargesKept, never more than the cap minus 1), so the next burst always needs at
+        /// least one accruing cast first, and the bursting cast itself grants nothing.
         ///
         /// <paramref name="exsanguinateEligible"/> is the caller's "this spell may spend the pool" answer.
         /// EXACTLY THREE CALLS, AND ONLY ONE OF THEM CAN PASS TRUE. <see cref="ApplyHarmClassAbilityDamage"/>
@@ -1564,7 +1439,7 @@ namespace ACE.Server.WorldObjects
         /// call graph rather than of a flag someone has to keep setting correctly.
         ///
         /// An accruing strike uses the charges accumulated BEFORE it; that strike's own charge is granted
-        /// afterwards via <see cref="TryGrantBloodCharge"/>. That is the same ordering Nether Rush uses and it
+        /// afterwards via <see cref="TryGrantBloodCharge"/>. That is the same ordering Mana Rush uses and it
         /// is why the opening cast of a fight is unbuffed.
         /// </summary>
         public float ApplyBloodChargeDamage(bool exsanguinateEligible, out BloodChargeCastOutcome outcome)
@@ -1584,7 +1459,7 @@ namespace ACE.Server.WorldObjects
             var gearPerStack = BloodChargeGearPerStack();
 
             outcome = ExsanguinateMath.Resolve(exsanguinateEligible,
-                TryGetClassAbility(ClassAbilityId.Exsanguinate, out _), stacks, cap);
+                TryGetClassAbility(ClassAbilityId.Exsanguinate, out var exsanguinateRank), stacks, cap);
 
             if (ExsanguinateMath.Bursts(outcome))
             {
@@ -1598,9 +1473,19 @@ namespace ACE.Server.WorldObjects
                     GetEquippedModValue(EquipmentModId.Sanguinate),
                     gearPerStack);
 
-                ClearBloodChargeStacks();
+                // THE POOL IS SET TO THE KEPT CHARGES, NOT EMPTIED (Blood Mage buff pass): 2/3/4 by
+                // Exsanguinate rank (tunables class_ability_exsanguinate_charges_kept_r1..r3), never more than cap - 1 so the next burst still needs a rebuilt pool.
+                // The setter refreshes the idle clock, so the kept charges get a full window of their own.
+                // This cast still gains no charge of its own - the outcome gate at both call sites holds.
+                var kept = ExsanguinateMath.ChargesKept(exsanguinateRank,
+                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r1").Item,
+                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r2").Item,
+                    PropertyManager.GetLong("class_ability_exsanguinate_charges_kept_r3").Item,
+                    cap);
 
-                SendClassAbilityBuffMessage($"You EXSANGUINATE, spending your full pool of {stacks} blood charges at once for +{BloodChargeMath.BonusPercent(burst)}% damage on this cast. (0/{cap} charges - an exsanguinating cast gains no charge.)");
+                SetBloodChargeStacks(kept);
+
+                SendClassAbilityBuffMessage($"You EXSANGUINATE, spending your full pool of {stacks} blood charges for +{BloodChargeMath.BonusPercent(burst)}% damage on this cast. Your pool settles at {kept}/{cap} charges; an exsanguinating cast gains no charge.");
                 ApplyVisualEffects(PlayScript.EnchantUpRed);
 
                 return burst;
@@ -1659,6 +1544,12 @@ namespace ACE.Server.WorldObjects
             // school-agnostic and why these are the same three sites Blood Price uses.
             mod *= GetResonanceMagicDamageMod();
 
+            // Hemomancy (Blood Mage T1): the Harm leg of its heal-armed damage buff (1.0 unless armed).
+            mod *= GetHemomancyDamageMod();
+
+            // Berserk Rage (Berserker T3): the Harm leg of its enraged x1.5 (1.0 unless raging).
+            mod *= GetBerserkRageDamageMod();
+
             // Spellweave (Spellsword T1): the Harm leg of ITS three-site wiring - the stamped per-cast mod,
             // see GetSpellweaveSpellDamageMod's doc comment.
             mod *= GetSpellweaveSpellDamageMod();
@@ -1703,9 +1594,9 @@ namespace ACE.Server.WorldObjects
         /// created, so it runs once per cast whatever the projectile count.
         ///
         /// WHY NOT RESOLVE PER PROJECTILE, which is the obvious simplification and is WRONG. Raven Fury is
-        /// eight projectiles from one cast. Exsanguinate empties the pool when it fires, so if each
-        /// projectile asked the pool at its own collision, the first one to land would burst and the other
-        /// seven would find an empty pool. Which projectile that is depends on flight time and on what each
+        /// eight projectiles from one cast. Exsanguinate spends the pool when it fires (leaving only the kept
+        /// charges, always short of full), so if each projectile asked the pool at its own collision, the
+        /// first one to land would burst and the other seven would find a pool that no longer bursts. Which projectile that is depends on flight time and on what each
         /// one happens to collide with, so the burst would land on an arbitrary target and the cast's total
         /// damage would vary run to run for reasons the player cannot see or control. Resolving at cast time
         /// is what makes "the pool is spent by the CAST" true - one read, one consumption, one multiplier
@@ -1832,6 +1723,13 @@ namespace ACE.Server.WorldObjects
             // makes each of a Raven Fury ring's landed projectiles both take and build the ramp.
             mod *= GetResonanceMagicDamageMod();
 
+            // Hemomancy (Blood Mage T1): the life-projectile leg of its heal-armed damage buff, read per
+            // projectile like Resonance (it is a timed buff, consumed by nobody). 1.0 unless armed.
+            mod *= GetHemomancyDamageMod();
+
+            // Berserk Rage (Berserker T3): the life-projectile leg of its enraged x1.5 (1.0 unless raging).
+            mod *= GetBerserkRageDamageMod();
+
             // Spellweave (Spellsword T1): the life-projectile leg of ITS three-site wiring. UNLIKE Resonance
             // this one IS stamped at cast time, same as the Blood Charge terms above - Spellweave's charge is
             // consumed by the CAST, not per landed projectile, so every projectile of a Raven Fury ring reads
@@ -1890,134 +1788,6 @@ namespace ACE.Server.WorldObjects
                 TryGrantBloodCharge();
 
             return mod;
-        }
-
-        /// <summary>
-        /// Applies or refreshes Weakened Blood on a target this player's Harm or Drain just landed on.
-        /// Silently does nothing without the ability, so call sites need no rank lookup. The magnitude and
-        /// the merge-with-existing rule live on the target (Creature_ClassAbilityDebuffs.cs) because every
-        /// life caster in the fellowship reads the same mark, not just this one.
-        ///
-        /// TWO THINGS LAND, NOT ONE (user, live test 2026-08-03: "the 'Fester' spell is what should be
-        /// applied, and also multiply outgoing damage. The fester animation should be visible"):
-        ///
-        ///  - the transient target-side MARK, which is where the 2.00/2.50/3.10 life vulnerability lives and
-        ///    is unchanged by this;
-        ///  - the retail FESTER enchantment, which is what the player and everyone nearby can actually see.
-        ///
-        /// They are deliberately not the same object - see the note on <see cref="WeakenedBloodMath"/> for
-        /// why reading the vulnerability out of the enchantment registry would hand it to
-        /// GetEnchantmentsTopLayer's PowerLevel selection.
-        /// </summary>
-        public void TryApplyWeakenedBlood(Creature target)
-        {
-            if (target == null || target is Player)
-                return;
-
-            if (!TryGetClassAbility(ClassAbilityId.WeakenedBlood, out var rank))
-                return;
-
-            // HEMORRHAGE (machinery on Weakened Blood, proven owned by the early return above). Added to the
-            // rank's table value in the SAME BARE-MULTIPLIER UNIT the table is in - +0.05 takes a rank-3
-            // mark from 3.10 to 3.15 - not as a percentage of it. The applier's gear is baked into the
-            // magnitude STORED ON THE TARGET, which is deliberate: the mark is already shared with every
-            // other attacker, so their damage reads whatever the applier's mark was worth.
-            var mod = WeakenedBloodMath.ResistanceMod(rank,
-                PropertyManager.GetDouble("class_ability_weakenedblood_resist_r1").Item,
-                PropertyManager.GetDouble("class_ability_weakenedblood_resist_r2").Item,
-                PropertyManager.GetDouble("class_ability_weakenedblood_resist_r3").Item,
-                GetEquippedModValue(EquipmentModId.Hemorrhage));
-
-            var duration = PropertyManager.GetDouble("class_ability_weakenedblood_duration_seconds").Item;
-
-            var tookHold = target.ApplyWeakenedBlood(mod, duration);
-
-            ApplyWeakenedBloodFester(target, rank, mod, duration, tookHold);
-        }
-
-        /// <summary>
-        /// Lands the retail Fester enchantment behind Weakened Blood, plays that spell's own target effect
-        /// on the creature IMMEDIATELY (so this cast's drain script lands on top of it), and tells the
-        /// caster in chat when the mark first takes hold.
-        ///
-        /// THE CHAT LINE IS THE TELL, NOT THE SCRIPT - and that is a deliberate choice, made twice.
-        /// User, live test 2026-08-03: "I can't tell that fester is applying visually when weakened blood
-        /// fires. Perhaps the spell is being overridden by the drain." That reading was correct, and it is
-        /// measurable rather than inferred. Probing the client's portal.dat SpellBase entries directly gives:
-        ///
-        ///   Fester Other V (175) / VI (176) / Incantation (4489): TargetEffect 0x26 (PlayScript.RegenDownREd)
-        ///   Harm Other I (7) / VI (1176) / Heart Rend (2070):     TargetEffect 0x20 (PlayScript.HealthDownRed)
-        ///   Drain Health Other I (1237) / VI (1242) / Inc (4643): TargetEffect 0x20 (PlayScript.HealthDownRed)
-        ///
-        /// Both scripts fire on the SAME target guid in the SAME tick, and Fester's goes first: this method
-        /// runs inside HandleCastSpell_Boost / HandleCastSpell_Transfer, which return to HandleCastSpell,
-        /// which then calls DoSpellEffects to broadcast the Harm or Drain script. So the subtle regen-down
-        /// puff is enqueued immediately before the big red health-down burst on the same creature, and the
-        /// drain is what the player actually sees. The enchantment registry write itself is unconditional
-        /// inside EnchantmentManager.Add - nothing in that path can silently drop it.
-        ///
-        /// A ONE-TICK DELAY WAS TRIED HERE AND DELIBERATELY REVERTED. Deferring the Fester broadcast by a
-        /// tick does make it the visible script - and that is exactly the problem, because it then displaces
-        /// the drain. User, same day, on the delayed build: "it seems the fester is now applying on drain
-        /// instead of the drain effect. Drain effect is better ... revert to show the drain as a priority
-        /// over fester effect." The drain burst is the primary combat feedback and outranks the mark's tell.
-        /// Do not re-introduce the delay to make Fester visible; the visibility need is already met below.
-        ///
-        /// BECAUSE A VISUAL WAS NEVER THE RIGHT ANSWER HERE. The actual need is confirming the mark landed,
-        /// in a fight already full of particles, so the caster gets a chat line naming the target and quoting
-        /// the magnitude. That line, not the script, is what makes Weakened Blood confirmable - which is why
-        /// reverting the delay costs nothing. It fires only when the mark TAKES HOLD, not on every refresh -
-        /// see Creature.ApplyWeakenedBlood for why that gate is where the spam bound lives.
-        ///
-        /// THE SCRIPT IS THE SPELL'S, NOT A GUESS. spell.TargetEffect is read straight out of portal.dat via
-        /// SpellBase, exactly as DoSpellEffects does for a normal cast, so whatever the client already plays
-        /// for a cast Fester is what plays here. Hardcoding a PlayScript would be a guess about a value the
-        /// dat file already answers - and the neighbouring PlayScript values are the WRONG VITAL rather than
-        /// a different colour (0x1F HealthUpRed is a heal, 0x20 HealthDownRed is the drain), so an
-        /// off-by-one there is not a cosmetic slip.
-        ///
-        /// NOT RESISTED, DELIBERATELY. This is the visible half of a class-ability mark, not a cast spell:
-        /// the mark itself has never been resistable and the two must not diverge, or a resisted Fester would
-        /// leave a target silently carrying the vulnerability with no tell at all - the exact complaint this
-        /// change answers.
-        ///
-        /// DURATION IS THE SPELL'S OWN, which is longer than the mark's 20 seconds. The two are not required
-        /// to agree: Fester is a real Life Magic debuff doing its real retail work (a health-regeneration
-        /// penalty) and outliving the vulnerability costs nothing, whereas clipping it would mean mutating a
-        /// dat-backed Spell. What the player must not see is a vulnerability with no visual, and this is on
-        /// the safe side of that.
-        ///
-        /// A dead target is skipped: the enchantment would be written onto a biota that is about to become a
-        /// corpse, and the strike that killed it is feedback enough.
-        /// </summary>
-        private void ApplyWeakenedBloodFester(Creature target, int rank, double mod, double durationSeconds, bool tookHold)
-        {
-            if (target.IsDead)
-                return;
-
-            var spellId = WeakenedBloodMath.FesterSpell(rank);
-
-            if (spellId == SpellId.Undef)
-                return;
-
-            var spell = new Spell(spellId);
-
-            if (spell.NotFound)
-                return;
-
-            target.EnchantmentManager.Add(spell, this, null);
-
-            if (tookHold)
-                SendClassAbilityBuffMessage($"Weakened Blood takes hold on {target.Name}. ({spell.Name} lands, life damage x{mod:0.00} for {durationSeconds:0}s)");
-
-            if (spell.TargetEffect == 0)
-                return;
-
-            // IMMEDIATELY, and that ordering is the point: DoSpellEffects broadcasts this cast's own Harm or
-            // Drain script on the same target a moment after this method returns, so the drain lands ON TOP
-            // and stays the visible one. See the "deliberately reverted" note above before adding any delay.
-            // BROADCAST, not a direct send - the same shape DoSpellEffects uses at its own TargetEffect site.
-            target.EnqueueBroadcast(new GameMessageScript(target.Guid, spell.TargetEffect, spell.Formula.Scale));
         }
 
         // ---- Blood Price: damaging spells of any school also cost health ------------------------
@@ -2079,13 +1849,15 @@ namespace ACE.Server.WorldObjects
                     PropertyManager.GetDouble("class_ability_bloodprice_health_cost_r1").Item,
                     PropertyManager.GetDouble("class_ability_bloodprice_health_cost_r2").Item,
                     PropertyManager.GetDouble("class_ability_bloodprice_health_cost_r3").Item),
-                // BLOOD PRICE (machinery, proven owned by the early return above) rides the DAMAGE BONUS
-                // ONLY. The HealthCostFraction call above deliberately takes no gear term: gear amplifies
-                // the payoff and never discounts the price (DESIGN.md 2.3).
-                BloodPriceMath.DamageBonus(rank,
+                // BLOOD PRICE (machinery, proven owned by the early return above) and the LIFE MAGIC affinity
+                // both ride the DAMAGE BONUS ONLY: rankBonus * multiplier + gear. The HealthCostFraction call
+                // above deliberately takes neither: gear and skill amplify the payoff and never discount the
+                // price (DESIGN.md 2.3).
+                BloodPriceMath.ScaledDamageBonus(rank,
                     PropertyManager.GetDouble("class_ability_bloodprice_damage_r1").Item,
                     PropertyManager.GetDouble("class_ability_bloodprice_damage_r2").Item,
                     PropertyManager.GetDouble("class_ability_bloodprice_damage_r3").Item,
+                    GetClassAbilityAffinityMultiplier(Skill.LifeMagic),
                     GetEquippedModValue(EquipmentModId.BloodPrice)),
                 PropertyManager.GetDouble("class_ability_bloodprice_min_health_fraction").Item);
 
@@ -2148,11 +1920,13 @@ namespace ACE.Server.WorldObjects
 
             // CLOTTING (machinery, proven owned by the early return above) rides the ABSORB FRACTION ONLY.
             // GetSanguineWardSelfCostFraction above deliberately takes no gear term - the self-cost is the
-            // ability's own bargain, the same ruling that keeps Blood Price's health cost unmoddable.
-            var fraction = SanguineWardMath.WardFraction(rank,
+            // ability's own bargain, the same ruling that keeps Blood Price's health cost unmoddable. The
+            // COOKING affinity multiplies the rank's absorb fraction; the gear term stays outside the multiply.
+            var fraction = SanguineWardMath.ScaledWardFraction(rank,
                 PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r1").Item,
                 PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r2").Item,
                 PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r3").Item,
+                GetClassAbilityAffinityMultiplier(Skill.Cooking),
                 GetEquippedModValue(EquipmentModId.Clotting));
 
             sanguineWard = SanguineWardMath.Grant(sanguineWard, healthLost, fraction, Time.GetUnixTime(),
@@ -2196,12 +1970,13 @@ namespace ACE.Server.WorldObjects
         /// write and deliberately leaves every reported number at its pre-barrier value. Both conventions
         /// are correct: the ward stopped the damage, the barrier paid for damage that already landed.
         ///
-        /// CALL IT UNCONDITIONALLY. There is no attacker filter and no class_abilities_enabled gate at any
-        /// site, which is what the original Player.TakeDamage site does and is therefore what "identical
-        /// behaviour whatever the damage type" means here: the ward already absorbs PvP hits and
-        /// self-damage, and a caller that adds guards would make the ward weaker on its path than on the
-        /// melee one. The early-out above keeps an unwarded player free on every hot path, and
-        /// <paramref name="source"/> is used only for the squelch check and tolerates null.
+        /// THE PvE GATE LIVES IN THE CALLER, not here. Since 2026-10-24 (all class abilities PvE only) the
+        /// one caller, SanguineWardAbility.ModifyIncomingDamage, skips a hit whose source is a Player (PvP
+        /// or self-damage) and hands a DoT tick down with only its enemy-creature share, so the pool is
+        /// untouched by PvP and self damage while monster DoTs and hits from a just-killed monster are still
+        /// absorbed. This method stays filter-free so the gate is written down once. The
+        /// early-out above keeps an unwarded player free on every hot path, and <paramref name="source"/> is
+        /// used only for the squelch check and tolerates null.
         /// </summary>
         public uint AbsorbWithSanguineWard(WorldObject source, uint incomingDamage)
         {
@@ -2284,7 +2059,7 @@ namespace ACE.Server.WorldObjects
         /// and holding it requires landing magic damage at least every 6 seconds. Sec 5d is explicit that
         /// the short window, not the earn rate, is the brake.
         ///
-        /// ANNOUNCED AT THE PEAK ONLY, matching Frenzy and Nether Rush rather than Blood Charge. Blood
+        /// ANNOUNCED AT THE PEAK ONLY, matching Frenzy and Mana Rush rather than Blood Charge. Blood
         /// Charge announces every gain because its pool has no tell at all until Exsanguinate spends it, and
         /// it is capped at one gain per cast so the spam is bounded by the cap. Neither holds here: five
         /// stacks can arrive from a single Ring proc within one tick, so a per-gain line would be five lines
@@ -2402,12 +2177,12 @@ namespace ACE.Server.WorldObjects
         ///
         /// THE FEEDBACK LOOP IS BOUNDED BY THE CAP, not by anything in this method. Stacks raise proc
         /// chance and are earned by proccing, so the mechanic feeds itself; the 5-stack cap is what makes
-        /// the ceiling finite (+10 percentage points), and because stacks are only earned by proccing the
+        /// the ceiling finite (+3.3/6.7/10 percentage points by rank), and because stacks are only earned by proccing the
         /// steady state sits below the cap whenever the base chance is low. See SpellsurgeAbility.
         /// </summary>
         public void AddSpellsurgeStack()
         {
-            if (!TryGetClassAbility(ClassAbilityId.Spellsurge, out var rank))
+            if (!TryGetClassAbility(ClassAbilityId.Spellsurge, out _))
                 return;
 
             var cap = SpellsurgeStackCap();
@@ -2430,25 +2205,25 @@ namespace ACE.Server.WorldObjects
             if (spellsurgeStacks != cap)
                 return;
 
-            // Quotes the SAME number GetSpellsurgeProcChanceBonus will hand the war procs, gear included -
-            // the peak line would otherwise understate a Surge-modded player's actual peak.
-            var points = (int)Math.Round(SpellsurgeAbility.ProcChanceBonus(rank, cap,
-                PropertyManager.GetDouble("class_ability_spellsurge_per_stack").Item,
-                GetEquippedModValue(EquipmentModId.Surge)) * 100);
+            // QUOTES THE COMPOSED GETTER ITSELF - GetSpellsurgeProcChanceBonus, the exact read the war procs
+            // make - rather than re-deriving the number here, so the peak line can never drift from what the
+            // next proc roll gets (rank's per-stack rate and the Surge gear term included). The pool was just
+            // stamped at `now` and sits at the cap, so the getter cannot lazily expire it here.
+            var points = Math.Round(GetSpellsurgeProcChanceBonus() * 100.0, 1);
 
-            SendClassAbilityBuffMessage($"Your spellsurge peaks! (+{points}% proc chance)");
+            SendClassAbilityBuffMessage($"Your spellsurge peaks! (+{points.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}% proc chance)");
             ApplyVisualEffects(PlayScript.EnchantUpBlue);
         }
 
         /// <summary>
-        /// Spellsurge's bonus to a proc chance, as a FRACTION to ADD to that chance (3 stacks at the 0.02
-        /// default returns 0.06, i.e. +6 percentage points). Lazily expires the pool first, and returns 0.0
+        /// Spellsurge's bonus to a proc chance, as a FRACTION to ADD to that chance (3 stacks at the rank-3
+        /// 0.02 rate returns 0.06, i.e. +6 percentage points). Lazily expires the pool first, and returns 0.0
         /// when the ability is unowned or the pool is empty, so a proc handler can add it unconditionally.
+        /// Rank buys the per-stack rate (0.67/1.33/2 points, SpellsurgeAbility.PerStack); the stack cap is rank-free.
         ///
-        /// ADDITIVE, NOT MULTIPLICATIVE, and that is what makes "+10 percentage points at a full stack"
-        /// literally true for all three war procs regardless of their very different base chances
-        /// (Spellblade 22% -> 32%, Runeblade 19% -> 29%, Spellstorm 10% -> 20%; sec 5e). A multiplicative
-        /// reading would have made the entry worth twice as much to Spellblade as to Spellstorm.
+        /// ADDITIVE, NOT MULTIPLICATIVE, and that is what makes "+3.3/6.7/10 percentage points at a full stack"
+        /// literally true for all three war procs regardless of their very different base chances (sec 5e).
+        /// A multiplicative reading would have made the entry worth more to Spellblade than to Spellstorm.
         /// </summary>
         public float GetSpellsurgeProcChanceBonus()
         {
@@ -2476,7 +2251,10 @@ namespace ACE.Server.WorldObjects
             // (DESIGN.md 2.4, the delegation rule). Their own Spellblade/Runeblade/Spellstorm mods are
             // separate registry rows and are added there instead.
             return SpellsurgeAbility.ProcChanceBonus(rank, stacks,
-                PropertyManager.GetDouble("class_ability_spellsurge_per_stack").Item,
+                SpellsurgeAbility.PerStack(rank,
+                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r1").Item,
+                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r2").Item,
+                    PropertyManager.GetDouble("class_ability_spellsurge_per_stack_r3").Item),
                 GetEquippedModValue(EquipmentModId.Surge));
         }
 
@@ -2540,6 +2318,61 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>
+        /// The damage scale of the class-ability proc cast now in progress, 1.0 at every other moment. Read by
+        /// WorldObject_Magic.LaunchSpellProjectiles onto SpellProjectile.ProcDamageScale. Same latch shape and
+        /// same no-drift argument as <see cref="ClassAbilityProcCastActive"/>: it is armed only inside one
+        /// synchronous proc cast, so it is deliberately not part of ResetClassAbilityTransientState.
+        /// </summary>
+        public float ClassAbilityProcDamageScale { get; private set; } = 1.0f;
+
+        /// <summary>
+        /// <see cref="CastClassAbilityProc(Action)"/> with a per-cast damage scale for the projectiles it
+        /// launches (Spellsword Nether parity, owner ruling 2026-10-27). The scale is restored to 1.0 in a
+        /// finally, so a throwing cast cannot leave a later ordinary cast scaled. Elemental procs pass 1.0.
+        /// </summary>
+        public void CastClassAbilityProc(Action cast, float procDamageScale)
+        {
+            ClassAbilityProcDamageScale = procDamageScale;
+
+            try
+            {
+                CastClassAbilityProc(cast);
+            }
+            finally
+            {
+                ClassAbilityProcDamageScale = 1.0f;
+            }
+        }
+
+        /// <summary>
+        /// Volatile Elements: the ORIGINAL damage type of the weapon hit whose class-ability proc cast is now in
+        /// progress, when Volatile Elements re-typed that hit; null at every other moment. Read by
+        /// WorldObject_Magic.LaunchSpellProjectiles onto SpellProjectile.RendSourceDamageType. Same latch shape
+        /// and no-drift argument as <see cref="ClassAbilityProcDamageScale"/>, so it is likewise not part of
+        /// ResetClassAbilityTransientState.
+        /// </summary>
+        public DamageType? ClassAbilityProcRendSourceDamageType { get; private set; }
+
+        /// <summary>
+        /// <see cref="CastClassAbilityProc(Action, float)"/> that also stamps the projectiles it launches with
+        /// the hit's ORIGINAL damage type (<paramref name="rendSourceDamageType"/>, DamageEvent.OriginalDamageType),
+        /// so the proc's rend takes the better of the weapon's original-type rend and the spell type's rend
+        /// (Volatile Elements, owner ruling 2026-10-30). Null when the hit was not re-typed, which reproduces
+        /// the two-argument overload exactly. Restored to null in a finally, so a throwing cast cannot leave a
+        /// later ordinary cast stamped. Spellblade, Runeblade and Spellstorm all pass
+        /// damageEvent.OriginalDamageType here identically.
+        /// </summary>
+        public void CastClassAbilityProc(Action cast, float procDamageScale, DamageType? rendSourceDamageType)
+        {
+            // Arm, run, always disarm - the shared dat-free shape, unit-tested in VolatileElementsTests.
+            // A proc is not on a per-hit hot path (it fires only on a landed proc roll), so these delegates'
+            // allocation is not a concern here.
+            ClassAbilityProcLatch.Run<DamageType?>(v => ClassAbilityProcRendSourceDamageType = v,
+                rendSourceDamageType, null,
+                () => CastClassAbilityProc(cast, procDamageScale));
+        }
+
         // Surefooted's stack pool lived here until the ability was retired on 2026-09-12 (class ability
         // overhaul): its stacking avoidance overlapped Parry inside the same pooled cap. The pool, its
         // OnEvade trigger, its melee-hit reset in Player.TakeDamage(DamageEvent) and its parry-term read in
@@ -2551,7 +2384,7 @@ namespace ACE.Server.WorldObjects
         /// TRUE while the player's NEXT landed weapon hit should get the Spellweave bonus - armed by
         /// OnSpellweaveCast (any committed spell cast, including a proc), consumed by
         /// ConsumeSpellweaveWeaponHitMod. A one-shot charge, never a stacking ramp or a timed buff like
-        /// Frenzy/Nether Rush above, so there is nothing for ClassAbilityBuffsHeartbeat to expire.
+        /// Frenzy/Mana Rush above, so there is nothing for ClassAbilityBuffsHeartbeat to expire.
         /// </summary>
         private bool spellweaveWeaponChargeArmed;
 
@@ -2659,71 +2492,12 @@ namespace ACE.Server.WorldObjects
             return SpellweaveAbility.DamageMultiplier(rank, perRank, affinity);
         }
 
-        // ---- Vengeance: per-attacker "recently hit me" grudge window ----------------------------
-        //
-        // Berserker T2. Transient, never persisted, keyed by attacker guid rather than a single scalar
-        // because more than one monster can be beating on the Berserker at once and each owes its own
-        // 15-second window. Mutated only on the player's landblock thread (the incoming-damage dispatch and
-        // the outgoing-damage dispatch both run there), same no-locking assumption as every other
-        // class-ability buff in this file. Lazily expired on read (IsVengeanceTarget) and swept on
-        // ClassAbilityBuffsHeartbeat so a long-dead grudge does not sit in the dictionary forever.
-
-        private Dictionary<uint, double> vengeanceAttackers;
-
-        /// <summary>
-        /// Lazily creates the backing dictionary on first use, rather than a field initializer. Several test
-        /// harnesses (MuleSummonTests among them) build a Player via
-        /// FormatterServices.GetUninitializedObject, which skips every field initializer along with the
-        /// constructor - a bare field initializer here left this null for those instances, and the first
-        /// heartbeat sweep below threw a NullReferenceException that silently ate the rest of
-        /// Player.Heartbeat (MuleVendorLeashTick included), matching the GetClassAbilityCache() lazy-init
-        /// idiom already used elsewhere in this class for the identical reason.
-        /// </summary>
-        private Dictionary<uint, double> VengeanceAttackers => vengeanceAttackers ??= new Dictionary<uint, double>();
-
-        /// <summary>
-        /// Arms/refreshes the Vengeance grudge window for this attacker. Called from
-        /// VengeanceAbility.OnDamageTaken on every landed physical hit - see
-        /// Player.ApplyIncomingDamageClassAbilities for the shared gates (monster attackers only, never
-        /// PvP/self/dead) that already ran before this fires, and for why this fires even on a hit
-        /// mitigated to 0 damage (the hit still connected).
-        /// </summary>
-        public void OnVengeanceAttackerHit(Creature attacker)
-        {
-            if (attacker == null)
-                return;
-
-            VengeanceAttackers[attacker.Guid.Full] = Time.GetUnixTime();
-        }
-
-        /// <summary>
-        /// TRUE while <paramref name="target"/> damaged this player within the Vengeance window (refreshed
-        /// on every further hit it lands - PropertyManager's own doc comment on
-        /// class_ability_vengeance_window_seconds). Lazily forgets the entry once the window has lapsed, so
-        /// a one-off grudge does not leak in the dictionary forever between heartbeats.
-        /// </summary>
-        public bool IsVengeanceTarget(Creature target)
-        {
-            if (target == null)
-                return false;
-
-            var guid = target.Guid.Full;
-
-            if (!VengeanceAttackers.TryGetValue(guid, out var lastHit))
-                return false;
-
-            if (Time.GetUnixTime() - lastHit > PropertyManager.GetDouble("class_ability_vengeance_window_seconds").Item)
-            {
-                VengeanceAttackers.Remove(guid);
-                return false;
-            }
-
-            return true;
-        }
+        // ---- Vengeance: RETIRED 2026-10-24 (Berserker pass). Its per-attacker grudge state was removed
+        // with the ability; Intimidate replaced it at Berserker T2. -----------------------------------------
 
         // ---- Killer Instinct: stacking "Opening" pool from crits / landed Sneak Attacks ---------
         //
-        // Rogue T3. Same shared-window stack shape as Frenzy/Resonance/Nether Rush: one shared expiry
+        // Rogue T3. Same shared-window stack shape as Frenzy/Resonance/Mana Rush: one shared expiry
         // refreshed by every new Opening, rather than each Opening tracking its own independent 8s
         // countdown. Transient, never persisted, mutated only on the player's landblock thread (the
         // outgoing-damage dispatch and the melee/missile crit-chance roll both run there).

@@ -92,6 +92,23 @@ namespace ACE.Server.Tests
             Assert.IsTrue(QuestStamps.IsEligible("FilosDoomDynDungeonSurveyor"));
         }
 
+        /// <summary>
+        /// The PvP daily rows are repeatable bookkeeping, not quests: every counter and done flag the catalog defines awards no stamp,
+        /// whatever its case. A real quest that only contains the word is untouched (the prefix matches at the start).
+        /// </summary>
+        [TestMethod]
+        public void IsEligible_PvpDailyRowsRejected()
+        {
+            foreach (var task in ACE.Server.Pvp.PvpDailyCatalog.Tasks)
+            {
+                Assert.IsFalse(QuestStamps.IsEligible(task.CounterName), task.CounterName);
+                Assert.IsFalse(QuestStamps.IsEligible(task.DoneName), task.DoneName);
+            }
+
+            Assert.IsFalse(QuestStamps.IsEligible("pvpdailyfirstbloodcount"));
+            Assert.IsTrue(QuestStamps.IsEligible("ArenaPvpDailyLegend"), "control: the prefix only matches at the start");
+        }
+
         [TestMethod]
         public void IsEligible_LedgerRowsRejected()
         {

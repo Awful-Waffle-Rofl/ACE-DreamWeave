@@ -165,11 +165,12 @@ namespace ACE.Server.CombatSimulator
         ///   nothing to look up. Direction of the error: magic damage OVERSTATED against any
         ///   roster character holding a magic-absorbing shield.
         /// - The ELEMENTAL damage mod and the creature SLAYER mod (:549, :552), both attacker-side
-        ///   factors of that same multiply, and the war-magic SKILL BONUS (:662), which is
-        ///   added to the sum for a player caster. A caller could fold the first two into
-        ///   PreMitigationMod, but nothing on this branch does, and there is no field for the
-        ///   third. Direction: magic damage UNDERSTATED by whatever those would have contributed,
-        ///   since each is at or above its neutral value.
+        ///   factors of that same multiply. This method does not compute them; a caller that wants
+        ///   them folds them into PreMitigationMod, which is exact because they multiply the whole
+        ///   sum. CreatureAttackerSpecs.Spell and PlayerAttackerSpecs.FromPlayer both do. A spec
+        ///   built by hand without them understates magic damage by whatever they contribute.
+        /// - The war-magic SKILL BONUS for a player caster is applied, through
+        ///   AttackerSpec.MagicSkillBonus (0 unless a builder sets it).
         /// - The crit-path RECOMPOSITION of the two rating mods (:884-888), which additively
         ///   combines the crit damage rating and the defender's crit damage resist rating on a
         ///   crit only. The same structural limit the physical path has, and for the same reason:
@@ -192,8 +193,9 @@ namespace ACE.Server.CombatSimulator
             var critChance = EffectiveCritChance(spec);
 
             // the base roll is UNCONDITIONAL: a magic crit adds to it rather than replacing it,
-            // so there is no (1 - critChance) weighting on this term
-            var baseTerm = expectedBase * spec.PreMitigationMod;
+            // so there is no (1 - critChance) weighting on this term. The player skill bonus rides with it:
+            // it is added to every hit, before the multipliers (AttackerSpec.MagicSkillBonus)
+            var baseTerm = (expectedBase + spec.MagicSkillBonus) * spec.PreMitigationMod;
             var critTerm = critChance * spec.BaseDamageMax * 0.5f * spec.MagicCritDamageMod * spec.PreMitigationMod;
 
             var meanDamage = (baseTerm + critTerm) * mitigation;

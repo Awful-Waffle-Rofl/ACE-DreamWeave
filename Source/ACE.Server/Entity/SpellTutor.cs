@@ -301,6 +301,13 @@ namespace ACE.Server.Entity
             SendNpc(npc, player, $"Level {level} {SchoolDisplayName[school]} costs {offer.Cost:N0} pyreals; you have {spendable:N0} ({player.CoinValue ?? 0:N0} in your pack, {player.BankedPyreals:N0} in your bank).");
         }
 
+        /// <summary>
+        /// The spell ids the school's professor teaches at this level (the cached Offer's list, already filtered against the
+        /// client spell table), or an empty list when there is no offer. Used by the PvP match spell grant.
+        /// </summary>
+        internal static IReadOnlyList<uint> GetTaughtSpellIds(string school, int level)
+            => TryGetOffer(school, level, out var offer) ? offer.SpellIds : (IReadOnlyList<uint>)Array.Empty<uint>();
+
         private static bool TryGetOffer(string school, int level, out Offer offer)
         {
             var key = (school, level);

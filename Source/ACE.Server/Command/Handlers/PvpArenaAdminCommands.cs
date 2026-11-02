@@ -6,8 +6,10 @@ using System.Text;
 using log4net;
 
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp;
@@ -26,14 +28,15 @@ namespace ACE.Server.Command.Handlers
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         private const string AdminUsage =
-            "[ArenaAdmin] Usage: /arenaadmin <list|cancel <id>|clearqueue <1v1|2v2|tugak|bg|all>|testspace <arena_0066|arena_0067|bg_016c|bg_003c>>";
+            "[ArenaAdmin] Usage: /arenaadmin <list|cancel <id>|clearqueue <1v1|2v2|tugak|bg|all>|testspace <arena_0066|arena_0067|bg_016c|bg_003c>|deserter <character> [clear]>";
 
         [CommandHandler("arenaadmin", AccessLevel.Admin, CommandHandlerFlag.RequiresWorld, 0,
             "PvP arena admin: inspect and manage live matches.",
             "list                                  - every live match, with its short id, mode, map, state, participants and elapsed time\n" +
             "cancel <id>                           - cancel a live match (unrated once Countdown/Live); accepts an unambiguous short id prefix\n" +
             "clearqueue <1v1|2v2|tugak|bg|all>        - empty a queue (or every queue)\n" +
-            "testspace <arena_0066|arena_0067|bg_016c|bg_003c> - allocate a match space for yourself alone and teleport in, for a live map check")]
+            "testspace <arena_0066|arena_0067|bg_016c|bg_003c> - allocate a match space for yourself alone and teleport in, for a live map check\n" +
+            "deserter <character> [clear]          - show a character's deserter strikes and lockout; clear zeroes both (online or offline)")]
         public static void HandleArenaAdmin(Session session, params string[] parameters)
         {
             var player = session?.Player;
@@ -66,6 +69,10 @@ namespace ACE.Server.Command.Handlers
 
                 case "testspace":
                     HandleTestSpace(player, rest);
+                    break;
+
+                case "deserter":
+                    HandleDeserter(player, rest);
                     break;
 
                 default:
@@ -219,6 +226,102 @@ namespace ACE.Server.Command.Handlers
 
             var count = PvpMatchManager.ClearQueue(arg);
             Msg(player, $"[ArenaAdmin] Cleared {count} player(s) from the {PvpArenaText.ModeLabel(arg)} queue.");
+        }
+
+        // ---- deserter (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout") ----
+
+        /// <summary>
+        /// Parses "deserter &lt;character&gt; [clear]" against <paramref name="exists"/> (a name lookup). The FULL joined text is tried first, so a
+        /// character whose name ends in "Clear" ("Crystal Clear") is found as named; only when it does not resolve, and there is more than one
+        /// word, is a trailing "clear" (any case) stripped and taken as the clear request. Null name for no arguments. Pure apart from the lookup.
+        /// </summary>
+        internal static (string Name, bool Clear) ParseDeserterArgs(string[] args, Func<string, bool> exists)
+        {
+            if (args == null || args.Length == 0)
+                return (null, false);
+
+            var full = string.Join(" ", args).Trim();
+
+            if (full.Length == 0)
+                return (null, false);
+
+            var trailingClear = args.Length > 1 && string.Equals(args[^1], "clear", StringComparison.OrdinalIgnoreCase);
+
+            if (!trailingClear || (exists != null && exists(full)))
+                return (full, false);
+
+            var name = string.Join(" ", args.Take(args.Length - 1)).Trim();
+
+            return (name.Length == 0 ? full : name, name.Length > 0);
+        }
+
+        private static readonly long MaxUnixSeconds = DateTimeOffset.MaxValue.ToUnixTimeSeconds();
+
+        /// <summary>
+        /// A unix time as "yyyy-MM-dd HH:mm:ss UTC", "none" for 0 or less, or "out of range (N)" past year 9999 (a corrupt stored value must
+        /// not throw out of the command). Pure.
+        /// </summary>
+        internal static string FormatUnixUtc(long unixSeconds)
+        {
+            if (unixSeconds <= 0)
+                return "none";
+
+            if (unixSeconds > MaxUnixSeconds)
+                return $"out of range ({unixSeconds})";
+
+            return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+        }
+
+        /// <summary>The /arenaadmin deserter status line. Pure.</summary>
+        internal static string FormatDeserterStatus(string name, PvpDeserterStatus s) =>
+            PvpArenaText.Fill(PvpArenaText.AdminDeserterStatus,
+                ("name", name),
+                ("strikes", s.Record.Strikes),
+                ("current", s.CurrentStrikes),
+                ("last", s.Record.Strikes > 0 ? FormatUnixUtc(s.Record.LastStrikeAt) : "none"),
+                ("until", FormatUnixUtc(s.Record.LockoutUntil)),
+                ("remaining", s.SecondsRemaining > 0 ? PvpArenaText.DeserterRemainingPhrase(s.SecondsRemaining) : "none"));
+
+        private static void HandleDeserter(Player admin, string[] args)
+        {
+            var (name, clear) = ParseDeserterArgs(args, n => PlayerManager.FindByName(n) != null);
+
+            if (name == null)
+            {
+                Msg(admin, PvpArenaText.AdminDeserterUsage);
+                return;
+            }
+
+            var target = PlayerManager.FindByName(name, out var online);
+
+            if (target == null)
+            {
+                Msg(admin, PvpArenaText.Fill(PvpArenaText.AdminDeserterNotFound, ("name", name)));
+                return;
+            }
+
+            var id = target.Guid.Full;
+            var stored = new PvpDeserterRecord(
+                target.GetProperty(PropertyInt.PvpDeserterStrikes) ?? 0,
+                target.GetProperty(PropertyInt64.PvpDeserterLastStrikeAt) ?? 0,
+                target.GetProperty(PropertyInt64.PvpDeserterLockoutUntil) ?? 0);
+
+            if (clear)
+            {
+                var result = PvpMatchManager.ClearDeserter(id, target.Name, admin.Name, stored);
+
+                if (result == null)
+                {
+                    Msg(admin, PvpArenaText.AdminDeserterUnavailable);
+                    return;
+                }
+
+                Msg(admin, PvpArenaText.Fill(result.Stored ? PvpArenaText.AdminDeserterCleared : PvpArenaText.AdminDeserterClearedMemoryOnly, ("name", target.Name), ("where", online ? "online" : "offline")));
+            }
+
+            var status = PvpMatchManager.DeserterStatus(id, stored);
+
+            Msg(admin, status == null ? PvpArenaText.AdminDeserterUnavailable : FormatDeserterStatus(target.Name, status));
         }
 
         // ---- testspace ----

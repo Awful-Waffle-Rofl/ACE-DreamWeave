@@ -14,9 +14,9 @@ namespace ACE.Server.Tests
     /// The helper is exercised directly rather than through SetCommonProperties / UpdateCommonProps.
     /// Those two are not reachable from a unit test: SetCommonProperties calls
     /// LootGenerationFactory.GetLongDesc and PropertyManager, and UpdateCommonProps needs a live
-    /// Player with a Session. The VisualEffectScript copy therefore has NO unit cover here - it is a
-    /// single assignment inside those methods, and its behaviour is queued for live verification
-    /// instead (Docs/VERIFY-QUEUE.md, the tailoring row).
+    /// Player with a Session. The VisualEffectScript handling is covered separately in
+    /// TailoringQualityAuraTests (Tailoring.IntermediateScript / ResolveTailoredScript, plus a source
+    /// scan pinning that both methods call them).
     ///
     /// TestCreatures supplies bare WorldObjects with no database and no dat files.
     /// </summary>

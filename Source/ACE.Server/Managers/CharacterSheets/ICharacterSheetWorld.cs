@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using log4net;
 
 using ACE.Common.Extensions;
+using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.CombatSimulator;
 using ACE.Server.Entity;
@@ -15,6 +16,14 @@ namespace ACE.Server.Managers.CharacterSheets
 {
     public enum CharacterPresence { Missing, Deleted, Online, Offline }
 
+    /// <summary>What the published-sheets directory needs from a live player: nothing else may be added here (privacy).</summary>
+    public sealed class SheetPlayerInfo
+    {
+        public string Name { get; set; }
+        public int Level { get; set; }
+        public string Heritage { get; set; }
+    }
+
     /// <summary>
     /// The world-facing seam of CharacterSheetService: presence, the two projections and the rank snapshot.
     /// Every method blocks the CALLER for up to its timeout and must never be called from a world thread.
@@ -22,6 +31,12 @@ namespace ACE.Server.Managers.CharacterSheets
     public interface ICharacterSheetWorld
     {
         CharacterPresence Presence(uint characterGuid);
+
+        /// <summary>
+        /// The directory fields of one character (name, level, heritage display name), or null when the
+        /// player is not known to PlayerManager. In-memory reads only, no shard query, no queueing.
+        /// </summary>
+        SheetPlayerInfo PlayerInfo(uint characterGuid);
 
         /// <summary>Blocks up to timeout. null = timed out / not ticking / refused.</summary>
         CharacterSheet BuildOnline(uint characterGuid, bool includeClassAbilities, TimeSpan timeout, bool ownerView = false);
@@ -197,6 +212,35 @@ namespace ACE.Server.Managers.CharacterSheets
                 return CharacterPresence.Deleted;
 
             return PlayerManager.GetOnlinePlayer(characterGuid) != null ? CharacterPresence.Online : CharacterPresence.Offline;
+        }
+
+        /// <summary>
+        /// The directory's heritage text. The heritage INT is authoritative (HeritageGroup.ToSentence, the same
+        /// display the rest of the server uses); the stored string is consulted only when the int is absent,
+        /// zero (Invalid) or not a defined HeritageGroup. Neither usable: empty string, never null.
+        /// </summary>
+        internal static string HeritageText(int? heritageId, string stored)
+        {
+            if (heritageId.HasValue && heritageId.Value != (int)HeritageGroup.Invalid
+                && System.Enum.IsDefined(typeof(HeritageGroup), heritageId.Value))
+                return ((HeritageGroup)heritageId.Value).ToSentence();
+
+            return string.IsNullOrEmpty(stored) ? string.Empty : stored;
+        }
+
+        public SheetPlayerInfo PlayerInfo(uint characterGuid)
+        {
+            // Online or offline, whichever PlayerManager holds. Runs on the market API request thread: the
+            // lookup takes PlayerManager's read lock briefly, and each property read takes the biota's
+            // read lock (WorldObject.GetProperty -> Biota.GetProperty(..., BiotaDatabaseLock)).
+            var player = PlayerManager.FindByGuid(characterGuid);
+
+            if (player == null)
+                return null;
+
+            var heritage = HeritageText(player.Heritage, player.GetProperty(PropertyString.HeritageGroup));
+
+            return new SheetPlayerInfo { Name = player.Name, Level = player.Level ?? 0, Heritage = heritage };
         }
 
         public CharacterSheet BuildOnline(uint characterGuid, bool includeClassAbilities, TimeSpan timeout, bool ownerView = false)
@@ -405,7 +449,7 @@ namespace ACE.Server.Managers.CharacterSheets
                     exempt.Add(p.Guid.Full);
             }
 
-            foreach (var board in LeaderboardRanking.Boards)
+            foreach (var board in LeaderboardRanking.SheetBoards())
             {
                 if (board.FeatureGate != null && !PropertyManager.GetBool(board.FeatureGate).Item)
                     continue;

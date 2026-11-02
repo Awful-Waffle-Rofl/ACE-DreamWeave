@@ -76,6 +76,10 @@ namespace ACE.Server.WorldObjects
             if (tag == null || BattlegroundKillChipActive || !(amount > 0f) || source is not Player attacker)
                 return amount;
 
+            CrystalHitResolution resolution;
+            CrystalDefenderReductionDials dials;
+            DateTime now;
+
             try
             {
                 var binding = attacker.PvpBinding;
@@ -83,12 +87,65 @@ namespace ACE.Server.WorldObjects
                 if (!CrystalDefenderReduction.IsAttackerHit(tag, binding) || binding.Match.DefenderReduction == null)
                     return amount;
 
-                return CrystalDefenderReduction.Apply(tag, binding, Location, DefenderSampleSource(this), PvpArenaHookSettings.UtcNow(), amount);
+                dials = binding.Match.DefenderReduction;
+                now = PvpArenaHookSettings.UtcNow();
+                resolution = CrystalDefenderReduction.Resolve(tag, binding, Location, DefenderSampleSource(this), now, amount);
             }
             catch (Exception ex)
             {
                 log.Error($"[PVP] crystal {tag.Index} of match {tag.MatchId} (0x{Guid}): the engaged-defender reduction threw; the hit lands unreduced", ex);
                 return amount;
+            }
+
+            LogDefenderReduction(tag, attacker, dials, amount, resolution, now);
+
+            return resolution.Amount;
+        }
+
+        /// <summary>The fewest seconds between two engaged-defender diagnostics lines for one crystal.</summary>
+        internal const double DefenderReductionLogIntervalSeconds = 5.0;
+
+        /// <summary>
+        /// Where the engaged-defender diagnostics line goes: the [PVP] info log, the level and channel every other match line uses. A seam so
+        /// a test can read the lines; production never reassigns it.
+        /// </summary>
+        internal static Action<string> DefenderReductionLog = line => log.Info(line);
+
+        /// <summary>When this crystal may log its next diagnostics line. Landblock thread only, like every other crystal field.</summary>
+        private DateTime battlegroundDefenderLogNextUtc;
+
+        /// <summary>Qualifying hits on this crystal the throttle skipped since its last diagnostics line. Landblock thread only.</summary>
+        private int battlegroundDefenderLogSkipped;
+
+        /// <summary>
+        /// The engaged-defender diagnostics (Docs/Pvp/ATTACK-DEFEND.md "Engaged defenders"): one line per crystal at most every
+        /// <see cref="DefenderReductionLogIntervalSeconds"/>, for a hit the rule considered (an attacker of this Live match, the match carrying
+        /// dials). It names the engaged count and the multiplier, and when nobody counted, why each candidate did not. Best effort: a failure
+        /// here never touches the hit.
+        /// </summary>
+        private void LogDefenderReduction(BattlegroundObjectiveTag tag, Player attacker, CrystalDefenderReductionDials dials, float rolled, CrystalHitResolution resolution, DateTime now)
+        {
+            try
+            {
+                if (!resolution.Qualified)
+                    return;
+
+                if (now < battlegroundDefenderLogNextUtc)
+                {
+                    battlegroundDefenderLogSkipped++;
+                    return;
+                }
+
+                var skipped = battlegroundDefenderLogSkipped;
+
+                battlegroundDefenderLogSkipped = 0;
+                battlegroundDefenderLogNextUtc = now.AddSeconds(DefenderReductionLogIntervalSeconds);
+
+                DefenderReductionLog?.Invoke(CrystalDefenderReduction.FormatHitLine(tag, $"0x{Guid}", attacker?.Name, dials, rolled, resolution, skipped));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] crystal {tag?.Index} of match {tag?.MatchId}: the engaged-defender diagnostics line threw; the hit is unaffected", ex);
             }
         }
 

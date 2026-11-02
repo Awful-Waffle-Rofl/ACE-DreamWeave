@@ -20,6 +20,11 @@ namespace ACE.Server.Pvp
                 var waitedMinutes = (ctx.UtcNow - a.QueuedAtUtc).TotalMinutes;
                 var window = Math.Min(ctx.MmWindowInitial + ctx.MmWindowGrowthPerMinute * waitedMinutes, ctx.MmWindowMax);
 
+                // Fresh-opponent tiers: the best-tier valid candidate wins, the first in queue order within a tier. With no Probe
+                // every candidate is Fresh, so the first valid one returns at once - the legacy behavior.
+                QueueEntrant best = null;
+                var bestTier = int.MaxValue;
+
                 for (var j = 0; j < solo.Count; j++)
                 {
                     if (i == j)
@@ -33,8 +38,22 @@ namespace ACE.Server.Pvp
                     if (Math.Abs(a.Ratings[0] - b.Ratings[0]) > window)
                         continue;
 
+                    var tier = PairingTiers.Rate(ctx, new[] { a }, new[] { b });
+
+                    if (tier == 0 || tier >= bestTier)
+                        continue;
+
+                    best = b;
+                    bestTier = tier;
+
+                    if (tier == PairingTiers.Best)
+                        break;
+                }
+
+                if (best != null)
+                {
                     var teamA = new PvpTeam(0, new List<PvpParticipant> { new PvpParticipant(a.CharacterIds[0], a.Ratings[0], a.IpKey) });
-                    var teamB = new PvpTeam(1, new List<PvpParticipant> { new PvpParticipant(b.CharacterIds[0], b.Ratings[0], b.IpKey) });
+                    var teamB = new PvpTeam(1, new List<PvpParticipant> { new PvpParticipant(best.CharacterIds[0], best.Ratings[0], best.IpKey) });
 
                     return new MatchProposal(new List<PvpTeam> { teamA, teamB }, Rated: true);
                 }

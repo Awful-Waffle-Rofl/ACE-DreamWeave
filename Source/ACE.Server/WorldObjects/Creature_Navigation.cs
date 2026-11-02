@@ -291,7 +291,10 @@ namespace ACE.Server.WorldObjects
             // TurnToParameters.Speed for a TurnToObject, so omitting it here told the client to track the target
             // at full rate while the server turned at a fifth of it - for the whole slow window, on exactly the
             // monsters an archer is most likely to pin.
-            turnToMotion.MoveToParameters.Speed = CurrentMovementSlowFactor;
+            //
+            // MovementSpeedFactor, not CurrentMovementSlowFactor: it is the slow for an ordinary creature, and the
+            // slow times the speed floor for a combat pet, matching the mvp.Speed GetMovementParameters sets.
+            turnToMotion.MoveToParameters.Speed = MovementSpeedFactor;
 
             EnqueueBroadcastMotion(turnToMotion);
 
@@ -345,7 +348,10 @@ namespace ACE.Server.WorldObjects
             // BroadcastMoveTo reaches here too, so a player who walks into render range mid-slow is told the
             // correct rate for free. Unslowed creatures - and every Player, which can never be pinned - get
             // exactly 1.0f, which is MoveToParameters' own default.
-            motion.MoveToParameters.Speed = CurrentMovementSlowFactor;
+            //
+            // MovementSpeedFactor also carries the combat pet speed floor (CombatPet_SpeedFloor.cs); for every other
+            // creature it is CurrentMovementSlowFactor.
+            motion.MoveToParameters.Speed = MovementSpeedFactor;
 
             if (runRate > 0)
                 motion.RunRate = runRate;
@@ -373,7 +379,7 @@ namespace ACE.Server.WorldObjects
                 // return-home leg's wire value, and a player who enters render range while the creature is
                 // slowed must be told the rate the server is simulating, not the default 1.0f. (1.0f is
                 // walkRunThreshold; speed is the fourth argument of GetMoveToPosition.)
-                motion = GetMoveToPosition(home, RunRate, 1.0f, CurrentMovementSlowFactor);
+                motion = GetMoveToPosition(home, RunRate, 1.0f, MovementSpeedFactor);
             }
 
             player.Session.Network.EnqueueSend(new GameMessageUpdateMotion(this, motion));

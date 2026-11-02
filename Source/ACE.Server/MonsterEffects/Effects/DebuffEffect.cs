@@ -52,7 +52,7 @@ namespace ACE.Server.MonsterEffects.Effects
     /// crediting one weighted winner, so a reactor is never asked to buy its notification with avoidance
     /// chance it does not supply. Verified by MonsterEffectAvoidIntegrationTests.
     /// </summary>
-    public sealed class DebuffEffect : IMonsterEffect, IMonsterOutgoingHit, IMonsterSpellHit, IMonsterAvoidance
+    public sealed class DebuffEffect : IMonsterEffect, IMonsterOutgoingHit, IMonsterSpellHit, IMonsterAvoidance, IMonsterReflectedRider
     {
         public string Kind => "debuff";
 
@@ -109,6 +109,24 @@ namespace ACE.Server.MonsterEffects.Effects
             Apply(caster, target, projectile.Spell.DamageType, spec);
         }
 
+        /// <summary>
+        /// Reflect (Vanguard T3) bounced this monster's shot: the debuff the shot would have laid on the
+        /// player lands on the MONSTER instead, cast by the reflector. Gated on the same on= trigger the
+        /// original shot would have fired (hit for a missile, spellhit for a spell projectile); the proc
+        /// chance is still the monster's own, and a vuln still matches the shot's own damage type.
+        /// </summary>
+        public void OnReflected(Creature monster, Creature reflector, MonsterEffectTrigger firedAs, DamageType damageType, float damage, MonsterEffectSpec spec, ref MonsterEffectState state)
+        {
+            if (damage <= 0.0f || reflector == null)
+                return;
+
+            var trigger = spec.GetFlags("on", MonsterEffectTrigger.Hit);
+            if (!trigger.HasFlag(firedAs))
+                return;
+
+            Apply(monster, monster, damageType, spec, reflector);
+        }
+
         /// <summary>Never contributes avoidance chance - see the class doc comment for why on=avoid needs a granter.</summary>
         public double GetAvoidChance(Creature defender, Creature attacker, CombatType combatType, MonsterEffectSpec spec, ref MonsterEffectState state) => 0.0;
 
@@ -124,10 +142,17 @@ namespace ACE.Server.MonsterEffects.Effects
             Apply(defender, attacker, DamageType.Undef, spec);
         }
 
-        private static void Apply(Creature source, Creature target, DamageType damageType, MonsterEffectSpec spec)
+        /// <summary>
+        /// <paramref name="source"/> is always the monster carrying the record (the proc chance is its own).
+        /// <paramref name="caster"/> is who the enchantment is attributed to: the monster itself (null, every
+        /// normal trigger) or the player who reflected the shot.
+        /// </summary>
+        private static void Apply(Creature source, Creature target, DamageType damageType, MonsterEffectSpec spec, Creature caster = null)
         {
             if (target == null || target.IsDead)
                 return;
+
+            var enchantmentCaster = caster ?? source;
 
             // source is always the monster carrying this record (every Apply call site passes it first), so
             // the proc chance is scaled by ITS ramp axis=procchance and capped there - see
@@ -155,15 +180,15 @@ namespace ACE.Server.MonsterEffects.Effects
             switch (spec.GetEnum("what", MonsterEffectDebuffWhat.Undef))
             {
                 case MonsterEffectDebuffWhat.Imperil:
-                    ApplyImperil(source, target, Math.Min(mag, MonsterEffectCaps.DebuffCap), secs);
+                    ApplyImperil(enchantmentCaster, target, Math.Min(mag, MonsterEffectCaps.DebuffCap), secs);
                     break;
 
                 case MonsterEffectDebuffWhat.Vuln:
-                    ApplyVuln(source, target, damageType, Math.Min(mag, MonsterEffectCaps.DebuffVulnCap), secs);
+                    ApplyVuln(enchantmentCaster, target, damageType, Math.Min(mag, MonsterEffectCaps.DebuffVulnCap), secs);
                     break;
 
                 case MonsterEffectDebuffWhat.AttackSkills:
-                    ApplyAttackSkills(source, target, Math.Min(mag, MonsterEffectCaps.DebuffCap), secs);
+                    ApplyAttackSkills(enchantmentCaster, target, Math.Min(mag, MonsterEffectCaps.DebuffCap), secs);
                     break;
             }
         }

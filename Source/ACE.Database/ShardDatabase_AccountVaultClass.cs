@@ -21,12 +21,24 @@ namespace ACE.Database
     /// - These are ledger operations, NOT biota operations, so they deliberately do not run through
     ///   SerializedShardDatabase's worker thread. The caller is AccountVaultStore, which serializes
     ///   every mutation for one account through its own queue.
-    /// - NOTHING here may open a user-initiated EF transaction, and nothing here needs one.
-    ///   ShardDbContext.OnConfiguring enables EnableRetryOnFailure and MySqlRetryingExecutionStrategy
-    ///   refuses a user-initiated transaction outright. Every statement below is a single ExecuteSqlRaw
-    ///   or a single LINQ read, each its own implicit transaction. Atomicity comes from the
-    ///   account_vault_class_uidx unique key plus that per-account mutation queue, not from the
-    ///   database.
+    /// - EXACTLY ONE METHOD HERE OPENS A USER-INITIATED EF TRANSACTION:
+    ///   <see cref="TryExchangeAccountVaultClasses"/>, and only inside
+    ///   context.Database.CreateExecutionStrategy().Execute(...). ShardDbContext.OnConfiguring enables
+    ///   EnableRetryOnFailure, and MySqlRetryingExecutionStrategy refuses a bare BeginTransaction()
+    ///   outright. Every OTHER method is a single ExecuteSqlRaw or a single LINQ read per step, each its
+    ///   own implicit transaction, and gets its atomicity from the account_vault_class_uidx unique key
+    ///   plus that per-account mutation queue rather than from the database.
+    ///
+    ///   The exchange is the exception because it is the one operation whose correctness is
+    ///   MULTI-ROW: it debits some class rows and credits others as one trade (the partial-salvage
+    ///   combine), and a crash between two single-statement adjusts would leave a player's items
+    ///   destroyed on one row and never credited on the other - a state no per-row guard can see,
+    ///   because each row on its own is perfectly valid. The strategy may re-run the whole delegate
+    ///   after a commit whose acknowledgement was lost, so the delegate is idempotent by
+    ///   construction: it locks every row it touches, and a re-run that finds every row already at its
+    ///   post-state reports success without writing. Nothing else in this file may copy the pattern
+    ///   without the same two properties - one strategy-wrapped transaction, and an idempotent
+    ///   delegate - and the source-shape tests pin the count at one.
     /// - READ FAILURE CONTRACT: a read returns NULL when it FAILED and an EMPTY LIST when the account
     ///   genuinely holds no classes. Callers must never conflate the two - a store that read a
     ///   transient failure as "holds none" would draw an empty panel over a full vault.
@@ -493,7 +505,8 @@ namespace ACE.Database
         /// <paramref name="knownPresent"/> is a HINT, not a promise, and a stale one is bounded rather
         /// than fatal - see the stack batch's remarks.
         ///
-        /// No user-initiated transaction, per this file's header: each statement is its own implicit
+        /// No user-initiated transaction (this file's header names the one method that opens one, and
+        /// this is not it): each statement is its own implicit
         /// transaction, so one (table, key) group never half-commits. The groups are NOT atomic with
         /// each other and do not need to be.
         /// </summary>
@@ -676,6 +689,341 @@ namespace ACE.Database
             }
 
             return order.All(classKey => outcomes[classKey] == AccountVaultStackAdjustResult.Applied);
+        }
+
+        // ---- the ATOMIC multi-row exchange (mule partial-salvage combine) ----
+
+        /// <summary>
+        /// Locks one class row for the rest of the exchange's transaction and reads it. Under REPEATABLE
+        /// READ - the MySQL/MariaDB default, and this repo sets no isolation level anywhere, so it is
+        /// what the exchange runs under - a key with no row takes a gap lock on
+        /// account_vault_class_uidx instead, which stops another writer inserting that key between this
+        /// read and the exchange's own INSERT. Under READ COMMITTED there would be no gap lock; the
+        /// exchange does not depend on it for correctness, because a key inserted underneath it makes
+        /// the plain INSERT fail with a duplicate key, which is caught, rolled back and Refused.
+        /// </summary>
+        private const string LockAccountVaultClassRowSql =
+            "SELECT * FROM `account_vault_class` WHERE `account_Id` = {0} AND `class_Key` = {1} FOR UPDATE";
+
+        /// <summary>
+        /// Applies one step's deltas, guarded on the EXACT pre-state the exchange just verified under
+        /// the row lock. Both columns in one statement, for the reason
+        /// <see cref="ApplyAccountVaultClassDeltaSql"/> documents. The guard is redundant while the
+        /// lock holds, and deliberately kept anyway: it turns any gap in that reasoning into zero
+        /// affected rows and a rollback rather than a delta applied to a state nobody checked. A step
+        /// always has at least one non-zero delta, so a matched row is always a changed row and the
+        /// affected count means the same thing under either CLIENT_FOUND_ROWS setting.
+        /// </summary>
+        private const string ExchangeAccountVaultClassUpdateSql =
+            "UPDATE `account_vault_class` SET `count` = `count` + {2}, `total_Value` = `total_Value` + {3} " +
+            "WHERE `account_Id` = {0} AND `class_Key` = {1} AND `count` = {4} AND `total_Value` = {5}";
+
+        /// <summary>
+        /// Creates a row the exchange observed absent. A PLAIN INSERT, never ON DUPLICATE KEY UPDATE:
+        /// the duplicate branch would ADD the deltas to a row this exchange never verified. A duplicate
+        /// here instead raises MySQL 1062, which the exchange catches, rolls the whole trade back on,
+        /// and reports as Refused - the ledger provably did not move. 1062 is not transient, so the
+        /// execution strategy never retries it.
+        /// </summary>
+        private const string ExchangeAccountVaultClassInsertSql =
+            "INSERT INTO `account_vault_class` (`account_Id`, `class_Key`, `wcid`, `count`, `total_Value`, `value_Band_Pct`, `canonical_Form`) " +
+            "VALUES ({0}, {1}, {2}, {3}, {4}, {5}, {6})";
+
+        /// <summary>
+        /// The request shape <see cref="TryExchangeAccountVaultClasses"/> accepts, checked before any
+        /// statement so a malformed call is a refusal and never a database round trip. Public and
+        /// static so the test fake applies the identical rules.
+        ///
+        ///   - a non-zero account and at least one step, no null step;
+        ///   - every key 32 LOWERCASE HEX characters. This is stricter than the other methods here on
+        ///     purpose: class_Key carries the database's case-insensitive default collation, so two keys
+        ///     that are ordinal-distinct but collation-equal would lock and update the SAME row twice.
+        ///     The key alphabet is what makes ordinal and collation equality agree, so it is enforced
+        ///     here rather than assumed (see TryAdjustAccountVaultClassBatch for the long form);
+        ///   - every key DISTINCT, for the same reason: two steps on one row cannot both be verified
+        ///     against one observed state;
+        ///   - every step has at least one non-zero delta - a no-op step has identical pre- and
+        ///     post-states and would make a retry indistinguishable from a first run;
+        ///   - expected and resulting count and total all non-negative, without overflow;
+        ///   - neither the expected nor the resulting state is "zero items, non-zero total": that is a
+        ///     pool that has lost its items (see DeleteEmptyAccountVaultClasses), and an exchange must
+        ///     never create one or build on one;
+        ///   - a step expecting 0/0 carries a usable seed, because only that step can find its row
+        ///     absent and need to create it.
+        /// </summary>
+        public static bool IsValidAccountVaultClassExchange(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps, out string reason)
+        {
+            reason = null;
+
+            if (accountId == 0)
+            {
+                reason = "account id 0";
+                return false;
+            }
+
+            if (steps == null || steps.Count == 0)
+            {
+                reason = "no steps";
+                return false;
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var step in steps)
+            {
+                if (step == null)
+                {
+                    reason = "a null step";
+                    return false;
+                }
+
+                if (!IsLowerHexClassKey(step.ClassKey))
+                {
+                    reason = $"class key '{step.ClassKey}' is not 32 lowercase hex characters";
+                    return false;
+                }
+
+                if (!seen.Add(step.ClassKey))
+                {
+                    reason = $"class key {step.ClassKey} appears more than once";
+                    return false;
+                }
+
+                if (step.CountDelta == 0 && step.ValueDelta == 0)
+                {
+                    reason = $"class key {step.ClassKey} has no delta";
+                    return false;
+                }
+
+                if (step.ExpectedCount < 0 || step.ExpectedTotal < 0)
+                {
+                    reason = $"class key {step.ClassKey} expects a negative pre-state {step.ExpectedCount}/{step.ExpectedTotal}";
+                    return false;
+                }
+
+                long resultCount, resultTotal;
+
+                try
+                {
+                    resultCount = checked(step.ExpectedCount + step.CountDelta);
+                    resultTotal = checked(step.ExpectedTotal + step.ValueDelta);
+                }
+                catch (OverflowException)
+                {
+                    reason = $"class key {step.ClassKey} overflows applying {step.CountDelta}/{step.ValueDelta} to {step.ExpectedCount}/{step.ExpectedTotal}";
+                    return false;
+                }
+
+                if (resultCount < 0 || resultTotal < 0)
+                {
+                    reason = $"class key {step.ClassKey} would go negative: {step.ExpectedCount}/{step.ExpectedTotal} + {step.CountDelta}/{step.ValueDelta}";
+                    return false;
+                }
+
+                if ((step.ExpectedCount == 0 && step.ExpectedTotal != 0) || (resultCount == 0 && resultTotal != 0))
+                {
+                    reason = $"class key {step.ClassKey} expects or produces zero items with a non-zero total: {step.ExpectedCount}/{step.ExpectedTotal} -> {resultCount}/{resultTotal}";
+                    return false;
+                }
+
+                if (step.ExpectedCount == 0 && (step.Seed == null || string.IsNullOrEmpty(step.Seed.CanonicalForm)))
+                {
+                    reason = $"class key {step.ClassKey} expects an absent row but carries no usable seed to create it";
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsLowerHexClassKey(string classKey)
+        {
+            if (classKey == null || classKey.Length != 32)
+                return false;
+
+            foreach (var c in classKey)
+            {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Applies every step's deltas to its class row as ONE atomic trade, or none of them.
+        ///
+        /// Inside one execution-strategy transaction:
+        ///   1. Lock every key FOR UPDATE, in ORDINAL key order so two exchanges over overlapping keys
+        ///      always acquire their locks in the same order and cannot deadlock on each other. A key
+        ///      with no row reads as 0/0 (and, under REPEATABLE READ, takes a gap lock).
+        ///   2. Every row at its expected PRE-state: apply every step - a guarded UPDATE for a row that
+        ///      exists, a plain INSERT from the seed for one that does not - and commit. Applied.
+        ///   3. Otherwise, every row at its POST-state (expected + delta): this is a re-run of a
+        ///      delegate whose commit landed but whose acknowledgement was lost. Commit nothing new.
+        ///      Applied, zero writes.
+        ///   4. Otherwise (the ledger moved underneath the caller, or a mix of pre and post): roll
+        ///      back. Refused - and NO row has changed, including the ones that did match.
+        ///
+        /// Because every step's delta is non-zero, no row can be at its pre- and post-state at once, so
+        /// steps 2 and 3 can never both claim a call.
+        ///
+        /// WHAT STEP 3 PROVES, AND WHAT IT DOES NOT. Every locked row sitting at exactly this
+        /// exchange's post-state is the signature of this exchange having committed. It is not a
+        /// token: a different operation that happened to leave every row at the same values would read
+        /// the same way. That is acceptable here for the reason the rest of this file's atomicity is:
+        /// the caller, AccountVaultStore, serializes every mutation for one account through its own
+        /// queue, so nothing else moves these rows while this call is in flight.
+        ///
+        /// A ROW DRAINED TO ZERO IS LEFT AT 0/0, not deleted, matching
+        /// <see cref="TryAdjustAccountVaultClass"/>: the caller reaps empties with
+        /// <see cref="DeleteEmptyAccountVaultClasses"/> afterwards. Step 3 reads an already-reaped row
+        /// as 0/0, so the reap cannot break a later retry.
+        ///
+        /// APPLIED MEANS THE LEDGER IS AT THE POST-STATE, NOT THAT THIS CALL WROTE IT. Step 3 returns
+        /// Applied having written nothing, so a caller must never grant anything OUTSIDE the ledger
+        /// (an item, a refund, an audit row that counts as a payout) on the strength of Applied alone.
+        /// Anything the trade owes beyond these rows must be keyed to the trade itself, not to "this
+        /// call reported Applied", or a retried call grants it twice.
+        ///
+        /// OUTCOMES. <see cref="AccountVaultStackAdjustResult.Applied"/> or
+        /// <see cref="AccountVaultStackAdjustResult.Refused"/> as above; Refused also for a request
+        /// <see cref="IsValidAccountVaultClassExchange"/> rejects, without touching the database, and
+        /// for an INSERT that hit a duplicate key (MySQL 1062), after rolling the trade back.
+        /// <see cref="AccountVaultStackAdjustResult.Failed"/> for ANY exception, never a refusal and
+        /// never Applied: the commit may have landed before the throw. AppliedCountUnknown is never
+        /// returned - there is no read-back to fail; the caller reloads the ledger itself.
+        /// </summary>
+        public AccountVaultStackAdjustResult TryExchangeAccountVaultClasses(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps)
+        {
+            if (!IsValidAccountVaultClassExchange(accountId, steps, out var reason))
+            {
+                log.Error($"[VAULT] TryExchangeAccountVaultClasses refused a malformed request for account {accountId}: {reason}.");
+                return AccountVaultStackAdjustResult.Refused;
+            }
+
+            var ordered = steps.OrderBy(s => s.ClassKey, StringComparer.Ordinal).ToList();
+
+            // Every step, built once and before the try, so the Failed log below can name the whole
+            // trade an operator has to reconcile by hand - "carrying N steps" alone cannot be.
+            var stepSummary = string.Join("; ", ordered.Select(s => $"{s.ClassKey} {s.ExpectedCount}/{s.ExpectedTotal} {s.CountDelta:+#;-#;0}/{s.ValueDelta:+#;-#;0}"));
+
+            try
+            {
+                using (var context = new ShardDbContext())
+                {
+                    var strategy = context.Database.CreateExecutionStrategy();
+
+                    return strategy.Execute(() =>
+                    {
+                        using (var transaction = context.Database.BeginTransaction())
+                        {
+                            // 1. Lock and observe, in ordinal key order. Must stay FIRST: every
+                            // decision below is made against these observations, and a re-run that
+                            // skipped them would apply the deltas a second time.
+                            var present = new bool[ordered.Count];
+                            var observedCount = new long[ordered.Count];
+                            var observedTotal = new long[ordered.Count];
+
+                            for (var i = 0; i < ordered.Count; i++)
+                            {
+                                var row = context.AccountVaultClass
+                                    .FromSqlRaw(LockAccountVaultClassRowSql, accountId, ordered[i].ClassKey)
+                                    .AsNoTracking()
+                                    .ToList()
+                                    .FirstOrDefault();
+
+                                present[i] = row != null;
+                                observedCount[i] = row?.Count ?? 0;
+                                observedTotal[i] = row?.TotalValue ?? 0;
+                            }
+
+                            var allPre = true;
+                            var allPost = true;
+
+                            for (var i = 0; i < ordered.Count; i++)
+                            {
+                                var step = ordered[i];
+
+                                if (observedCount[i] != step.ExpectedCount || observedTotal[i] != step.ExpectedTotal)
+                                    allPre = false;
+
+                                if (observedCount[i] != step.ExpectedCount + step.CountDelta || observedTotal[i] != step.ExpectedTotal + step.ValueDelta)
+                                    allPost = false;
+                            }
+
+                            // 2. Every row where the caller said it was: apply the whole trade.
+                            if (allPre)
+                            {
+                                for (var i = 0; i < ordered.Count; i++)
+                                {
+                                    var step = ordered[i];
+
+                                    if (present[i])
+                                    {
+                                        var applied = context.Database.ExecuteSqlRaw(ExchangeAccountVaultClassUpdateSql, accountId, step.ClassKey,
+                                                                                     step.CountDelta, step.ValueDelta, step.ExpectedCount, step.ExpectedTotal);
+
+                                        if (applied != 1)
+                                        {
+                                            transaction.Rollback();
+
+                                            log.Error($"[VAULT] TryExchangeAccountVaultClasses: the guarded UPDATE for account {accountId}, class {step.ClassKey} matched {applied} row(s) under its own row lock. Rolled back; nothing moved.");
+                                            return AccountVaultStackAdjustResult.Refused;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        try
+                                        {
+                                            context.Database.ExecuteSqlRaw(ExchangeAccountVaultClassInsertSql, accountId, step.ClassKey, step.Seed.Wcid,
+                                                                           step.CountDelta, step.ValueDelta, step.Seed.ValueBandPct, step.Seed.CanonicalForm);
+                                        }
+                                        catch (MySqlConnector.MySqlException ex) when (ex.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
+                                        {
+                                            // The row appeared after it was observed absent. Only this
+                                            // statement failed, so the transaction is still open and
+                                            // rolling it back undoes every earlier step: provably
+                                            // nothing moved. Not transient, so never retried.
+                                            transaction.Rollback();
+
+                                            log.Warn($"[VAULT] TryExchangeAccountVaultClasses refused for account {accountId}: class {step.ClassKey} was observed absent but its INSERT hit a duplicate key. Rolled back; nothing moved. Trade: {stepSummary}.");
+                                            return AccountVaultStackAdjustResult.Refused;
+                                        }
+                                    }
+                                }
+
+                                transaction.Commit();
+                                return AccountVaultStackAdjustResult.Applied;
+                            }
+
+                            // 3. Every row already where the trade leaves it: an earlier run of this
+                            // delegate committed and lost its acknowledgement. Write nothing.
+                            if (allPost)
+                            {
+                                transaction.Commit();
+
+                                log.Warn($"[VAULT] TryExchangeAccountVaultClasses: account {accountId}'s {ordered.Count} class row(s) were already at the post-state; treating as already applied and writing nothing. Trade: {stepSummary}.");
+                                return AccountVaultStackAdjustResult.Applied;
+                            }
+
+                            // 4. The ledger moved underneath the caller. Nothing has been written.
+                            transaction.Rollback();
+
+                            var observed = string.Join(", ", ordered.Select((s, i) =>
+                                $"{s.ClassKey} expected {s.ExpectedCount}/{s.ExpectedTotal} delta {s.CountDelta:+#;-#;0}/{s.ValueDelta:+#;-#;0} found {(present[i] ? $"{observedCount[i]}/{observedTotal[i]}" : "absent")}"));
+
+                            log.Warn($"[VAULT] TryExchangeAccountVaultClasses refused for account {accountId}: the ledger is at neither the expected pre-state nor the post-state ({observed}).");
+                            return AccountVaultStackAdjustResult.Refused;
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULT] TryExchangeAccountVaultClasses threw for account {accountId} carrying {ordered.Count} step(s): {ex.GetFullMessage()}. Whether it committed is UNKNOWN. Trade: {stepSummary}.");
+                return AccountVaultStackAdjustResult.Failed;
+            }
         }
 
         /// <summary>

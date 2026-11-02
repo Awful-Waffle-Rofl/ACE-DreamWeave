@@ -37,12 +37,11 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// CAP-granting wcids deliberately kept OFF the planner because their source is not yet revealed to
-        /// players. cap-quests.json is published verbatim to the public wiki, so an unrevealed source cannot
+        /// players. cap-quests.json is published verbatim to the public www site, so an unrevealed source cannot
         /// sit in it, not even behind a flag. To reveal one, add its row to cap-quests.json and delete it here.
         /// </summary>
         private static readonly HashSet<uint> UnrevealedCapWcids = new HashSet<uint>
         {
-            1004121, // Relic of the Unburied (MlRelariaTrophy)
         };
 
         /// <summary>Matches one "(objectId, type, value)" tuple from a weenie_properties_int VALUES list.</summary>
@@ -160,6 +159,11 @@ namespace ACE.Server.Tests
                 Assert.IsFalse(string.IsNullOrWhiteSpace(quest.QuestName), "a row is missing questName");
                 Assert.IsFalse(string.IsNullOrWhiteSpace(quest.Label), $"{quest.QuestName} is missing a player-facing label");
                 Assert.AreNotEqual(0u, quest.Wcid, $"{quest.QuestName} is missing a wcid");
+
+                // The planner import sends each questName as a `quest=` query value, and the route silently
+                // drops a value that fails this rule - so a questName that breaks it would never import.
+                Assert.IsTrue(ACE.Server.Managers.CharacterSheets.ClassAbilityImportProjection.IsValidQuestParam(quest.QuestName),
+                    $"{quest.QuestName} does not match the import quest-param pattern {ACE.Server.Managers.CharacterSheets.ClassAbilityImportProjection.QuestParamPattern}.");
             }
         }
 

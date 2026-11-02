@@ -150,6 +150,29 @@ namespace ACE.Server.Entity.AccountVault
                                              IReadOnlySet<string> knownPresent,
                                              out IReadOnlyDictionary<string, AccountVaultStackAdjustResult> perKey);
 
+        /// <summary>
+        /// Applies every step's deltas to its class row as ONE atomic trade, or none of them - the
+        /// partial-salvage combine, which debits some class rows and credits others.
+        ///
+        /// Each step names the pre-state it expects (0/0 for a row that must not exist yet). The trade
+        /// applies only if EVERY row is at its expected pre-state; if every row is already at its
+        /// post-state it reports <see cref="AccountVaultStackAdjustResult.Applied"/> without writing
+        /// (a retry after a lost commit acknowledgement); anything else is
+        /// <see cref="AccountVaultStackAdjustResult.Refused"/> with NO row changed. A malformed request
+        /// (see ShardDatabase.IsValidAccountVaultClassExchange) is Refused before any statement.
+        ///
+        /// APPLIED MEANS THE LEDGER IS AT THE POST-STATE, NOT THAT THIS CALL WROTE IT: a retry finds
+        /// the rows already moved and reports Applied without writing. A caller must therefore never
+        /// grant anything OUTSIDE the ledger (an item, a refund, a payout) on Applied alone, or a
+        /// retried call grants it twice.
+        ///
+        /// <see cref="AccountVaultStackAdjustResult.Failed"/> means an exception escaped and whether the
+        /// trade committed is UNKNOWN - the caller must re-read the ledger, never assume either way.
+        /// AppliedCountUnknown is never returned. Rows drained to zero are left at 0/0 for
+        /// <see cref="DeleteEmptyAccountVaultClasses"/>.
+        /// </summary>
+        AccountVaultStackAdjustResult TryExchangeAccountVaultClasses(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps);
+
         int DeleteEmptyAccountVaultClasses(uint accountId);
 
         /// <summary>Sharing grants. NULL means the read failed.</summary>
@@ -206,6 +229,24 @@ namespace ACE.Server.Entity.AccountVault
         /// unavailable rather than pretending the look was saved.
         /// </summary>
         bool UpsertAccountMuleForm(AccountMuleForm row);
+
+        /// <summary>
+        /// One account's vault settings row (account_vault_setting), e.g. the salvage-combine toggle
+        /// behind <c>/mule autosalvage on|off</c>. Same two-channel contract as
+        /// <see cref="GetAccountMuleForm"/>, for the same reason.
+        ///
+        /// <c>Ok == false</c> means the READ FAILED and Row is meaningless. <c>Ok == true</c> with a
+        /// null Row means the account has never changed a setting. This interface does NOT decide
+        /// what a missing row means; the store layer above it maps "no row" to the defaults
+        /// (salvage combine ON) and must never map a failed read to them.
+        /// </summary>
+        (bool Ok, AccountVaultSetting Row) GetAccountVaultSetting(uint accountId);
+
+        /// <summary>
+        /// Saves or replaces one account's full settings row. Returns false if the write failed, in
+        /// which case the caller must leave any cached setting alone.
+        /// </summary>
+        bool UpsertAccountVaultSetting(AccountVaultSetting row);
 
         /// <summary>Barrel rows for one account, newest first. NULL means the read failed.</summary>
         List<AccountVaultBarrel> GetAccountVaultBarrels(uint accountId, int limit);
@@ -335,6 +376,14 @@ namespace ACE.Server.Entity.AccountVault
             return Db.TryAdjustAccountVaultClassBatch(accountId, groups, knownPresent, out perKey);
         }
 
+        public AccountVaultStackAdjustResult TryExchangeAccountVaultClasses(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps)
+        {
+            // NOT wrapped in Read<T>, for the reason TryAdjustAccountVaultClass is not: the DAO already
+            // turns every exception into Failed itself, and a wrapper here could only flatten something
+            // that escaped it into the same value, hiding that it escaped.
+            return Db.TryExchangeAccountVaultClasses(accountId, steps);
+        }
+
         public int DeleteEmptyAccountVaultClasses(uint accountId)
         {
             return Db.DeleteEmptyAccountVaultClasses(accountId);
@@ -397,6 +446,29 @@ namespace ACE.Server.Entity.AccountVault
         public bool UpsertAccountMuleForm(AccountMuleForm row)
         {
             return Db.UpsertAccountMuleForm(row);
+        }
+
+        /// <summary>
+        /// Not wrapped in <see cref="Read{T}"/>, for the same reason as <see cref="GetAccountMuleForm"/>:
+        /// an escaped exception must surface as (false, null), the failure answer, never as
+        /// (true, null), which would read as "no row, use the defaults".
+        /// </summary>
+        public (bool Ok, AccountVaultSetting Row) GetAccountVaultSetting(uint accountId)
+        {
+            try
+            {
+                return Db.GetAccountVaultSetting(accountId);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[VAULTSETTING] GetAccountVaultSetting({accountId}) failed: {ex.GetFullMessage()}");
+                return (false, null);
+            }
+        }
+
+        public bool UpsertAccountVaultSetting(AccountVaultSetting row)
+        {
+            return Db.UpsertAccountVaultSetting(row);
         }
 
         /// <summary>

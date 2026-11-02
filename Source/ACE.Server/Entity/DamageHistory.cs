@@ -51,6 +51,25 @@ namespace ACE.Server.Entity
             }
         }
 
+        /// <summary>
+        /// The entry for the hit that took this creature to 0 health, or null when that cannot be said exactly: the
+        /// newest log entry must be damage, must have left health at 0, and must carry its unclamped
+        /// <see cref="DamageHistoryEntry.Thrown"/>. A DoT tick fails the second test on purpose (ApplyDamageTick records
+        /// before it writes), and it already reports itself in "You receive N points of periodic damage."
+        /// </summary>
+        public DamageHistoryEntry KillingBlow
+        {
+            get
+            {
+                var last = Log.LastOrDefault();
+
+                if (last == null || last.Amount >= 0 || last.CurrentHealth != 0 || last.Thrown == null)
+                    return null;
+
+                return last;
+            }
+        }
+
         public float TotalHealth => TotalDamage.Values.Sum(i => i.TotalDamage);
 
         /// <summary>
@@ -93,7 +112,7 @@ namespace ACE.Server.Entity
                 // proportional split's rounding, or the overkill clamp. Evades, resists and misses never reach
                 // a sink at all. World Events counts any of these as combat contact (2026-10-04 follow-up
                 // ruling); nothing is logged and no damage total moves.
-                ACE.Server.WorldEvents.WorldEventCombatCreditHook.OnCombatContact(Creature, attacker);
+                ACE.Server.WorldEvents.WorldEventHooks.OnCombatContact(Creature, attacker);
                 return;
             }
 
@@ -107,14 +126,37 @@ namespace ACE.Server.Entity
             // records through this method - melee, missile, spell projectile, life magic, DoT ticks and pet
             // damage alike - and because this one site sees both directions. Two field reads and a type
             // test for every hit that does not involve a run creature.
-            ACE.Server.WorldEvents.WorldEventCombatCreditHook.OnDamageRecorded(Creature, attacker, amount);
+            ACE.Server.WorldEvents.WorldEventHooks.OnDamageRecorded(Creature, attacker, amount);
 
             // Attack/Defend engaged defenders (Docs/Pvp/ATTACK-DEFEND.md "Engaged defenders"): damage between two opposing players of
             // one Live match stamps both of them, here for the same reason as the World Events hook above - every damaging health write
-            // records through this method and it sees both directions. Two type tests for every hit that is not player on player.
-            Player.OnPvpDamageRecorded(Creature, attacker);
+            // records through this method and it sees both directions. The same call credits the battleground performance stats with the
+            // amount actually removed (Docs/Pvp/BATTLEGROUNDS.md "Performance stats"). At most a field read or two type tests for every
+            // hit that is not PvP.
+            Player.OnPvpDamageRecorded(Creature, attacker, amount);
+
+            // Group Thread contribution summary (ThreadDungeonRun_Contribution.cs): damage dealt to a run creature and damage taken
+            // inside a run's copy, credited per roster member with the amount actually removed. Here for the same reason as the two
+            // hooks above. A field read and a type test for every hit outside a Thread.
+            ACE.Server.ThreadDungeons.ThreadContributionHook.OnDamageRecorded(Creature, attacker, amount);
 
             Creature.OnHealthUpdate();
+        }
+
+        /// <summary>
+        /// Add, also recording the hit before the health write clamped it (DamageHistoryEntry.Thrown), for the sinks
+        /// that have that figure. A separate overload so the three-argument Add above stays exactly as it was.
+        /// </summary>
+        /// <param name="thrown">The hit after every mitigation, before the clamp to remaining health</param>
+        public void Add(WorldObject attacker, DamageType damageType, uint amount, uint thrown)
+        {
+            var before = Log.Count;
+
+            Add(attacker, damageType, amount);
+
+            // a zero amount logs nothing, so there is no entry to stamp
+            if (Log.Count > before)
+                Log[^1].Thrown = thrown;
         }
 
         /// <summary>

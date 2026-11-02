@@ -8,7 +8,7 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Archer T3 game-changer: a 6/12/18% chance (by rank) that a missile volley immediately fires a full
+    /// Archer T3 game-changer: a 10/20/30% chance (by rank) that a missile volley immediately fires a full
     /// second volley at the same targets, at no ammo/stamina cost. Bespoke: rolled in Player.LaunchMissile
     /// via Player.TryClassAbilityDoubleVolley; the second volley reuses the cleave-style multi-shot arrow
     /// machinery. Carries IPassiveStatAbility because it hooks no combat event of its own.
@@ -27,7 +27,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "doublevolley",
             DisplayName = "Double Volley",
-            Description = "Your missile volleys have a 6/12/18% chance (by rank) to immediately fire a full " +
+            Description = "Your missile volleys have a 10/20/30% chance (by rank) to immediately fire a full " +
                           "second volley at the same targets - no ammo, no stamina. Higher Run multiplies " +
                           "the chance, uncapped.",
             MaxRank = 3,
@@ -39,7 +39,7 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// <summary>
         /// The re-fire chance at a given rank: (base + step*(rank-1)) scaled by the Run affinity multiplier,
         /// UNCAPPED (pass 0 for <paramref name="affinityCap"/>), plus the equipment-mod term. Ranks 1-3 with
-        /// the 0.06 defaults and a neutral (1.0) multiplier -> 6/12/18%. Pure for testability. Returns 0 for
+        /// the 0.10 defaults and a neutral (1.0) multiplier -> 10/20/30%. Pure for testability. Returns 0 for
         /// rank &lt;= 0.
         ///
         /// <paramref name="affinityMultiplier"/> is what Player.GetClassAbilityAffinityMultiplier(Skill.Run)
@@ -88,11 +88,15 @@ namespace ACE.Server.ClassAbilities.Abilities
             var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.Run) ?? 1.0;
             var affinity = rank <= 0 ? 0.0 : Math.Max(0.0, rankBonus * Math.Max(1.0, multiplier) - rankBonus);
 
-            var gear = player.GetEquippedModValue(EquipmentModId.DoubleVolley) * 100.0;
+            // The null-conditional is for the readout unit tests, which call this with a null Player
+            // because Player's static initializer cannot run under the test host: no player means no
+            // equipped mod, so the gear term is 0 (the neutral value for an additive term).
+            var gearFraction = player?.GetEquippedModValue(EquipmentModId.DoubleVolley) ?? 0.0;
+            var gear = gearFraction * 100.0;
 
             var skill = rankBonus * 100.0;
             var affinityPct = affinity * 100.0;
-            var effective = Chance(rank, chanceBase, chanceStep, multiplier, 0.0, player.GetEquippedModValue(EquipmentModId.DoubleVolley)) * 100.0;
+            var effective = Chance(rank, chanceBase, chanceStep, multiplier, 0.0, gearFraction) * 100.0;
 
             return new ClassAbilityReadout
             {

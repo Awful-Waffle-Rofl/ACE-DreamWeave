@@ -311,11 +311,22 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>The placement options for a pick, through the same validated parser the admin command uses.</summary>
         public static bool TryBuildOptions(ThreadPuzzlePick pick, out PuzzleGateOptions options, out string error)
+            => TryBuildOptions(pick, null, out options, out error);
+
+        /// <summary>
+        /// <see cref="TryBuildOptions(ThreadPuzzlePick, out PuzzleGateOptions, out string)"/> with extra key=value
+        /// tokens appended (a speed course adds rounds= and lockout=), through the same validated parser. A null or
+        /// empty <paramref name="extraTokens"/> builds exactly what the Thread pass builds.
+        /// </summary>
+        public static bool TryBuildOptions(ThreadPuzzlePick pick, IEnumerable<string> extraTokens, out PuzzleGateOptions options, out string error)
         {
             var tokens = new List<string> { pick.Type.ToString().ToLowerInvariant() };
 
             if (pick.Type != PuzzleGateType.Shuffle)
                 tokens.Add("n=" + pick.N.ToString(CultureInfo.InvariantCulture));
+
+            if (extraTokens != null)
+                tokens.AddRange(extraTokens);
 
             return PuzzleGateOptions.TryParse(tokens, out options, out error);
         }

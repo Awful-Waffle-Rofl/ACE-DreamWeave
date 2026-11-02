@@ -161,7 +161,7 @@ namespace ACE.Server.WorldObjects
 
             kineticChargeStacks++;
 
-            // announce once, on the hit that tops the stack off - the same spam bound Frenzy and Nether Rush
+            // announce once, on the hit that tops the stack off - the same spam bound Frenzy and Mana Rush
             // use, and for the same reason: the charges have no tell of their own until they are spent
             if (kineticChargeStacks == threshold)
             {
@@ -181,7 +181,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void TryBuildKineticChargeFromAvoidedAttack(Creature attacker)
         {
-            if (attacker == null || PvpClassifier.IsPvp(attacker, this) || attacker == this || attacker.IsDead)
+            if (ClassAbilityAttackerFilter.EnemyCreature(attacker, this) == null)
                 return;
 
             if (!TryGetClassAbility(ClassAbilityId.KineticCharge, out _))
@@ -216,7 +216,7 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// How many EXTRA creatures the strike currently in progress should cleave into, on top of the
-        /// weapon's own CleaveTargets and Whirlwind's +1, because it just spent a full Kinetic Charge stack
+        /// weapon's own CleaveTargets and Whirlwind's rank-scaled extra targets, because it just spent a full Kinetic Charge stack
         /// on a melee attack. Set by KineticChargeAbility.ModifyOutgoingDamage (a different class, hence the
         /// public setter method below) and read back by Creature.GetCleaveTarget from the SAME strike.
         ///
@@ -265,7 +265,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool ResolvingMeleeCleaveHits { get; set; }
 
-        // ---- Runic Ward (Spellsword T2): weapon hits inscribe a pool, a war spell cashes it -----------
+        // ---- Runic Ward (Spellsword T2): weapon hits inscribe a pool that absorbs and shields ----------
 
         private RunicWardMath.WardState runicWard;
 
@@ -273,7 +273,7 @@ namespace ACE.Server.WorldObjects
         /// The current ward LIFETIME's running total: how much damage it has absorbed since the pool last
         /// went from empty to non-zero. Told to the player exactly once, in the message that ends the
         /// lifetime (shatter or fade) - see RunicWardMessages. Reset at every lifetime boundary: shatter,
-        /// spend, lapse, and a fresh Inscribe landing on a ward the heartbeat has not yet swept.
+        /// lapse, and a fresh Inscribe landing on a ward the heartbeat has not yet swept.
         /// </summary>
         private uint runicWardLifetimeAbsorbed;
 
@@ -282,18 +282,17 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Adds one landed weapon hit's share to the ward, from the gain fraction the handler computed (rank
-        /// plus its Item Tinkering affinity). The pool's ceiling is read here rather than passed in, because
-        /// it is a fraction of THIS player's maximum health.
+        /// plus its Item Tinkering affinity) and the rank's ceiling fraction. The ceiling is turned into
+        /// points here because it is a fraction of THIS player's maximum health.
         /// </summary>
-        public void InscribeRunicWard(uint hitDamage, double gainFraction)
+        public void InscribeRunicWard(uint hitDamage, double gainFraction, double capFraction)
         {
             if (hitDamage == 0 || gainFraction <= 0.0)
                 return;
 
             var now = Time.GetUnixTime();
 
-            var cap = RunicWardMath.Cap(Health.MaxValue,
-                PropertyManager.GetDouble("class_ability_runicward_cap_fraction").Item);
+            var cap = RunicWardMath.Cap(Health.MaxValue, capFraction);
 
             var before = RunicWardMath.IsExpired(runicWard, now) ? 0u : runicWard.Amount;
 
@@ -362,40 +361,52 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// The offensive half of the choice: a landed WAR spell cashes the entire remaining ward as FLAT
-        /// extra damage on that spell, and the pool is emptied whether or not it was worth anything. Read
-        /// from SpellProjectile.CalculateDamage's war/void branch, the only place a spell's damage can still
-        /// be changed; returns 0 for every other school and for an empty or lapsed pool.
-        ///
-        /// NO RANK CHECK, matching the absorb half above - the pool itself is the authority, so an unlearned
-        /// Spellsword can still cash a ward they inscribed while they held the ability rather than having it
-        /// become undrainable.
-        ///
-        /// A MULTI-PROJECTILE WAR CAST SPENDS IT ON THE BOLT THAT LANDS FIRST, because this is read per
-        /// projectile. That is the same "first strike spends it" shape Adrenaline uses, and it is what keeps
-        /// the whole ward from being multiplied across every bolt of a Ring.
+        /// TRUE while a Runic Ward pool is standing and inside its window. Read by
+        /// <see cref="GetWardShieldLevel"/>; NO RANK CHECK, matching the absorb half - the pool is the
+        /// authority, so a ward that outlives an unlearn keeps shielding until it drains or lapses.
         /// </summary>
-        public float SpendRunicWardIntoWarSpell(Spell spell)
+        public bool HasActiveRunicWard() => runicWard.Amount > 0 && !RunicWardMath.IsExpired(runicWard, Time.GetUnixTime());
+
+        // ---- Ward shield (Runic Ward AND Sanguine Ward, owner ruling 2026-10-24) ---------------------
+
+        /// <summary>
+        /// The shield armor level this player's standing wards grant against <paramref name="attacker"/>, or
+        /// 0 when none applies. Read from exactly one place, Creature.GetShieldMod, which only physical
+        /// (melee and missile) attacks reach - spells never call it - and which applies the shield's frontal
+        /// cone itself. So all this decides is WHETHER a ward shield applies and HOW BIG it is.
+        ///
+        /// PvE ONLY, like every class ability: the attacker must pass ClassAbilityAttackerFilter.EnemyCreature
+        /// (a live non-player creature other than this player). Gated on class_abilities_enabled, matching
+        /// the absorb halves, which the pre-write dispatch gates the same way.
+        ///
+        /// Each ward contributes its own tunable level (class_ability_runicward_shield_level /
+        /// class_ability_sanguine_ward_shield_level, both 100) while its pool is up - Runic Ward also only
+        /// inside its window - and with BOTH up the LARGER level applies, never the sum. The shield drops
+        /// the moment the pool empties, because the pool is what is tested here on every blow.
+        ///
+        /// THIS DOES NOT ENABLE SHIELD BLOCK OR THORNS: both gate on GetEquippedShield() != null directly and
+        /// never read GetShieldMod.
+        /// </summary>
+        public double GetWardShieldLevel(WorldObject attacker, WorldObject facing = null)
         {
-            if (spell == null || spell.School != MagicSchool.WarMagic || runicWard.Amount == 0)
-                return 0.0f;
+            // pools first: every blow on every player reaches this, and nearly none of them has a ward up,
+            // so the cheap test runs before any tunable or attacker read
+            var runicUp = HasActiveRunicWard();
+            var sanguineUp = GetSanguineWardRemaining() > 0;
 
-            var spent = RunicWardMath.Spend(runicWard, Time.GetUnixTime());
+            if (!runicUp && !sanguineUp)
+                return 0.0;
 
-            // the spend ends the lifetime, same as a shatter or a lapse - reset here, before the
-            // empty-spend guard below, so a war spell landing on an expired-but-not-yet-swept ward
-            // still clears the running total and the announce flag rather than leaving them stale
-            runicWard = default;
-            runicWardLifetimeAbsorbed = 0;
-            runicWardFullyInscribedAnnounced = false;
+            // the decision itself is WardShieldMath.LevelFor (pure, unit-tested); this only gathers its inputs.
+            // The frontal cone is measured against `facing` when GetShieldMod has one (a Reflect bounce), else
+            // the attacker - the same rule GetShieldMod applies to a real shield.
+            var enemyCreature = ClassAbilityAttackerFilter.EnemyCreature(attacker, this) != null;
+            var frontal = enemyCreature && WardShieldMath.IsFrontal(GetAngle(facing ?? attacker));
 
-            if (spent == 0)
-                return 0.0f;
-
-            SendClassAbilityBuffMessage(RunicWardMessages.DischargeMessage(spent, spell.Name));
-            ApplyVisualEffects(PlayScript.EnchantUpWhite);
-
-            return spent;
+            return WardShieldMath.LevelFor(runicUp, sanguineUp, enemyCreature, frontal,
+                PropertyManager.GetBool("class_abilities_enabled").Item,
+                PropertyManager.GetLong("class_ability_runicward_shield_level").Item,
+                PropertyManager.GetLong("class_ability_sanguine_ward_shield_level").Item);
         }
 
         // ---- Soul Jump (Void/Summon T3): a combat pet dies in the summoner's place --------------------

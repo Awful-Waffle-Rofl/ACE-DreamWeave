@@ -10,12 +10,13 @@ namespace ACE.Server.Tests
 {
     /// <summary>
     /// Content pins for the ML tinker lock arc (WaffleACE, 2026-09-27): only the 8 Bluespire quest
-    /// weapons carry PropertyBool.TinkerLocked (9068) - their cook_book allow-list is exactly the 6
-    /// tinker stones (4 Ward-Stones + 2 Thirst-Stones). The 3 Siraluun crests do NOT carry the lock
-    /// (owner ruling reversed an earlier draft, 2026-09-27) and tinker normally, so they carry
-    /// ItemWorkmanship = 10 like the weapons but no TinkerLocked row; a Defenders EquipmentSetId row
-    /// briefly added for the crests in this same arc was removed by a later owner ruling the same
-    /// day, so the crests must carry no EquipmentSetId at all. Each remaining numeric tunable (bow
+    /// weapons carry PropertyBool.TinkerLocked (9068) - their cook_book allow-list is exactly the 7
+    /// tinker stones (4 Ward-Stones + 2 Thirst-Stones + the Defender Stone). The 6 Siraluun crest head-slot armors
+    /// (3 crests + 3 Crest Helmets) do NOT carry the lock (owner ruling reversed an earlier draft,
+    /// 2026-09-27) and tinker normally, so they carry ItemWorkmanship = 10 like the weapons but no
+    /// TinkerLocked row. A Defenders EquipmentSetId row added in that arc was removed the same day and
+    /// restored by the 2026-10-19 owner request (with base ArmorLevel 340), so all six must carry
+    /// EquipmentSetId = 16 and ArmorLevel = 340. Each remaining numeric tunable (bow
     /// MaximumVelocity, caster ImbuedEffect/CriticalFrequency) lands as specified. Pure file + regex
     /// parsing, same idiom as BluespireBaseWeaponTinkerContentTests.
     /// </summary>
@@ -28,6 +29,8 @@ namespace ACE.Server.Tests
         private const int CriticalFrequencyProperty = 147;
         private const int EquipmentSetIdProperty = 265;
         private const int ItemWorkmanshipProperty = 105;
+        private const int ArmorLevelProperty = 28;
+        private const int DefendersSetId = 16;
 
         private static readonly int[] WeaponWcids =
         {
@@ -36,9 +39,10 @@ namespace ACE.Server.Tests
 
         private static readonly int[] CasterWcids = { 1005451, 1005452, 1005453 };
 
-        private static readonly int[] CrestWcids = { 1005480, 1005481, 1005482 };
+        private static readonly int[] CrestWcids = { 1005480, 1005481, 1005482, 1005483, 1005484, 1005485 };
 
-        // The exact allow-list: the 4 Ward-Stones (target all 8 weapons) + 2 Thirst-Stones (each
+        // The exact allow-list: the 4 Ward-Stones (target all 8 weapons) + the Defender Stone
+        // (1005493, owner-approved 2026-10-29, also targets all 8 weapons) + 2 Thirst-Stones (each
         // targets only its own weapon category - Blood-Thirst the 5 melee/missile weapons,
         // Spirit-Thirst the 3 casters - via the existing rows in BluespireUpgradeGemsCookbook.sql).
         private static readonly HashSet<int> WardStoneWcids = new HashSet<int>
@@ -51,8 +55,10 @@ namespace ACE.Server.Tests
 
         private static readonly HashSet<int> ThirstStoneWcids = new HashSet<int> { 1005460, 1005461 };
 
+        private static readonly HashSet<int> DefenderStoneWcids = new HashSet<int> { 1005493 };
+
         private static readonly HashSet<int> AllowedStoneWcids =
-            new HashSet<int>(WardStoneWcids.Concat(ThirstStoneWcids));
+            new HashSet<int>(WardStoneWcids.Concat(ThirstStoneWcids).Concat(DefenderStoneWcids));
 
         [TestMethod]
         public void AllEightWeapons_CarryTinkerLocked()
@@ -86,13 +92,13 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// Owner ruling reversed the initial lock on the 3 Siraluun crests (2026-09-27): they must
-        /// tinker normally, so they carry ItemWorkmanship = 10 but must NOT carry TinkerLocked at
-        /// all. A later owner ruling the same day also removed the Defenders EquipmentSetId row
-        /// that had briefly been added in this arc, so EquipmentSetId (265) must be ABSENT too.
+        /// The 6 Siraluun crest head-slot armors (1005480-1005485) must tinker normally (owner ruling
+        /// 2026-09-27): ItemWorkmanship = 10 (the armor tinkers refuse a null Workmanship target) and no
+        /// TinkerLocked at all. Per the 2026-10-19 owner request they also carry the Defenders set
+        /// (EquipmentSetId 265 = 16) and base ArmorLevel (28) = 340.
         /// </summary>
         [TestMethod]
-        public void Crests_CarryWorkmanshipButNotTheLockOrAnEquipmentSet()
+        public void Crests_CarryWorkmanshipDefendersAndNoLock()
         {
             var weeniesDir = GetWeeniesDir();
             var problems = new List<string>();
@@ -116,8 +122,15 @@ namespace ACE.Server.Tests
                 else if (workmanship != 10)
                     problems.Add($"{wcid} ({name}): ItemWorkmanship is {workmanship}, expected 10.");
 
-                if (ints.ContainsKey(EquipmentSetIdProperty))
-                    problems.Add($"{wcid} ({name}): carries PropertyInt {EquipmentSetIdProperty} (EquipmentSetId) - the Defenders set was removed by owner ruling, this must be absent.");
+                if (!ints.TryGetValue(EquipmentSetIdProperty, out var setId))
+                    problems.Add($"{wcid} ({name}): missing PropertyInt {EquipmentSetIdProperty} (EquipmentSetId).");
+                else if (setId != DefendersSetId)
+                    problems.Add($"{wcid} ({name}): EquipmentSetId is {setId}, expected {DefendersSetId} (Defenders).");
+
+                if (!ints.TryGetValue(ArmorLevelProperty, out var armorLevel))
+                    problems.Add($"{wcid} ({name}): missing PropertyInt {ArmorLevelProperty} (ArmorLevel).");
+                else if (armorLevel != 340)
+                    problems.Add($"{wcid} ({name}): ArmorLevel is {armorLevel}, expected 340.");
 
                 if (bools.ContainsKey(TinkerLockedProperty))
                     problems.Add($"{wcid} ({name}): carries PropertyBool {TinkerLockedProperty} (TinkerLocked) - crests must tinker normally, not be locked.");
@@ -127,7 +140,7 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void BluespireQuestWeapons_CookbookSourcesAreExactlyTheSixTinkerStones()
+        public void BluespireQuestWeapons_CookbookSourcesAreExactlyTheSevenTinkerStones()
         {
             var contentDir = FindContentDir();
             Assert.IsNotNull(contentDir, $"Could not locate the repo's Content/ directory by walking up from {AppContext.BaseDirectory}.");
@@ -154,6 +167,11 @@ namespace ACE.Server.Tests
             {
                 var sources = sourcesByTarget[wcid];
 
+                // Every weapon must accept the Defender Stone (it targets all 8 weapons alike).
+                var missingDefender = DefenderStoneWcids.Except(sources).ToList();
+                if (missingDefender.Count > 0)
+                    problems.Add($"{wcid}: missing Defender Stone cook_book source(s) {string.Join(",", missingDefender)}.");
+
                 // Every weapon must accept all 4 Ward-Stones (they target all 8 weapons alike).
                 var missingWardStones = WardStoneWcids.Except(sources).ToList();
                 if (missingWardStones.Count > 0)
@@ -163,10 +181,10 @@ namespace ACE.Server.Tests
                 if (!sources.Overlaps(ThirstStoneWcids))
                     problems.Add($"{wcid}: has no Thirst-Stone ({string.Join(",", ThirstStoneWcids)}) cook_book source at all.");
 
-                // Nothing outside the 6-stone allow-list may reach this target.
+                // Nothing outside the 7-stone allow-list may reach this target.
                 var extra = sources.Except(AllowedStoneWcids).ToList();
                 if (extra.Count > 0)
-                    problems.Add($"{wcid}: has UNEXPECTED cook_book source(s) {string.Join(",", extra)} - the allow-list must be exactly the 6 tinker stones.");
+                    problems.Add($"{wcid}: has UNEXPECTED cook_book source(s) {string.Join(",", extra)} - the allow-list must be exactly the 7 tinker stones.");
             }
 
             // Across the 8 weapons, BOTH Thirst-Stones must actually be used somewhere (Blood-Thirst

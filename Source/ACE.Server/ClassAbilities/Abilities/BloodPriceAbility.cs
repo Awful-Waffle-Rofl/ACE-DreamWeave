@@ -1,3 +1,4 @@
+using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -7,8 +8,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// <summary>
     /// Blood Mage T3: damaging spells of ANY school also cost health - each cast spends 3/4/5% of current
     /// health by rank and deals +8/16/24% damage. Below 20% current health the cast lands normally with no
-    /// bonus and no health cost. PvE only. Deliberately unscaled: the health cost IS the brake, and the brake
-    /// grows with the payoff rather than sitting flat. BLOOD-MAGE-DESIGN.md sec 3.
+    /// bonus and no health cost. PvE only. The health cost IS the brake, and the brake grows with the payoff
+    /// rather than sitting flat. Since the Blood Mage buff pass the DAMAGE BONUS (only) carries a Life Magic
+    /// affinity multiplier, gear additive outside it; the health cost stays unscaled. BLOOD-MAGE-DESIGN.md
+    /// sec 3.
     ///
     /// This is the class's only school-agnostic damage multiplier, so it is the entry whose cross-class
     /// product needs sign-off; the design deliberately did NOT use it to reach the x2.0 late-game floor
@@ -42,44 +45,55 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Blood Price",
             Description = "Your damaging spells of any school also cost health: each cast spends 3/4/5% of " +
                           "your current health by rank and deals +10/20/30% damage. Below 20% health the cast " +
-                          "lands normally, with no bonus and no health cost. Against monsters only.",
+                          "lands normally, with no bonus and no health cost. Against monsters only. Higher " +
+                          "Life Magic multiplies the damage bonus, never the health cost.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
+            // Blood Mage buff pass: 2/rank -> 1/rank (the 2026-09-13 premium reprice reversed). Existing
+            // owners are refunded the difference by ClassAbilityRepricing wave 1.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.LifeMagic,
         };
 
         /// <summary>
-        /// Reports BloodPriceMath.DamageBonus as a percent. Skill is the rank's bonus, there is no
-        /// legacy-skill rider, and Gear is the BLOOD PRICE mod, added to that bonus on the same additive
-        /// axis. The 20% current-health floor is an ALL-OR-NOTHING GATE on whether a cast qualifies at all
-        /// (BloodPriceMath.Resolve), not a numeric clamp on this magnitude, so CapNote is never set for it.
+        /// Reports the damage bonus as a percent. Skill is the rank's bonus, Affinity is the amount the LIFE
+        /// MAGIC multiplier adds to it (rankBonus * multiplier - rankBonus), and Gear is the BLOOD PRICE mod,
+        /// added outside the multiply - the same expression BloodPriceMath.ScaledDamageBonus applies at cast
+        /// time in Player.ApplyBloodPriceCost. The 20% current-health floor is an ALL-OR-NOTHING GATE on
+        /// whether a cast qualifies at all (BloodPriceMath.Resolve), not a numeric clamp on this magnitude, so
+        /// CapNote is never set for it.
         ///
         /// THIS LINE IS THE PAYOFF, NOT THE PRICE. The health cost (3/4/5% of current health) is unmoddable
-        /// by ruling and is not part of this readout at any term.
+        /// by ruling - neither gear nor affinity touches it - and is not part of this readout at any term.
         ///
-        /// The null-conditional on the gear read is for the readout unit tests, which call this with a null
-        /// Player because Player's static initializer cannot run under the test host; every live caller
-        /// (/abilities list) passes session.Player.
+        /// The null-conditionals on the affinity and gear reads are for the readout unit tests, which call
+        /// this with a null Player because Player's static initializer cannot run under the test host; every
+        /// live caller (/abilities list) passes session.Player. The affinity fallback is the NEUTRAL 1.0.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var gearBonus = player?.GetEquippedModValue(EquipmentModId.BloodPrice) ?? 0.0;
 
-            var bonus = BloodPriceMath.DamageBonus(rank,
-                PropertyManager.GetDouble("class_ability_bloodprice_damage_r1").Item,
-                PropertyManager.GetDouble("class_ability_bloodprice_damage_r2").Item,
-                PropertyManager.GetDouble("class_ability_bloodprice_damage_r3").Item);
+            var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.LifeMagic) ?? 1.0;
+
+            var r1 = PropertyManager.GetDouble("class_ability_bloodprice_damage_r1").Item;
+            var r2 = PropertyManager.GetDouble("class_ability_bloodprice_damage_r2").Item;
+            var r3 = PropertyManager.GetDouble("class_ability_bloodprice_damage_r3").Item;
+
+            var bonus = BloodPriceMath.DamageBonus(rank, r1, r2, r3);
+            var scaled = BloodPriceMath.ScaledDamageBonus(rank, r1, r2, r3, multiplier);
 
             var skill = bonus * 100.0;
+            var affinity = (scaled - bonus) * 100.0;
             var gear = gearBonus * 100.0;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
                 Skill = skill,
-                Affinity = 0.0,
+                Affinity = affinity,
                 Gear = gear,
-                Effective = skill + gear,
+                Effective = skill + affinity + gear,
                 Unit = "%",
                 Label = "spell dmg",
                 Per = null,

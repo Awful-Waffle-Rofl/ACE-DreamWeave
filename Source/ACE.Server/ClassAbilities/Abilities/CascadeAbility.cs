@@ -1,6 +1,7 @@
 using System;
 
 using ACE.Common;
+using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -8,8 +9,8 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Spellsword T3: a landed PROC has a 25% chance to immediately fire the same spell again at a SECOND
-    /// nearby enemy. SPELLSWORD-DESIGN.md sec 5f, and the generation guard is design question Q13.
+    /// Spellsword T3: a landed PROC has a 5/10/15% chance (by rank, multiplied by Item Enchantment) to
+    /// immediately fire the same spell again at a SECOND nearby enemy. SPELLSWORD-DESIGN.md sec 5f, and the generation guard is design question Q13.
     ///
     /// THE GUARD IS THE POINT OF THIS ABILITY, so read this before changing anything here.
     ///
@@ -46,13 +47,13 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// The latch is armed by Player.CastClassAbilityProc, which the three Spellsword war proc handlers wrap
     /// their cast in. IF THAT WRAPPER IS NOT USED, CASCADE SIMPLY NEVER FIRES - it fails closed, not open.
     ///
-    /// SINGLE RANK, BY RULING (user, 2026-08-04): "Cascade doesn't make sense with 3 tiers if the 1st is the
-    /// only one that does anything. Eliminate ranks 2, 3." The design (sec 3) had given it ranks 1/2/3 at
-    /// cost 3/3/3 while sec 7 registered a single rank-invariant tunable, so ranks 2 and 3 were pure cost
-    /// for no effect. It now matches Spellstorm and Spellsurge: one rank at cost 3.
-    /// <see cref="CascadeChance"/> still takes the rank so an unowned caller gets 0, and so a per-rank
-    /// ladder (a base/step pair, the shape EchoCastAbility already uses) stays a one-line change if the
-    /// entry is ever given something for rank to buy.
+    /// RANKS. It was cut to a single rank by ruling (user, 2026-08-04) because ranks 2 and 3 then bought
+    /// nothing. The 2026-10-24 Spellsword pass gave rank something to buy - CHANCE, 5/10/15% from the
+    /// class_ability_cascade_chance_r1/_r2/_r3 tunables - and three ranks at 1/1/1. The same pass added an
+    /// ITEM ENCHANTMENT affinity that MULTIPLIES the rank's chance, the added amount clamped by
+    /// class_ability_affinity_chance_cap exactly as Sundermark clamps its Life Magic rider, with the gear term
+    /// outside the clamp. Neither change touches the generation guard: rank, affinity and gear all move the
+    /// CHANCE of one hop, never the number of hops.
     /// </summary>
     public class CascadeAbility : ISpellHitAbility, IAbilityReadout
     {
@@ -63,12 +64,38 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 3,
             Name = "cascade",
             DisplayName = "Cascade",
-            Description = "A landed proc has a 25% chance to immediately fire again at a second nearby enemy. " +
-                          "The second casting cannot cascade further.",
-            MaxRank = 1,
-            CostPerRank = new[] { 3 },
+            Description = "A landed proc has a 5/10/15% chance (by rank) to immediately fire again at a second " +
+                          "nearby enemy. The second casting cannot cascade further. Higher Item Enchantment " +
+                          "increases the chance.",
+            MaxRank = 3,
+            CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: one rank at 3 -> three at 1/1/1 (ClassAbilityRepricing wave 4, PromoteToPaid)
             Implemented = true,
+            AffinitySkill = Skill.ItemEnchantment,
         };
+
+        /// <summary>
+        /// The rank's base chain chance: the r1/r2/r3 tunables (0.05 / 0.10 / 0.15). Ranks above 3 clamp to
+        /// the rank-3 value; 0 for rank &lt;= 0. Pure for testability.
+        /// </summary>
+        public static double BaseChance(int rank, double chanceR1, double chanceR2, double chanceR3)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            if (rank == 1)
+                return Math.Max(0.0, chanceR1);
+
+            if (rank == 2)
+                return Math.Max(0.0, chanceR2);
+
+            return Math.Max(0.0, chanceR3);
+        }
+
+        /// <summary>The live base chance at <paramref name="rank"/>, from the three per-rank tunables.</summary>
+        private static double LiveBaseChance(int rank) => BaseChance(rank,
+            PropertyManager.GetDouble("class_ability_cascade_chance_r1").Item,
+            PropertyManager.GetDouble("class_ability_cascade_chance_r2").Item,
+            PropertyManager.GetDouble("class_ability_cascade_chance_r3").Item);
 
         /// <summary>
         /// Radius in metres, measured from the PRIMARY target, within which the second enemy is looked for -
@@ -79,22 +106,37 @@ namespace ACE.Server.ClassAbilities.Abilities
         private const double DefaultRadiusMeters = 8.0;
 
         /// <summary>
-        /// The chance a landed proc cascades. Rank-invariant today (see the class doc comment): the rank is
-        /// taken only so an unowned caller gets 0, and so a per-rank ladder can be added without changing
-        /// call sites. Pure for testability, matching EchoCastAbility.EchoChance.
+        /// The chance a landed proc cascades: the rank's base <paramref name="chance"/> (from
+        /// <see cref="BaseChance"/>) MULTIPLIED by the Item Enchantment affinity, plus the Cascade equipment
+        /// mod. Pure for testability. Returns 0 for rank &lt;= 0.
+        ///
+        /// <paramref name="affinityMultiplier"/> is what <c>Player.GetClassAbilityAffinityMultiplier</c>
+        /// returns - a FACTOR &gt;= 1.0. What is capped is the AMOUNT the multiply ADDS
+        /// (chance * multiplier - chance), bounded by <paramref name="affinityCap"/>
+        /// (class_ability_affinity_chance_cap; 0 means uncapped) - the same shape as SundermarkAbility.Chance.
         ///
         /// <paramref name="gearModChance"/> is the CASCADE equipment mod (EquipmentModId.Cascade), a
-        /// MACHINERY mod added to the chain CHANCE on the ability's own axis. It deliberately does NOT
-        /// touch class_ability_cascade_max_generation: that integer is the entire safety argument against
-        /// unbounded chaining, and DESIGN.md 2.3 records it as unmoddable on purpose. Last and defaulted to
-        /// 0, so an unmodded build is bit-identical.
+        /// MACHINERY mod added to the chain CHANCE on the ability's own axis, OUTSIDE the affinity clamp. It
+        /// deliberately does NOT touch class_ability_cascade_max_generation: that integer is the entire safety
+        /// argument against unbounded chaining, and DESIGN.md 2.3 records it as unmoddable on purpose.
+        ///
+        /// The two affinity parameters are APPENDED after the gear term (the gear parameter shipped first),
+        /// and default to the neutral 1.0 / uncapped, so an existing (rank, chance, gear) call is
+        /// bit-identical to what it was.
         /// </summary>
-        public static float CascadeChance(int rank, double chance, double gearModChance = 0.0)
+        public static float CascadeChance(int rank, double chance, double gearModChance = 0.0, double affinityMultiplier = 1.0, double affinityCap = 0.0)
         {
             if (rank <= 0)
                 return 0.0f;
 
-            return (float)Math.Max(0.0, chance + Math.Max(0.0, gearModChance));
+            var added = chance * affinityMultiplier - chance;
+
+            if (affinityCap > 0.0)
+                added = Math.Min(added, affinityCap);
+
+            added = Math.Max(0.0, added);
+
+            return (float)Math.Max(0.0, chance + added + Math.Max(0.0, gearModChance));
         }
 
         /// <summary>
@@ -131,8 +173,10 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Cascade equipment mod (MACHINERY): +pp on this ability's own chain roll. Ownership is proven
             // by the dispatch itself - ApplySpellHitClassAbilities only walks LEARNED ISpellHitAbility
             // handlers - so the plain read is correct here.
-            var chance = CascadeChance(rank, PropertyManager.GetDouble("class_ability_cascade_chance").Item,
-                caster.GetEquippedModValue(EquipmentModId.Cascade));
+            var chance = CascadeChance(rank, LiveBaseChance(rank),
+                caster.GetEquippedModValue(EquipmentModId.Cascade),
+                caster.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment),
+                PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
@@ -164,6 +208,11 @@ namespace ACE.Server.ClassAbilities.Abilities
                 // LifeProjectileDamage defaults to 0 and a life-projectile spell (Martyr's Hecatomb) lands
                 // for 0 damage on every cascade hit.
                 SpellProjectile.CopyPerCastStamps(child, projectile);
+
+                // Volatile Wall counts the wall's OWN projectiles only (owner ruling 2026-10-24): a cascade
+                // re-fire neither ramps nor advances any counter, including the fresh one CreateSpellProjectiles
+                // would have made for a wall spell.
+                child.VolatileWallCounter = null;
             }
         }
 
@@ -227,38 +276,46 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Mirrors CascadeChance() above - a single rank-invariant chain chance, no affinity rider, so no
-        /// cap can bite and CapNote is always null. Gear is the CASCADE mod.
+        /// Mirrors CascadeChance() above: Skill is the rank's base chance, Affinity the CAPPED amount the
+        /// Item Enchantment multiplier adds (chance * multiplier - chance, then clamped by
+        /// class_ability_affinity_chance_cap), Gear the CASCADE mod added outside the clamp - so the three
+        /// terms sum to Effective. CapNote reports "affinity cap" exactly when the clamp is biting.
         ///
-        /// Skill is deliberately computed from the UNGEARED helper so the two columns stay separable; the
-        /// gear term is then added back into Effective, which is what CascadeChance() actually rolls
-        /// against.
-        ///
-        /// The null-conditional on the gear read is for the readout unit tests, which call this with a null
-        /// Player because Player's static initializer cannot run under the test host.
+        /// The null-conditionals are for the readout unit tests, which call this with a null Player
+        /// because Player's static initializer cannot run under the test host; the affinity fallback is the
+        /// NEUTRAL 1.0.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var chance = CascadeChance(rank, PropertyManager.GetDouble("class_ability_cascade_chance").Item);
+            var skillChance = LiveBaseChance(rank);
+            var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
+
+            var affinityMultiplier = player?.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment) ?? 1.0;
+            var rawAdded = skillChance * affinityMultiplier - skillChance;
+
+            var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;
+            clampedAdded = Math.Max(0.0, clampedAdded);
+            var capBit = affinityCap > 0.0 && rawAdded > affinityCap;
 
             var gearChance = rank <= 0
                 ? 0.0
                 : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Cascade) ?? 0.0);
 
-            var skill = chance * 100.0;
+            var skill = skillChance * 100.0;
+            var affinity = clampedAdded * 100.0;
             var gear = gearChance * 100.0;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
                 Skill = skill,
-                Affinity = 0.0,
+                Affinity = affinity,
                 Gear = gear,
-                Effective = skill + gear,
+                Effective = skill + affinity + gear,
                 Unit = "%",
                 Label = "chain",
                 Per = null,
-                CapNote = null,
+                CapNote = capBit ? "affinity cap" : null,
             };
         }
     }

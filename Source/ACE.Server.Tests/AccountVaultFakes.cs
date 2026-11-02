@@ -764,6 +764,123 @@ namespace ACE.Server.Tests
         /// <summary>Class keys the oracle called present that were not.</summary>
         public int ClassBatchKeysUpsertedAfterIdentifyingRead;
 
+        /// <summary>Where <see cref="TryExchangeAccountVaultClasses"/> injects a failure, if anywhere.</summary>
+        public enum ExchangeFailure
+        {
+            /// <summary>No injected failure; the exchange behaves like the real DAO.</summary>
+            None,
+
+            /// <summary>
+            /// The exchange throws before its commit: NO row changes and the call reports Failed. The
+            /// real DAO's "statement or connection died mid-transaction, rolled back" case.
+            /// </summary>
+            BeforeCommit,
+
+            /// <summary>
+            /// The exchange commits and then loses its acknowledgement: every row IS at its post-state
+            /// and the call still reports Failed. The harder half for a caller, which must not read
+            /// Failed as "nothing moved". Fires only on a call that actually applied the trade.
+            /// </summary>
+            AfterCommit,
+        }
+
+        /// <summary>Calls to the class exchange, so a test can prove a retry was or was not made.</summary>
+        public int ClassExchangeCalls;
+
+        /// <summary>The steps of the most recent class exchange call, as passed.</summary>
+        public IReadOnlyList<AccountVaultClassExchangeStep> LastClassExchangeSteps;
+
+        /// <summary>The injected failure mode. See <see cref="ExchangeFailure"/>.</summary>
+        public ExchangeFailure ClassExchangeFailMode = ExchangeFailure.None;
+
+        /// <summary>
+        /// How many more calls <see cref="ClassExchangeFailMode"/> applies to, decremented each time it
+        /// fires. Unbounded by default; set it to 1 for "fails once, then the retry behaves normally".
+        /// </summary>
+        public int ClassExchangeFailRemaining = int.MaxValue;
+
+        public AccountVaultStackAdjustResult TryExchangeAccountVaultClasses(uint accountId, IReadOnlyList<AccountVaultClassExchangeStep> steps)
+        {
+            ClassExchangeCalls++;
+            LastClassExchangeSteps = steps;
+
+            // The SAME validation the real DAO runs, so the fake can never accept a request the DAO
+            // would refuse or the reverse. A malformed request never reaches the database, so no
+            // injected database failure can fire on one.
+            if (!ShardDatabase.IsValidAccountVaultClassExchange(accountId, steps, out _))
+                return AccountVaultStackAdjustResult.Refused;
+
+            bool InjectionFires(ExchangeFailure mode)
+            {
+                if (ClassExchangeFailMode != mode || ClassExchangeFailRemaining <= 0)
+                    return false;
+
+                ClassExchangeFailRemaining--;
+                return true;
+            }
+
+            if (InjectionFires(ExchangeFailure.BeforeCommit))
+                return AccountVaultStackAdjustResult.Failed;
+
+            var rows = steps.Select(s => Classes.FirstOrDefault(c => c.AccountId == accountId && c.ClassKey == s.ClassKey)).ToList();
+
+            var allPre = true;
+            var allPost = true;
+
+            for (var i = 0; i < steps.Count; i++)
+            {
+                var count = rows[i]?.Count ?? 0;
+                var total = rows[i]?.TotalValue ?? 0;
+
+                if (count != steps[i].ExpectedCount || total != steps[i].ExpectedTotal)
+                    allPre = false;
+
+                if (count != steps[i].ExpectedCount + steps[i].CountDelta || total != steps[i].ExpectedTotal + steps[i].ValueDelta)
+                    allPost = false;
+            }
+
+            if (allPre)
+            {
+                for (var i = 0; i < steps.Count; i++)
+                {
+                    var step = steps[i];
+                    var row = rows[i];
+
+                    if (row == null)
+                    {
+                        row = new AccountVaultClass
+                        {
+                            Id = nextRowId++,
+                            AccountId = accountId,
+                            ClassKey = step.ClassKey,
+                            Wcid = step.Seed.Wcid,
+                            Count = 0,
+                            TotalValue = 0,
+                            ValueBandPct = step.Seed.ValueBandPct,
+                            CanonicalForm = step.Seed.CanonicalForm,
+                        };
+
+                        Classes.Add(row);
+                    }
+
+                    // Drained rows stay at 0/0 for DeleteEmptyAccountVaultClasses, as the real DAO leaves them.
+                    row.Count += step.CountDelta;
+                    row.TotalValue += step.ValueDelta;
+                }
+
+                if (InjectionFires(ExchangeFailure.AfterCommit))
+                    return AccountVaultStackAdjustResult.Failed;
+
+                return AccountVaultStackAdjustResult.Applied;
+            }
+
+            // A re-run after a lost acknowledgement: already applied, write nothing.
+            if (allPost)
+                return AccountVaultStackAdjustResult.Applied;
+
+            return AccountVaultStackAdjustResult.Refused;
+        }
+
         public int DeleteEmptyAccountVaultClasses(uint accountId)
         {
             DeletedEmptyClassCalls++;
@@ -931,6 +1048,58 @@ namespace ACE.Server.Tests
                 return false;
 
             MuleForms[row.AccountId] = row;
+            return true;
+        }
+
+        // ---- account_vault_setting ----
+
+        /// <summary>
+        /// Settings rows, one per account. A dictionary for the same reason as <see cref="MuleForms"/>:
+        /// the real table is keyed by account_Id and the write is an upsert.
+        /// </summary>
+        public readonly Dictionary<uint, AccountVaultSetting> VaultSettings = new Dictionary<uint, AccountVaultSetting>();
+
+        /// <summary>
+        /// Makes the settings read report the FAILURE answer, (false, null). Distinct from having no
+        /// row, which is the success answer (true, null) that the store maps to the defaults.
+        /// </summary>
+        public bool FailVaultSettingRead;
+
+        /// <summary>Makes the settings upsert report false with the stored row left untouched.</summary>
+        public bool FailVaultSettingUpsert;
+
+        /// <summary>Settings reads, so a test can prove a caller caches rather than re-reading.</summary>
+        public int VaultSettingReads;
+
+        /// <summary>Settings writes, so a test can see a write that the stored row cannot reveal.</summary>
+        public int UpsertVaultSettingCalls;
+
+        public (bool Ok, AccountVaultSetting Row) GetAccountVaultSetting(uint accountId)
+        {
+            VaultSettingReads++;
+
+            if (FailVaultSettingRead)
+                return (false, null);
+
+            return (true, VaultSettings.TryGetValue(accountId, out var row) ? row : null);
+        }
+
+        public bool UpsertAccountVaultSetting(AccountVaultSetting row)
+        {
+            UpsertVaultSettingCalls++;
+
+            if (FailVaultSettingUpsert)
+                return false;
+
+            // A copy, so a caller mutating its own instance after the write cannot rewrite the
+            // "stored" row - the real upsert snapshots the values into the table at write time.
+            VaultSettings[row.AccountId] = new AccountVaultSetting
+            {
+                AccountId = row.AccountId,
+                SalvageCombine = row.SalvageCombine,
+                SetByCharacterGuid = row.SetByCharacterGuid,
+                UpdatedAt = row.UpdatedAt,
+            };
             return true;
         }
 
@@ -1128,9 +1297,19 @@ namespace ACE.Server.Tests
                     return container;
                 }
 
-                return MakeStack(weenieClassId, 1, ItemMaxStackSize);
+                var made = MakeStack(weenieClassId, 1, ItemMaxStackSize);
+
+                return CreateTransform != null ? CreateTransform(made) : made;
             }
         }
+
+        /// <summary>
+        /// Applied to every non-container object <see cref="CreateNewWorldObject"/> builds, the counterpart
+        /// of <see cref="MaterializeTransform"/> for the ledger path: a ledger probe and a ledger withdraw
+        /// both come from here, so this is how a test makes a ledger row look like a full salvage bag of a
+        /// material. Null leaves the plain stack untouched.
+        /// </summary>
+        public Func<WorldObject, WorldObject> CreateTransform;
 
         /// <summary>
         /// Container guids whose load reports a READ FAILURE rather than an absence. The two are
@@ -1315,6 +1494,14 @@ namespace ACE.Server.Tests
         public int? MaterializeFailAfterCalls;
 
         /// <summary>
+        /// The THROWING counterpart of <see cref="MaterializeFailAfterCalls"/>, and a countdown in the same
+        /// sense: the next this many calls behave, the one after them THROWS, and the knob then clears
+        /// itself so every later call behaves again (an unwind's own builds are not sabotaged). Set it to
+        /// k-1 to make the k-th call throw. Null disables it.
+        /// </summary>
+        public int? MaterializeThrowAfterCalls;
+
+        /// <summary>
         /// Applied to every object <see cref="MaterializeClass"/> builds, so a test can make a display
         /// object look like something other than the salvage bag the fake always makes (e.g. give it a
         /// ValidLocations). Null leaves the bag untouched.
@@ -1326,6 +1513,17 @@ namespace ACE.Server.Tests
             using (EnterCall())
             {
                 Interlocked.Increment(ref materializeClassCalls);
+
+                if (MaterializeThrowAfterCalls.HasValue)
+                {
+                    if (MaterializeThrowAfterCalls.Value <= 0)
+                    {
+                        MaterializeThrowAfterCalls = null;
+                        throw new InvalidOperationException($"fake materializer failure building wcid {wcid}");
+                    }
+
+                    MaterializeThrowAfterCalls = MaterializeThrowAfterCalls.Value - 1;
+                }
 
                 if (FailMaterializeWcids.Contains(wcid))
                     return null;

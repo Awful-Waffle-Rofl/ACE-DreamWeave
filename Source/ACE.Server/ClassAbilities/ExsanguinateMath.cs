@@ -22,8 +22,10 @@ namespace ACE.Server.ClassAbilities
         Accrue,
 
         /// <summary>
-        /// This cast SPENDS the whole pool: the burst multiplier applies and NO charge is granted, so the
-        /// pool restarts from empty on the next cast.
+        /// This cast SPENDS the whole pool: the burst multiplier applies and NO charge is granted. The pool
+        /// is then SET to the Exsanguinate rank's kept charges (<see cref="ExsanguinateMath.ChargesKept"/>,
+        /// always below the cap) rather than emptied, so the next burst needs a rebuilt pool but not a full
+        /// one from zero.
         /// </summary>
         Burst,
     }
@@ -36,10 +38,41 @@ namespace ACE.Server.ClassAbilities
     ///
     /// Kept as a static so the firing decision, the burst and the resistance-ignore arithmetic are
     /// unit-testable without a live Player (Player's static initializer cannot run under the test host).
-    /// The stateful half - reading the pool and clearing it - lives in Player_ClassAbilityBuffs.cs.
+    /// The stateful half - reading the pool and setting it to the kept charges after a burst - lives in
+    /// Player_ClassAbilityBuffs.cs.
     /// </summary>
     public static class ExsanguinateMath
     {
+        /// <summary>
+        /// How many Blood Charges the pool is SET to after a burst, at the given Exsanguinate rank:
+        /// <paramref name="keptR1"/>/<paramref name="keptR2"/>/<paramref name="keptR3"/> (the
+        /// class_ability_exsanguinate_charges_kept_rN tunables, 2/3/4), clamped to at most
+        /// <paramref name="stackCap"/> - 1.
+        ///
+        /// WHY CAP - 1. The burst gate is a FULL pool (<see cref="Resolve"/>). Keeping cap or more would leave
+        /// the pool still full, so the very next Hecatomb would burst again with no rebuild at all, which is
+        /// the invisible-repeat the full-pool gate exists to prevent. At cap - 1 the next burst always needs
+        /// at least one accruing cast first. A rank-3 Exsanguinate with a rank-1 Sanguine Reserve (cap 3)
+        /// therefore keeps 2, not 3.
+        ///
+        /// Rank 0 or below keeps nothing; a rank above 3 clamps to rank 3's value. Never negative: a cap of 0
+        /// (no Sanguine Reserve) or a mis-set negative tunable keeps 0.
+        /// </summary>
+        public static int ChargesKept(int rank, long keptR1, long keptR2, long keptR3, int stackCap)
+        {
+            if (rank <= 0)
+                return 0;
+
+            var kept = rank == 1 ? keptR1 : rank == 2 ? keptR2 : keptR3;
+
+            var ceiling = stackCap - 1L;
+
+            if (kept > ceiling)
+                kept = ceiling;
+
+            return kept < 0 ? 0 : (int)kept;
+        }
+
         /// <summary>
         /// THE FIRING DECISION, and the only place it is made. Returns
         /// <see cref="BloodChargeCastOutcome.Burst"/> only when all of the following hold, and

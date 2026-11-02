@@ -6,6 +6,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Entity.Models;
 using ACE.Server.Entity;
+using ACE.Server.KnotLoot;
 
 namespace ACE.Server.WorldObjects.Entity
 {
@@ -122,7 +123,11 @@ namespace ACE.Server.WorldObjects.Entity
                     // enlightenment no longer grants bonus vitals (the +1/enl floor is attributes + specialized
                     // skills only); the attribute increase still flows into vitals via AttributeFormula
                     if (Vital == PropertyAttribute2nd.MaxHealth)
+                    {
                         total += (uint)player.GetGearMaxHealth();
+                        // Knot loot: Shield of the Rose max-health penalty, a floored subtraction in the gear slot
+                        total = KnotTraitCombat.SubtractMaxHealthPenalty(total, player.GetKnotMaxHealthPenalty());
+                    }
 
                     // "Enhanced <vital>" class ability - a flat base increase (counts toward wield requirements)
                     total += (uint)player.GetEnhancedVitalBonus(Vital);
@@ -160,7 +165,11 @@ namespace ACE.Server.WorldObjects.Entity
                 // it's also possible these were considered "base"
                 // (enlightenment no longer grants bonus vitals - see the Base getter above)
                 if (Vital == PropertyAttribute2nd.MaxHealth)
+                {
                     total += (uint)player.GetGearMaxHealth();
+                    // Knot loot: Shield of the Rose max-health penalty, pre-multiplier in the gear slot (as the client rebuilds it)
+                    total = KnotTraitCombat.SubtractMaxHealthPenalty(total, player.GetKnotMaxHealthPenalty());
+                }
 
                 // "Enhanced <vital>" is a base increase, so it rides with base (pre-multiplier)
                 total += (uint)player.GetEnhancedVitalBonus(Vital);

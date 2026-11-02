@@ -38,6 +38,9 @@ namespace ACE.Server.Network
 
         public bool TailSent { get; private set; }
 
+        /// <summary>This message's outbound ring index (NetworkSession.RecordOutbound), 0 when not recorded. Diagnostics only.</summary>
+        public long RingIndex;
+
         public MessageFragment(GameMessage message, uint sequence)
         {
             Message = message;

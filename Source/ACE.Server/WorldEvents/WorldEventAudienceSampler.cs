@@ -50,7 +50,19 @@ namespace ACE.Server.WorldEvents
         /// landblock instance (a realm copy of a landblock is a different place with the same geometry, so
         /// a raw distance comparison across instances would count players who are not there).
         /// </summary>
-        public static AudienceEstimate Sample(Position anchor, float radius)
+        public static AudienceEstimate Sample(Position anchor, float radius) => Sample(anchor, radius, false);
+
+        /// <summary>
+        /// Who counts toward the audience for a run (pure): everyone non-staff, as <see cref="CountsTowardAudience"/>; with
+        /// <paramref name="countStaff"/> (a run whose objective counts staff, World Events Hold's admins_count) staff too.
+        /// </summary>
+        public static bool CountsTowardAudience(AccessLevel? level, bool countStaff) => countStaff || CountsTowardAudience(level);
+
+        /// <summary>
+        /// <see cref="Sample(Position, float)"/>, with staff counted too when <paramref name="countStaff"/> is true. False is
+        /// the staff rule above, exactly.
+        /// </summary>
+        public static AudienceEstimate Sample(Position anchor, float radius, bool countStaff)
         {
             if (anchor == null || radius <= 0)
                 return new AudienceEstimate(0, 0, 0);
@@ -69,7 +81,7 @@ namespace ACE.Server.WorldEvents
                     if (loc.DistanceTo(anchor) > radius)
                         continue;
 
-                    if (!CountsTowardAudience(player.Session?.AccessLevel))
+                    if (!CountsTowardAudience(player.Session?.AccessLevel, countStaff))
                         continue;
 
                     levels.Add(player.Level ?? 1);
@@ -98,7 +110,10 @@ namespace ACE.Server.WorldEvents
         /// abandoned. So on exception this returns <see cref="int.MaxValue"/> instead of 0 - a broken scan
         /// must hold the run open, never end it.
         /// </summary>
-        public static int CountAliveNear(Position anchor, float radius)
+        public static int CountAliveNear(Position anchor, float radius) => CountAliveNear(anchor, radius, false);
+
+        /// <summary><see cref="CountAliveNear(Position, float)"/>, with staff counted too when <paramref name="countStaff"/> is true.</summary>
+        public static int CountAliveNear(Position anchor, float radius, bool countStaff)
         {
             if (anchor == null || radius <= 0)
                 return 0;
@@ -117,7 +132,7 @@ namespace ACE.Server.WorldEvents
                     if (loc.DistanceTo(anchor) > radius)
                         continue;
 
-                    if (!CountsTowardAudience(player.Session?.AccessLevel))
+                    if (!CountsTowardAudience(player.Session?.AccessLevel, countStaff))
                         continue;
 
                     if (player.IsDead)

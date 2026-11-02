@@ -638,6 +638,8 @@ namespace ACE.Server.WorldObjects
             // a comment.
             var activeStore = Store;
 
+            LastSalvageCombineMessage = null;
+
             // WAVE 3 (SPEC-vault-batch-deposit.md section 5 step 6): every item that is NOT a trade note
             // and NOT refused for having no store is collected here and handed to the store in ONE
             // TryDepositBatch call inside ONE Enqueue, rather than one Enqueue/TryDeposit pair per item.
@@ -698,6 +700,30 @@ namespace ACE.Server.WorldObjects
 
             if (depositCandidates.Count == 0)
                 return;
+
+            // Mule partial-salvage combine: which candidates are PARTIAL salvage bags, captured BEFORE the
+            // deposit runs (a class deposit destroys the carrier). Raw properties only - never the
+            // Workmanship getter, which rewrites ItemWorkmanship. Whether a combine actually runs is decided
+            // after the per-item disposition below, from which of these really deposited.
+            //
+            // GUARDED, defaulting to "no partials": this runs before the deposit, and a throw here must never
+            // be the thing that stops a sale from depositing. The cost of the fallback is one skipped combine.
+            var partialSalvageIndexes = new List<int>();
+
+            try
+            {
+                for (var i = 0; i < depositCandidates.Count; i++)
+                {
+                    if (IsPartialSalvageCandidate(depositCandidates[i]))
+                        partialSalvageIndexes.Add(i);
+                }
+            }
+            catch (Exception ex)
+            {
+                partialSalvageIndexes.Clear();
+
+                log.Warn($"[MULE VENDOR] {Name}: scanning a deposit for partial salvage bags threw; no partial-salvage combine will run for this deposit. The deposit itself is unaffected: {ex}");
+            }
 
             var ok = false;
             IReadOnlyList<VaultDepositOutcome> outcomes = null;
@@ -861,7 +887,110 @@ namespace ACE.Server.WorldObjects
                 // rejected sale (M4).
                 NumItemsBought++;
             }
+
+            // AFTER every item's disposition is final, so nothing the combine does - including a throw - can
+            // change an outcome or reach HandBackOrphan. Reached only when the deposit did not throw (that arm
+            // returned above). Runs before ProcessItemsForPurchase's ApproachVendor, so the panel rebuilds
+            // against the version the combine bumps.
+            if (partialSalvageIndexes.Count > 0)
+                RunPartialSalvageCombine(activeStore, depositCandidates, outcomes, partialSalvageIndexes, actor, player);
         }
+
+        /// <summary>
+        /// The chat line the last deposit's salvage combine sent (or would have sent, with no player), or null.
+        /// Reset at the top of every <see cref="DepositItems"/>. A test seam: no unit test can build a Player.
+        /// </summary>
+        internal string LastSalvageCombineMessage { get; private set; }
+
+        /// <summary>
+        /// A partial salvage bag by its RAW properties: TinkeringMaterial with a Structure below its
+        /// MaxStructure. Either property absent means not partial.
+        /// </summary>
+        internal static bool IsPartialSalvageCandidate(WorldObject item)
+        {
+            if (item == null || item.ItemType != ItemType.TinkeringMaterial)
+                return false;
+
+            var structure = item.GetProperty(PropertyInt.Structure);
+            var maxStructure = item.GetProperty(PropertyInt.MaxStructure);
+
+            return structure != null && maxStructure != null && structure.Value < maxStructure.Value;
+        }
+
+        /// <summary>
+        /// Runs the vault's partial-salvage consolidation on the SAME store the deposit used - the vault
+        /// owner's, so a grantee's deposit follows the owner's /mule autosalvage setting - as a second queued
+        /// work item, and tells the depositor what happened. NEVER throws and never touches a deposit outcome:
+        /// every failure here is logged and the deposit stands exactly as it was.
+        /// </summary>
+        private void RunPartialSalvageCombine(AccountVaultStore targetStore, List<WorldObject> depositCandidates, IReadOnlyList<VaultDepositOutcome> outcomes,
+                                              List<int> partialSalvageIndexes, VaultActor actor, Player player)
+        {
+            // SellPhase.Combine: the combine's whole world-thread cost, its queued work item included, charged
+            // only when one actually runs. Inert outside a sell handler scope - see SellPhaseProfile.
+            var combineScope = 0L;
+
+            try
+            {
+                if (targetStore == null)
+                    return;
+
+                var wcids = new HashSet<uint>();
+
+                foreach (var index in partialSalvageIndexes)
+                {
+                    if (outcomes[index].Deposited)
+                        wcids.Add(depositCandidates[index].WeenieClassId);
+                }
+
+                if (wcids.Count == 0)
+                    return;
+
+                combineScope = SellPhaseProfile.Begin();
+
+                // Test seam, null in production: a throw from here is a throw OUTSIDE the store's own guarded
+                // pass, which is what this method's catch exists for.
+                BeforeSalvageCombineForTest?.Invoke();
+
+                SalvageCombineSummary summary = null;
+
+                if (!targetStore.Enqueue(() =>
+                {
+                    targetStore.ConsolidatePartialSalvageOnQueue(wcids, actor, out var result);
+                    summary = result;
+                }, out var thrown))
+                {
+                    log.Warn($"[MULE VENDOR] {Name}: the partial-salvage combine for account {targetStore.AccountId} was not run - the store's queue refused the work (store evicted?). The deposit is unaffected.");
+                    return;
+                }
+
+                if (thrown != null)
+                {
+                    log.Error($"[MULE VENDOR] {Name}: the partial-salvage combine for account {targetStore.AccountId} threw. The deposit is unaffected: {thrown}");
+                    return;
+                }
+
+                var message = summary?.PlayerMessage;
+
+                if (message == null)
+                    return;
+
+                LastSalvageCombineMessage = message;
+
+                player?.Session?.Network.EnqueueSend(new GameMessageSystemChat(message, ChatMessageType.System));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[MULE VENDOR] {Name}: the partial-salvage combine step threw. The deposit is unaffected: {ex}");
+            }
+            finally
+            {
+                SellPhaseProfile.End(SellPhase.Combine, combineScope);
+            }
+        }
+
+        /// <summary>Test seam, null in production. See its call site in <see cref="RunPartialSalvageCombine"/>.</summary>
+        internal Action BeforeSalvageCombineForTest;
 
         /// <summary>
         /// Hands an undepositable item back to the player who tried to sell it, rather than leaving it
@@ -1751,8 +1880,8 @@ namespace ACE.Server.WorldObjects
         /// VendorType.PersonalVendor to bypass the ordinary Value&lt;1 "unsellable" rejection
         /// (Player_Commerce.cs:459) - the client is the only remaining obstacle for these items.
         ///
-        /// This sends each such item's owning player a PublicUpdatePropertyInt(item, Value, 1) purely
-        /// to unstick the client's local drag check. It must be the PUBLIC variant: the Private one
+        /// This sends each such item's owning player a PublicUpdatePropertyInt(item, Value, ClientValue)
+        /// - 1 per unit, so StackSize for a stack - purely to unstick the client's local drag check. It must be the PUBLIC variant: the Private one
         /// carries no object guid (GameMessagePrivateUpdatePropertyInt writes sequence, property,
         /// value only), so the client applies it to the PLAYER's own property table and the item is
         /// never touched. The first version of this fix used Private and did nothing visible in-game;
@@ -1793,7 +1922,9 @@ namespace ACE.Server.WorldObjects
             var messages = new List<GameMessage>();
 
             foreach (var item in SelectZeroValueItems(possessions))
-                messages.Add(new GameMessagePublicUpdatePropertyInt(item, PropertyInt.Value, 1));
+                // ClientValue, not a literal 1: the client divides Value by StackSize before its zero
+                // test, so a literal 1 on a stack of N > 1 reads as worth 0 and the drag is refused.
+                messages.Add(new GameMessagePublicUpdatePropertyInt(item, PropertyInt.Value, item.ClientValue));
 
             return messages;
         }
@@ -2267,7 +2398,7 @@ namespace ACE.Server.WorldObjects
                 classDisplay.Name = $"{baseName} ({entry.Count:N0} in vault)";
             }
 
-            classDisplay.VendorShopCreateListStackSize = -1;
+            classDisplay.VendorShopCreateListStackSize = SliderMax(entry.Count);
 
             return classDisplay;
         }
@@ -2314,19 +2445,17 @@ namespace ACE.Server.WorldObjects
             // row's worth. A live test found the gap the hard way: 295 mana scarabs presented as
             // a stack of 100, two withdrawals of 100 succeeded, and the row still read 100 with
             // 95 actually left - there was no way short of trial and error to learn how many
-            // remained. VendorShopCreateListStackSize = -1 lets the panel REQUEST any amount;
-            // nothing was telling the player which amount to ask for.
+            // remained. The panel's request cap (VendorShopCreateListStackSize, set below to the
+            // held count) now answers that for the slider, but the label still says it in text.
             //
             // The true count goes in the NAME because that is the one field of a vendor row this
             // server fully owns and the client renders verbatim. The count is part of the row's
             // DisplaySig, so a row whose count moved is REPLACED by a freshly labelled object on
             // the next RebuildView, which is how the label tracks down as the stack is drawn out.
             //
-            // EVERY STACKABLE row is labelled, whatever it holds, and the reason is
-            // VendorShopCreateListStackSize = -1 a few lines below: it lets the buy panel request
-            // ANY amount of this row, so the panel always looks willing to sell up to the cap no
-            // matter how little is actually stored. The number the player needs is therefore
-            // missing on every stackable row, not merely on the ones the cap truncates.
+            // EVERY STACKABLE row is labelled, whatever it holds: the rendered stack is capped at
+            // MaxStackSize, so the number the player needs is missing on every stackable row, not
+            // merely on the ones the cap truncates.
             //
             // Two narrower rules were tried first and both failed in play, which is why this one
             // is written down rather than trimmed again later. Labelling only CAPPED rows left
@@ -2349,13 +2478,11 @@ namespace ACE.Server.WorldObjects
                 display.Name = $"{baseName} ({entry.Count:N0} in vault)";
             }
 
-            // M5: without this, the client presents one MaxStackSize stack per approach, so a
-            // 10,000-kit ledger row (the exact DESIGN 7.3 headline case) needs about 100
-            // re-approaches to buy out. Vendor.AddDefaultItem does the same for a stackSize-less
-            // add (Vendor.cs:177); -1 lets the buy panel request an arbitrary amount, which
-            // TryAdjustAccountVaultStack already adjudicates against what the ledger actually
-            // holds, so an over-request is refused there rather than accepted here.
-            display.VendorShopCreateListStackSize = -1;
+            // The panel's request cap is the HELD count, so dragging the slider to max takes
+            // everything held rather than one MaxStackSize stack per approach. Display only:
+            // TryAdjustAccountVaultStack still adjudicates every request against the ledger.
+            // Unverified in game: whether the client lets one request exceed MaxStackSize.
+            display.VendorShopCreateListStackSize = SliderMax(entry.Count);
 
             return display;
         }
@@ -2372,6 +2499,13 @@ namespace ACE.Server.WorldObjects
             if (NeedsDisplayProxy(display.ItemType))
                 display.ItemType = ProxyDisplayItemType;
         }
+
+        /// <summary>
+        /// The buy panel's request cap for a row holding <paramref name="held"/>: the true count, clamped
+        /// to 24 bits. The wire field is packed as (stackSize & 0xFFFFFF) | (pwdType << 24) in
+        /// GameEventApproachVendor.cs, so anything larger would wrap to a tiny or zero cap.
+        /// </summary>
+        private static int SliderMax(long held) => (int)Math.Min(held, 0xFFFFFF);
 
         /// <summary>
         /// Materializes the display proxy that stands in for one stored biota of a hidden ItemType.
@@ -2443,13 +2577,14 @@ namespace ACE.Server.WorldObjects
 
             // A SINGLE stored biota is indivisible - it did not collapse into the ledger precisely
             // because it is not a plain identical-to-fresh stack - so its row is deliberately left
-            // without VendorShopCreateListStackSize = -1: the only valid request is the whole thing.
+            // without a VendorShopCreateListStackSize: the only valid request is the whole thing.
             //
             // A GROUP of N is a different object. It is N whole indivisible biotas on one line, so the
             // panel legitimately needs to request an arbitrary k of them, and the count has to reach
             // the player somehow. Both halves mirror what the ledger rows already do a few lines above:
-            // -1 lets the panel ask for any k, and the true N goes in the NAME because that is the one
-            // field of a vendor row this server fully owns and the client renders verbatim.
+            // the request cap is the held N so the slider can ask for any k up to all of them, and the
+            // true N goes in the NAME because that is the one field of a vendor row this server fully
+            // owns and the client renders verbatim.
             if (groupCount > 1)
             {
                 // Captured BEFORE the suffix is appended and handed back so RebuildView registers it
@@ -2457,7 +2592,7 @@ namespace ACE.Server.WorldObjects
                 // count must never be a sort key.
                 baseName = proxy.Name;
                 proxy.Name = $"{baseName} ({groupCount:N0} in vault)";
-                proxy.VendorShopCreateListStackSize = -1;
+                proxy.VendorShopCreateListStackSize = SliderMax(groupCount);
             }
 
             StampForDisplay(proxy);

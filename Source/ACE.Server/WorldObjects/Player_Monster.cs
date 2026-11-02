@@ -57,6 +57,10 @@ namespace ACE.Server.WorldObjects
             if (SameFaction(monster))
                 monster.AddRetaliateTarget(this);
 
+            // WaffleACE fork, World Events Hold: a seeker keeps going for its knight even when hit.
+            if (ACE.Server.WorldEvents.WorldEventHooks.KeepsHoldSeekerLock(monster, this))
+                return;
+
             if (monster.MonsterState != State.Awake && (monster.Tolerance & PlayerCombatPet_RetaliateExclude) == 0)
             {
                 monster.AttackTarget = this;

@@ -42,7 +42,8 @@ namespace ACE.Server.ThreadDungeons
         private bool placementWanted;
         private bool cacheSortWanted;
         private uint cacheSortResume;
-        private DateTime lastSpawnCacheUtc = DateTime.MinValue;
+        // Keyed by player guid: the /spawncache cooldown is per player, so group members do not block each other.
+        private readonly Dictionary<uint, DateTime> lastSpawnCacheUtc = new Dictionary<uint, DateTime>();
 
         /// <summary>
         /// True when this run delivers loot through Thread Caches instead of corpses. False until
@@ -587,9 +588,12 @@ namespace ACE.Server.ThreadDungeons
 
         public void SetCacheSortResume(uint cacheGuid) { lock (stateLock) cacheSortResume = cacheGuid; }
 
-        public bool SpawnCacheCooldownElapsed(DateTime nowUtc) { lock (stateLock) return nowUtc - lastSpawnCacheUtc >= SpawnCacheCooldown; }
+        public bool SpawnCacheCooldownElapsed(uint playerGuid, DateTime nowUtc)
+        {
+            lock (stateLock) return !lastSpawnCacheUtc.TryGetValue(playerGuid, out var last) || nowUtc - last >= SpawnCacheCooldown;
+        }
 
-        public void StampSpawnCacheCooldown(DateTime nowUtc) { lock (stateLock) lastSpawnCacheUtc = nowUtc; }
+        public void StampSpawnCacheCooldown(uint playerGuid, DateTime nowUtc) { lock (stateLock) lastSpawnCacheUtc[playerGuid] = nowUtc; }
 
         /// <summary>Records a cache that is in the world. False for null, a duplicate, or an Ended run.</summary>
         public bool TryRegisterCache(Container cache)

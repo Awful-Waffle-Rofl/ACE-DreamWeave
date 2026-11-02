@@ -110,7 +110,7 @@ namespace ACE.Server.WeaponMods
         Longevity        = 29,
         Siphon           = 30,
         QuickRefresh     = 31,
-        ArcaneDefender   = 32,
+        DefensiveWeapon  = 32,
         PanicReload      = 33,
     }
 }

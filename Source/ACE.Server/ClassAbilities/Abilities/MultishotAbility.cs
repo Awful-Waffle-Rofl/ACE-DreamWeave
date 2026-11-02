@@ -27,7 +27,8 @@ namespace ACE.Server.ClassAbilities.Abilities
             Description = "Your missile attacks strike additional nearby targets - one extra arrow per rank. " +
                           "Stacks with multi-shot weapons: their extra arrows are added together. Each extra " +
                           "arrow deals 60% of a normal arrow's damage; high Assess Creature and gear raise " +
-                          "that toward a 100% ceiling.",
+                          "that toward a 100% ceiling. If there are fewer targets than extra arrows, each leftover " +
+                          "arrow hits your own target for a third of that damage.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
             Implemented = true,

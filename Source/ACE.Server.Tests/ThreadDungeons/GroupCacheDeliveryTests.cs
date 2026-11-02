@@ -151,6 +151,11 @@ namespace ACE.Server.Tests.ThreadDungeons
             public readonly List<uint> FormCalls = new List<uint>();
             public readonly List<uint> Moves = new List<uint>();
             public readonly List<Container> Delivered = new List<Container>();
+
+            /// <summary>Every move, form, exit relocation and chat line of a pass, in the order they happened.</summary>
+            public readonly List<string> Events = new List<string>();
+
+            public Action<uint, ThreadCachePlacer.CacheMoveResult> SummonMove = (g, r) => { };
             public Func<uint, Func<bool>, CacheFormPass> FormAt;
 
             public ThreadGroupCacheDelivery.DeliveryWorld Build(ThreadDungeonRun run, Func<ThreadLootLedgerEntry, List<WorldObject>> materialize = null,
@@ -159,9 +164,11 @@ namespace ACE.Server.Tests.ThreadDungeons
                 return new ThreadGroupCacheDelivery.DeliveryWorld
                 {
                     IsInside = g => Inside.Contains(g),
-                    FormAt = (g, hasMore) => { FormCalls.Add(g); return FormAt(g, hasMore); },
+                    FormAt = (g, hasMore) => { FormCalls.Add(g); Events.Add("form"); return FormAt(g, hasMore); },
                     MoveFor = g => Moves.Add(g),
-                    Tell = (g, t) => Told.Add((g, t)),
+                    SummonMoveFor = (g, r) => { Moves.Add(g); Events.Add("move"); SummonMove(g, r); },
+                    RelocateExitFor = g => Events.Add("exit"),
+                    Tell = (g, t) => { Told.Add((g, t)); Events.Add("tell:" + t); },
                     Deliver = (c, r) => Delivered.Add(c),
                     Materialize = materialize ?? (_ => new List<WorldObject>()),
                     BuildBonus = bonus ?? NoBonus,
@@ -311,6 +318,36 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(all.All(i => !i.IsDestroyed));
             Assert.IsTrue(run.Roster.All(m => PileHeld(run, m.Guid).All(h => h.Round == 1)), "every item carries the deal round");
             Assert.IsTrue(run.HasUnclaimedLoot, "held piles are unclaimed loot");
+        }
+
+        [TestMethod]
+        public void Deal_tags_each_seats_fixed_bonus_by_index_so_every_seat_has_its_own_single_key_at_any_B()
+        {
+            var run = ClearedGroupRun(Member, Member2);
+            Assert.IsTrue(run.TryMarkLootBonusPending());
+            Assert.AreNotEqual(1.0, run.Group.RewardBonus, "fixture: B is not 1");
+
+            var keys = new List<WorldObject>();
+
+            ThreadGroupCacheDelivery.Deal(run, _ => throw new AssertFailedException("no ledger entry"), (r, b) =>
+            {
+                // The shape BuildBossBonusPerSeatItems returns: note scaled by B, ONE key, a bag.
+                var key = Item(51954);
+                keys.Add(key);
+                return new List<WorldObject> { StackedValued(20630, (int)Math.Ceiling(2 * b)), key, Valued(3) };
+            });
+
+            Assert.AreEqual(3, keys.Count, "one key per seat");
+
+            foreach (var guid in new[] { Owner, Member, Member2 })
+            {
+                var pile = PileHeld(run, guid);
+                Assert.AreEqual(3, pile.Count, "no extra key from B");
+                CollectionAssert.AreEqual(new int?[] { 0, 1, 2 }, pile.Select(h => h.FixedOrder).ToArray());
+                Assert.AreEqual(51954u, pile[1].Item.WeenieClassId, "index 1 is the key");
+            }
+
+            Assert.AreEqual(3, keys.Select(k => k.Guid.Full).Distinct().Count(), "each seat holds its own key");
         }
 
         [TestMethod]
@@ -1111,7 +1148,10 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.IsTrue(run.HasHeldPile(Member));
             Assert.IsTrue(run.IsMemberDeliveryWanted(Member), "not inside: waits for arrival (R20)");
-            CollectionAssert.AreEqual(new[] { (Owner, ThreadCachePlacer.FormedMessage) }, world.Told, "one line, to the member it formed for");
+            // The formed line to the member it formed for, and the share-waits line to the seated member outside
+            // (ThreadGroupCacheDelivery.TellShareWaits: their free return, ThreadGroupClearedReturnTests).
+            CollectionAssert.AreEqual(new[] { (Owner, ThreadCachePlacer.FormedMessage), (Member, GroupRosterRules.ShareWaitsInsideText(false)) }, world.Told,
+                "one line to each member, in roster order");
 
             // The member arrives; the next pass serves them and clears the flag.
             world.Inside.Add(Member);
@@ -1175,6 +1215,130 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.AreSame(memberItem, formed[0].Inventory.Values.Single());
             Assert.IsTrue(run.HasHeldPile(Owner), "another member's pile is untouched");
             Assert.IsFalse(ownerItem.IsDestroyed);
+        }
+
+        private static Action<uint, ThreadCachePlacer.CacheMoveResult> Moved(int n, bool noRoom = false)
+            => (g, r) => { r.Moved += n; r.NoRoom |= noRoom; };
+
+        private static ThreadDungeonRun SummonRun()
+        {
+            var run = ClearedGroupRun(Member);
+            Assert.IsTrue(run.AddToHeldPile(Member, new HeldPileItem(Valued(2), null, 1)));
+            return run;
+        }
+
+        [TestMethod]
+        public void Summon_moves_the_requesters_placed_caches_before_forming_new_ones_and_tells_once()
+        {
+            var run = SummonRun();
+            var formed = new List<Chest>();
+            var world = new FakeWorld { SummonMove = Moved(2) };
+            world.FormAt = FormsChests(run, formed);
+            world.Inside.Add(Member);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            CollectionAssert.AreEqual(new[] { Member }, world.Moves, "the requester's placed caches come to them");
+            CollectionAssert.AreEqual(new[] { "move", "form", "exit", "tell:" + ThreadCachePlacer.FormedMessage }, world.Events,
+                "move existing, form new, relocate the exit once after the forming, then exactly one line");
+            Assert.AreEqual(1, formed.Count);
+        }
+
+        [TestMethod]
+        public void Summon_with_nothing_moved_and_nothing_formed_says_no_room_once()
+        {
+            var run = SummonRun();
+            var world = new FakeWorld { SummonMove = Moved(0, noRoom: true) };
+            world.FormAt = (g, hasMore) => new CacheFormPass { NoRoom = true };
+            world.Inside.Add(Member);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            CollectionAssert.AreEqual(new[] { "move", "form", "tell:" + ThreadCachePlacer.NoRoomMessage }, world.Events, "one no-room line, no exit relocation");
+        }
+
+        [TestMethod]
+        public void Summon_that_moved_something_never_says_no_room_even_if_the_forming_found_none()
+        {
+            var run = SummonRun();
+            var world = new FakeWorld { SummonMove = Moved(1) };
+            world.FormAt = (g, hasMore) => new CacheFormPass { NoRoom = true };
+            world.Inside.Add(Member);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            CollectionAssert.AreEqual(new[] { "move", "form", "exit", "tell:" + ThreadCachePlacer.FormedMessage }, world.Events);
+        }
+
+        [TestMethod]
+        public void Summon_still_forms_when_the_move_throws()
+        {
+            var run = SummonRun();
+            var formed = new List<Chest>();
+            var world = new FakeWorld { SummonMove = (g, r) => throw new InvalidOperationException("move blew up") };
+            world.FormAt = FormsChests(run, formed);
+            world.Inside.Add(Member);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            CollectionAssert.AreEqual(new[] { Member }, world.FormCalls, "the form step still runs");
+            Assert.AreEqual(1, formed.Count);
+            CollectionAssert.AreEqual(new[] { "move", "form", "tell:" + ThreadCachePlacer.FormedMessage }, world.Events, "nothing moved, so no exit relocation; the forming still reports");
+        }
+
+        [TestMethod]
+        public void Summon_keeps_the_progress_of_a_move_that_throws_partway()
+        {
+            var run = SummonRun();
+            var formed = new List<Chest>();
+            var world = new FakeWorld { SummonMove = (g, r) => { r.Moved++; throw new InvalidOperationException("the second cache blew up"); } };
+            world.FormAt = FormsChests(run, formed);
+            world.Inside.Add(Member);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            CollectionAssert.AreEqual(new[] { "move", "form", "exit", "tell:" + ThreadCachePlacer.FormedMessage }, world.Events,
+                "the one cache that did move still earns the exit relocation and the formed line");
+        }
+
+        [TestMethod]
+        public void A_serve_that_throws_after_the_form_pass_still_reports_the_pass()
+        {
+            var run = SummonRun();
+            var world = new FakeWorld { FormAt = (g, h) => new CacheFormPass { CachesFormed = 1, FreshCacheAcceptedNothing = true } };
+            world.Inside.Add(Member);
+            var built = world.Build(run);
+            built.Tell = (g, t) => throw new InvalidOperationException("chat blew up");
+
+            var pass = ThreadGroupCacheDelivery.ServeMemberCore(run, Member, false, built, quiet: false);
+
+            Assert.IsNotNull(pass, "a throw after the pass keeps the pass");
+            Assert.AreEqual(1, pass.CachesFormed);
+        }
+
+        [TestMethod]
+        public void Summon_does_not_move_for_a_requester_who_is_not_inside()
+        {
+            var run = SummonRun();
+            var world = new FakeWorld { FormAt = (g, h) => null };
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, Member, world.Build(run));
+
+            Assert.AreEqual(0, world.Moves.Count);
+        }
+
+        [TestMethod]
+        public void Summon_does_not_move_for_a_requester_who_is_not_on_the_roster()
+        {
+            var run = SummonRun();
+            const uint stranger = 0x50000099u;
+            var world = new FakeWorld { SummonMove = (g, r) => throw new AssertFailedException("a non-roster requester moves nothing"), FormAt = (g, h) => null };
+            world.Inside.Add(stranger);
+
+            ThreadGroupCacheDelivery.Run(run, CacheRequestMode.Summon, stranger, world.Build(run));
+
+            Assert.AreEqual(0, world.Moves.Count);
+            CollectionAssert.DoesNotContain(world.Events, "move");
         }
 
         [TestMethod]
@@ -1513,16 +1677,17 @@ namespace ACE.Server.Tests.ThreadDungeons
             StringAssert.Contains(request, "Execute(run, landblock, stepMode, requesterGuid, budget);",
                 "each chain step forwards the requester; stepMode is the request's own mode on the first step and Auto after it");
 
+            // Knots (2026-10-12): the attempt stamps the player it forms at through the one wcid-taking factory, which
+            // names the run owner by the run's owner name and a member by the roster (ThreadRewardBonusBuilderTests pins
+            // that body).
             var attempt = PooledLootSourceText.MethodBody(src, "private static Container TryPlaceEmpty(");
-            var ownerTest = attempt.IndexOf("owner.Guid.Full == run.OwnerGuid", StringComparison.Ordinal);
-            var solo = attempt.IndexOf("ThreadDungeonRewardSpawner.CreateCacheChest(run, \"pooled cache\")", StringComparison.Ordinal);
-            var member = attempt.IndexOf("ThreadDungeonRewardSpawner.CreateCacheChest(run, \"pooled cache\", owner.Guid.Full)", StringComparison.Ordinal);
-            Assert.IsTrue(ownerTest >= 0 && ownerTest < solo && solo < member, "the owner keeps the owner-stamped factory; a member gets their own stamp");
+            StringAssert.Contains(attempt, "ThreadDungeonRewardSpawner.CreateCacheChest(run, \"pooled cache\", owner.Guid.Full, wcid)",
+                "every cache is stamped for the player it forms at");
 
             StringAssert.Contains(src, "internal static bool IsOwnerInside(ThreadDungeonRun run, Player owner)\n            => ThreadRunPresence.IsMemberInside(run, owner);",
                 "invariant 1: one inside test");
 
-            var move = PooledLootSourceText.MethodBody(src, "private static void MoveCaches(");
+            var move = PooledLootSourceText.MethodBody(src, "private static CacheMoveResult MoveCaches(");
             StringAssert.Contains(move, "if (run.IsGroup && !ThreadLootPool.IsCacheFor(old, owner.Guid.Full))", "a member moves only their own caches, and solo never filters");
 
             var loop = PooledLootSourceText.MethodBody(src, "internal static CacheFormPass FormAndFill(");

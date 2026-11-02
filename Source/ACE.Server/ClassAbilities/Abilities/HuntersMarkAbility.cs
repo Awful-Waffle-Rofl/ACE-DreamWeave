@@ -12,7 +12,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
     /// Archer T1 splash: any weapon attack the Archer lands stamps a 10 second mark on the target, and a
-    /// marked creature takes 1/2/3/4/5% more damage by rank from EVERY source and damage type - the Archer,
+    /// marked creature takes 2/4/6/8/10% more damage by rank from EVERY source and damage type - the Archer,
     /// their fellows, and their pets alike. The group-wide half is the point of the entry: it is the class's
     /// contribution to a fellowship's damage rather than another private rider on the Archer's own arrows.
     ///
@@ -53,7 +53,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "hunters_mark",
             DisplayName = "Hunter's Mark",
             Description = "Any weapon attack you land marks the target for 10 seconds. A marked creature takes " +
-                          "1/2/3/4/5% more damage (by rank) from every source and damage type, including your " +
+                          "2/4/6/8/10% more damage (by rank) from every source and damage type, including your " +
                           "fellows and pets. The mark is its own debuff: it stacks with Vulnerability, Imperil " +
                           "and rending weapons. If several archers mark a target, the strongest mark applies. " +
                           "Higher Assess Creature multiplies the bonus.",

@@ -69,8 +69,8 @@ namespace ACE.Server.Command.Handlers
                 case CharSheetCommandKind.Show:
                 default:
                     return wasAlreadyOn
-                        ? $"Your character sheet: {result.Link.Url}"
-                        : $"Your character sheet is now public: {result.Link.Url} - anyone with this link can see your equipped gear, attributes, vitals, skills, class abilities and leaderboard ranks. Use /charsheet off to hide it, or /charsheet rotate for a new link.";
+                        ? $"Your character sheet: {result.Link.Url} (listed in the Character Sheets directory)"
+                        : $"Your character sheet is now public: {result.Link.Url}. It is listed in the Character Sheets directory, so anyone can find it, not just people with the link. It shows your name, level, heritage, equipped gear, attributes, vitals, skills, class abilities and leaderboard ranks. Use /charsheet off to remove it from the directory and hide it, or /charsheet rotate for a new link (the old link stops working).";
             }
         }
     }

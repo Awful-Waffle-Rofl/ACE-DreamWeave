@@ -610,7 +610,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.0f, DoubleVolleyAbility.Chance(0, 0.06, 0.06, 1.0, 0.0, 0.99));
             Assert.AreEqual(0.0f, AcidProcAbility.Chance(0, 0.25, 0.99));
             Assert.AreEqual(0.0f, EchoCastAbility.EchoChance(0, 0.06, 0.06, 0.0, 0.99));
-            Assert.AreEqual(0.0f, ElementalRendAbility.RendChance(0, 0.08, 0.06, 0.0, 0.99));
             Assert.AreEqual(0.0, RiposteAbility.CounterFraction(0, 0.40, 0.30, 0.99), Epsilon);
         }
 
@@ -626,7 +625,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.27f, AcidProcAbility.Chance(1, 0.25, 0.02), 1e-6f);
 
             Assert.AreEqual(0.075f, EchoCastAbility.EchoChance(1, 0.06, 0.06, 0.0, 0.015), 1e-6f);
-            Assert.AreEqual(0.10f, ElementalRendAbility.RendChance(1, 0.08, 0.06, 0.0, 0.02), 1e-6f);
 
             // riposte counter fraction: 40% at rank 1 + 10pp = 50%
             Assert.AreEqual(0.50, RiposteAbility.CounterFraction(1, 0.40, 0.30, 0.10), Epsilon);
@@ -639,7 +637,6 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.18f, DoubleVolleyAbility.Chance(3, 0.06, 0.06, 1.0));
             Assert.AreEqual(0.25f, AcidProcAbility.Chance(1, 0.25, 0.0));
             Assert.AreEqual(0.06f, EchoCastAbility.EchoChance(1, 0.06, 0.06, 0.0));
-            Assert.AreEqual(0.08f, ElementalRendAbility.RendChance(1, 0.08, 0.06, 0.0));
             Assert.AreEqual(0.40, RiposteAbility.CounterFraction(1, 0.40, 0.30), Epsilon);
         }
 
@@ -706,7 +703,7 @@ namespace ACE.Server.Tests
             {
                 EquipmentModId.Deadeye,
                 EquipmentModId.LongDraw,
-                EquipmentModId.SavageBlows,
+                EquipmentModId.SavageBlows,   // mod 17: links Heavy Blows since 2026-10-24 (member name kept for the market token contract)
                 EquipmentModId.Executioner,
                 EquipmentModId.Bloodlust,
                 EquipmentModId.Venom,

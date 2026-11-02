@@ -83,11 +83,90 @@ namespace ACE.Server.WorldObjects
         internal const uint MmdWcid = 20630;
         internal const long MmdValue = 250000;
 
+        /// <summary>
+        /// The "(N MMD)" display figure for a pyreal balance: pyreals / MmdValue, TRUNCATED (never rounded up, so
+        /// the figure never promises an MMD the balance cannot spend) to one decimal place, with a whole number
+        /// shown without the ".0". 250,000 -> "1", 375,000 -> "1.5", 24,999 -> "0". Display only; the spendable
+        /// whole-MMD count is still the floor division at <see cref="MmdValue"/>.
+        /// </summary>
+        public static string FormatMmdEquivalent(long pyreals)
+        {
+            if (pyreals < 0)
+                pyreals = 0;
+
+            var whole = pyreals / MmdValue;
+            var tenth = (pyreals % MmdValue) * 10 / MmdValue;
+
+            return tenth == 0
+                ? whole.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)
+                : whole.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + "." + tenth.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         // "Class Ability Point" (Content/sql/weenies/1001010_classabilitypoint_currency.sql) - a display-only
         // vendor alternate-currency weenie whose "bank balance" IS the player's AvailableClassAbilityPoints.
         // The Drift Network class-ability trainers price their tokens in this currency; the always-on shop hook
         // below draws it straight from the CAP property, so no Class Ability Point item is ever granted or held.
         private const uint ClassAbilityPointCurrencyWcid = 1001010;
+
+        // "Mark of the Hopeslayer" (Content/sql/weenies/1006650 Blood.sql) - the PvP arena currency, a Stackable that
+        // is Bonded and Attuned. Banked as a per-character count (PropertyInt64.BankedHopeslayerMarks), like the
+        // promissory note, but NEVER transferable: the item is bonded, so a transfer would launder it.
+        internal const uint HopeslayerMarkWcid = ACE.Server.Pvp.PvpArenaRewards.BloodWcid;
+        internal const string HopeslayerMarkName = "Marks of the Hopeslayer";
+
+        /// <summary>Sent when /bank transfer is asked to move Marks of the Hopeslayer.</summary>
+        internal const string MarksTransferRefusedMessage = "Marks of the Hopeslayer are bonded and cannot be transferred to other characters.";
+
+        /// <summary>The /bank currency tokens that mean Marks of the Hopeslayer.</summary>
+        internal static bool IsHopeslayerMarkToken(string token) => token is "m" or "mark" or "marks";
+
+        /// <summary>
+        /// True, with the player-facing refusal, when a /bank transfer names a currency that may never move between
+        /// characters (Marks of the Hopeslayer). Pure so the refusal is testable without a live Player; the
+        /// command handler calls it before it parses the amount or looks up the target.
+        /// </summary>
+        internal static bool TryGetBankTransferRefusal(string currencyToken, out string message)
+        {
+            if (IsHopeslayerMarkToken(currencyToken))
+            {
+                message = MarksTransferRefusedMessage;
+                return true;
+            }
+
+            message = null;
+            return false;
+        }
+
+        /// <summary>
+        /// How many Marks a deposit takes from the pack: everything held when <paramref name="requested"/> is
+        /// negative ("all"), otherwise the smaller of the request and what is held. Zero when nothing is held or
+        /// zero was asked for. Pure so the all/amount rule is testable without a live Player.
+        /// </summary>
+        internal static long PlanMarkDeposit(long held, long requested)
+        {
+            if (held <= 0 || requested == 0)
+                return 0;
+
+            if (requested < 0)
+                return held;
+
+            return Math.Min(held, requested);
+        }
+
+        /// <summary>
+        /// Pure core of the Marks vendor-currency debit (the mirror of <see cref="TryDebitBankedMmd"/>): FALSE,
+        /// leaving <paramref name="newBalance"/> at the old balance, when the amount is negative or exceeds the
+        /// bank; otherwise sets the resulting balance and returns TRUE.
+        /// </summary>
+        internal static bool TryDebitBankedMarks(long banked, long amount, out long newBalance)
+        {
+            newBalance = banked;
+            if (amount < 0 || amount > banked)
+                return false;
+
+            newBalance = banked - amount;
+            return true;
+        }
 
 
         /// <summary>
@@ -177,6 +256,12 @@ namespace ACE.Server.WorldObjects
         {
             get => GetProperty(PropertyInt64.BankedPromissoryNotes) ?? 0;
             set => SetProperty(PropertyInt64.BankedPromissoryNotes, value);
+        }
+
+        public long BankedHopeslayerMarks
+        {
+            get => GetProperty(PropertyInt64.BankedHopeslayerMarks) ?? 0;
+            set => SetProperty(PropertyInt64.BankedHopeslayerMarks, value);
         }
 
         /// <summary>
@@ -1135,6 +1220,98 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Deposits Marks of the Hopeslayer (count-based token, stackable). amount &lt; 0 means "all". Credits only
+        /// what actually left the pack, so a consume that fails partway never over-credits.
+        /// </summary>
+        public long DepositHopeslayerMarks(long amount = -1, bool suppressChat = false)
+        {
+            if (amount == 0)
+            {
+                if (!suppressChat) BankMsg("Amount must be greater than zero.");
+                return 0;
+            }
+
+            var held = GetNumInventoryItemsOfWCID(HopeslayerMarkWcid);
+            var take = PlanMarkDeposit(held, amount);
+
+            if (take <= 0)
+            {
+                if (!suppressChat) BankMsg("No Marks of the Hopeslayer found to deposit.");
+                return 0;
+            }
+
+            // The balance is credited ONCE, below, from what RunMarkDeposit reports as actually removed.
+            var deposited = RunMarkDeposit(take, planned =>
+            {
+                var before = GetNumInventoryItemsOfWCID(HopeslayerMarkWcid);
+
+                // planned <= take <= held, and held is an int, so the narrowing cannot truncate.
+                TryConsumeFromInventoryWithNetworking(HopeslayerMarkWcid, (int)planned);
+
+                return before - GetNumInventoryItemsOfWCID(HopeslayerMarkWcid);
+            });
+
+            if (deposited != take)
+                log.Error($"[BANK] {Name} (0x{Guid.Full:X8}) DepositHopeslayerMarks planned {take} but {deposited} left the pack; crediting {deposited}.");
+
+            if (deposited <= 0)
+            {
+                if (!suppressChat) BankMsg("No Marks of the Hopeslayer found to deposit.");
+                return 0;
+            }
+
+            var balance = ModifyBankBalance(PropertyInt64.BankedHopeslayerMarks, deposited);
+
+            // Persist NOW rather than rushing the next periodic save: the pack change and this balance must reach
+            // the shard together, or a crash between them either loses the Marks (pack saved, balance not) or
+            // duplicates them (balance saved, pack not). Marks only; the promissory-note path is unchanged.
+            SaveBiotaToDatabase();
+
+            if (!suppressChat) BankMsg($"Deposited {deposited:N0} Marks of the Hopeslayer. Balance: {balance:N0}");
+
+            return deposited;
+        }
+
+        /// <summary>
+        /// Runs a Marks deposit through <paramref name="consume"/> (asked for <paramref name="take"/>, returns how many
+        /// actually left the pack) and returns the count to credit: never more than was asked, never negative. Pure
+        /// apart from the delegate, so a consume that removes less than asked is testable with a fake.
+        /// </summary>
+        internal static long RunMarkDeposit(long take, Func<long, long> consume)
+        {
+            if (take <= 0)
+                return 0;
+
+            var removed = consume(take);
+
+            return Math.Max(0, Math.Min(removed, take));
+        }
+
+        /// <summary>
+        /// Runs a Marks withdrawal as a loop of single-stack creations. <paramref name="createStack"/> is asked for
+        /// the amount still owed and returns how many units reached the pack (0 stops the loop). Returns the total
+        /// created, which is exactly what the caller must debit, once. Pure apart from the delegate, so a creator
+        /// that fails partway is testable with a fake.
+        /// </summary>
+        internal static long RunMarkWithdraw(long amount, Func<long, long> createStack)
+        {
+            long created = 0;
+            long remaining = amount;
+
+            while (remaining > 0)
+            {
+                var made = createStack(remaining);
+                if (made <= 0) break;
+
+                made = Math.Min(made, remaining);
+                created += made;
+                remaining -= made;
+            }
+
+            return created;
+        }
+
+        /// <summary>
         /// Deposits everything the bank supports.
         /// </summary>
         public void DepositAll()
@@ -1149,9 +1326,10 @@ namespace ACE.Server.WorldObjects
             DepositLuminance(-1, suppressChat: true);
             DepositLegendaryKeys(suppressChat: true);
             DepositPromissoryNotes(suppressChat: true);
+            DepositHopeslayerMarks(-1, suppressChat: true);
 
             var peas = peaValue > 0 ? $" (including {peaValue:N0} from peas)" : "";
-            BankMsg($"Deposited all. Pyreals: {BankedPyreals:N0}{peas} | Luminance: {BankedLuminance:N0} | Keys: {BankedLegendaryKeys:N0} | Promissory Notes: {BankedPromissoryNotes:N0}");
+            BankMsg($"Deposited all. Pyreals: {BankedPyreals:N0}{peas} | Luminance: {BankedLuminance:N0} | Keys: {BankedLegendaryKeys:N0} | Promissory Notes: {BankedPromissoryNotes:N0} | Marks of the Hopeslayer: {BankedHopeslayerMarks:N0}");
         }
 
         #endregion
@@ -1505,6 +1683,32 @@ namespace ACE.Server.WorldObjects
                 BankMsg($"Withdrew {created:N0} of {amount:N0} promissory note(s) (partial - out of pack space). Balance: {balance:N0}");
         }
 
+        /// <summary>
+        /// Withdraws banked Marks of the Hopeslayer, emitted as STACKS (wcid 1006650 is a Stackable with its own
+        /// MaxStackSize). Debits only what was created.
+        /// </summary>
+        public void WithdrawHopeslayerMarks(long amount)
+        {
+            if (amount <= 0) { BankMsg("Amount must be greater than zero."); return; }
+            if (amount > BankedHopeslayerMarks) { BankMsg($"Insufficient banked Marks of the Hopeslayer. You have {BankedHopeslayerMarks:N0}."); return; }
+            if (amount > MaxWithdrawItems) { BankMsg($"Cannot withdraw more than {MaxWithdrawItems:N0} Marks of the Hopeslayer at once."); return; }
+
+            var created = RunMarkWithdraw(amount, remaining => TryCreateStackInInventory(HopeslayerMarkWcid, remaining));
+
+            if (created <= 0) { BankMsg("Could not withdraw - check your pack space."); return; }
+
+            // Debited ONCE, by exactly what was created, after the creation loop.
+            var balance = ModifyBankBalance(PropertyInt64.BankedHopeslayerMarks, -created);
+
+            // Persist NOW (see DepositHopeslayerMarks): the new stacks and the lowered balance land together.
+            SaveBiotaToDatabase();
+
+            if (created == amount)
+                BankMsg($"Withdrew {created:N0} Marks of the Hopeslayer. Balance: {balance:N0}");
+            else
+                BankMsg($"Withdrew {created:N0} of {amount:N0} Marks of the Hopeslayer (partial - out of pack space). Balance: {balance:N0}");
+        }
+
         #endregion
 
         #region Transfer
@@ -1754,8 +1958,9 @@ namespace ACE.Server.WorldObjects
         #region Shop hook bridge (alternate currencies)
 
         /// <summary>
-        /// Banked amount of a vendor alternate currency, for the always-on shop hook. Promissory notes are
-        /// backed by their own banked balance; Class Ability Points are backed by the CAP property (there is no
+        /// Banked amount of a vendor alternate currency, for the always-on shop hook. Promissory notes and
+        /// Marks of the Hopeslayer (wcid <see cref="HopeslayerMarkWcid"/>) are each backed by their own banked
+        /// balance; Class Ability Points are backed by the CAP property (there is no
         /// bankable item behind them at all); MMDs (Trade Note (250,000), wcid <see cref="MmdWcid"/>) are backed
         /// by BankedPyreals at <see cref="MmdValue"/> pyreals per note, floored. Every other alternate currency
         /// returns 0 (inventory-only).
@@ -1764,6 +1969,8 @@ namespace ACE.Server.WorldObjects
         {
             if (wcid == PromissoryNoteWcid)
                 return BankedPromissoryNotes;
+            if (wcid == HopeslayerMarkWcid)
+                return BankedHopeslayerMarks;
             // PK facet: class ability points cannot be spent in any form there, so as a vendor currency the
             // balance reads as 0 (every CAP-priced purchase then fails its affordability check) - and
             // DebitBankedAlternateCurrency below refuses on its own as well, so neither half relies on the other.
@@ -1786,6 +1993,11 @@ namespace ACE.Server.WorldObjects
             {
                 ModifyBankBalance(PropertyInt64.BankedPromissoryNotes, -amount);
                 return "Promissory Notes";
+            }
+            if (wcid == HopeslayerMarkWcid && TryDebitBankedMarks(BankedHopeslayerMarks, amount, out _))
+            {
+                ModifyBankBalance(PropertyInt64.BankedHopeslayerMarks, -amount);
+                return HopeslayerMarkName;
             }
             // PK facet: the class ability point freeze covers points as a vendor currency too. A null return is
             // "not bankable or insufficient", which every caller already treats as "do not hand over goods".
@@ -1867,6 +2079,8 @@ namespace ACE.Server.WorldObjects
         {
             if (wcid == PromissoryNoteWcid)
                 return "Promissory Notes";
+            if (wcid == HopeslayerMarkWcid)
+                return HopeslayerMarkName;
             if (wcid == ClassAbilityPointCurrencyWcid)
                 return "Class Ability Points";
             if (wcid == MmdWcid)

@@ -87,6 +87,16 @@ namespace ACE.Server.Pvp.Templates
         {
             var map = new Dictionary<string, PvpTemplateCatalogEntry>(StringComparer.OrdinalIgnoreCase);
 
+            foreach (var entry in ParseRows(rows, warn))
+                map[entry.Key] = entry;
+
+            return new PvpTemplateCatalog(map);
+        }
+
+        private static IEnumerable<PvpTemplateCatalogEntry> ParseRows(IEnumerable<PvpTemplateRecord> rows, Action<string> warn)
+        {
+            var map = new Dictionary<string, PvpTemplateCatalogEntry>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var row in rows ?? Enumerable.Empty<PvpTemplateRecord>())
             {
                 if (row == null || string.IsNullOrEmpty(row.TemplateKey))
@@ -121,7 +131,7 @@ namespace ACE.Server.Pvp.Templates
                 };
             }
 
-            return new PvpTemplateCatalog(map);
+            return map.Values;
         }
 
         public PvpTemplateCatalogEntry Get(string key) => key != null && entries.TryGetValue(key.Trim(), out var e) ? e : null;

@@ -64,17 +64,34 @@ namespace ACE.Server.ClassAbilities
         /// Blows' stamina surcharge is (DESIGN.md 2.3, "two cost mechanics are deliberately NOT moddable").
         /// Do not mirror this parameter onto the cost.
         /// </summary>
-        public static double DamageBonus(int rank, double bonusR1, double bonusR2, double bonusR3, double gear = 0.0)
+        public static double DamageBonus(int rank, double bonusR1, double bonusR2, double bonusR3, double gear = 0.0) =>
+            ScaledDamageBonus(rank, bonusR1, bonusR2, bonusR3, 1.0, gear);
+
+        /// <summary>
+        /// <see cref="DamageBonus"/> with the LIFE MAGIC affinity applied: the rank's bonus MULTIPLIED by
+        /// <paramref name="affinityMultiplier"/>, then the BLOOD PRICE gear term added outside the multiply
+        /// (amount = rankBonus * multiplier + gear), so an item never compounds with the skill.
+        ///
+        /// THE AFFINITY RIDES THE PAYOFF ONLY. <see cref="HealthCostFraction"/> takes neither gear nor
+        /// affinity: the health cost is the ability's own bargain and nothing discounts it.
+        ///
+        /// The multiplier is floored at 1.0, the NEUTRAL factor, so a caller passing 0.0 degrades to the bare
+        /// rank bonus rather than deleting it. A separately named method rather than an overload, because
+        /// tests reflect on <see cref="DamageBonus"/> by name and an overload would make that lookup ambiguous.
+        /// </summary>
+        public static double ScaledDamageBonus(int rank, double bonusR1, double bonusR2, double bonusR3, double affinityMultiplier, double gear = 0.0)
         {
             if (rank <= 0)
                 return 0.0;
 
-            var bonus = (rank switch
+            var rankBonus = rank switch
             {
                 1 => bonusR1,
                 2 => bonusR2,
                 _ => bonusR3,
-            }) + gear;
+            };
+
+            var bonus = rankBonus * Math.Max(1.0, affinityMultiplier) + gear;
 
             return bonus < 0.0 ? 0.0 : bonus;
         }

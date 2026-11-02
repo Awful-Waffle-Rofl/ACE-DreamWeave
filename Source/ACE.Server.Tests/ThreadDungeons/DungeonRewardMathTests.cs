@@ -428,7 +428,48 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             Assert.AreEqual(1.0, DungeonRewardMath.HealthMultiplier(Spec(), Mods(), new string[0]), 1e-9);
             Assert.AreEqual(1.6, DungeonRewardMath.HealthMultiplier(Spec(("hardy", 1.6)), Mods(), new string[0]), 1e-9);
-            Assert.AreEqual(1.6 * 1.5, DungeonRewardMath.HealthMultiplier(Spec(("hardy", 1.6)), Mods(), new[] { "boss_guarded" }), 1e-9, "an extra uses its MinMagnitude");
+            Assert.AreEqual(1.6, DungeonRewardMath.HealthMultiplier(Spec(("hardy", 1.6)), Mods(), new[] { "boss_guarded" }), 1e-9, "an extra at 1.5 does not stack on hardy 1.6: the greatest wins");
+            Assert.AreEqual(1.5, DungeonRewardMath.HealthMultiplier(Spec(), Mods(), new[] { "boss_guarded" }), 1e-9, "an extra uses its MinMagnitude");
+        }
+
+        // ---- boss health takes the greatest health_mult modifier, not the product (owner ruling) ----------
+
+        [TestMethod]
+        public void Health_multiplier_boss_takes_the_greatest_of_hardy_and_boss_guarded()
+        {
+            var spec = Spec(("hardy", 2.0), ("boss_guarded", 3.0));
+            Assert.AreEqual(3.0, DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>(), forBoss: true), 1e-9,
+                "max(2.0, 3.0), not the product 6.0");
+
+            var hardyWins = Spec(("hardy", 2.5), ("boss_guarded", 1.5));
+            Assert.AreEqual(2.5, DungeonRewardMath.HealthMultiplier(hardyWins, Mods(), Array.Empty<string>(), forBoss: true), 1e-9,
+                "the greater of the two wins whichever modifier it is");
+        }
+
+        [TestMethod]
+        public void Health_multiplier_boss_with_hardy_alone_is_its_magnitude_and_none_is_one()
+        {
+            Assert.AreEqual(1.8, DungeonRewardMath.HealthMultiplier(Spec(("hardy", 1.8)), Mods(), Array.Empty<string>(), forBoss: true), 1e-9);
+            Assert.AreEqual(1.0, DungeonRewardMath.HealthMultiplier(Spec(), Mods(), Array.Empty<string>(), forBoss: true), 1e-9);
+            Assert.AreEqual(1.0, DungeonRewardMath.HealthMultiplier(Spec(("savage", 20)), Mods(), Array.Empty<string>(), forBoss: true), 1e-9,
+                "a gem with no health_mult modifier is untouched");
+        }
+
+        [TestMethod]
+        public void Health_multiplier_pack_with_both_is_hardy_only()
+        {
+            var spec = Spec(("hardy", 2.0), ("boss_guarded", 3.0));
+            Assert.AreEqual(2.0, DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>()), 1e-9);
+        }
+
+        [TestMethod]
+        public void Health_multiplier_max_is_taken_after_level_scaling()
+        {
+            var spec = Spec(("hardy", 2.0), ("boss_guarded", 3.0));
+            var scaled = DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>(), forBoss: true, levelScale: 0.5);
+            var guardedScaled = DungeonRewardMath.HealthMultiplier(Spec(("boss_guarded", 3.0)), Mods(), Array.Empty<string>(), forBoss: true, levelScale: 0.5);
+            Assert.AreEqual(guardedScaled, scaled, 1e-9, "max over the already-scaled magnitudes");
+            Assert.IsTrue(scaled < 3.0 && scaled >= 1.0, $"scaled {scaled}");
         }
 
         [TestMethod]
@@ -458,8 +499,8 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.AreEqual(1.6, DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>()), 1e-9,
                 "boss_guarded (Target: boss) must not multiply the pack's health");
-            Assert.AreEqual(3.2, DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>(), forBoss: true), 1e-9,
-                "the boss view folds its own boss_guarded on top of the pack's hardy");
+            Assert.AreEqual(2.0, DungeonRewardMath.HealthMultiplier(spec, Mods(), Array.Empty<string>(), forBoss: true), 1e-9,
+                "the boss view includes its own boss_guarded and takes the greatest, not the product");
         }
 
         [TestMethod]

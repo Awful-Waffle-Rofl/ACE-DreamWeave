@@ -68,6 +68,11 @@ namespace ACE.Server.WorldObjects
         {
             get
             {
+                // a Player that never entered the world (an offline hydration for the combat simulator) has no
+                // PhysicsObj; it is standing still, not jumping. Live players always have one.
+                if (PhysicsObj == null)
+                    return false;
+
                 if (FastTick)
                     return !PhysicsObj.TransientState.HasFlag(TransientStateFlags.OnWalkable);
                 else
@@ -396,6 +401,9 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // World Events Hold: assessing a knight also says its health in chat (throttled). Nothing for any other target.
+            ACE.Server.WorldEvents.WorldEventHooks.SendHoldKnightHealthLine(this, wo);
+
             var currentTime = Time.GetUnixTime();
 
             // compare with previously requested appraisal target
@@ -667,6 +675,9 @@ namespace ACE.Server.WorldObjects
             // queue calls this pk_timer seconds later) is counted only if it really happens. Latched once per teleport. See
             // Player_TeleportWatch.
             TeleportWatchOnLogOut();
+
+            // paced teleport flush deletes still waiting are dropped, never sent (teleport_flush_delete_pacing)
+            DiscardTeleportDeletes();
 
             IsBusy = true;
             IsLoggingOut = true;

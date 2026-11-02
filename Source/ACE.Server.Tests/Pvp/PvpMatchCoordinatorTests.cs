@@ -73,7 +73,7 @@ namespace ACE.Server.Tests.Pvp
             public Position Location;
         }
 
-        private sealed class FakeGateway : IPvpPlayerGateway
+        private class FakeGateway : IPvpPlayerGateway
         {
             public readonly Dictionary<uint, FakePlayer> Players = new();
             public readonly List<(uint Id, string Text)> Messages = new();
@@ -88,17 +88,32 @@ namespace ACE.Server.Tests.Pvp
             /// <summary>When true, a teleport into the arena lands at once (the next presence read sees InInstance).</summary>
             public bool AutoArrive = true;
 
-            public FakePlayer Add(uint id, string name, string ip = null, int level = 100, params uint[] fellowship)
+            public FakePlayer Add(uint id, string name, string ip = null, bool clearedThread = true, params uint[] fellowship)
             {
                 var p = new FakePlayer
                 {
-                    Facts = new PvpPlayerFacts(id, name, level, ip ?? $"10.0.0.{id & 0xFF}", false, false, false, false, false, false, false, true, fellowship, PreferredTemplateKey: DefaultTemplateKey),
+                    Facts = new PvpPlayerFacts(id, name, ip ?? $"10.0.0.{id & 0xFF}", false, false, false, false, false, false, false, fellowship, PreferredTemplateKey: DefaultTemplateKey, HasClearedThread: clearedThread),
                     Location = new Position(0xA9B40019, 84f, 7f, 94f, 0f, 0f, 0f, 1f, 0),
                 };
 
                 Players[id] = p;
                 return p;
             }
+
+            /// <summary>The team hue palette lookup (IPvpPlayerGateway.ClothingPalettes). Null, like the interface default: no kit is dressed.</summary>
+            public Func<uint, IReadOnlyCollection<uint>> PaletteLookup;
+
+            /// <summary>The clothing table icon per (ClothingBase, palette); null answers 0.</summary>
+            public Func<uint, uint, uint> IconLookup;
+
+            public IReadOnlyCollection<uint> ClothingPalettes(uint clothingBase) => PaletteLookup?.Invoke(clothingBase);
+
+            public uint ClothingPaletteIcon(uint clothingBase, uint palette) => IconLookup?.Invoke(clothingBase, palette) ?? 0;
+
+            /// <summary>The team hue "@wcid" look source (IPvpPlayerGateway.WorldLookSource). Null, like the interface default: no look is swapped.</summary>
+            public Func<uint, PvpLookSource> LookSourceLookup;
+
+            public PvpLookSource WorldLookSource(uint wcid) => LookSourceLookup?.Invoke(wcid);
 
             public PvpPlayerFacts GetFacts(uint id) => Players.TryGetValue(id, out var p) && p.Online ? p.Facts : null;
 
@@ -188,6 +203,11 @@ namespace ACE.Server.Tests.Pvp
             public readonly List<(uint Id, int Amount, PvpBloodGrant Grant)> BloodGrants = new();
 
             public void GrantArenaBlood(uint id, int amount, PvpBloodGrant grant) => BloodGrants.Add((id, amount, grant));
+
+            /// <summary>PvP dailies: every facts record the coordinator dispatched, in order.</summary>
+            public readonly List<PvpMatchFacts> DailyFacts = new();
+
+            public void ApplyDailyFacts(PvpMatchFacts facts) => DailyFacts.Add(facts);
 
             // ---- PvP Template Facets ----
 
@@ -285,8 +305,21 @@ namespace ACE.Server.Tests.Pvp
 
             public List<PvpLatestParticipantTemplateRecord> LatestTemplates = new();
 
-            public void LoadTemplates(Action<List<PvpTemplateRecord>, PvpTemplateStoreStatus> callback) =>
-                callback(TemplateRows?.Select(r => r.Clone()).ToList(), TemplateRows == null ? PvpTemplateStoreStatus.Failed : PvpTemplateStoreStatus.Ok);
+            /// <summary>True: the template reads are held in <see cref="PendingTemplateReads"/> until the test lands each one.</summary>
+            public bool DeferTemplateReads;
+
+            /// <summary>The held template reads, in the order they were issued. Each lands the read's callback when invoked.</summary>
+            public readonly List<Action> PendingTemplateReads = new();
+
+            public void LoadTemplates(Action<List<PvpTemplateRecord>, PvpTemplateStoreStatus> callback)
+            {
+                void Land() => callback(TemplateRows?.Select(r => r.Clone()).ToList(), TemplateRows == null ? PvpTemplateStoreStatus.Failed : PvpTemplateStoreStatus.Ok);
+
+                if (DeferTemplateReads)
+                    PendingTemplateReads.Add(Land);
+                else
+                    Land();
+            }
 
             public void SaveParticipantTemplates(uint dbMatchId, IReadOnlyList<PvpMatchParticipantTemplateRecord> stamps, Action<PvpTemplateStoreStatus> callback)
             {
@@ -295,6 +328,14 @@ namespace ACE.Server.Tests.Pvp
             }
 
             public void LoadLatestParticipantTemplates(Action<List<PvpLatestParticipantTemplateRecord>, PvpTemplateStoreStatus> callback) => callback(LatestTemplates, PvpTemplateStoreStatus.Ok);
+
+            /// <summary>Lands the oldest held template read.</summary>
+            public void LandNextTemplateRead()
+            {
+                var next = PendingTemplateReads[0];
+                PendingTemplateReads.RemoveAt(0);
+                next();
+            }
 
             public void SaveMatchResult(PvpMatchRecord match, IReadOnlyList<PvpMatchParticipantRecord> participants, IReadOnlyList<PvpRatingRecord> ratingUpserts, Action<PvpMatchSaveResult, uint> callback)
             {
@@ -313,16 +354,35 @@ namespace ACE.Server.Tests.Pvp
         private sealed class Rig
         {
             public readonly FakeClock Clock = new();
-            public readonly FakeGateway Gateway = new();
+            public FakeGateway Gateway = new();
             public readonly FakeSpaces Spaces = new();
             public readonly FakeSink Sink = new();
             public readonly ConcurrentQueue<PvpIntent> Intents = new();
-            public PvpArenaDials Dials = PvpTunables.Defaults with { BloodEnabled = true };
+            // The shipped arena amounts are 2/1/1 (owner ruling 2026-10-18); the rig pins them explicitly so a payout-mechanics test never
+            // depends on the shipped values. Zero-amount behaviour has its own test (Blood_ZeroAmounts_*), the shipped amounts theirs (ShippedArenaMarks_*).
+            public PvpArenaDials Dials = PvpTunables.Defaults with { BloodEnabled = true, BloodWin = 2, BloodLoss = 1, BloodDraw = 1 };
+            public PvpPairingDials Pairing = PvpPairingTunables.Defaults;
+            public Action<string> AuditSink;
+
+            /// <summary>The Arena Crier seam; null keeps the coordinator's live announcer (the pre-existing tests never read it).</summary>
+            public IPvpArenaCrierAnnouncer Announcer;
+
+            /// <summary>
+            /// The pvp_conduct_* dials, as shipped except that the contribution floor is OFF so the pre-floor payout tests keep paying; the
+            /// floor tests turn it on. Only a Tugak Brawl rig with the conduct gateway is ever sampled.
+            /// </summary>
+            public PvpConductDials Conduct = PvpConductTunables.Defaults with { FloorEnabled = false };
+
+            /// <summary>The team-colour coin every match of this rig draws (TeamColourCoin): true makes team 0 Red (and Tugak all Red).</summary>
+            public bool ColourCoin = true;
+
             public PvpMatchCoordinator Coordinator;
 
             public Rig Build(bool loadRatings = true)
             {
-                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Clock.Now, () => Dials, Intents);
+                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Clock.Now, () => Dials, Intents, arenaAnnouncer: Announcer, pairingDialSource: () => Pairing, conductDialSource: () => Conduct, auditSink: AuditSink);
+                // Team colours: pinned so the lineup's colour tags are fixed (true: team 0 Red; Tugak all Red).
+                Coordinator.TeamColourCoin = () => ColourCoin;
                 Gateway.Intents = Intents;
 
                 if (loadRatings)
@@ -377,9 +437,11 @@ namespace ACE.Server.Tests.Pvp
             public PvpMatchParticipantRecord Part(uint id) => Sink.Saves.Single().Parts.Single(p => p.CharacterId == id);
         }
 
-        private static Rig OneVOneLive(out PvpMatch match)
+        private static Rig OneVOneLive(out PvpMatch match, Action<Rig> configure = null)
         {
-            var rig = new Rig().Build();
+            var rig = new Rig();
+            configure?.Invoke(rig);
+            rig.Build();
             rig.Gateway.Add(A, "Alpha");
             rig.Gateway.Add(B, "Bravo");
 
@@ -576,10 +638,11 @@ namespace ACE.Server.Tests.Pvp
 
         // ================= FFA =================
 
-        private static Rig FfaRig(int players, out uint[] ids)
+        private static Rig FfaRig(int players, out uint[] ids, Action<Rig> configure = null)
         {
             var rig = new Rig();
-            rig.Dials = PvpTunables.Defaults with { FfaTargetPlayers = 6, FfaMinPlayers = 5 };
+            rig.Dials = PvpTunables.Defaults with { FfaTargetPlayers = 6, FfaMinPlayers = 5, BloodWin = 2, BloodLoss = 1, BloodDraw = 1 };
+            configure?.Invoke(rig);
             rig.Build();
 
             ids = new[] { A, B, C, D, E, F, G }.Take(players).ToArray();
@@ -665,7 +728,7 @@ namespace ACE.Server.Tests.Pvp
 
         /// <summary>
         /// Drives: Join x5, Tick, Accept x5, Tick to Live, one Death, then Tick past the FFA time limit. The four
-        /// survivors share 1st, the eliminated player is 5th, and the result is RATED.
+        /// survivors, none of whom dealt damage, tie for 1st, the eliminated player is 5th, and the result is RATED.
         /// </summary>
         [TestMethod]
         public void Ffa_Timeout_SurvivorsShareFirst_Rated()
@@ -689,7 +752,7 @@ namespace ACE.Server.Tests.Pvp
             Assert.IsTrue(rig.Gateway.Got(A, PvpArenaText.TimeUpFfa));
             foreach (var id in new[] { A, B, C, D })
                 Assert.AreEqual(1, rig.Part(id).Placement, $"survivor 0x{id:X8} shares first");
-            // DESIGN "Win condition": out first with 4 teams still alive, so 5th, even though the survivors share 1st.
+            // DESIGN "Win condition": out first with 4 teams still alive, so 5th, even though the survivors tie for 1st.
             Assert.AreEqual(5, rig.Part(E).Placement);
             Assert.IsTrue(rig.Sink.Saves.Single().Match.Rated);
             Assert.AreEqual(5, rig.Sink.Saves.Single().Ratings.Count);
@@ -1515,6 +1578,359 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(5, rig.Part(E).Placement, "still a participant at Resolving");
         }
 
+        // ================= conduct signals: the Tugak Brawl ledger (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals") =================
+
+        /// <summary>
+        /// Tugak Brawl builds the performance ledger at formation, with every seat, and a Live elimination with a killer credits the killer one
+        /// killshot (a death with no killer credits nobody). 1v1 stays ledger-less (the control below).
+        /// </summary>
+        [TestMethod]
+        public void Tugak_BuildsTheLedger_AndAnEliminationIsTheKillersKillshot()
+        {
+            var rig = FfaRig(5, out var ids);
+            rig.Dials = rig.Dials with { FfaTargetPlayers = 5, OvertimeEnabled = false };
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            var match = rig.DriveAcceptedToLive(A);
+
+            Assert.IsNotNull(match.Performance, "Tugak Brawl carries the ledger");
+            CollectionAssert.AreEquivalent(ids, match.Performance.Snapshot().Select(s => s.CharacterId).ToArray());
+
+            rig.Death(E, match.MatchId, killer: A);
+            rig.Death(D, match.MatchId);
+            rig.Tick();
+
+            var perf = match.Performance.Snapshot().ToDictionary(s => s.CharacterId);
+            Assert.AreEqual(1, perf[A].Killshots, "the elimination is A's killshot");
+            Assert.AreEqual(0, perf.Values.Where(s => s.CharacterId != A).Sum(s => s.Killshots), "a death with no killer credits nobody");
+        }
+
+        // ================= contribution floor: modes with no ledger =================
+
+        /// <summary>
+        /// The floor ON at its production defaults, with zero stats credited anywhere: a 1v1 carries no ledger, so both seats are paid
+        /// Blood as always and nobody hears the withheld line. The Tugak floor test above is the control that the floor does bite.
+        /// </summary>
+        [TestMethod]
+        public void Floor_On_OneVOne_PaysBothSeats()
+        {
+            var rig = new Rig().Build();
+            rig.Conduct = PvpConductTunables.Defaults;
+            rig.Gateway.Add(A, "Alpha");
+            rig.Gateway.Add(B, "Bravo");
+            rig.Coordinator.Join(A, "1v1", false);
+            rig.Coordinator.Join(B, "1v1", false);
+            rig.Tick();
+            rig.AcceptAll(A, B);
+            var match = rig.DriveAcceptedToLive(A);
+
+            Assert.IsNull(match.Performance, "fixture: a 1v1 carries no ledger");
+            rig.Death(B, match.MatchId, killer: A);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            Assert.AreEqual(2, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+        }
+
+        /// <summary>As the 1v1: a 2v2 carries no ledger, so with the floor ON and zero stats every seat is paid.</summary>
+        [TestMethod]
+        public void Floor_On_TwoVTwo_PaysEverySeat()
+        {
+            var rig = new Rig().Build();
+            rig.Conduct = PvpConductTunables.Defaults;
+            rig.Gateway.Add(A, "Alpha", fellowship: new[] { A, B });
+            rig.Gateway.Add(B, "Bravo", fellowship: new[] { A, B });
+            rig.Gateway.Add(C, "Charlie");
+            rig.Gateway.Add(D, "Delta");
+            rig.Coordinator.Join(A, "2v2", true);
+            rig.Coordinator.Join(C, "2v2", false);
+            rig.Coordinator.Join(D, "2v2", false);
+            rig.Clock.Advance(rig.Dials.DuoVsSoloAfterSeconds);
+            rig.Tick();
+            rig.AcceptAll(A, B, C, D);
+            var match = rig.DriveAcceptedToLive(A);
+
+            Assert.IsNull(match.Performance, "fixture: a 2v2 carries no ledger");
+            rig.Death(C, match.MatchId, killer: A);
+            rig.Death(D, match.MatchId, killer: A);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            Assert.AreEqual(4, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+        }
+        // ================= contribution floor on the Tugak Blood payout =================
+
+        private static (Rig Rig, PvpMatch Match) TugakFloorRun(bool floorEnabled)
+        {
+            var rig = FfaRig(5, out var ids);
+            rig.Dials = rig.Dials with { FfaTargetPlayers = 5, OvertimeEnabled = false };
+            rig.Conduct = rig.Conduct with { FloorEnabled = floorEnabled };
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            var match = rig.DriveAcceptedToLive(A);
+
+            // A, B and C deal damage; D and E do nothing at all.
+            match.Performance.CreditPlayerDamage(A, 500, null);
+            match.Performance.CreditPlayerDamage(B, 400, null);
+            match.Performance.CreditPlayerDamage(C, 300, null);
+
+            rig.Death(E, match.MatchId, killer: A);
+            rig.Death(D, match.MatchId, killer: A);
+            rig.Death(C, match.MatchId, killer: A);
+            rig.Death(B, match.MatchId, killer: A);
+            rig.Tick();
+            return (rig, match);
+        }
+
+        /// <summary>
+        /// THE WIRING (Tugak). The two seats that dealt nothing get 0 Blood and no grant call (the daily cap is untouched); the damage dealers
+        /// are paid as with the floor off. BloodFor is not involved: the gate is at the coordinator call site. Rating output is the same.
+        /// </summary>
+        [TestMethod]
+        public void Tugak_Floor_BelowFloorSeatsGetNoBlood_OthersUnchanged_RatingUnchanged()
+        {
+            var on = TugakFloorRun(true);
+            var off = TugakFloorRun(false);
+
+            Assert.AreEqual(PvpMatchState.Resolving, on.Match.State);
+            Assert.AreEqual(5, off.Rig.Gateway.BloodGrants.Count, "control: with the floor off all five are paid");
+            Assert.AreEqual(3, on.Rig.Gateway.BloodGrants.Count);
+            Assert.AreEqual((0, 0), on.Rig.Gateway.Blood(D));
+            Assert.AreEqual((0, 0), on.Rig.Gateway.Blood(E));
+
+            foreach (var id in new[] { A, B, C })
+                Assert.AreEqual(off.Rig.Gateway.Blood(id), on.Rig.Gateway.Blood(id), $"0x{id:X8} is paid exactly as before");
+
+            Assert.AreEqual(1, on.Rig.Gateway.Count(D, "[Arena] No reward: your contribution this match was below the minimum."));
+            Assert.AreEqual(1, on.Rig.Gateway.Count(E, "[Arena] No reward: your contribution this match was below the minimum."));
+            Assert.AreEqual(0, on.Rig.Gateway.Count(A, "[Arena] No reward: your contribution this match was below the minimum."));
+
+            var onRows = on.Rig.Sink.Saves.Single().Ratings.OrderBy(r => r.CharacterId).Select(r => (r.CharacterId, r.Rating)).ToList();
+            var offRows = off.Rig.Sink.Saves.Single().Ratings.OrderBy(r => r.CharacterId).Select(r => (r.CharacterId, r.Rating)).ToList();
+            CollectionAssert.AreEqual(offRows, onRows);
+        }
+        /// <summary>
+        /// The arena fake plus the battleground half of the player seam, which the live gateway also implements: it is what lets the conduct
+        /// sampler read a Tugak Brawl seat's position and activity stamp. Positions default to the origin.
+        /// </summary>
+        private sealed class FakeConductGateway : FakeGateway, ACE.Server.Pvp.Battlegrounds.IBattlegroundPlayerGateway
+        {
+            public readonly Dictionary<uint, (double X, double Y, double Z)> At = new();
+
+            public readonly Dictionary<uint, PvpActivityStamp> Activity = new();
+
+            public ACE.Server.Pvp.Battlegrounds.BattlegroundZoneSample SampleZone(uint id, uint matchInstance)
+            {
+                if (!IsOnline(id))
+                    return null;
+
+                var p = Players[id];
+                var at = At.TryGetValue(id, out var xyz) ? xyz : (0.0, 0.0, 0.0);
+                Activity.TryGetValue(id, out var stamp);
+
+                return new ACE.Server.Pvp.Battlegrounds.BattlegroundZoneSample(id, 0, null, p.Instance == matchInstance, false, p.Teleporting, at.Item1, at.Item2, at.Item3, stamp?.AtUtc, stamp?.MatchId);
+            }
+
+            public void DrainVitals(uint id, Guid matchId, uint matchInstance, int health, int stamina, int mana, bool lethal) { }
+
+            public void Respawn(uint id, Guid matchId, Position spawn) { }
+
+            public bool IsInDeathProcess(uint id) => false;
+
+            public void ExitMatchFromPen(uint id, string context) { }
+        }
+
+        /// <summary>
+        /// The conduct sampler runs for Tugak Brawl: with every player standing together, each second credits every seat one engaged
+        /// second; a player far from everyone earns none; and the stamp read through the zone sample moves that seat's last-active time.
+        /// </summary>
+        [TestMethod]
+        public void Tugak_ConductSampler_CreditsEngagedSeconds_AndReadsTheStamp()
+        {
+            var rig = new Rig { Gateway = new FakeConductGateway() };
+            rig.Dials = PvpTunables.Defaults with { FfaTargetPlayers = 5, FfaMinPlayers = 5, OvertimeEnabled = false };
+            rig.Build();
+
+            var ids = new[] { A, B, C, D, E };
+            var names = new[] { "Alpha", "Bravo", "Charlie", "Delta", "Echo" };
+
+            for (var i = 0; i < ids.Length; i++)
+                rig.Gateway.Add(ids[i], names[i]);
+
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            var match = rig.DriveAcceptedToLive(A);
+
+            var gateway = (FakeConductGateway)rig.Gateway;
+            gateway.At[E] = (500, 500, 0);
+
+            for (var i = 0; i < 3; i++)
+            {
+                rig.Clock.Advance(1);
+                rig.Tick();
+            }
+
+            var perf = match.Performance.Snapshot().ToDictionary(s => s.CharacterId);
+            Assert.AreEqual(3, perf[A].EngagedSeconds, "standing with four enemies: engaged every second");
+            Assert.AreEqual(0, perf[E].EngagedSeconds, "700 m from everyone");
+            Assert.AreEqual(match.LiveSinceUtc, rig.Coordinator.ConductLastActiveUtc(B), "standing still is not activity");
+
+            var hitAt = rig.Clock.Now;
+            gateway.Activity[B] = new PvpActivityStamp(match.MatchId, hitAt);
+            rig.Clock.Advance(1);
+            rig.Tick();
+
+            Assert.AreEqual(hitAt, rig.Coordinator.ConductLastActiveUtc(B), "the stamp is the last activity");
+            Assert.AreEqual(4, match.Performance.Snapshot().Single(s => s.CharacterId == A).EngagedSeconds);
+        }
+
+        /// <summary>A five-player Tugak Brawl, on the conduct gateway, driven to Live.</summary>
+        private static Rig TugakConductLive(out PvpMatch match, out FakeConductGateway gateway, Action<Rig> configure = null)
+        {
+            var rig = new Rig { Gateway = new FakeConductGateway() };
+            rig.Dials = PvpTunables.Defaults with { FfaTargetPlayers = 5, FfaMinPlayers = 5, OvertimeEnabled = false };
+            configure?.Invoke(rig);
+            rig.Build();
+
+            var ids = new[] { A, B, C, D, E };
+            var names = new[] { "Alpha", "Bravo", "Charlie", "Delta", "Echo" };
+
+            for (var i = 0; i < ids.Length; i++)
+                rig.Gateway.Add(ids[i], names[i]);
+
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            match = rig.DriveAcceptedToLive(A);
+            gateway = (FakeConductGateway)rig.Gateway;
+            return rig;
+        }
+
+        /// <summary>One-second ticks, stamping fresh activity on every id in <paramref name="active"/> before each.</summary>
+        private static void RunActive(Rig rig, PvpMatch match, FakeConductGateway gateway, int seconds, params uint[] active)
+        {
+            for (var i = 0; i < seconds; i++)
+            {
+                rig.Clock.Advance(1);
+
+                foreach (var id in active)
+                    gateway.Activity[id] = new PvpActivityStamp(match.MatchId, rig.Clock.Now);
+
+                rig.Tick();
+            }
+        }
+
+        private static PvpParticipant Seat(PvpMatch match, uint id) => match.Teams.SelectMany(t => t.Members).Single(p => p.CharacterId == id);
+
+        /// <summary>
+        /// Tugak Brawl idles out like a battleground: one warning at 60 s, removal at 90 s as ForfeitInactive, exited and returned like
+        /// /arena leave, the whole field told; the others play on.
+        /// </summary>
+        [TestMethod]
+        public void Tugak_Idle_WarnsAt60_RemovesAt90()
+        {
+            var rig = TugakConductLive(out var match, out var gateway);
+            var removals = new List<(uint, ParticipantExit)>();
+            rig.Coordinator.ConductRemoved += (id, how) => removals.Add((id, how));
+            var active = new[] { A, B, C, D };
+
+            RunActive(rig, match, gateway, 60, active);
+            Assert.AreEqual(1, rig.Gateway.Messages.Count(m => m.Id == E && m.Text == "[Arena] You are idle. Fight, heal, or hold the objective within 30 seconds or you will be removed from the match."));
+
+            RunActive(rig, match, gateway, 29, active);
+            Assert.IsNull(Seat(match, E).ExitReason);
+
+            RunActive(rig, match, gateway, 1, active);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Seat(match, E).ExitReason);
+            CollectionAssert.Contains(rig.Gateway.Returned, E);
+            Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Id == E && m.Text == PvpArenaText.RemovedInactiveYou));
+            Assert.IsTrue(active.All(id => rig.Gateway.Messages.Any(m => m.Id == id && m.Text == "[Arena] Echo was removed from the match for inactivity.")));
+            CollectionAssert.AreEqual(new[] { (E, ParticipantExit.ForfeitInactive) }, removals);
+            Assert.AreEqual(PvpMatchState.Live, match.State, "four left: the brawl carries on");
+            Assert.IsTrue(active.All(id => Seat(match, id).ExitReason == null));
+        }
+
+        /// <summary>
+        /// Two Tugak Brawl idlers reach 90 s on the same pass: both are removed on that one tick, each once, and the three still active play on.
+        /// </summary>
+        [TestMethod]
+        public void Tugak_Idle_TwoIdlersRemovedInTheSamePass()
+        {
+            var rig = TugakConductLive(out var match, out var gateway);
+            var removals = new List<(uint, ParticipantExit)>();
+            rig.Coordinator.ConductRemoved += (id, how) => removals.Add((id, how));
+            var active = new[] { A, B, C };
+
+            RunActive(rig, match, gateway, 89, active);
+            Assert.IsNull(Seat(match, D).ExitReason);
+            Assert.IsNull(Seat(match, E).ExitReason);
+
+            RunActive(rig, match, gateway, 1, active);
+
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Seat(match, D).ExitReason);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Seat(match, E).ExitReason);
+            CollectionAssert.AreEquivalent(new[] { (D, ParticipantExit.ForfeitInactive), (E, ParticipantExit.ForfeitInactive) }, removals);
+            Assert.AreEqual(PvpMatchState.Live, match.State, "three left: the brawl carries on");
+
+            RunActive(rig, match, gateway, 5, active);
+            Assert.AreEqual(2, removals.Count, "each removed once");
+        }
+
+        /// <summary>
+        /// Feeding never applies to Tugak Brawl: a death there is already final (Died), even with the feeding dials at their loosest.
+        /// </summary>
+        [TestMethod]
+        public void Tugak_Death_IsNeverAFeedingRemoval()
+        {
+            var rig = TugakConductLive(out var match, out _, r => r.Conduct = PvpConductTunables.Defaults with { FeedMinDeaths = 0, FeedMaxShare = 1.0 });
+
+            rig.Death(E, match.MatchId, killer: A);
+            rig.Tick();
+
+            Assert.AreEqual(ParticipantExit.Died, Seat(match, E).ExitReason);
+        }
+
+        /// <summary>
+        /// HARD INVARIANT: no change to 1v1. A 1v1 on the conduct gateway (so the sampler COULD read it) with both players idle for 120 s:
+        /// no warning, no removal. It carries no ledger, so the sampler never runs for it.
+        /// </summary>
+        [TestMethod]
+        public void OneVOne_IsNeverWarnedOrRemovedForIdling()
+        {
+            var rig = new Rig { Gateway = new FakeConductGateway() }.Build();
+            rig.Gateway.Add(A, "Alpha");
+            rig.Gateway.Add(B, "Bravo");
+            Assert.IsTrue(rig.Coordinator.Join(A, "1v1", false).Joined);
+            Assert.IsTrue(rig.Coordinator.Join(B, "1v1", false).Joined);
+            rig.Tick();
+            rig.AcceptAll(A, B);
+            var match = rig.DriveAcceptedToLive(A);
+
+            RunActive(rig, match, (FakeConductGateway)rig.Gateway, 120);
+
+            Assert.AreEqual(PvpMatchState.Live, match.State, "fixture: still Live at 120 s");
+            Assert.IsNull(Seat(match, A).ExitReason);
+            Assert.IsNull(Seat(match, B).ExitReason);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.StartsWith("[Arena] You are idle.")));
+        }
+
+        [TestMethod]
+        public void OneVOne_HasNoLedger()
+        {
+            OneVOneLive(out var match);
+
+            Assert.IsNull(match.Performance);
+        }
+
         // ================= admin cancel (owner ruling on #1399) =================
 
         /// <summary>
@@ -1649,10 +2065,10 @@ namespace ACE.Server.Tests.Pvp
         public void Join_Refusals_MapToTheirLines()
         {
             var rig = new Rig().Build();
-            rig.Gateway.Add(A, "Alpha", level: 10);
+            rig.Gateway.Add(A, "Alpha", clearedThread: false);
             var low = rig.Coordinator.Join(A, "1v1", false);
-            Assert.AreEqual(PvpJoinRefusal.BelowMinLevel, low.Refusal);
-            Assert.AreEqual("[Arena] You must be at least level 50 to enter the arena.", PvpMatchCoordinator.RefusalText(low));
+            Assert.AreEqual(PvpJoinRefusal.NoThreadCleared, low.Refusal);
+            Assert.AreEqual("[Arena] You must complete at least one Thread before you can join PvP Arenas or Battlegrounds. The Thread-Guide's first Thread counts.", PvpMatchCoordinator.RefusalText(low));
 
             rig.Gateway.Add(B, "Bravo").Facts = rig.Gateway.Players[B].Facts with { InInstance = true };
             Assert.AreEqual(PvpArenaText.InInstance, PvpMatchCoordinator.RefusalText(rig.Coordinator.Join(B, "1v1", false)));
@@ -1668,57 +2084,44 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual("[Arena] The 1v1 arena is closed right now.", PvpMatchCoordinator.RefusalText(rig.Coordinator.Join(D, "1v1", false)));
         }
 
-        // ================= the PK facet is no longer required (owner ruling 2026-10-03, Docs/Pvp/TEMPLATES.md) =================
+        // ================= one Thread clear replaces the level and PK facet requirements (owner ruling 2026-10-15) =================
 
         /// <summary>
-        /// Drives: Join with OnPkFacet false. DISCRIMINATES the removed admission check: before templates this exact
-        /// input was refused with NotOnPkFacet; now any facet may queue.
+        /// Drives: Join by a player who has not cleared a Thread, then by the same player once they have. DISCRIMINATES the
+        /// new admission check: the first is refused with NoThreadCleared and not queued; the control queues.
         /// </summary>
         [TestMethod]
-        public void Join_OffThePkFacet_IsAdmitted()
+        public void Join_WithoutAThreadClear_IsRefused_AndWithOne_IsAdmitted()
         {
             var rig = new Rig().Build();
-            rig.Gateway.Add(A, "Alpha").Facts = rig.Gateway.Players[A].Facts with { OnPkFacet = false };
+            var p = rig.Gateway.Add(A, "Alpha", clearedThread: false);
+
+            var refused = rig.Coordinator.Join(A, "1v1", false);
+            Assert.AreEqual(PvpJoinRefusal.NoThreadCleared, refused.Refusal);
+            Assert.AreEqual(0, rig.Coordinator.QueuedIds("1v1").Count());
+
+            p.Facts = p.Facts with { HasClearedThread = true };
 
             var result = rig.Coordinator.Join(A, "1v1", false);
-
             Assert.AreEqual(PvpJoinRefusal.None, result.Refusal);
             CollectionAssert.AreEqual(new[] { A }, rig.Coordinator.QueuedIds("1v1").ToList());
         }
 
-        /// <summary>Drives: Join(duo) whose partner is off the PK facet. The pair queues (it was DuoPartnerIneligible before templates).</summary>
+        /// <summary>Drives: Join(duo) whose partner has not cleared a Thread. The pair is refused as DuoPartnerIneligible naming the partner.</summary>
         [TestMethod]
-        public void Join_Duo_PartnerOffThePkFacet_IsAdmitted()
+        public void Join_Duo_PartnerWithoutAThreadClear_IsRefused()
         {
             var rig = new Rig().Build();
             rig.Gateway.Add(A, "Alpha", fellowship: new[] { A, B });
-            rig.Gateway.Add(B, "Bravo", fellowship: new[] { A, B });
-            rig.Gateway.Players[B].Facts = rig.Gateway.Players[B].Facts with { OnPkFacet = false };
+            rig.Gateway.Add(B, "Bravo", clearedThread: false, fellowship: new[] { A, B });
 
             var result = rig.Coordinator.Join(A, "2v2", true);
 
-            Assert.AreEqual(PvpJoinRefusal.None, result.Refusal);
+            Assert.AreEqual(PvpJoinRefusal.DuoPartnerIneligible, result.Refusal);
             Assert.AreEqual("Bravo", result.PartnerName);
-        }
 
-        /// <summary>
-        /// Drives: Join x2, Tick (-> AwaitingAccept), flip OnPkFacet false, Accept. The accept stands (before templates it
-        /// was turned into a decline with the NotOnPkFacet line).
-        /// </summary>
-        [TestMethod]
-        public void Accept_OffThePkFacet_IsAccepted()
-        {
-            var rig = new Rig().Build();
-            rig.Gateway.Add(A, "Alpha");
-            rig.Gateway.Add(B, "Bravo");
-            rig.Coordinator.Join(A, "1v1", false);
-            rig.Coordinator.Join(B, "1v1", false);
-            rig.Tick();
-
-            rig.Gateway.Players[A].Facts = rig.Gateway.Players[A].Facts with { OnPkFacet = false };
-
-            Assert.AreEqual(PvpAnswerOutcome.Accepted, rig.Coordinator.Accept(A).Outcome);
-            Assert.IsFalse(rig.Gateway.Got(A, PvpArenaText.NotOnPkFacet));
+            rig.Gateway.Players[B].Facts = rig.Gateway.Players[B].Facts with { HasClearedThread = true };
+            Assert.AreEqual(PvpJoinRefusal.None, rig.Coordinator.Join(A, "2v2", true).Refusal, "control");
         }
 
         // ================= overtime (Docs/Pvp/DESIGN.md "Overtime") =================
@@ -1943,10 +2346,10 @@ namespace ACE.Server.Tests.Pvp
 
         /// <summary>
         /// Drives: 5-player FFA to Live, one Death, then past regulation and to the hard end. FFA gets overtime too,
-        /// with its own announcement, and at the hard end keeps the old FFA timeout: survivors share first, rated.
+        /// with its own announcement, and at the hard end the FFA timeout ranks survivors by damage; nobody dealt any, so all four tie for first, rated.
         /// </summary>
         [TestMethod]
-        public void Ffa_Overtime_ThenSurvivorsShareFirst_Rated()
+        public void Ffa_Overtime_ThenNoDamageSurvivorsTieForFirst_Rated()
         {
             var rig = FfaRig(5, out var ids);
             rig.Dials = rig.Dials with { FfaTargetPlayers = 5 };
@@ -1962,7 +2365,7 @@ namespace ACE.Server.Tests.Pvp
             rig.Clock.Advance(300);
             rig.Tick();
             Assert.AreEqual(PvpMatchState.Live, match.State);
-            Assert.IsTrue(rig.Gateway.Got(A, "[Arena] Overtime! No healing for the final 3 minutes. If time runs out, the survivors share first place."));
+            Assert.IsTrue(rig.Gateway.Got(A, "[Arena] Overtime! No healing for the final 3 minutes. If time runs out, the survivors are ranked by damage dealt to other players."));
 
             rig.Clock.Advance(180);
             rig.Tick();
@@ -2000,7 +2403,7 @@ namespace ACE.Server.Tests.Pvp
         {
             Assert.AreEqual(OvertimeLine1v1Default, PvpArenaText.OvertimeAnnouncement(180, 0.0, 0.0, false));
             Assert.AreEqual("[Arena] Overtime! The final 90 seconds begins. If no one wins, the match is a draw.", PvpArenaText.OvertimeAnnouncement(90, 1.0, 0.0, false));
-            Assert.AreEqual("[Arena] Overtime! No healing for the final 2 minutes. Damage rises by 25% each minute. If time runs out, the survivors share first place.", PvpArenaText.OvertimeAnnouncement(120, 0.0, 0.25, true));
+            Assert.AreEqual("[Arena] Overtime! No healing for the final 2 minutes. Damage rises by 25% each minute. If time runs out, the survivors are ranked by damage dealt to other players.", PvpArenaText.OvertimeAnnouncement(120, 0.0, 0.25, true));
             Assert.AreEqual("1 second", PvpArenaText.DurationPhrase(1));
             Assert.AreEqual("1 minute", PvpArenaText.DurationPhrase(60));
             Assert.AreEqual("61 seconds", PvpArenaText.DurationPhrase(61));
@@ -2090,6 +2493,31 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual(PvpMatchState.Resolving, match.State);
             Assert.AreEqual((2, 1), rig.Gateway.Blood(A));
             Assert.AreEqual((0, 0), rig.Gateway.Blood(B), "a forfeiter is never even granted 0");
+        }
+
+        /// <summary>
+        /// Drives: the 1v1 path to Live with the arena amounts seeded to 0 explicitly (the shipped amounts are 2/1/1 since 2026-10-18; this keeps
+        /// the zero-amount behaviour covered), a Death, Tick. The match resolves, but nobody is granted anything (so no daily-cap ledger tick),
+        /// and no "You receive N Marks" line goes out. Positive control: the same flow with win/loss = 2/1 grants both seats.
+        /// </summary>
+        [TestMethod]
+        public void Blood_ZeroAmounts_ArenaMatchGrantsNothing_AndSaysNothing()
+        {
+            var control = OneVOneLive(out var controlMatch);
+            control.Death(B, controlMatch.MatchId, killer: A);
+            control.Tick();
+            Assert.AreEqual(2, control.Gateway.BloodGrants.Count, "control: the rig's 2/1/1 pays both seats");
+
+            var rig = OneVOneLive(out var match);
+            rig.Dials = PvpTunables.Defaults with { CrierEnabled = false, BloodWin = 0, BloodLoss = 0, BloodDraw = 0 };
+            Assert.IsTrue(rig.Dials.BloodEnabled, "the switch stays ON: BG Marks share it");
+
+            rig.Death(B, match.MatchId, killer: A);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            Assert.AreEqual(0, rig.Gateway.BloodGrants.Count, "a 0 payout makes no grant call at all (no zero-item grant, no cap-ledger tick)");
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("receive") || m.Text.Contains("Hopeslayer") || m.Text.Contains("+0")), "no Marks line is sent for a 0 payout");
         }
 
         /// <summary>Drives: 1v1 to Countdown, Bravo walks out, Tick. Resolved (rated) but never Live: no Blood for anyone.</summary>
@@ -2184,6 +2612,97 @@ namespace ACE.Server.Tests.Pvp
             Assert.AreEqual((3, 1), rig.Gateway.Blood(C), "third place gets the loss amount");
             Assert.AreEqual((3, 1), rig.Gateway.Blood(D));
             Assert.AreEqual((0, 0), rig.Gateway.Blood(E));
+        }
+
+        /// <summary>
+        /// Tugak G1 (owner ruling 2026-10-15) end to end: an FFA of 5 to Live, Echo dies, then the conduct ledger is credited Alpha 300,
+        /// Bravo 100 and Charlie 100 (Delta nothing), and the match times out (overtime off). The survivors are ranked by that damage:
+        /// Alpha 1st, Bravo and Charlie share 2nd, Delta 4th, Echo keeps 5th. Only Alpha is the winner: the one win result, the one Win
+        /// payout, and the rating rows follow the placements. Before G1 all four survivors shared 1st and were each paid the Win.
+        /// </summary>
+        [TestMethod]
+        public void Ffa_Timeout_SurvivorsRankedByLedgerDamage_OnlyTopWins()
+        {
+            var rig = FfaRig(5, out var ids);
+            rig.Dials = rig.Dials with { FfaTargetPlayers = 5, OvertimeEnabled = false, BloodEnabled = true, BloodWin = 7, BloodLoss = 3 };
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            var match = rig.DriveAcceptedToLive(A);
+
+            rig.Death(E, match.MatchId, killer: A);
+            rig.Tick();
+            Assert.AreEqual(PvpMatchState.Live, match.State);
+
+            Assert.IsNotNull(match.Performance, "Tugak Brawl carries the conduct ledger");
+            match.Performance.CreditPlayerDamage(A, 300, null);
+            match.Performance.CreditPlayerDamage(B, 100, null);
+            match.Performance.CreditPlayerDamage(C, 100, null);
+
+            rig.Clock.Advance(rig.Dials.TimeLimitSecondsFfa);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            Assert.IsTrue(rig.Gateway.Got(A, PvpArenaText.TimeUpFfa));
+
+            Assert.AreEqual(1, rig.Part(A).Placement);
+            Assert.AreEqual(2, rig.Part(B).Placement);
+            Assert.AreEqual(2, rig.Part(C).Placement, "equal damage shares a placement");
+            Assert.AreEqual(4, rig.Part(D).Placement, "0 damage is last of the survivors");
+            Assert.AreEqual(5, rig.Part(E).Placement, "still below every survivor");
+
+            Assert.AreEqual("win", rig.Part(A).Result);
+            foreach (var id in new[] { B, C, D, E })
+                Assert.AreEqual("loss", rig.Part(id).Result, $"0x{id:X8} is not a winner");
+
+            Assert.AreEqual((7, 1), rig.Gateway.Blood(A), "only 1st is paid the Win");
+            Assert.AreEqual((3, 1), rig.Gateway.Blood(B));
+            Assert.AreEqual((3, 1), rig.Gateway.Blood(D));
+
+            Assert.AreEqual("win", rig.Sink.Saves.Single().Match.Outcome, "one winner, no longer \"shared\"");
+            Assert.IsTrue(rig.Sink.Saves.Single().Match.Rated);
+            Assert.IsTrue(rig.Gateway.Got(A, "[Arena] You placed 1 of 5."));
+            Assert.IsTrue(rig.Gateway.Got(D, "[Arena] You placed 4 of 5."));
+
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId);
+            Assert.IsTrue(ratings[A].Rating > ratings[B].Rating && ratings[B].Rating > ratings[D].Rating, "the rating follows the damage ranking");
+            Assert.AreEqual(1, ratings[A].Wins);
+            Assert.AreEqual(0, ratings[B].Wins);
+        }
+
+        /// <summary>
+        /// Tugak G1 fallback: damage is credited, then the ledger is dropped (null) just before the limit. The timeout must not throw, and
+        /// with no damage to rank by, the survivors tie for 1st (the pre-G1 result) while the eliminated player keeps 5th.
+        /// </summary>
+        [TestMethod]
+        public void Ffa_Timeout_NoLedger_SurvivorsTieForFirst()
+        {
+            var rig = FfaRig(5, out var ids);
+            rig.Dials = rig.Dials with { FfaTargetPlayers = 5, OvertimeEnabled = false };
+            foreach (var id in ids)
+                rig.Coordinator.Join(id, "ffa", false);
+            rig.Tick();
+            rig.AcceptAll(ids);
+            var match = rig.DriveAcceptedToLive(A);
+
+            rig.Death(E, match.MatchId, killer: A);
+            rig.Tick();
+
+            match.Performance.CreditPlayerDamage(A, 300, null);
+            rig.Clock.Advance(rig.Dials.TimeLimitSecondsFfa - 1);
+            rig.Tick();
+            Assert.AreEqual(PvpMatchState.Live, match.State);
+
+            match.Performance = null;
+            rig.Clock.Advance(1);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Resolving, match.State);
+            foreach (var id in new[] { A, B, C, D })
+                Assert.AreEqual(1, rig.Part(id).Placement, $"survivor 0x{id:X8} ties for first with no ledger");
+            Assert.AreEqual(5, rig.Part(E).Placement);
+            Assert.AreEqual("shared", rig.Sink.Saves.Single().Match.Outcome);
         }
 
         /// <summary>Drives: the 1v1 path to Live, then an admin Cancel. A canceled match never pays.</summary>

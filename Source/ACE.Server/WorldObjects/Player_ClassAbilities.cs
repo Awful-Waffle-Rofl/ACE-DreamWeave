@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using ACE.Common;
 using ACE.Entity.Enum;
@@ -9,6 +10,7 @@ using ACE.Database.Models.Shard;
 using ACE.Server.ClassAbilities;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
 using ACE.Server.Entity.Facets;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Factories;
@@ -430,11 +432,11 @@ namespace ACE.Server.WorldObjects
         /// THIS HOOK IS PHYSICAL-ONLY. Player.TakeDamage is the melee/missile/hotspot entry point; magic
         /// damage (spell projectiles, Harm, Drain Health) and DoT ticks write Health straight to the vital
         /// and never arrive here, so anything registered as an IIncomingDamageAbility fires on physical
-        /// damage and nothing else unless it is separately wired at those sites. Two handlers ride it:
-        /// Vengeance, which deliberately stays physical-only on its tracking side, and Thorns, which is NOT
-        /// physical-only any more (user ruling 2026-10-07) - it is separately wired by name at the three
-        /// direct magic sites through Player.ApplyThornsOnMagicHit. Never call this whole dispatch from a
-        /// magic site to "give Thorns magic": that would silently widen Vengeance with it. Any new
+        /// damage and nothing else unless it is separately wired at those sites. Thorns rides it (Vengeance
+        /// did too until its 2026-10-24 retirement), and Thorns is NOT physical-only any more (user ruling
+        /// 2026-10-07) - it is separately wired by name at the three direct magic sites through
+        /// Player.ApplyThornsOnMagicHit. Never call this whole dispatch from a magic site to "give Thorns
+        /// magic": that would silently widen every other handler on it. Any new
         /// incoming-damage ability inherits the physical-only default; decide which one it wants and say so
         /// in its description.
         ///
@@ -459,7 +461,9 @@ namespace ACE.Server.WorldObjects
             if (learned.Length == 0)
                 return;
 
-            if (source is not Creature attacker || PvpClassifier.IsPvp(attacker, this) || attacker == this || attacker.IsDead)
+            var attacker = ClassAbilityAttackerFilter.EnemyCreature(source, this);
+
+            if (attacker == null)
                 return;
 
             if (!PropertyManager.GetBool("class_abilities_enabled").Item)
@@ -515,7 +519,21 @@ namespace ACE.Server.WorldObjects
         /// distinct from a null attacker, which also covers PvP and self-damage - a handler that skips
         /// unattributed damage and a handler that skips PvP want different answers.
         /// </param>
-        public uint ApplyPreWriteDamageClassAbilities(WorldObject source, DamageType damageType, uint incomingDamage, bool isDamageOverTime = false)
+        /// <param name="isSpell">
+        /// TRUE from the four spell sites (spell projectile, Harm, Drain Health, DoT tick); the physical
+        /// path passes nothing. Carried as PreWriteDamageContext.IsSpell.
+        /// </param>
+        /// <param name="enemyCreatureSpellDamage">
+        /// Only the DoT tick passes this: the share of the tick whose casters pass
+        /// ClassAbilityAttackerFilter.EnemyCreature, because the tick itself has no source to filter. The
+        /// single-source spell sites leave it null and the share is the whole hit when the filtered Attacker
+        /// is non-null, else 0. Ignored unless <paramref name="isSpell"/>, and clamped to the hit.
+        /// </param>
+        /// <param name="isHazard">
+        /// TRUE only from Player.TakeDamage when HazardContext.HitPlayers dealt the hit. Carried as
+        /// PreWriteDamageContext.IsHazard; every ward skips such a hit (owner ruling R3; the list is on IsHazard).
+        /// </param>
+        public uint ApplyPreWriteDamageClassAbilities(WorldObject source, DamageType damageType, uint incomingDamage, bool isDamageOverTime = false, bool isSpell = false, uint? enemyCreatureSpellDamage = null, bool isHazard = false)
         {
             var learned = preWriteDamageClassAbilities ??= BuildClassAbilityHookCache(ClassAbilityRegistry.PreWriteDamageAbilities);
 
@@ -526,8 +544,11 @@ namespace ACE.Server.WorldObjects
                 return incomingDamage;
 
             // the same attacker filter ApplyIncomingDamageClassAbilities applies, evaluated once and carried
-            // on the context rather than early-returning on it - see the summary for why
-            var attacker = source is Creature creature && !PvpClassifier.IsPvp(creature, this) && creature != this && !creature.IsDead ? creature : null;
+            // on the context rather than early-returning on it - see the summary for why. Shared with the DoT
+            // tick site through ClassAbilityAttackerFilter so the two cannot disagree about a caster.
+            var attacker = ClassAbilityAttackerFilter.EnemyCreature(source, this);
+
+            var spellDamageFromEnemyCreature = ClassAbilityAttackerFilter.SpellDamageShare(isSpell, attacker != null, enemyCreatureSpellDamage, incomingDamage);
 
             var context = new PreWriteDamageContext
             {
@@ -535,6 +556,9 @@ namespace ACE.Server.WorldObjects
                 Attacker = attacker,
                 DamageType = damageType,
                 IsDamageOverTime = isDamageOverTime,
+                IsSpell = isSpell,
+                SpellDamageFromEnemyCreature = spellDamageFromEnemyCreature,
+                IsHazard = isHazard,
                 Damage = incomingDamage,
             };
 
@@ -564,7 +588,7 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Rolls the Double Volley class ability: TRUE when the player has it learned and this volley wins
-        /// its per-rank re-fire chance (6/12/18%). Bespoke - the second volley is fired by the caller
+        /// its per-rank re-fire chance (10/20/30%). Bespoke - the second volley is fired by the caller
         /// (Player.LaunchMissile) rather than by a hook. FALSE when unlearned or the system is disabled.
         /// </summary>
         public bool TryClassAbilityDoubleVolley()
@@ -586,6 +610,22 @@ namespace ACE.Server.WorldObjects
                 GetEquippedModValue(EquipmentModId.DoubleVolley));
 
             return ThreadSafeRandom.Next(0.0f, 1.0f) <= chance;
+        }
+
+        /// <summary>
+        /// Rolls Pinning Shot ONCE for a missile volley. NULL when the ability is not held (or class
+        /// abilities are off or suppressed), which tells the hit-time code no volley roll exists; otherwise
+        /// TRUE when the volley wins its chance. The result is stamped on every projectile of the volley
+        /// (WorldObject.ClassAbilityVolleyPinRoll) so the primary arrow, the multishot extras, the overflow
+        /// arrows and the Double Volley re-fire all share it: a win pins every target an arrow LANDS on, a
+        /// loss pins none, and a miss simply never reaches the hit-time check.
+        /// </summary>
+        public bool? RollClassAbilityVolleyPin()
+        {
+            if (!TryGetClassAbility(ClassAbilityId.PinningShot, out var rank))
+                return null;
+
+            return ThreadSafeRandom.Next(0.0f, 1.0f) <= PinningShotAbility.ChanceFor(this, rank);
         }
 
         /// <summary>
@@ -1312,6 +1352,15 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // Reprice wave not yet applied to this character (the sweep kill switch was off at login): a rank
+            // gained now would be priced at the NEW ladder and then migrated as if paid at the OLD one. Shared
+            // by the paid learn and the prepaid voucher apply, which both run this method.
+            if (ClassAbilityRepricePendingFor(skill.Id))
+            {
+                error = ClassAbilityRepricing.PendingRefusal;
+                return false;
+            }
+
             // Tier 2/3 unlock gate (only checked when first learning the skill - subsequent ranks of an
             // already-owned skill can't lock, since owning rank 1 proves the tier was already unlocked)
             if (GetClassAbilityRank(skill.Id) == 0 && !MeetsClassAbilityTierUnlock(skill, out error))
@@ -1752,6 +1801,501 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// THE CLASS ABILITY REPRICE MIGRATION: a per-character login sweep that applies every pending
+        /// <see cref="ClassAbilityRepricing"/> wave. A wave UNLEARNS its functionally changed abilities (rank to
+        /// 0, stripped from stored facet builds, carried tokens taken back) and KEEPS the ranks of the rest
+        /// (tokens taken back only for a tier whose price changed), and then the character's available points
+        /// are RECOMPUTED from scratch (<see cref="ClassAbilityRepricing.RecomputePoints"/>):
+        /// max(TotalEarned - owned cost at live prices - outstanding carried token value,
+        ///     current Available + the refund the pinned old prices owe).
+        /// The decisions are the pure helpers on ClassAbilityRepricing; this method only applies them.
+        ///
+        /// Modelled on <see cref="ApplyClassAbilityOverhaulRespec"/> and run right after it in
+        /// PlayerEnterWorld, before the CAP audit: per-character, guarded by PropertyInt 9092
+        /// ClassAbilityRepriceWave (the highest wave applied, absent = 0), and stoppable live by the
+        /// server-wide <c>class_ability_reprice_sweep_enabled</c> kill switch.
+        ///
+        /// RETURNS TRUE WHEN THE CAP AUDIT IS DEFERRED: the points phase is waiting on the character save
+        /// (step 3) and will run the audit itself once it has settled the counters, so PlayerEnterWorld must
+        /// not audit now. FALSE means the migration finished (or did nothing) synchronously.
+        ///
+        /// THE LOGIN SEQUENCE, in order:
+        ///  1. Guard stamp, then kill switch.
+        ///  2. STORED FACET BUILDS FIRST (only when a pending wave unlearns anything and the character has
+        ///     earned at least one point - one that never has cannot hold a stored rank): a blocking facet read,
+        ///     then every unlearned ability is stripped from every stored build with CONFIRMED writes. A read or
+        ///     write that does not confirm ABANDONS the run with nothing else touched and no stamp, so the next
+        ///     login retries - the overhaul respec's ordering, for its reason (a stored build is a second copy
+        ///     of the ranks). No points move for a stored build: the swap model already released them.
+        ///  3. RANKS: every owned unlearned ability's quest row is erased, the rank cache dropped, and the
+        ///     character (the quest rows) saved. The same save carries a PENDING-REFUND MARKER (two Character
+        ///     quest rows, ClassAbilityRepricing.MarkerRefundKey / MarkerMaskKey): the old-price cost of the
+        ///     erased ranks and which abilities they were. Every owned PromoteToPaid ability's quest row is raised
+        ///     to its promoted rank in the same save. When anything was erased or promoted, EVERYTHING BELOW WAITS FOR
+        ///     THAT SAVE TO CONFIRM: it runs from the save's callback, marshalled back onto the world thread. A
+        ///     failed save, or a logout / crash before the callback, runs none of it, so the character is left
+        ///     unstamped with its points untouched; the next login finds its ranks at 0 but the marker intact,
+        ///     treats it as touched and pays the refund from the marker. Meanwhile the pending-wave refusals
+        ///     keep every rank and token path for the eight abilities closed.
+        ///  4. TOKENS: every carried token the decision takes back is consumed; every token left is valued at
+        ///     its exchanger refund for the outstanding-token term.
+        ///  5. POINTS (only for a character that owns any pending-wave ability or had a token taken back):
+        ///     the recompute and its floor (current Available + the old-price refund measured from the ranks
+        ///     at login, so nobody loses an unlearn refund). Ledger: one zero-delta reprice row per unlearned
+        ///     ability (rank_After 0); one voucher_refund row per token taken back, crediting its old price, so
+        ///     the CAP audit's sink term nets the original purchase; and ONE reprice row carrying the rest of the
+        ///     delta (written even when that is 0), so the rows sum to exactly the change in Available. A
+        ///     winning floor logs a warning with both terms.
+        ///  6. The stamp; then, unless the run was idle, the chat line(s), the cache invalidation and the biota
+        ///     save (points and stamp together); then, when it was deferred, the CAP audit (from a finally, on
+        ///     every path while the player is online except a failed character save). The marker is NOT erased here: it is erased at the next
+        ///     login that finds the stamp present, so a lost biota save leaves it to pay from and a persisted
+        ///     one makes it stale and ignored - no window loses it, none pays it twice.
+        ///
+        /// THE CRASH WINDOWS. The biota save (points and stamp) is only ever queued after the character save
+        /// (the erased ranks) has CONFIRMED, so stamp and points can never persist over ranks that did not. A
+        /// crash after the character save but before the biota save leaves the ranks erased, the marker
+        /// present and the character unstamped; the recompute is ABSOLUTE, so the re-run computes the same
+        /// recompute from whichever erased ranks and consumed tokens persisted, and the floor's unlearned part
+        /// comes from the marker, so it does not shrink either (a token taken back in the lost run is the one
+        /// floor term a re-run cannot see; the recompute still returns it). The strip is idempotent. The stamp
+        /// and the points share the one biota save, so a lost stamp never re-pays a floor that already landed,
+        /// and a stamp present at login turns any leftover marker into a stale one that is erased unpaid. The fire-and-forget
+        /// ledger rows are the remaining exception: a crash after they are queued but before the biota save
+        /// leaves rows whose points did not persist, and the re-run writes them again (the exposure every CAP
+        /// write site has; the audit reads the counters, not row sums).
+        ///
+        /// A run that touched nothing - owns no pending-wave ability, carried no affected token, stripped no
+        /// stored build - makes NO explicit save: the stamp rides the normal player save cycle, and if it is
+        /// lost the next login simply finds nothing to do again.
+        ///
+        /// WHILE A CHARACTER IS UNMIGRATED (the kill switch is off, or the deferred phase has not run yet)
+        /// every rank and token path for a pending-wave ability refuses - see
+        /// <see cref="ClassAbilityRepricePendingFor"/>.
+        /// </summary>
+        public bool ApplyClassAbilityRepricing()
+        {
+            var appliedWave = GetProperty(PropertyInt.ClassAbilityRepriceWave) ?? 0;
+            var latestWave = ClassAbilityRepricing.LatestWave;
+
+            // Already migrated through every shipped wave - the permanent end state until a new wave ships.
+            // A pending-refund marker still present here is STALE: the stamp persisted, so the refund it
+            // carried was paid in the same biota save. It is ignored and erased, never paid again.
+            if (appliedWave >= latestWave)
+            {
+                ClearStaleRepriceMarkers(latestWave);
+                return false;
+            }
+
+            if (!PropertyManager.GetBool("class_ability_reprice_sweep_enabled").Item)
+                return false;
+
+            var waves = ClassAbilityRepricing.Waves;
+            var lastPending = ClassAbilityRepricing.PendingWaves(waves, appliedWave).Last();
+
+            // ---- 1. stored facet builds, first, confirmed, or nothing happens ----
+
+            var unlearnNames = ClassAbilityRepricing.UnlearnedAbilityNames(waves, appliedWave);
+            var strippedFacets = 0;
+            var strippedNames = new HashSet<string>(StringComparer.Ordinal);
+
+            // A character that never earned a point cannot have bought a rank, so no stored build of theirs
+            // can hold one: skip the blocking facet read (it is still stamped below).
+            if (unlearnNames.Count > 0 && TotalClassAbilityPointsEarned > 0)
+            {
+                if (!TryGetCharacterFacetRows(out var facetRows))
+                {
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): the character_facet read did not complete, so the class ability reprice migration is SKIPPED this login. Nothing was changed and the wave was not stamped - the next login retries.");
+                    return false;
+                }
+
+                if (!ClassAbilityRepricing.TryStripStoredAbilities(facetRows, unlearnNames, FacetDbTimeoutMs,
+                        DatabaseManager.Shard.SaveCharacterFacet, out strippedFacets, out strippedNames))
+                {
+                    log.Error($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): one or more character_facet ability writes did not confirm, so the class ability reprice migration is ABANDONED this login and the wave was NOT stamped. No rank, point or token was touched; the next login re-runs it.");
+                    return false;
+                }
+            }
+
+            // ---- 2. ranks: erase every owned unlearned ability ----
+
+            // Captured BEFORE the erase: the old-price refund (the floor) and the ownership test read these.
+            var ranksBefore = new Dictionary<ClassAbilityId, int>();
+            foreach (var row in ClassAbilityRepricing.PendingWaves(waves, appliedWave).SelectMany(w => w.Rows))
+                ranksBefore[row.Ability] = GetClassAbilityRank(row.Ability);
+
+            int RankBefore(ClassAbilityId id) => ranksBefore.TryGetValue(id, out var r) ? r : 0;
+
+            var unlearns = ClassAbilityRepricing.PlanUnlearns(waves, appliedWave, RankBefore);
+            var unlearned = new List<(UnlearnStep Step, ClassAbilityDefinition Def)>();
+
+            foreach (var step in unlearns)
+            {
+                if (!ClassAbilityRegistry.Abilities.TryGetValue(step.Ability, out var def))
+                {
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): reprice wave {step.Wave} unlearns {step.Ability}, which is not in the live registry; skipped.");
+                    continue;
+                }
+
+                if (Character.EraseQuest(ClassAbilityRegistry.QuestKey(def), CharacterDatabaseLock))
+                    CharacterChangesDetected = true;
+
+                unlearned.Add((step, def));
+            }
+
+            // THE PENDING-REFUND MARKER, written into the SAME character save as the erase: the old-price cost
+            // of every rank just erased, and which abilities they were. If the points phase never runs (logout,
+            // client crash, server stop, failed callback), the next login finds the ranks at 0 but the marker
+            // intact, treats the character as touched, and pays the refund from it. Accumulates onto any marker
+            // an earlier interrupted run left.
+            if (unlearned.Count > 0)
+                WriteRepriceMarker(latestWave, unlearned.Sum(u => u.Step.OldPaid), unlearned.Select(u => u.Step.Ability));
+
+            // PROMOTIONS (RepriceAction.PromoteToPaid): raise each owned rank to what the new ladder sells for the
+            // old price paid. Written into the SAME character save as the erase, and like the erase it must
+            // CONFIRM before the points and the stamp move (step 3 below): the recompute prices the promoted rank
+            // at the live ladder, so stamping over a promotion that did not persist would leave the owner at
+            // their old rank having been charged for the new one. A re-run after a lost save simply sees the old
+            // rank again and promotes it again; a re-run after a persisted one sees the promoted rank and plans
+            // nothing (PromotedRank never raises a rank above what was paid).
+            var promoted = new List<(PromoteStep Step, ClassAbilityDefinition Def)>();
+
+            foreach (var step in ClassAbilityRepricing.PlanPromotions(waves, appliedWave, RankBefore))
+            {
+                if (!ClassAbilityRegistry.Abilities.TryGetValue(step.Ability, out var def))
+                {
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): reprice wave {step.Wave} promotes {step.Ability}, which is not in the live registry; skipped.");
+                    continue;
+                }
+
+                var quest = Character.GetOrCreateQuest(ClassAbilityRegistry.QuestKey(def), CharacterDatabaseLock, out var created);
+                if (created)
+                    quest.CharacterId = Guid.Full;
+                quest.NumTimesCompleted = step.NewRank;
+                quest.LastTimeCompleted = (uint)Time.GetUnixTime();
+                CharacterChangesDetected = true;
+
+                promoted.Add((step, def));
+            }
+
+            // BEFORE the point writes, for the reason UnlearnClassAbility gives: the owned cost the recompute
+            // reads, and each ledger row's owned_Cost_After snapshot, are only honest once the cache is rebuilt
+            // from the erased quest rows.
+            classAbilityCache = null;
+
+            var context = new RepriceRun
+            {
+                AppliedWave = appliedWave,
+                LatestWave = latestWave,
+                Waves = waves,
+                LastPending = lastPending,
+                RanksBefore = ranksBefore,
+                Unlearned = unlearned,
+                Promoted = promoted,
+                StrippedFacets = strippedFacets,
+                StrippedNames = strippedNames,
+            };
+
+            if (unlearned.Count == 0 && promoted.Count == 0)
+            {
+                FinishClassAbilityRepricing(context);
+                return false;
+            }
+
+            // ---- 3. the character save must CONFIRM before any point, token or the stamp moves ----
+
+            SaveCharacterToDatabase(saved =>
+            {
+                // Shard worker thread: never touch the Player here - every outcome is handled on the world thread.
+                WorldManager.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    // World thread. The character may have logged out (or its client crashed) while the save was
+                    // queued: the erased ranks and the pending-refund marker ride the same character save, so its
+                    // next login finds the marker and pays the refund from it. Nothing to audit for an offline player.
+                    if (PlayerManager.GetOnlinePlayer(Guid.Full) != this)
+                    {
+                        log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): logged out before the reprice points phase ran; the pending-refund marker rode the same character save as the erased ranks, so the next login pays the refund from it.");
+                        return;
+                    }
+
+                    var skipAudit = false;
+
+                    try
+                    {
+                        if (!saved)
+                        {
+                            log.Error($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): the character save carrying the unlearned class ability ranks did not confirm, so the reprice points phase did NOT run. The wave is not stamped and no point or token moved; the next login re-runs the migration (from the pending-refund marker if the erase did persist).");
+
+                            // No audit on this branch: the ranks are erased in memory but no point has moved, so it
+                            // would latch a false first_Detected_At for a player CharacterSaveFailed is about to boot.
+                            skipAudit = true;
+                            return;
+                        }
+
+                        if ((GetProperty(PropertyInt.ClassAbilityRepriceWave) ?? 0) >= latestWave)
+                            return;
+
+                        FinishClassAbilityRepricing(context);
+                    }
+                    finally
+                    {
+                        // Deferred from PlayerEnterWorld, which skipped it. Runs on every path while the player is
+                        // online - finished, already stamped, or an exception above - except the failed save.
+                        if (!skipAudit)
+                            AuditClassAbilityPointLedger();
+                    }
+                }));
+            });
+
+            return true;
+        }
+
+        /// <summary>
+        /// Writes (accumulating onto any existing one) the pending-refund marker for <paramref name="wave"/>:
+        /// two Character quest rows, <see cref="ClassAbilityRepricing.MarkerRefundKey"/> holding the old-price
+        /// refund owed and <see cref="ClassAbilityRepricing.MarkerMaskKey"/> holding which abilities were erased.
+        /// Character rows, so they ride the same character save as the erase itself.
+        /// </summary>
+        private void WriteRepriceMarker(int wave, int refund, IEnumerable<ClassAbilityId> erased)
+        {
+            var refundRow = Character.GetOrCreateQuest(ClassAbilityRepricing.MarkerRefundKey(wave), CharacterDatabaseLock, out var createdRefund);
+            if (createdRefund)
+                refundRow.CharacterId = Guid.Full;
+            refundRow.NumTimesCompleted = (createdRefund ? 0 : refundRow.NumTimesCompleted) + Math.Max(0, refund);
+
+            var maskRow = Character.GetOrCreateQuest(ClassAbilityRepricing.MarkerMaskKey(wave), CharacterDatabaseLock, out var createdMask);
+            if (createdMask)
+                maskRow.CharacterId = Guid.Full;
+            maskRow.NumTimesCompleted = (createdMask ? 0 : maskRow.NumTimesCompleted) | ClassAbilityRepricing.EncodeUnlearnMask(ClassAbilityRepricing.Waves, erased);
+
+            CharacterChangesDetected = true;
+        }
+
+        /// <summary>Sums the refund and ORs the masks of every pending-refund marker for a wave in (<paramref name="appliedWave"/>, <paramref name="latestWave"/>].</summary>
+        private void ReadRepriceMarkers(int appliedWave, int latestWave, out int refund, out int mask)
+        {
+            refund = 0;
+            mask = 0;
+
+            for (var wave = appliedWave + 1; wave <= latestWave; wave++)
+            {
+                refund += Math.Max(0, Character.GetQuest(ClassAbilityRepricing.MarkerRefundKey(wave), CharacterDatabaseLock)?.NumTimesCompleted ?? 0);
+                mask |= Character.GetQuest(ClassAbilityRepricing.MarkerMaskKey(wave), CharacterDatabaseLock)?.NumTimesCompleted ?? 0;
+            }
+        }
+
+        /// <summary>
+        /// Erases every pending-refund marker up to <paramref name="latestWave"/>. Called only once the stamp
+        /// is PRESENT at login: the stamp and the points share one biota save, so a marker that outlived it
+        /// carries a refund already paid and must never be paid again. Rides the normal character save.
+        /// </summary>
+        private void ClearStaleRepriceMarkers(int latestWave)
+        {
+            for (var wave = 1; wave <= latestWave; wave++)
+            {
+                if (Character.EraseQuest(ClassAbilityRepricing.MarkerRefundKey(wave), CharacterDatabaseLock))
+                    CharacterChangesDetected = true;
+
+                if (Character.EraseQuest(ClassAbilityRepricing.MarkerMaskKey(wave), CharacterDatabaseLock))
+                    CharacterChangesDetected = true;
+            }
+        }
+
+        /// <summary>A wave's label for a ledger detail, or "wave N" if the number is not in the list.</summary>
+        private static string WaveLabel(IReadOnlyList<RepriceWave> waves, int number) =>
+            waves.FirstOrDefault(w => w.Number == number)?.Label ?? $"wave {number}";
+
+        /// <summary>The state <see cref="ApplyClassAbilityRepricing"/> hands its points phase.</summary>
+        private sealed class RepriceRun
+        {
+            public int AppliedWave;
+            public int LatestWave;
+            public IReadOnlyList<RepriceWave> Waves;
+            public RepriceWave LastPending;
+            public Dictionary<ClassAbilityId, int> RanksBefore;
+            public List<(UnlearnStep Step, ClassAbilityDefinition Def)> Unlearned;
+            public List<(PromoteStep Step, ClassAbilityDefinition Def)> Promoted;
+            public int StrippedFacets;
+            public HashSet<string> StrippedNames;
+        }
+
+        /// <summary>
+        /// Steps 4 to 6 of <see cref="ApplyClassAbilityRepricing"/>: the tokens, the points recompute and its
+        /// ledger rows, the stamp, the chat line and the biota save. Runs on the world thread, either directly
+        /// (nothing was erased) or from the confirmed character save.
+        /// </summary>
+        private void FinishClassAbilityRepricing(RepriceRun run)
+        {
+            var waves = run.Waves;
+            var appliedWave = run.AppliedWave;
+            var latestWave = run.LatestWave;
+
+            int RankBefore(ClassAbilityId id) => run.RanksBefore.TryGetValue(id, out var r) ? r : 0;
+
+            var ownsPendingAbility = ClassAbilityRepricing.OwnsAnyPendingAbility(waves, appliedWave, RankBefore);
+
+            // The pending-refund marker: every rank erased but not yet paid for, whether this run erased it or
+            // an earlier interrupted one did. Its abilities' ranks are 0 now, so it is the ONLY source for them.
+            ReadRepriceMarkers(appliedWave, latestWave, out var markerRefund, out var markerMask);
+            var erasedIds = ClassAbilityRepricing.DecodeUnlearnMask(waves, markerMask);
+
+            // ---- 4. tokens: take back what the decision says, value what is left ----
+
+            var tokensTaken = new List<(string Name, ClassAbilityDefinition Def, string Ability, int Tier, TokenRefundDecision Decision)>();
+            var outstanding = new List<(int TokenId, int Tier, int Stack)>();
+
+            foreach (var item in GetAllPossessions().ToList())
+            {
+                var tokenId = item.GetProperty(PropertyInt.ClassAbilityTokenId) ?? 0;
+
+                if (tokenId <= 0)
+                    continue;
+
+                var tier = item.GetProperty(PropertyInt.ClassAbilityTokenTier) ?? 0;
+                var stackSize = item.StackSize ?? 1;
+
+                var decision = ClassAbilityRepricing.DecideTokenRefund(waves, appliedWave, tokenId, tier, stackSize);
+
+                if (decision.Refund)
+                {
+                    // Captured before the consume: the object is destroyed by the call below.
+                    var name = item.Name;
+
+                    if (TryConsumeFromInventoryWithNetworking(item, decision.Stack))
+                    {
+                        ClassAbilityRegistry.Abilities.TryGetValue((ClassAbilityId)tokenId, out var tokenDef);
+                        tokensTaken.Add((name, tokenDef, tokenDef?.Name ?? $"ability {tokenId}", tier, decision));
+                        continue;
+                    }
+
+                    // Not consumed: it stays a usable token, so it stays in the outstanding value and is not refunded.
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): could not take back the training token '{name}' (0x{item.Guid.Full:X8}); it was NOT refunded and still applies at the new price.");
+                }
+
+                outstanding.Add((tokenId, tier, stackSize));
+            }
+
+            // ---- 5. points: the recompute, for a character the wave actually touches ----
+
+            var touched = ownsPendingAbility || tokensTaken.Count > 0 || markerRefund > 0 || erasedIds.Count > 0;
+            var delta = 0;
+
+            if (touched)
+            {
+                var ownedCostAfter = ClassAbilityPointsSpentOnOwnedRanks();
+                var outstandingValue = ClassAbilityRepricing.OutstandingTokenValue(outstanding);
+                var tokensAtOldPrice = tokensTaken.Sum(t => t.Decision.Total);
+
+                // The old-price refund: the unlearned part from the marker only (their ranks are 0 now, or will
+                // be on a re-run), the kept part from the ranks as the character logged in, plus the tokens.
+                var expected = ClassAbilityRepricing.OldPriceRefund(waves, appliedWave, RankBefore, tokensAtOldPrice, markerRefund);
+                var points = ClassAbilityRepricing.RecomputePoints(TotalClassAbilityPointsEarned, AvailableClassAbilityPoints, ownedCostAfter, outstandingValue, expected);
+
+                if (points.FloorBinds)
+                    log.Warn($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): the FLOOR term won the reprice recompute - recomputed {points.Recomputed} is below the floor {points.Floor} (current available {points.CurrentAvailable} + old-price refund {points.OldPriceRefund}), so available is set to {points.NewAvailable}. totalEarned {TotalClassAbilityPointsEarned}, ownedCostAfter {ownedCostAfter}, outstandingTokenValue {outstandingValue}.");
+
+                foreach (var id in erasedIds)
+                {
+                    if (!ClassAbilityRegistry.Abilities.TryGetValue(id, out var def))
+                        continue;
+
+                    var thisRun = run.Unlearned.FirstOrDefault(u => u.Step.Ability == id);
+
+                    AdjustClassAbilityPoints(0, 0, CapLedgerReason.Reprice,
+                        ability: def.Name, rankAfter: 0,
+                        detail: thisRun.Def != null
+                            ? $"reprice wave {thisRun.Step.Wave} ({WaveLabel(waves, thisRun.Step.Wave)}): unlearned rank {thisRun.Step.OldRank} (paid {thisRun.Step.OldPaid} at the old price); points returned in this migration's net row"
+                            : $"reprice ({ClassAbilityRepricing.WaveNaming(waves, appliedWave, id)?.Label ?? run.LastPending.Label}): unlearned at an earlier interrupted login; its old-price refund came from the pending-refund marker and is in this migration's net row");
+                }
+
+                // One zero-delta reprice row per promotion, the record of the rank change; the recompute prices
+                // the promoted rank at the live ladder, so its points (0 for Taunt) are in the net row.
+                foreach (var promotion in run.Promoted)
+                {
+                    AdjustClassAbilityPoints(0, 0, CapLedgerReason.Reprice,
+                        ability: promotion.Def.Name, rankAfter: promotion.Step.NewRank,
+                        detail: $"reprice wave {promotion.Step.Wave} ({WaveLabel(waves, promotion.Step.Wave)}): promoted rank {promotion.Step.OldRank} -> {promotion.Step.NewRank} (paid {promotion.Step.OldPaid} at the old price); any difference is in this migration's net row");
+                }
+
+                // Each token taken back credits its OLD price under voucher_refund, a reason CapLedger.SinkSpend
+                // nets against the voucher_buy / vendor_debit that bought it, so the CAP audit stays balanced.
+                foreach (var token in tokensTaken)
+                {
+                    AdjustClassAbilityPoints(token.Decision.Total, 0, CapLedgerReason.VoucherRefund,
+                        ability: token.Ability, rankAfter: token.Def != null ? GetClassAbilityRank(token.Def.Id) : (int?)null,
+                        detail: $"reprice: took back '{token.Name}' rank {token.Tier} x{token.Decision.Stack}, bought at {token.Decision.UnitPrice} each");
+                }
+
+                // THE NET ROW IS UNCONDITIONAL: it carries the rest of the delta (the token rows already moved
+                // their share), and is the record that this character was recomputed even when it is 0.
+                var netDelta = ClassAbilityRepricing.NetRowDelta(points, tokensAtOldPrice);
+
+                AdjustClassAbilityPoints(netDelta, 0, CapLedgerReason.Reprice,
+                    detail: $"reprice waves {appliedWave + 1}..{latestWave}: recomputed {points.Recomputed} = earned {TotalClassAbilityPointsEarned} - owned {ownedCostAfter} - tokens {outstandingValue}; floor {points.Floor} = available {points.CurrentAvailable} + old-price refund {points.OldPriceRefund}; {(points.FloorBinds ? "floor" : "recompute")} won, available -> {points.NewAvailable} ({tokensAtOldPrice} of it in token refund rows)");
+
+                delta = points.Delta;
+            }
+
+            // ---- 6. the stamp, then the explicit save unless the run was idle ----
+
+            // Stamped only once every mutation above has been applied, and only after the erased ranks were
+            // confirmed saved - see the crash windows on ApplyClassAbilityRepricing.
+            SetProperty(PropertyInt.ClassAbilityRepriceWave, latestWave);
+
+            // Nothing touched: no explicit save. The stamp rides the normal save cycle.
+            if (!touched && run.StrippedFacets == 0)
+                return;
+
+            if (Session != null)
+            {
+                var strippedDisplay = run.StrippedNames
+                    .Select(n => ClassAbilityRegistry.Abilities.Values.FirstOrDefault(d => d.Name == n)?.DisplayName ?? n)
+                    .OrderBy(n => n, StringComparer.Ordinal)
+                    .ToList();
+
+                // Worded after the wave(s) that actually touched this character, not simply the last one pending.
+                // One contributing wave keeps that wave's own wording; more than one (both waves are commonly
+                // pending together at release) gets a neutral subject, because the points returned are the SUM
+                // over every wave and must not be attributed to one of them - see ClassAbilityRepricing.NoticeWording.
+                var touchedIds = erasedIds
+                    .Concat(run.Promoted.Select(p => p.Step.Ability))
+                    .Concat(run.RanksBefore.Where(kv => kv.Value > 0).Select(kv => kv.Key))
+                    .Concat(tokensTaken.Where(t => t.Def != null).Select(t => t.Def.Id))
+                    .Concat(run.StrippedNames.Select(n => ClassAbilityRegistry.Abilities.Values.FirstOrDefault(d => d.Name == n)).Where(d => d != null).Select(d => d.Id))
+                    .ToList();
+
+                var wording = ClassAbilityRepricing.NoticeWording(waves, appliedWave, touchedIds, erasedIds);
+
+                var lines = ClassAbilityRepricing.BuildNoticeLines(wording.Subject, wording.Trainer,
+                    erasedIds.Select(id => ClassAbilityRegistry.Abilities.TryGetValue(id, out var d) ? d.DisplayName : id.ToString()).ToList(),
+                    delta, tokensTaken.Count, strippedDisplay,
+                    run.Promoted.Select(p => (p.Def.DisplayName, p.Step.NewRank)).ToList());
+
+                foreach (var line in lines)
+                    Session.Network.EnqueueSend(new GameMessageSystemChat(line, ChatMessageType.Advancement));
+            }
+
+            classAbilityCache = null;
+            InvalidateClassAbilityHookCaches();
+
+            SaveBiotaToDatabase();
+
+            log.Info($"[CAREPRICE] {Name} (0x{Guid.Full:X8}): reprice waves {appliedWave + 1}..{latestWave} applied - unlearned {erasedIds.Count} ability(s) ({run.Unlearned.Count} this login, marker refund {markerRefund}), promoted {run.Promoted.Count}, took back {tokensTaken.Count} token(s), stripped {run.StrippedFacets} stored facet build(s), {delta} point(s) returned; available {AvailableClassAbilityPoints}.");
+        }
+
+        /// <summary>
+        /// TRUE while a reprice wave naming <paramref name="ability"/> has not yet been applied to this
+        /// character (<see cref="ClassAbilityRepricing.IsAbilityRepricePending(int, ClassAbilityId)"/> against
+        /// PropertyInt 9092). Every path that buys, applies or refunds a rank or token of that ability refuses
+        /// with <see cref="ClassAbilityRepricing.PendingRefusal"/> while this holds - otherwise a rank learned
+        /// now would be swept by the pending unlearn, a token bought at the NEW price would later be taken back
+        /// as if paid at the OLD one, and an old-price token refunded at the exchanger would be paid the new
+        /// one. Normally false: every login with the sweep enabled migrates before the player can act.
+        /// </summary>
+        public bool ClassAbilityRepricePendingFor(ClassAbilityId ability) =>
+            ClassAbilityRepricing.IsAbilityRepricePending(GetProperty(PropertyInt.ClassAbilityRepriceWave) ?? 0, ability);
+
+        /// <summary>
         /// Unlearns a class ability entirely (all ranks), refunding its cumulative point cost and
         /// charging the respec luminance fee. Returns FALSE with a player-facing error and no
         /// state change on any validation failure. ignoreFee skips the luminance charge (developer
@@ -1773,6 +2317,14 @@ namespace ACE.Server.WorldObjects
             if (IsInPvpMatch)
             {
                 error = PvpArenaText.AbilitySpendRefused;
+                return false;
+            }
+
+            // Reprice wave not yet applied: an unlearn now would refund at the NEW price a rank the pending
+            // migration still prices at the OLD one (or is about to unlearn and recompute itself).
+            if (ClassAbilityRepricePendingFor(skill.Id))
+            {
+                error = ClassAbilityRepricing.PendingRefusal;
                 return false;
             }
 

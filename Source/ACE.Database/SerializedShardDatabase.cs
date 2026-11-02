@@ -553,11 +553,31 @@ namespace ACE.Database
         }
 
 
+        /// <summary>
+        /// A read that THROWS is answered with null, never dropped. RunStandalone swallows a task's exception without
+        /// running its callback, and this is the player-login read: WorldManager.PlayerEnterWorld ends the login's
+        /// SuitHolderMoveGuard entering mark only from inside this callback, so a lost callback held that character out
+        /// of every suit builder move until restart (and left the session waiting with no player). Null, not an empty
+        /// result: an empty result would log the character in carrying nothing, while DoPlayerEnterWorld answers null
+        /// by aborting the login (its catch), the same as any other unreadable character. The callback runs outside the
+        /// try, so a callback that throws is still not answered twice.
+        /// </summary>
         public void GetPossessedBiotasInParallel(uint id, Action<PossessedBiotas> callback)
         {
             _queue.Add(new QueueEntry(new Task(() =>
             {
-                var c = BaseDatabase.GetPossessedBiotasInParallel(id);
+                PossessedBiotas c;
+
+                try
+                {
+                    c = BaseDatabase.GetPossessedBiotasInParallel(id);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[DATABASE] GetPossessedBiotasInParallel 0x{id:X8} failed; answering null: {ex}");
+                    c = null;
+                }
+
                 callback?.Invoke(c);
             })));
         }

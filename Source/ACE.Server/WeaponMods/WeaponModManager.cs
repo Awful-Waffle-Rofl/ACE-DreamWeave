@@ -583,7 +583,7 @@ namespace ACE.Server.WeaponMods
                 // row stores that magnitude instead. WeaponModTinkerSet.ApplySpecialAtFraction owns the split.
                 var fraction = WeaponModValue.RollFraction(WeaponModRoller.RollPotency(definition), workmanship);
                 var scale = WeaponModValue.MagnitudeScale();
-                var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale);
+                var magnitude = WeaponModValue.MagnitudeFromFraction(definition, fraction, scale, target);
 
                 // A magnitude that resolves to zero is not applied at all - no record is written. Since the
                 // decoupling there is no slot for it to hand back either, so it simply does not appear. This
@@ -594,7 +594,7 @@ namespace ACE.Server.WeaponMods
 
                 WeaponModTinkerSet.ApplySpecialAtFraction(target, definition, fraction, scale);
 
-                lines.Add(WeaponModDisplay.Describe(definition, magnitude, scale));
+                lines.Add(WeaponModDisplay.Describe(definition, magnitude, scale, target));
             }
 
             if (lines.Count == 0)
@@ -679,7 +679,7 @@ namespace ACE.Server.WeaponMods
                 : WeaponModValue.RollFraction(WeaponModRoller.RollPotency(addedSpecial), workmanship);
             var addedMagnitude = addedSpecial == null
                 ? 0.0
-                : WeaponModValue.MagnitudeFromFraction(addedSpecial, addedFraction, addedScale);
+                : WeaponModValue.MagnitudeFromFraction(addedSpecial, addedFraction, addedScale, target);
 
             // a special that resolves to zero magnitude is not applied - the removed slot is simply lost this
             // use, same rule as everywhere else a rolled magnitude can land on zero
@@ -691,7 +691,7 @@ namespace ACE.Server.WeaponMods
             {
                 WeaponModTinkerSet.ApplySpecialAtFraction(target, addedSpecial, addedFraction, addedScale);
 
-                lines.Add($"Gained: {WeaponModDisplay.Describe(addedSpecial, addedMagnitude, addedScale)}");
+                lines.Add($"Gained: {WeaponModDisplay.Describe(addedSpecial, addedMagnitude, addedScale, target)}");
             }
 
             // Reachable only on a weapon that held NOTHING and drew nothing - an empty class pool, or a
@@ -730,6 +730,54 @@ namespace ACE.Server.WeaponMods
         /// craft's own UpdateObj round-trip counts as a rebuild is NOT established; if it does, the aura
         /// vanishes immediately and this comment is merely pessimistic.
         /// </summary>
+        /// <summary>
+        /// Reads one world weenie template, or null when there is none. Test seam (the PvpWorldLooks.WeenieReader
+        /// pattern): production reads the cached world weenie.
+        /// </summary>
+        internal static Func<uint, ACE.Entity.Models.Weenie> TemplateWeenieReader = wcid => ACE.Database.DatabaseManager.World.GetCachedWeenie(wcid);
+
+        /// <summary>
+        /// The VisualEffectScript (PropertyDataId 9000) the weapon's own weenie TEMPLATE carries, e.g. the Olthoi
+        /// Voidclaw 1007600's black smoke 0x33001154, or null. Read from the template and never from the biota,
+        /// because the biota's row is the one the tier aura overwrites. A missing template, or a reader that
+        /// throws, reads as no base script.
+        /// </summary>
+        internal static uint? BaseVisualEffectScript(WorldObject target)
+        {
+            ACE.Entity.Models.Weenie weenie;
+            try
+            {
+                weenie = TemplateWeenieReader(target.WeenieClassId);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            if (weenie?.PropertiesDID != null && weenie.PropertiesDID.TryGetValue(PropertyDataId.VisualEffectScript, out var script) && script != 0)
+                return script;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Sets the weapon's VisualEffectScript for a tier change. While the weapon holds a tier, the TIER AURA WINS
+        /// over any base script the weenie carries (unchanged behaviour: there is one 9000 slot and the aura takes
+        /// it). When the tier falls back to one with no script (None), the weenie template's own base script is
+        /// restored rather than the row being removed, so a reroll cannot permanently erase a baked effect. A weapon
+        /// whose template has no 9000 row still ends with no row, exactly as before.
+        /// </summary>
+        internal static void ApplyTierScript(WorldObject target, WeaponQualityTier tierBefore, WeaponQualityTier tierAfter)
+        {
+            var scriptBefore = WeaponQualityTiers.ScriptFor(tierBefore);
+            var scriptAfter = WeaponQualityTiers.ScriptFor(tierAfter);
+
+            if (scriptAfter == scriptBefore)
+                return;
+
+            target.VisualEffectScript = scriptAfter ?? BaseVisualEffectScript(target);
+        }
+
         private static void HandleTierTransition(Player player, WorldObject target, WeaponQualityTier tierBefore)
         {
             var tierAfter = WeaponQualityTiers.Evaluate(target);
@@ -737,11 +785,7 @@ namespace ACE.Server.WeaponMods
             if (tierAfter == tierBefore)
                 return;
 
-            var scriptBefore = WeaponQualityTiers.ScriptFor(tierBefore);
-            var scriptAfter = WeaponQualityTiers.ScriptFor(tierAfter);
-
-            if (scriptAfter != scriptBefore)
-                target.VisualEffectScript = scriptAfter;
+            ApplyTierScript(target, tierBefore, tierAfter);
 
             var total = WeaponQualityTiers.TotalIntensity(target);
 

@@ -31,6 +31,33 @@ namespace ACE.Server.Tests
     {
         // ---- the weighted type roll ----------------------------------------------------------------------
 
+        /// <summary>What an empty wave does next, by wave number, re-spawn use and a live checkpoint boss.</summary>
+        [TestMethod]
+        public void EmptyWaveAction_skips_short_of_the_last_wave_and_respawns_the_last_exactly_once()
+        {
+            for (var wave = 1; wave < MlDigsiteRules.TotalWaves; wave++)
+            {
+                Assert.AreEqual(MlDigsiteEmptyWaveAction.SkipToNext, MlDigsiteRules.EmptyWaveAction(wave, false, false));
+                Assert.AreEqual(MlDigsiteEmptyWaveAction.SkipToNext, MlDigsiteRules.EmptyWaveAction(wave, true, true));
+            }
+
+            Assert.AreEqual(MlDigsiteEmptyWaveAction.RespawnLast, MlDigsiteRules.EmptyWaveAction(MlDigsiteRules.TotalWaves, false, false));
+            Assert.AreEqual(MlDigsiteEmptyWaveAction.RespawnLast, MlDigsiteRules.EmptyWaveAction(MlDigsiteRules.TotalWaves, false, true), "the first empty last wave re-spawns even with a boss up");
+            Assert.AreEqual(MlDigsiteEmptyWaveAction.EndRun, MlDigsiteRules.EmptyWaveAction(MlDigsiteRules.TotalWaves, true, false));
+            Assert.AreEqual(MlDigsiteEmptyWaveAction.LeaveToClock, MlDigsiteRules.EmptyWaveAction(MlDigsiteRules.TotalWaves, true, true), "a live checkpoint boss leaves the run to the stall clock");
+        }
+
+        /// <summary>A vanish-emptied wave counts as cleared only when at least half (rounded up) was killed.</summary>
+        [TestMethod]
+        public void VanishCountsAsClear_needs_at_least_half_killed()
+        {
+            Assert.IsTrue(MlDigsiteRules.VanishCountsAsClear(4, 8));
+            Assert.IsFalse(MlDigsiteRules.VanishCountsAsClear(3, 8));
+            Assert.IsTrue(MlDigsiteRules.VanishCountsAsClear(2, 3), "ceil(3 / 2) = 2");
+            Assert.IsFalse(MlDigsiteRules.VanishCountsAsClear(1, 3));
+            Assert.IsFalse(MlDigsiteRules.VanishCountsAsClear(0, 0), "nothing spawned is never a clear");
+            Assert.IsFalse(MlDigsiteRules.VanishCountsAsClear(5, 0));
+        }
         /// <summary>
         /// The shipped weights (round 13 feedback, ratified by the tester 2026-09-18) are 70 / 25 / 5, which
         /// happen to total exactly 100 - the missing Relaria dig is still NOT a branch of this function at
@@ -1593,7 +1620,7 @@ namespace ACE.Server.Tests
 
             var manager = PooledLootSourceText.Read("Source/ACE.Server/MlDigsite/MlDigsiteManager.cs");
             var spawnNext = PooledLootSourceText.MethodBody(manager,
-                "private static int SpawnNextWave(MlDigsiteEncounter encounter, Random rng, bool announceStart = true)");
+                "private static int SpawnNextWave(MlDigsiteEncounter encounter, Random rng, bool announceStart = true, bool respawnLastWave = false)");
 
             StringAssert.Contains(spawnNext, "MlDigsiteRules.IsCheckpointWave(waveNumber, MlDigsiteTunables.CheckpointEvery)");
             StringAssert.Contains(spawnNext, "encounter.TryClaimCheckpoint(waveNumber)");
@@ -1676,7 +1703,7 @@ namespace ACE.Server.Tests
             Assert.IsFalse(openEncounter.Contains("SpawnNextWave(encounter, rng)"),
                 "OpenEncounter must not call SpawnNextWave without suppressing the opening wave announcement");
 
-            StringAssert.Contains(driveWaves, "SpawnNextWave(encounter, NewRandom())");
+            StringAssert.Contains(driveWaves, "SpawnNextWave(encounter, NewRandom(), respawnLastWave: encounter.TakeLastWaveRespawnPending())");
             Assert.IsFalse(driveWaves.Contains("announceStart: false"),
                 "a LATER wave (not the opening spawn) must still announce");
         }
@@ -1707,8 +1734,39 @@ namespace ACE.Server.Tests
             StringAssert.Contains(spawn, "EnqueueAction(new ActionEventDelegate(",
                 "the build must be handed to the anchor landblock's own action queue");
 
-            // The entry itself lives in the queued builder, and nowhere else.
-            StringAssert.Contains(build, "EnterWorld()");
+            // The entry itself lives in the queued builder (through its TryEnterWorld helper, which wraps the
+            // one chest.EnterWorld() call so the retry loop can repeat it), and nowhere else.
+            StringAssert.Contains(build, "TryEnterWorld(");
+            StringAssert.Contains(PooledLootSourceText.MethodBody(src,
+                "private static bool TryEnterWorld(MlDigsiteEncounter encounter, Chest chest, Position position, out bool threw)"),
+                "chest.EnterWorld()");
+        }
+
+        [TestMethod]
+        public void The_pack_fallback_grants_through_the_owners_own_action_queue()
+        {
+            var src = PooledLootSourceText.Read("Source/ACE.Server/MlDigsite/MlDigsiteRewards.cs");
+            var deliver = PooledLootSourceText.MethodBody(src,
+                "private static void DeliverToPack(MlDigsiteEncounter encounter, ChestPlan plan, Chest chest)");
+            var grant = PooledLootSourceText.MethodBody(src,
+                "private static void GrantToPack(MlDigsiteEncounter encounter, uint ownerGuid, Player owner, List<WorldObject> items, List<string> lost)");
+
+            // The owner may stand on a different landblock than the anchor, so the pack write is queued on the
+            // owner rather than made from the anchor landblock's thread.
+            StringAssert.Contains(deliver, "owner.EnqueueAction(new ActionEventDelegate(",
+                "the pack grant must be queued on the owner");
+            Assert.IsFalse(deliver.Contains("TryCreateInInventoryWithNetworking"),
+                "DeliverToPack must not touch the owner's pack on the anchor thread");
+            StringAssert.Contains(grant, "TryCreateInInventoryWithNetworking(");
+
+            // The contents are logged BEFORE the queue is used: the owner's action queue drains only on that
+            // player's tick, so a logout first drops the action silently and the log is the only record.
+            var logged = deliver.IndexOf("queuing pack grant for owner", StringComparison.Ordinal);
+            var lostLogged = deliver.IndexOf("item lost before the pack grant", StringComparison.Ordinal);
+            var queued = deliver.IndexOf("owner.EnqueueAction(", StringComparison.Ordinal);
+
+            Assert.IsTrue(logged >= 0 && lostLogged >= 0, "detached and lost items must both be logged");
+            Assert.IsTrue(logged < queued && lostLogged < queued, "the log must come before EnqueueAction");
         }
 
         [TestMethod]
@@ -1955,8 +2013,8 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0.01, DefaultPropertyManager.DefaultDoubleProperties["ml_treasure_drop_chance"].Item, 1e-9,
                 "the map drop chance should now be 1 percent");
 
-            Assert.AreEqual(0.01, DefaultPropertyManager.DefaultDoubleProperties["ml_treasure_relaria_chance"].Item, 1e-9,
-                "Relaria should now be the 1 percent dig outcome, not the 5 percent one");
+            Assert.AreEqual(0.025, DefaultPropertyManager.DefaultDoubleProperties["ml_treasure_relaria_chance"].Item, 1e-9,
+                "Relaria is raised to 2.5 percent by owner ruling 2026-10-15 (was 1 percent after the digsite rebalance, 5 percent originally)");
         }
 
         // ---- round 14 feedback: announcement text ---------------------------------------------------------

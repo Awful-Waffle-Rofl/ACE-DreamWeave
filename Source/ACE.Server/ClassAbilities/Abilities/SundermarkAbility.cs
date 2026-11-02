@@ -6,13 +6,15 @@ using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.WeaponMods;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Spellsword T2: a landed hit with ANY weapon has a 7/13/19% chance (by rank) to apply the matching
-    /// elemental Vulnerability to the target, at a level driven by the player's Life Magic.
+    /// Spellsword T2: a landed hit with ANY weapon, or a landed damaging spell projectile, has a 7/13/19%
+    /// chance (by rank) to apply the matching elemental Vulnerability to the target, at a level driven by
+    /// the player's Life Magic.
     ///
     /// THIS IS THE ONE SPELLSWORD PROC THAT IS NOT WEAPON-GATED. The three war procs (Spellblade,
     /// Runeblade, Spellstorm) require Light Weapons; Sundermark deliberately does not, so a character who
@@ -41,8 +43,29 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// table here - deliberately, per design section 6. That table already carries all eight rungs (level 7
     /// is the "X's Gift" family, level 8 the "Incantation of X Vulnerability Other"), so there is exactly
     /// one place to fix if the client ever changes them.
+    ///
+    /// SPELL HITS TOO, as of the 2026-10-24 Spellsword pass. The entry also rides ISpellHitAbility, the
+    /// same opt-in Dispelling Dance uses, so a landed damaging spell projectile rolls the same chance and
+    /// applies the Vulnerability for the spell's own damage type. Types with no single-element
+    /// vulnerability spell (a life projectile is Health) apply nothing, exactly as a weapon swing of such a
+    /// type does. The two paths are reached from disjoint call sites (weapon path only from
+    /// Player.DamageTarget, spell path only from SpellProjectile.OnCollideObject), so one weapon hit or one
+    /// projectile rolls once. A proc swing therefore rolls MORE than once: the weapon hit rolls on the weapon
+    /// path, and each projectile the proc launches (a Runeblade blast's three or five, a Spellstorm ring's nine) is a
+    /// separate spell hit that rolls again on the spell path. There is NO resist check on either path: the debuff is written straight to the registry
+    /// through CreateEnchantment, which is what the weapon path has always done.
+    ///
+    /// THE NETHER BRANCH (owner ruling 2026-10-30, option B, replacing the 2026-10-27 Nether-melee gate):
+    /// ANY Nether hit - a swing of any weapon, a Volatile Elements hit re-typed to Nether, a void bolt, a
+    /// proc that launched a Nether spell - applies one of the three void curses (Corruption, Corrosion,
+    /// Destructive Curse) instead of a vulnerability, chosen uniformly. Its chance is the same roll as the
+    /// vulnerability path, on the same Life Magic affinity, and the curse LEVEL is chosen exactly as the
+    /// vulnerability level is: the highest rung of the 8-rung ladder the attacker's Life Magic reaches
+    /// (SpellswordSpellTables.SelectRungIndex, scaled by class_ability_spellsword_level_skill_scale), capped by
+    /// class_ability_sundermark_nether_max_level (clamped 1-8, default 8) as a safety valve (owner correction
+    /// 2026-10-30). See IsNetherCurseHit.
     /// </summary>
-    public class SundermarkAbility : IOutgoingDamageAbility, IAbilityReadout
+    public class SundermarkAbility : IOutgoingDamageAbility, ISpellHitAbility, IAbilityReadout
     {
         public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
         {
@@ -51,12 +74,16 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 2,
             Name = "sundermark",
             DisplayName = "Sundermark",
-            Description = "Your landed hits with any weapon have a 7/13/19% chance (by rank) to inflict the " +
-                          "matching element's Vulnerability on the target. The level applied is set by your " +
-                          "Life Magic, and higher Life Magic also increases the chance.",
+            Description = "Your landed hits with any weapon and your damaging spell projectiles have a 7/13/19% " +
+                          "chance (by rank) to inflict the matching element's Vulnerability on the target. The " +
+                          "level applied is set by your Life Magic, and higher Life Magic also increases the chance. " +
+                          "A Nether hit instead inflicts a random void curse - Corruption, Corrosion or Destructive Curse - " +
+                          "at the level your Life Magic sets.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
+            CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: 2/rank -> 1/rank (ClassAbilityRepricing wave 4)
             Implemented = true,
+            // Life Magic scales EVERY roll, the Nether branch included (owner ruling 2026-10-30, option B; the
+            // 2026-10-27 Void Magic rider and its AdditionalAffinitySkills entry are gone).
             AffinitySkill = Skill.LifeMagic,
         };
 
@@ -101,35 +128,141 @@ namespace ACE.Server.ClassAbilities.Abilities
             return (float)Math.Max(0.0, rankBonus + added + Math.Max(0.0, gearModChance));
         }
 
+        // ---- Nether branch (owner ruling 2026-10-30, option B) ---------------------------------------
+
+        /// <summary>
+        /// TRUE when this proc takes the Nether curse branch: the hit DEALT Nether. Nothing else is consulted -
+        /// not the weapon class, not the weapon's declared W_DamageType, not the dispatch path - so a Nether
+        /// swing of any weapon, a Volatile Elements hit re-typed to Nether, a void wand's void bolt and a
+        /// Nether proc spell all qualify (owner ruling 2026-10-30, replacing the 2026-10-27 Nether-melee gate).
+        /// </summary>
+        public static bool IsNetherCurseHit(DamageType dealtDamageType)
+        {
+            return dealtDamageType == DamageType.Nether;
+        }
+
+        /// <summary>
+        /// The affinity multiplier for one roll, shared by the proc and the readout so the two cannot drift.
+        /// Life Magic on every roll, Nether included (owner ruling 2026-10-30). The call is literal so
+        /// ClassAbilityAffinityDeclarationTests can see it back the declared AffinitySkill.
+        /// </summary>
+        private static double AffinityMultiplier(Player player)
+        {
+            return player.GetClassAbilityAffinityMultiplier(Skill.LifeMagic);
+        }
+
+        /// <summary>
+        /// class_ability_sundermark_nether_max_level clamped to the ladder, 1-8: the safety-valve cap over the
+        /// void curse level Life Magic selects.
+        /// </summary>
+        public static uint NetherMaxLevel(long tunable)
+        {
+            return (uint)Math.Clamp(tunable, 1L, 8L);
+        }
+
+        /// <summary>
+        /// The uniform family pick, through an injectable inclusive-range integer source (the production
+        /// caller passes ThreadSafeRandom.Next, whose int overload is inclusive at both ends).
+        /// </summary>
+        public static int RollNetherCurseFamily(Func<int, int, int> nextInclusive)
+        {
+            return nextInclusive(0, SpellswordSpellTables.NetherCurseFamilies.Length - 1);
+        }
+
+        /// <summary>
+        /// The curse a Nether proc applies: family <paramref name="familyRoll"/>, at the highest rung of the
+        /// 8-rung ladder <paramref name="lifeMagicCurrent"/> reaches (the same SelectRungIndex call the
+        /// vulnerability path makes), capped by the clamped nether max-level tunable (owner correction
+        /// 2026-10-30: the level scales with Life Magic exactly like the vulnerability). Pure for testability.
+        /// </summary>
+        public static SpellId SelectNetherCurse(int familyRoll, uint lifeMagicCurrent, long maxLevelTunable, double thresholdScale)
+        {
+            var rungIndex = SpellswordSpellTables.SelectRungIndex(SpellswordSpellTables.VulnerabilityLevels,
+                NetherMaxLevel(maxLevelTunable),
+                lifeMagicCurrent,
+                thresholdScale);
+
+            return SpellswordSpellTables.NetherCurseFor(familyRoll, rungIndex);
+        }
+
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
         {
-            if (attacker == null || target == null || damageEvent == null)
+            if (damageEvent == null)
                 return;
 
             // NO weapon-skill gate here, on purpose. Any weapon class can carry this entry.
+            //
+            // The DEALT damage type only, never the weapon's declared W_DamageType. A combined Pierce|Slash
+            // weapon marks the target for whichever type the swing actually landed, so a thrust applies
+            // Piercing Vulnerability and a slash from the same sword applies Blade Vulnerability.
+            TryApplyVulnerability(attacker, rank, target, damageEvent.DamageType, damageEvent.Weapon);
+        }
+
+        /// <summary>
+        /// The SPELL path (2026-10-24): a landed damaging spell projectile of any school rolls the same
+        /// chance and marks the target for the SPELL's damage type. The dispatch already guarantees a
+        /// damaging projectile landed on a monster. Fires on every landed copy, the same as Dispelling Dance
+        /// and Elemental Rend; the vulnerability registry's own stacking rules (a refresh, never a second
+        /// layer from the same caster) keep a multi-projectile spell from doing more than one cast would.
+        /// The projectile's launcher (the wielded weapon or wand) is passed as the enchantment's weapon
+        /// argument, matching the weapon path.
+        /// </summary>
+        public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
+        {
+            if (projectile?.Spell == null)
+                return;
+
+            TryApplyVulnerability(caster, rank, primaryTarget, projectile.Spell.DamageType, projectile.ProjectileLauncher);
+        }
+
+        /// <summary>
+        /// The proc body both dispatch paths share, so the roll, the tunable reads, the level selection and
+        /// the visual cannot drift between them. Every line came from the weapon path unchanged; only the
+        /// damage type and the enchantment's weapon argument are supplied by the caller.
+        /// </summary>
+        private static void TryApplyVulnerability(Player attacker, int rank, Creature target, DamageType damageType, WorldObject weapon)
+        {
+            if (attacker == null || target == null)
+                return;
 
             // A dead target cannot be usefully debuffed (the strike that triggered this frequently kills).
             if (target.IsDead)
                 return;
 
-            // The DEALT damage type only, never the weapon's declared W_DamageType. A combined Pierce|Slash
-            // weapon marks the target for whichever type the swing actually landed, so a thrust applies
-            // Piercing Vulnerability and a slash from the same sword applies Blade Vulnerability.
-            var damageType = damageEvent.DamageType;
+            // NETHER BRANCH (owner ruling 2026-10-30, option B): ANY hit that dealt Nether applies a void curse
+            // instead of a vulnerability - weapon path and spell path alike, whatever the weapon. The chance
+            // below is the same roll on the same Life Magic affinity either way.
+            var netherCurse = IsNetherCurseHit(damageType);
 
-            var lifeMagicAffinity = attacker.GetClassAbilityAffinityMultiplier(Skill.LifeMagic);
+            var affinity = AffinityMultiplier(attacker);
 
             // Sundermark equipment mod (MACHINERY): +pp on this ability's own proc roll. Ownership is proven
             // by the dispatch itself - only LEARNED IOutgoingDamageAbility handlers are in the hook cache.
             var chance = Chance(rank,
                 PropertyManager.GetDouble("class_ability_sundermark_chance_base").Item,
                 PropertyManager.GetDouble("class_ability_sundermark_chance_step").Item,
-                lifeMagicAffinity,
+                affinity,
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item,
                 attacker.GetEquippedModValue(EquipmentModId.Sundermark));
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
+
+            if (netherCurse)
+            {
+                // One of Corruption / Corrosion / Destructive Curse, uniformly, at the rung LIFE Magic reaches on
+                // the same 8-rung ladder the vulnerability uses, capped by its own safety-valve tunable (owner
+                // correction 2026-10-30). Applied and shown exactly like the vulnerability below. The DoT's
+                // damage-resist-rating reduction on the target is INTENDED (a party-wide multiplier) and is
+                // deliberately left alone.
+                var curse = SelectNetherCurse(RollNetherCurseFamily(ThreadSafeRandom.Next),
+                    attacker.GetCreatureSkill(Skill.LifeMagic).Current,
+                    PropertyManager.GetLong("class_ability_sundermark_nether_max_level").Item,
+                    PropertyManager.GetDouble("class_ability_spellsword_level_skill_scale").Item);
+
+                ApplyAndShow(attacker, target, weapon, new Spell(curse));
+                return;
+            }
 
             // Level is driven by LIFE Magic (vulnerabilities are Life Magic), not by rank and not by War
             // Magic. The cap is the tunable, not the rank ladder: the user ruled the entry ships uncapped,
@@ -150,12 +283,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (vuln == null)
                 return;
 
+            ApplyAndShow(attacker, target, weapon, new Spell(vuln.Value));
+
+            // NOTE: no AddSpellsurgeStack call. See the class doc comment - this is load-bearing, not an
+            // omission.
+        }
+
+        /// <summary>
+        /// Writes the debuff and plays its visual. Shared by the vulnerability path and the Nether curse
+        /// path so the two cannot drift.
+        /// </summary>
+        private static void ApplyAndShow(Player attacker, Creature target, WorldObject weapon, Spell vulnSpell)
+        {
             // Applied through the normal enchantment registry, so it obeys the standard stacking rules: it
             // will not stack past a stronger cast Vulnerability and refreshes an equal or weaker one. The
             // wielded weapon is passed as the enchantment's weapon argument, matching the caster/launcher
             // split the war procs use.
-            var vulnSpell = new Spell(vuln.Value);
-            attacker.CreateEnchantment(target, attacker, damageEvent.Weapon, vulnSpell);
+            //
+            // For a Nether curse this is the same call a landed Corrosion / Corruption projectile makes
+            // (SpellProjectile's EnchantmentProjectile branch), so EnchantmentManager.BuildEntry runs the
+            // damage-over-time branch on it and the ticks are credited to the attacker (CasterObjectId).
+            attacker.CreateEnchantment(target, attacker, weapon, vulnSpell);
 
             // AND PLAY THE SPELL'S OWN VISUAL, because CreateEnchantment does not.
             //
@@ -191,7 +339,9 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var skillChance = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
 
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.LifeMagic);
+            // Life Magic for every roll, Nether included (owner ruling 2026-10-30), through the same helper
+            // the proc uses.
+            var affinityMultiplier = AffinityMultiplier(player);
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;

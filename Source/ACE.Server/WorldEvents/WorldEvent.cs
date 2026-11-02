@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 using ACE.Common;
 using ACE.Entity;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.HazardMechanics;
 using ACE.Server.Managers;
 using ACE.Server.WorldEvents.Defs;
 using ACE.Server.WorldEvents.Objectives;
@@ -55,7 +57,14 @@ namespace ACE.Server.WorldEvents
         FailedNoParticipants,
         AbortedAdmin,
         AbortedShutdown,
-        AbortedError
+        AbortedError,
+
+        /// <summary>
+        /// The objective's own loss: what it had to keep alive fell below its minimum (an objective's
+        /// FailureOutcome hook). APPENDED, so no existing outcome changes its number. A failure for every
+        /// rule that asks (IsObjectiveFailureOutcome); no outcome line or boss-wins rule of its own yet.
+        /// </summary>
+        FailedObjectiveLost
     }
 
     /// <summary>
@@ -76,7 +85,7 @@ namespace ACE.Server.WorldEvents
     /// only <see cref="State"/> itself (written solely on the world thread while no landblock work is in
     /// flight), and everything it writes goes through <see cref="Participation"/>, whose own lock covers it.
     /// </summary>
-    public sealed class WorldEvent
+    public sealed partial class WorldEvent
     {
         private static readonly ILog log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -146,6 +155,47 @@ namespace ACE.Server.WorldEvents
         /// is presence-based), only crate-versus-coal.
         /// </summary>
         public WorldEventParticipation Participation { get; }
+
+        /// <summary>
+        /// The nominal circular arena presence is measured against (presence payout). Built once at
+        /// <see cref="Stage"/> from the theme's <see cref="ArenaDef"/> by <see cref="BuildArena"/>; a theme with
+        /// no arena block still gets one (rewardRadius, default height), so presence works for every theme.
+        /// Null only when the run has no anchor or no usable radius.
+        /// </summary>
+        public WorldEventArena Arena { get; private set; }
+
+        /// <summary>
+        /// The presence ledger (presence payout): how much of the window each player spent inside
+        /// <see cref="Arena"/>. Built at <see cref="Stage"/> beside the arena, opened at <see cref="ActiveAt"/>,
+        /// sampled once per Active tick, and closed on the first tick the objective is complete (or at
+        /// <see cref="Finish"/> if it never is). Null when <see cref="Arena"/> is null; the claim handler then
+        /// reads presence as unknown.
+        ///
+        /// THREADING: <see cref="OnPlayerDied"/> reaches the ledger from landblock threads while the tick samples
+        /// it on the world thread; the ledger's own lock covers both, and the reference itself is written only
+        /// at Stage, before any death can count.
+        /// </summary>
+        public WorldEventPresence Presence { get; private set; }
+
+        /// <summary>
+        /// The idle rule the production presence sampler applies on top of the arena test (thread-safe: the
+        /// sampler also runs from Finish on a command thread, see WorldEventIdleTracker).
+        /// Off (afkSeconds 0) until Stage, which rebuilds it from the objective's
+        /// <see cref="IWorldEventObjective.PresenceAfkSeconds"/> just before the presence ledger is built. That is 0
+        /// for every goal that ships, which turns it off entirely (no tracking, never idle), so presence samples are
+        /// exactly the arena test. Volatile: written once on the world thread at Stage, read by the sampler on
+        /// whichever thread runs it.
+        /// </summary>
+        private volatile WorldEventIdleTracker presenceIdle = new WorldEventIdleTracker(0);
+
+        /// <summary>The idle window the presence sampler applies (0 = off). Diagnostic and test seam.</summary>
+        internal double PresenceAfkSecondsInEffect => presenceIdle?.AfkSeconds ?? 0;
+
+        /// <summary>World-thread only: true once the presence window has been closed and its line logged.</summary>
+        private bool presenceClosed;
+
+        /// <summary>World-thread only: run clock of the last presence sample, so a close on the same tick does not walk again.</summary>
+        private double presenceLastSampleAt;
 
         /// <summary>
         /// The measured HP-cleared-per-second of this run (C16). Fed from <see cref="OnCreatureDied"/> for
@@ -277,6 +327,95 @@ namespace ACE.Server.WorldEvents
         /// no live Player.
         /// </summary>
         private readonly Func<int> presenceCounter;
+
+        /// <summary>
+        /// Test seam for the presence-payout sample (one entry per online player, Inside already decided). Null in
+        /// production, where <see cref="SamplePresenceList"/> walks the online-player list against <see cref="Arena"/>.
+        /// </summary>
+        private readonly Func<IReadOnlyList<PresenceSample>> presenceSampler;
+
+        /// <summary>
+        /// Test seam for the presence settings (grace seconds, snap percent). Null in production, which reads
+        /// world_events_presence_death_grace_seconds and world_events_presence_snap_pct, falling back to the
+        /// compiled defaults when the read throws.
+        /// </summary>
+        private readonly Func<(double GraceSeconds, double SnapPct)> presenceSettings;
+
+        /// <summary>
+        /// Test seam for world_events_presence_ring_enabled. Null in production, which reads the property and
+        /// treats a read that throws as OFF (no ring is the safe direction: it is purely decorative).
+        /// </summary>
+        private readonly Func<bool> ringFlag;
+
+        /// <summary>True when Stage decided to place the presence ring (switch on, ring wcid set, outdoor anchor).</summary>
+        private bool ringPlanned;
+
+        // ---- hazards (HAZARDS-PLAN B1) -----------------------------------------------------------------------------
+        // All of this is touched on the world thread only, except the host's end queue (any thread).
+
+        /// <summary>Test seam for the world_events_hazard* settings. Null reads the server properties.</summary>
+        private readonly Func<WorldEventHazardSettings> hazardSettings;
+
+        /// <summary>Test seam for the live hazard start; see the constructor. Null starts through HazardManager.</summary>
+        private readonly Func<WorldEventHazardStart, IWorldEventHazardRun> hazardStarter;
+
+        /// <summary>The hazard decided at Stage, or null for none. Never changes after Stage.</summary>
+        private WorldEventHazardPlan hazardPlan;
+
+        private readonly WorldEventHazardHost hazardHost = new WorldEventHazardHost();
+
+        /// <summary>The live hazard run, or null between runs and after Finish.</summary>
+        private IWorldEventHazardRun hazardRun;
+
+        /// <summary>The element of this event, settled at the first start (it depends on the decor style).</summary>
+        private WorldEventHazardElement? hazardElement;
+
+        /// <summary>Index into the theme's decor styles of the style this run picked, or -1 (none picked).</summary>
+        private int hazardDecorStyleIndex = -1;
+
+        /// <summary>Consecutive Aborted runs and failed starts since the last Completed run.</summary>
+        private int hazardAbortStreak;
+
+        /// <summary>True once the event will start no more hazard runs (Finish, an outcome that is not worth a restart, too many aborts).</summary>
+        private bool hazardDone;
+
+        private readonly Random hazardRng = new Random();
+
+        /// <summary>Kind (wisps | balls | rain) of the live run, null between runs. Written on the world thread, read by the status line.</summary>
+        private volatile string hazardRunKind;
+
+        /// <summary>The count last handed to the live run. Written on the world thread, read by the status line.</summary>
+        private volatile int hazardLiveCount;
+
+        /// <summary>
+        /// Short status fragment of the live hazard ("balls/fire/6": kind, element, live count), or null when no hazard run is
+        /// live. Safe off the world thread (two single-word reads; a torn pair is harmless in a status line).
+        /// </summary>
+        internal string HazardStatusText
+        {
+            get
+            {
+                var kind = hazardRunKind;
+                var element = hazardElement;
+
+                if (kind == null || hazardRun == null || element == null)
+                    return null;
+
+                return $"{kind}/{element.Value.ToString().ToLowerInvariant()}/{hazardLiveCount}";
+            }
+        }
+
+        /// <summary>
+        /// True when Stage holds the anchor's adjacent landblocks for the hazard: a hazard is planned and its region covers
+        /// more than one landblock (HazardSpan.TryCover, the rule the run itself uses), so hazard objects land on the neighbours.
+        /// </summary>
+        internal bool HazardHoldsAdjacents => hazardPlan != null && HazardSpan.TryCover(hazardPlan.Region, out var cover, out _) && cover.Count > 1;
+
+        /// <summary>The planned hazard (null for none). For the status line and tests.</summary>
+        internal WorldEventHazardPlan HazardPlan => hazardPlan;
+
+        /// <summary>The live hazard run's handle, or null. For tests.</summary>
+        internal IWorldEventHazardRun HazardRunHandle => hazardRun;
 
         /// <summary>
         /// Test seam for the boss placement (D6). Null in production, where IssueChampionPlacement goes to
@@ -425,12 +564,29 @@ namespace ACE.Server.WorldEvents
         /// <param name="deathProtectionFlag">Test seam. Null reads the server property; see the field's remarks.</param>
         /// <param name="teaserLeadSource">Test seam. Null reads the server property; see the field's remarks.</param>
         /// <param name="presenceCounter">Test seam. Null uses the live online-player scan; see the field's remarks.</param>
+        /// <param name="presenceSampler">Test seam. Null walks the live online-player list; see the field's remarks.</param>
+        /// <param name="presenceSettings">Test seam. Null reads the server properties; see the field's remarks.</param>
+        /// <param name="ringFlag">Test seam. Null reads the server property; see the field's remarks.</param>
+        /// <param name="hazardSettings">Test seam. Null reads the world_events_hazard* properties; see <see cref="hazardStarter"/>.</param>
+        /// <param name="hazardStarter">
+        /// Test seam. Null starts the hazard through HazardManager on the held anchor landblock; non-null, it receives the
+        /// whole start request instead (and needs no landblock), so the hazard's lifecycle can be driven with fakes.
+        /// </param>
         public WorldEvent(uint runId, WorldEventComposition composition, WorldEventRequest request,
             IWorldEventObjective objective, Func<AudienceEstimate> audienceSampler = null, Func<double> clock = null,
             IWorldEventLandblockBridge landblockBridge = null, Func<uint, double, bool> bossSpawner = null,
             Func<bool> throughputFlag = null, Func<(bool Ok, uint Current, uint Max)> bossHealthSampler = null,
-            Func<bool> deathProtectionFlag = null, Func<int> teaserLeadSource = null, Func<int> presenceCounter = null)
+            Func<bool> deathProtectionFlag = null, Func<int> teaserLeadSource = null, Func<int> presenceCounter = null,
+            Func<IReadOnlyList<PresenceSample>> presenceSampler = null, Func<(double GraceSeconds, double SnapPct)> presenceSettings = null,
+            Func<bool> ringFlag = null, Func<WorldEventHazardSettings> hazardSettings = null,
+            Func<WorldEventHazardStart, IWorldEventHazardRun> hazardStarter = null)
         {
+            this.hazardSettings = hazardSettings;
+            this.hazardStarter = hazardStarter;
+            this.presenceSampler = presenceSampler;
+            this.presenceSettings = presenceSettings;
+            this.ringFlag = ringFlag;
+
             RunId = runId;
             Composition = composition;
             Request = request;
@@ -478,6 +634,108 @@ namespace ACE.Server.WorldEvents
                 HeldGuids.Add(wo.Guid.Full);
 
                 return true;
+            }
+        }
+
+        /// <summary>The live switch the run latches at Active (see <see cref="LatchPooledLoot"/>).</summary>
+        public const string PooledLootTunable = "world_events_pooled_loot_enabled";
+
+        /// <summary>
+        /// This run's pooled-loot bank (world_events_pooled_loot_enabled), or null when the run corpses its kills the
+        /// old way. Set once, at the Announced -> Active edge, and never replaced, so a creature's death path reads one
+        /// answer for the whole run. See <see cref="WorldEventLootPool"/>.
+        /// </summary>
+        public WorldEventLootPool LootPool { get; private set; }
+
+        /// <summary>
+        /// Latches pooled loot for this run: true creates the bank, false leaves it null (every kill corpses, exactly
+        /// as before the feature). Only the first call has any effect. internal so tests can latch without a shard
+        /// config.
+        /// </summary>
+        internal void LatchPooledLoot(bool enabled)
+        {
+            if (pooledLootLatched)
+                return;
+
+            pooledLootLatched = true;
+
+            if (enabled)
+                LootPool = new WorldEventLootPool();
+
+            log.Info($"[WORLDEVENT] run={RunId} pooled loot {(enabled ? "on" : "off")}");
+        }
+
+        private bool pooledLootLatched;
+
+        /// <summary>
+        /// <see cref="PooledLootTunable"/>, with an explicit true fallback (GetBool's own fallback reads false before the
+        /// row is seeded). A read that throws - a unit test has no shard config - reads as OFF, which is the old
+        /// corpse behaviour and so the safe direction.
+        /// </summary>
+        private bool ReadPooledLootSwitch()
+        {
+            try
+            {
+                return PropertyManager.GetBool(PooledLootTunable, true).Item;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} could not read {PooledLootTunable}; pooled loot is off for this run", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="creatureGuid"/> is this run's boss - the one creature placed in the Boss spawn slot
+        /// (a Named boss, or the family champion standing in for one). It keeps its normal corpse and loot.
+        /// </summary>
+        public bool IsPooledLootBoss(uint creatureGuid) => creatureGuid != 0 && Spawner.BossGuid == creatureGuid;
+
+        /// <summary>
+        /// Finish, entering Rewarding: freezes the seats (every character with a participation record - the
+        /// crate-versus-coal rule, so a coal claimant has no seat) and deals the bank. Never throws.
+        /// </summary>
+        internal void DealLootPool()
+        {
+            var pool = LootPool;
+
+            if (pool == null)
+                return;
+
+            try
+            {
+                var seats = Participation.Records.Select(r => r.CharacterGuid).OrderBy(g => g).ToList();
+                var offset = seats.Count > 1 ? ThreadSafeRandom.Next(0, seats.Count - 1) : 0;
+
+                var summary = pool.CloseAndDeal(seats, offset);
+
+                log.Info($"[WORLDEVENT] run={RunId} pooled loot dealt records={summary.Records} seats={summary.Seats} rares={summary.Rares} raresDestroyed={summary.RaresDestroyed}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} pooled loot deal threw; the bank is disposed", ex);
+                DisposeLootPool();
+            }
+        }
+
+        /// <summary>Window end or abort: disposes the bank (unclaimed shares vanish). Never throws; idempotent.</summary>
+        internal void DisposeLootPool()
+        {
+            var pool = LootPool;
+
+            if (pool == null)
+                return;
+
+            try
+            {
+                var destroyed = pool.Dispose();
+
+                if (destroyed > 0)
+                    log.Info($"[WORLDEVENT] run={RunId} pooled loot disposed: destroyed {destroyed} held item(s) of unclaimed shares");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} pooled loot dispose threw", ex);
             }
         }
 
@@ -589,7 +847,43 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public bool RunValid(uint runId) => runId == RunId && State != WorldEventState.Done;
 
-        public string ProgressText => Objective?.ProgressText ?? "";
+        /// <summary>
+        /// The objective's progress line, or the line as it stood at Finish once an objective whose
+        /// <see cref="IWorldEventObjective.FreezesProgressAtFinish"/> is true has finished.
+        /// </summary>
+        public string ProgressText => frozenProgressText ?? Objective?.ProgressText ?? "";
+
+        /// <summary>Set once, at Finish, only for an objective that freezes its progress line; null otherwise.</summary>
+        private string frozenProgressText;
+
+        /// <summary>
+        /// Finish's objective hooks, each on its own try/catch so one throwing cannot skip the other or the
+        /// rest of Finish.
+        /// </summary>
+        private void FinishObjective(WorldEventOutcome outcome, double now)
+        {
+            if (Objective == null)
+                return;
+
+            try
+            {
+                if (Objective.FreezesProgressAtFinish)
+                    frozenProgressText = Objective.ProgressText ?? "";
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} could not freeze the progress text", ex);
+            }
+
+            try
+            {
+                Objective.OnFinish(outcome, now);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective OnFinish threw", ex);
+            }
+        }
 
         /// <summary>Player-facing anchor name, for announcement flavour text.</summary>
         public string AnchorName => Composition?.Anchor?.DisplayName ?? Composition?.Anchor?.Id ?? "somewhere";
@@ -865,8 +1159,8 @@ namespace ACE.Server.WorldEvents
 
             BossHealthMult = mult;
 
-            // BossGuid rather than championSpawned: the flag latches on the failure paths too, and there is
-            // nothing standing to ratchet in those cases.
+            // BossGuid rather than championSpawned: the ratchet needs a boss actually standing to apply to,
+            // and BossGuid is the direct test for that.
             if (Spawner.BossGuid == 0)
                 return;
 
@@ -960,6 +1254,17 @@ namespace ACE.Server.WorldEvents
 
             StagedAt = now;
 
+            // Objective hook: the presence idle window, read before the ledger it applies to is built.
+            presenceIdle = new WorldEventIdleTracker(ObjectivePresenceAfkSeconds());
+
+            // Presence payout: the arena and its ledger, BEFORE the hold, because a ring that crosses the anchor
+            // block's edge needs the adjacent blocks held (HoldLandblocks reads ringPlanned).
+            BuildPresence();
+
+            // The hazard is decided here for the same reason: a hazard region that crosses the anchor block's edge
+            // needs the adjacent blocks held too (HoldLandblocks reads HazardHoldsAdjacents).
+            PlanHazards();
+
             // The landblock hold runs BEFORE the audience sample on purpose (TECH-DESIGN 2.11): it loads and
             // WAKES the anchor block, so a dormant or unloaded block is live by the time the sampler looks at
             // it. A failed hold aborts the run outright rather than announcing an event nobody can reach.
@@ -992,6 +1297,305 @@ namespace ACE.Server.WorldEvents
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.DeathProtectionStartLine);
                 deathProtectionStartAnnounced = true;
             }
+
+            // The presence ring goes up with the announcement, so players see where to stand before the fight.
+            PlaceRing();
+
+            // Objective hook: the run is staged and announced. Last, so the objective sees everything above.
+            try
+            {
+                Objective?.OnStaged(now);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective OnStaged threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// The pure arena rule (presence payout): the theme's <see cref="ArenaDef"/> resolved against the anchor.
+        /// radius 0 (or no arena block at all) means the theme's rewardRadius; halfHeight 0 means radius / 2.
+        /// Null when there is no anchor or the resolved radius is not positive.
+        /// </summary>
+        public static WorldEventArena BuildArena(SourceThemeDef theme, Position anchor) => BuildArena(theme, null, anchor);
+
+        /// <summary>
+        /// <see cref="BuildArena(SourceThemeDef, Position)"/> with an optional goal-supplied radius. A positive,
+        /// finite <paramref name="goalArenaRadius"/> wins over the theme's arena radius and rewardRadius. Any
+        /// other value (null, 0 or negative, NaN, infinite) is unset, the fork idiom: it never disables the
+        /// arena, it leaves the theme rule exactly as it was. halfHeight still comes from the theme's arena
+        /// block, or radius / 2.
+        /// </summary>
+        public static WorldEventArena BuildArena(SourceThemeDef theme, float? goalArenaRadius, Position anchor)
+        {
+            if (anchor == null)
+                return null;
+
+            var def = theme?.Arena;
+            var goalSet = goalArenaRadius is float g && g > 0f && !float.IsInfinity(g);
+            var radius = goalSet ? goalArenaRadius.Value : (def != null && def.Radius > 0f ? def.Radius : (theme?.RewardRadius ?? 0f));
+
+            if (!(radius > 0f) || float.IsInfinity(radius))
+                return null;
+
+            var halfHeight = def != null && def.HalfHeight > 0f ? def.HalfHeight : radius / 2f;
+
+            return new WorldEventArena(new Position(anchor), radius, halfHeight);
+        }
+
+        /// <summary>
+        /// The objective's <see cref="IWorldEventObjective.ArenaRadius"/>, the goal radius BuildArena takes. Null
+        /// (the theme's rule) without an objective, and when the objective throws.
+        /// </summary>
+        private float? ObjectiveArenaRadius()
+        {
+            try
+            {
+                return Objective?.ArenaRadius;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective ArenaRadius threw; using the theme's arena", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Stage: builds <see cref="Arena"/> and <see cref="Presence"/> and decides whether the ring is placed.
+        /// Never throws; a failure leaves presence unknown (the claim then pays m 1.0, never coal).
+        /// </summary>
+        private void BuildPresence()
+        {
+            try
+            {
+                Arena = BuildArena(Composition?.Source, ObjectiveArenaRadius(), Composition?.AnchorPosition);
+
+                if (Arena == null)
+                {
+                    log.Info($"[WORLDEVENT] run={RunId} presence: no arena (no anchor or no radius); presence is unknown for this run");
+                    return;
+                }
+
+                var (grace, snap) = ReadPresenceSettings();
+
+                Presence = new WorldEventPresence(grace, snap);
+
+                var ringWcid = Composition?.Source?.Arena?.RingWcid ?? 0;
+
+                if (ringWcid != 0 && RingEnabled())
+                {
+                    if (Arena.Centre.Indoors)
+                        log.Info($"[WORLDEVENT] run={RunId} presence ring skipped: the anchor is indoors");
+                    else
+                        ringPlanned = true;
+                }
+
+                log.Info($"[WORLDEVENT] run={RunId} presence arena radius={Arena.Radius:F1} halfHeight={Arena.HalfHeight:F1} grace={grace:F0}s snap={snap:F0}% ring={(ringPlanned ? "on" : "off")} crossesEdge={Arena.CrossesBlockEdge()}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence setup threw; presence is unknown for this run", ex);
+                Arena = null;
+                Presence = null;
+                ringPlanned = false;
+            }
+        }
+
+        private (double GraceSeconds, double SnapPct) ReadPresenceSettings()
+        {
+            if (presenceSettings != null)
+                return presenceSettings();
+
+            try
+            {
+                return (PropertyManager.GetLong("world_events_presence_death_grace_seconds", 120).Item,
+                        PropertyManager.GetLong("world_events_presence_snap_pct", 2).Item);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} could not read the presence settings; using grace 120 s and snap 2%", ex);
+                return (120, 2);
+            }
+        }
+
+        private bool RingEnabled()
+        {
+            if (ringFlag != null)
+                return ringFlag();
+
+            try
+            {
+                return PropertyManager.GetBool("world_events_presence_ring_enabled", true).Item;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} could not read world_events_presence_ring_enabled; no ring for this run", ex);
+                return false;
+            }
+        }
+
+        /// <summary>True when Stage holds the anchor's adjacent landblocks for the presence ring.</summary>
+        internal bool RingHoldsAdjacents => ringPlanned && Arena != null && Arena.CrossesBlockEdge();
+
+        /// <summary>
+        /// After the Announced transition: places the ring of wisps on the arena rim (see
+        /// WorldEventSpawner.SpawnRing). Never throws; the ring is decorative and its failure costs nothing else.
+        /// </summary>
+        private void PlaceRing()
+        {
+            if (!ringPlanned || Arena == null)
+                return;
+
+            try
+            {
+                var def = Composition?.Source?.Arena;
+
+                if (def == null || AnchorLandblock == null)
+                {
+                    log.Info($"[WORLDEVENT] run={RunId} presence ring skipped: {(def == null ? "no arena block" : "no landblock is held")}");
+                    return;
+                }
+
+                var points = Arena.RingPoints(def.RingSpacing, def.RingMin, def.RingMax);
+
+                Spawner.SpawnRing(this, def, points);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence ring placement threw", ex);
+            }
+        }
+
+        /// <summary>Unix seconds on the run clock as the UTC DateTime the presence ledger is fed.</summary>
+        internal static DateTime PresenceTime(double unixSeconds) => DateTime.UnixEpoch.AddSeconds(unixSeconds);
+
+        /// <summary>
+        /// One presence sample (presence payout): every online player, inside or not. Production walks
+        /// PlayerManager.GetAllOnline once; the seam replaces the walk. Never throws: a failed walk is an EMPTY
+        /// sample, which credits nobody that tick (presence is a reward input, so a broken scan pays less, never
+        /// more).
+        /// </summary>
+        private IReadOnlyList<PresenceSample> SamplePresenceList(double now)
+        {
+            try
+            {
+                if (presenceSampler != null)
+                    return presenceSampler() ?? Array.Empty<PresenceSample>();
+
+                var arena = Arena;
+
+                if (arena == null)
+                    return Array.Empty<PresenceSample>();
+
+                var idle = presenceIdle;
+                var idleOn = idle != null && idle.Enabled;
+
+                var list = new List<PresenceSample>();
+
+                foreach (var player in PlayerManager.GetAllOnline())
+                {
+                    if (player == null)
+                        continue;
+
+                    var loc = player.Location;
+                    var inside = arena.Contains(loc);
+
+                    // An idle player (afk flag, or no movement and no new damage for the tracker's window) counts
+                    // as outside. With the tracker off (afkSeconds 0, the only value today) this block is skipped
+                    // and Inside is exactly the arena test.
+                    if (idleOn)
+                    {
+                        var damage = Participation != null && Participation.TryGetRecord(player.Guid.Full, out var rec) ? rec.Damage : 0f;
+
+                        inside = ComposeInside(inside, idle.IsIdle(player.Guid.Full, now, loc, damage, player.IsAfk));
+                    }
+
+                    list.Add(new PresenceSample(player.Guid.Full, player.Name, inside));
+                }
+
+                return list;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence sample threw; nobody is credited this tick", ex);
+                return Array.Empty<PresenceSample>();
+            }
+        }
+
+        /// <summary>A presence sample's Inside: inside the arena and not idle.</summary>
+        internal static bool ComposeInside(bool arenaInside, bool idle) => arenaInside && !idle;
+
+        /// <summary>One presence tick: a no-op without a ledger or once the window is closed.</summary>
+        private void SamplePresence(double now)
+        {
+            var presence = Presence;
+
+            if (presence == null || presenceClosed)
+                return;
+
+            presence.Sample(PresenceTime(now), SamplePresenceList(now));
+            presenceLastSampleAt = now;
+        }
+
+        /// <summary>
+        /// Closes the presence window: a final sample (unless this tick already took one - Close itself does not
+        /// credit the span since the last sample), then Close, then the presence line. Idempotent.
+        ///
+        /// Line format: [WORLDEVENT] run=&lt;id&gt; presence tracked=&lt;n&gt; window=&lt;s&gt; full=&lt;n&gt; graceDeaths=&lt;n&gt;
+        /// </summary>
+        internal void ClosePresence(double now, string reason)
+        {
+            var presence = Presence;
+
+            if (presence == null || presenceClosed)
+                return;
+
+            // A run that never went Active never opened the window: close it silently, with no walk and no line.
+            var opened = ActiveAt > 0;
+
+            try
+            {
+                if (opened && now > presenceLastSampleAt)
+                    SamplePresence(now);
+
+                presence.Close(PresenceTime(now));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence close threw", ex);
+            }
+
+            presenceClosed = true;
+
+            if (!opened)
+                return;
+
+            log.Info($"[WORLDEVENT] run={RunId} presence tracked={presence.TrackedCount} window={presence.TotalSeconds:F0} full={presence.FullCount} graceDeaths={presence.GraceDeaths}");
+
+            log.Debug($"[WORLDEVENT] run={RunId} presence window closed: {reason}");
+        }
+
+        /// <summary>
+        /// A player died (WorldEventManager.OnPlayerDied, from Player.Die on a landblock thread). Counts only while
+        /// the run is Active and only for a death inside <see cref="Arena"/>: that starts the death grace. Never
+        /// throws.
+        /// </summary>
+        public void OnPlayerDied(uint guid, Position location)
+        {
+            try
+            {
+                var presence = Presence;
+                var arena = Arena;
+
+                if (presence == null || arena == null || State != WorldEventState.Active)
+                    return;
+
+                presence.OnDeath(guid, PresenceTime(Now()), arena.Contains(location));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} presence death hook threw for 0x{guid:X8}", ex);
+            }
         }
 
         /// <summary>
@@ -1015,6 +1619,32 @@ namespace ACE.Server.WorldEvents
                 log.Error($"[WORLDEVENT] run={RunId} could not read world event death protection properties; treating it as off", ex);
 
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Every reason this run holds the anchor's adjacent landblocks (any one is enough): the theme's
+        /// holdAdjacentLandblocks, a ring or a hazard that crosses the anchor block's edge, and the
+        /// objective's <see cref="IWorldEventObjective.HoldsAdjacentLandblocks"/>. A throwing objective reads
+        /// as not asking. Valid once BuildPresence and PlanHazards have run.
+        /// </summary>
+        internal WorldEventHoldReason AdjacentHoldReasons
+        {
+            get
+            {
+                var objectiveAsks = false;
+
+                try
+                {
+                    objectiveAsks = Objective?.HoldsAdjacentLandblocks ?? false;
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[WORLDEVENT] run={RunId} objective HoldsAdjacentLandblocks threw; reading it as false", ex);
+                }
+
+                return WorldEventLandblockHold.ComputeHoldReasons(Composition?.Source?.HoldAdjacentLandblocks ?? false,
+                    RingHoldsAdjacents, HazardHoldsAdjacents, objectiveAsks);
             }
         }
 
@@ -1044,7 +1674,10 @@ namespace ACE.Server.WorldEvents
 
             try
             {
-                var holdAdjacents = Composition?.Source?.HoldAdjacentLandblocks ?? false;
+                // Presence ring: a circle that crosses the anchor block's edge puts wisps on the neighbours, and
+                // every wisp is placed on its OWN landblock's queue, so those blocks must be held too.
+                var reasons = AdjacentHoldReasons;
+                var holdAdjacents = WorldEventLandblockHold.HoldsAdjacents(reasons);
 
                 var prior = landblockBridge.SnapshotPermaload();
 
@@ -1073,7 +1706,7 @@ namespace ACE.Server.WorldEvents
                 heldBlockKeys = new HashSet<ulong>(keys);
                 heldBlockKeysToRelease = WorldEventLandblockHold.ComputeRelease(prior, keys);
 
-                log.Info($"[WORLDEVENT] run={RunId} hold blocks={keys.Count} release-at-finish={heldBlockKeysToRelease.Count} anchor=0x{landblock.Id.Raw:X8} instance={landblock.Instance}");
+                log.Info($"[WORLDEVENT] run={RunId} hold blocks={keys.Count} release-at-finish={heldBlockKeysToRelease.Count} anchor=0x{landblock.Id.Raw:X8} instance={landblock.Instance}{WorldEventLandblockHold.HoldReasonsLogSuffix(reasons)}");
 
                 return true;
             }
@@ -1177,6 +1810,15 @@ namespace ACE.Server.WorldEvents
                         {
                             ActiveAt = now;
 
+                            // Presence payout: the window opens at ActiveAt, exactly.
+                            Presence?.Begin(PresenceTime(now));
+                            presenceLastSampleAt = now;
+
+                            // Pooled loot is latched HERE, once per run, before the first wave can spawn: a creature
+                            // of this run either banks for its whole life or corpses for its whole life, whatever
+                            // the switch does mid-run.
+                            LatchPooledLoot(ReadPooledLootSwitch());
+
                             // The wipe grace (TECH-DESIGN 2.2) starts counting only once a live participant
                             // has actually been seen, not from the moment the run goes Active - so this is
                             // overwritten by TickActive's feed the instant a credited player is nearby, and
@@ -1184,6 +1826,9 @@ namespace ACE.Server.WorldEvents
                             LastAliveParticipantAt = ActiveAt;
 
                             OnBecameActive(now);
+
+                            // After the decor (the element may follow its style). Never throws.
+                            StartHazard(now);
 
                             WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.ActiveLine(
                                 Composition?.Source, Composition?.FamilyDisplayName, Composition?.Goal, AnchorName,
@@ -1238,14 +1883,25 @@ namespace ACE.Server.WorldEvents
             lastWaveIndexSpawned = -1;
             lastProgressAt = now;
 
+            // Wave 0 is outstanding until ReleaseFirstWaveIfReady sends it: below on this edge, unless the
+            // objective's IWorldEventObjective.FirstWaveReady says no, and then from the normal cadence.
+            firstWaveOutstanding = true;
+            FirstWaveReleasedAt = null;
+
             if (AnchorLandblock == null)
             {
                 log.Info($"[WORLDEVENT] run={RunId} no landblock is held; objective, champion and wave spawns are all skipped");
+
+                // Bookkeeping only: without a landblock the release places nothing, exactly as before.
+                ReleaseFirstWaveIfReady(now);
                 return;
             }
 
             try
             {
+                // Test seam: runs ahead of the real Active-edge spawns. Null in production.
+                activeEdgeSpawnSeam?.Invoke(now);
+
                 // 2026-08-19: the theme's objectives are FOUGHT only under a DestroySource goal. Under any
                 // other goal the identical creatures go down as scenery instead - see ObjectiveSpawnKind.
                 var objectiveKind = ObjectiveSpawnKind(Composition?.Goal);
@@ -1281,6 +1937,16 @@ namespace ACE.Server.WorldEvents
 
                         if (style != null)
                         {
+                            // The hazard element follows the style (sky_rift styleElements are index-aligned with decorStyles).
+                            for (var si = 0; si < styles.Count; si++)
+                            {
+                                if (ReferenceEquals(styles[si], style))
+                                {
+                                    hazardDecorStyleIndex = si;
+                                    break;
+                                }
+                            }
+
                             decor = WorldEventSpawner.ApplyDecorStyle(decor, style);
 
                             log.Info($"[WORLDEVENT] run={RunId} decor style [{string.Join(",", style)}] chosen from {styles.Count}");
@@ -1298,12 +1964,81 @@ namespace ACE.Server.WorldEvents
                 if (npcs != null && npcs.Count > 0)
                     Spawner.SpawnNpcs(this, npcs, Composition?.AnchorPosition);
 
+                if (!ReleaseFirstWaveIfReady(now))
+                    log.Info($"[WORLDEVENT] run={RunId} wave 0 waits: the objective's first wave is not ready");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} initial spawn threw", ex);
+
+                // A throw in the objective, decor or npc spawns has always cost the run its waves: wave 0
+                // never went out, so the cadence refuses every later one. Kept exactly so - wave 0 is not
+                // retried a tick later.
+                firstWaveOutstanding = false;
+            }
+        }
+
+        /// <summary>
+        /// Test seam: invoked at the start of the Active-edge spawn block, inside its try, so a test can make
+        /// that block throw without placing anything real. Null in production.
+        /// </summary>
+        internal Action<double> activeEdgeSpawnSeam;
+
+        /// <summary>When the wave cadence last fired (or wave 0 was released). Read-only test seam.</summary>
+        internal double LastWaveAt => lastWaveAt;
+
+        /// <summary>True from the Announced -> Active edge until wave 0 has been released.</summary>
+        private bool firstWaveOutstanding;
+
+        /// <summary>
+        /// When wave 0 was released (sent to SpawnWave, or with no held landblock, released with nothing to
+        /// place): the Active edge for every objective whose <see cref="IWorldEventObjective.FirstWaveReady"/>
+        /// is true there, which is the pre-R4 timing. Null until then. Diagnostic and test seam.
+        /// </summary>
+        internal double? FirstWaveReleasedAt { get; private set; }
+
+        /// <summary>The objective's <see cref="IWorldEventObjective.FirstWaveReady"/>; true without an objective, and when it throws.</summary>
+        private bool ObjectiveFirstWaveReady(double now)
+        {
+            try
+            {
+                return Objective?.FirstWaveReady(now) ?? true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective FirstWaveReady threw; reading it as ready", ex);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Sends wave 0 if it is still outstanding and the objective says it is ready, and returns whether it
+        /// went (false when it had already gone, or is not ready yet). Called on the Active edge, and on every
+        /// later normal-cadence tick while wave 0 waits. lastWaveAt restarts from the release so the next wave
+        /// is timed from wave 0, as it is on the Active edge. Places nothing without a held landblock.
+        /// </summary>
+        internal bool ReleaseFirstWaveIfReady(double now)
+        {
+            if (!firstWaveOutstanding || !ObjectiveFirstWaveReady(now))
+                return false;
+
+            firstWaveOutstanding = false;
+            FirstWaveReleasedAt = now;
+            lastWaveAt = now;
+
+            if (AnchorLandblock == null)
+                return true;
+
+            try
+            {
                 SpawnWave(now, initial: true);
             }
             catch (Exception ex)
             {
                 log.Error($"[WORLDEVENT] run={RunId} initial spawn threw", ex);
             }
+
+            return true;
         }
 
         /// <summary>
@@ -1313,9 +2048,11 @@ namespace ACE.Server.WorldEvents
         /// The audience is re-sampled here rather than reused from Stage (PLAN 1.5): a re-sample changes
         /// only the NEXT wave's band and size, never anything already in the world.
         /// </summary>
-        private void SpawnWave(double now, bool initial, string trigger = "initial")
+        private void SpawnWave(double now, bool initial, string trigger = "initial", WorldEventObjectiveWave objectiveWave = null)
         {
-            var theme = Composition?.Source;
+            // Objective hook (WorldEvent.ObjectiveApi.cs): an objective that runs its own cadence sizes the pick with its
+            // own theme copy and extra quantity, and places the pick itself. Null (every normal-cadence wave) is unchanged.
+            var theme = objectiveWave?.SizingTheme?.Invoke(Composition?.Source) ?? Composition?.Source;
 
             // The UNION roster, not Composition.Family: every per-slot draw of a two-family run comes from
             // both families' members at once (TECH-DESIGN 2.3). For a one-family run Roster IS that family's
@@ -1352,16 +2089,34 @@ namespace ACE.Server.WorldEvents
             // that has finished since the previous pick plus the "oldest wave still standing is stale"
             // signal - so its dials are settled before this wave's size and health are computed, and a wave
             // that cleared while no pick was due is still seen by the next one.
-            EvaluatePace(now);
+            // Boss phase (world_events_boss_phase_trash_multiplier): while the boss stands, the wave is sized
+            // at a fraction so players can focus fire on it, and the pace controller is HELD - the smaller
+            // field would otherwise read as "wave cleared fast / quantity maxed" and push trash health up.
+            // The cut applies only to a kill_boss run (the boss IS the objective); a family champion on a
+            // kill_count / destroy_source run leaves trash alone because trash deaths feed those goals. A
+            // multiplier of 1.0 is "off": no scaling AND no pace hold, identical to the pre-feature wave.
+            var bossPhaseApplies = WorldEventRosterSelector.BossPhaseApplies(Composition?.Goal?.TypeKind, Spawner.BossAlive);
+
+            var trashScale = bossPhaseApplies ? WorldEventRosterSelector.ReadBossPhaseTrashMultiplier() : 1.0;
+
+            var bossPhase = trashScale < 1.0;
+
+            if (WorldEventRosterSelector.ShouldHoldPace(bossPhaseApplies, trashScale))
+                HoldPace();
+            else
+                EvaluatePace(now);
 
             var alive = Spawner.LiveCount;
 
+            var extraQuantity = objectiveWave?.ExtraQuantity?.Invoke(theme) ?? 0;
+
             var pick = WorldEventRosterSelector.PickWave(family, Audience, theme, WaveIndex, alive,
-                Pace.QuantityBonus, Spawner.OverflowChampionsAlive, null);
+                Pace.QuantityBonus + extraQuantity, Spawner.OverflowChampionsAlive, null, trashScale);
 
             if (pick == null || pick.IsEmpty)
             {
-                log.Info($"[WORLDEVENT] run={RunId} wave={WaveIndex} skipped: alive={alive} against maxAlive={theme.EffectiveMaxAlive}");
+                log.Info($"[WORLDEVENT] run={RunId} wave={WaveIndex} skipped: alive={alive} against maxAlive={WorldEventRosterSelector.ScaledMaxAlive(theme, trashScale)} " +
+                         (bossPhase ? $"bossPhase=x{trashScale:F2}" : "bossPhase=off"));
                 return;
             }
 
@@ -1395,15 +2150,40 @@ namespace ACE.Server.WorldEvents
             // TECH-DESIGN 2.15 difficulty line. Deliberately a SEPARATE line from the fixed 5.2 wave line,
             // which monitoring queries are written against and which must not grow fields.
             log.Info($"[WORLDEVENT] run={RunId} wave={WaveIndex} health=x{healthMult:F2} crowd=x{CrowdHealthMult:F2} " +
-                     $"pace=x{Pace.HealthMult:F2} qbonus={Pace.QuantityBonus} champions={pick.Champions.Count}");
+                     $"pace=x{Pace.HealthMult:F2} qbonus={Pace.QuantityBonus} champions={pick.Champions.Count} " +
+                     (bossPhase ? $"bossPhase=x{trashScale:F2}" : "bossPhase=off"));
 
             lastWaveIndexSpawned = WaveIndex;
 
-            Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult);
+            if (objectiveWave?.Place != null)
+                objectiveWave.Place(new WorldEventObjectiveWavePick(pick, WaveIndex, band, healthMult, now, trigger));
+            else
+                Spawner.SpawnWave(this, pick, WaveAnchors(), WaveIndex, band, healthMult);
 
             // Per-wave chatter is local, not server-wide (PLAN 1.10): everyone actually near the fight sees
-            // it, without spamming players nowhere near this run.
-            WorldEventAnnouncer.Local(this, WorldEventAnnouncer.WaveLine(theme));
+            // it, without spamming players nowhere near this run. An objective wave that says its own lines skips it.
+            if (objectiveWave?.SkipThemeWaveLine != true)
+                WorldEventAnnouncer.Local(this, WorldEventAnnouncer.WaveLine(theme));
+        }
+
+        /// <summary>
+        /// The boss-phase counterpart of <see cref="EvaluatePace"/>: the pace controller is not fed, but the
+        /// waves that cleared are still drained (and their quantity-maxed bookkeeping dropped) so the
+        /// observations taken against the reduced field are not replayed as a burst on the first pick after
+        /// the boss dies. Not airtight: a wave spawned by the last boss-phase pick may still clear after the
+        /// boss dies and be evaluated once by the next pick (bounded: one wave interval).
+        /// </summary>
+        private void HoldPace()
+        {
+            try
+            {
+                foreach (var wave in Spawner.TakeClearedWaves())
+                    quantityMaxedByWave.Remove(wave.WaveIndex);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} pace hold threw", ex);
+            }
         }
 
         /// <summary>
@@ -2026,7 +2806,7 @@ namespace ACE.Server.WorldEvents
                     return;
 
                 var sampled = WorldEventAudienceSampler.SampleTopMaxHealth(Composition?.AnchorPosition,
-                    Composition?.Source?.RewardRadius ?? 0f);
+                    EffectiveParticipantRadius);
 
                 if (sampled > 0)
                     BossDamageTopMaxHealth = sampled;
@@ -2285,7 +3065,7 @@ namespace ACE.Server.WorldEvents
                     ProgressText, displayWave, secondsRemaining);
 
                 log.Info($"[WORLDEVENT] run={RunId} announce progress");
-                WorldEventAnnouncer.Broadcast(line);
+                AnnounceInRun(line);
             }
             catch (Exception ex)
             {
@@ -2295,7 +3075,7 @@ namespace ACE.Server.WorldEvents
 
         /// <summary>
         /// One death's contribution to the measured rate (C16). Wave trash, overflow champions and the
-        /// objective sources count; the boss, decor and npcs never do
+        /// objective sources count; the boss, decor, npcs and friendlies never do
         /// (<see cref="WorldEventThroughput.Counts"/>). The HP is the creature's Health.MaxValue AT DEATH,
         /// so it already carries whatever crowd/pace/objective scaling it was spawned with - which is what
         /// the group actually had to remove.
@@ -2307,7 +3087,7 @@ namespace ACE.Server.WorldEvents
 
             var guid = creature.Guid.Full;
 
-            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid)))
+            if (!WorldEventThroughput.Counts(guid, Spawner.BossGuid, Spawner.IsDecorGuid(guid), Spawner.IsNpcGuid(guid), Spawner.IsFriendlyGuid(guid)))
                 return;
 
             Throughput.NoteCleared(creature.Health.MaxValue);
@@ -2497,6 +3277,268 @@ namespace ACE.Server.WorldEvents
             lastWaveAt = now;
         }
 
+        // ---- hazards (HAZARDS-PLAN B1) -----------------------------------------------------------------------------
+
+        /// <summary>Stage: decides the event's hazard (or none) and logs it. Never throws; a failure means no hazard.</summary>
+        private void PlanHazards()
+        {
+            try
+            {
+                hazardPlan = null;
+
+                if (Arena == null)
+                    return;
+
+                var settings = hazardSettings != null ? hazardSettings() : WorldEventHazards.ReadSettings();
+
+                hazardPlan = WorldEventHazards.Plan(Composition?.Source, Request?.Hazard, settings, Arena, hazardRng, out var note);
+
+                if (hazardPlan == null)
+                    log.Info($"[WORLDEVENT] run={RunId} hazard: none ({note})");
+                else
+                    log.Info($"[WORLDEVENT] run={RunId} hazard: kind={hazardPlan.Kind} alternates={hazardPlan.BallsAlternateWithRain} count={hazardPlan.CountLow}..{hazardPlan.CountHigh} balls=[{string.Join(",", hazardPlan.BallPatterns)}] rainHeight={hazardPlan.RainDropHeight:F1}{(note != null ? " (" + note + ")" : "")}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hazard planning threw; this run has no hazard", ex);
+                hazardPlan = null;
+            }
+        }
+
+        /// <summary>The live count at <paramref name="now"/>: the ramp over the minimum duration, held a step short of the top until the boss is placed.</summary>
+        private int HazardCountNow(double now)
+        {
+            var hasBoss = (Composition?.Boss?.Kind ?? BossKind.None) != BossKind.None;
+
+            return WorldEventHazards.CountAt(now, ActiveAt, MinDurationSeconds, hazardPlan.CountLow, hazardPlan.CountHigh, hasBoss, championSpawned);
+        }
+
+        /// <summary>
+        /// Starts one hazard run if the plan allows it and none is live. The first call is right after OnBecameActive; a
+        /// failed start or an ended run is retried from <see cref="TickHazards"/>. Never throws.
+        /// </summary>
+        private void StartHazard(double now)
+        {
+            if (hazardPlan == null || hazardRun != null || hazardDone || finishInvoked)
+                return;
+
+            if (hazardStarter == null && AnchorLandblock == null)
+                return; // no landblock is held (no bridge, or the hold was skipped): nothing to start on.
+
+            try
+            {
+                hazardElement ??= WorldEventHazards.ResolveElement(hazardPlan, hazardDecorStyleIndex, hazardRng);
+
+                var kind = WorldEventHazards.NextRunKind(hazardPlan, hazardRng);
+                var anchorZ = Arena?.Centre?.PositionZ ?? 0f;
+                var start = WorldEventHazards.BuildStart(hazardPlan, kind, hazardElement.Value, anchorZ, hazardRng, hazardHost);
+
+                start.Landblock = AnchorLandblock;
+
+                var run = hazardStarter != null ? hazardStarter(start) : StartLiveHazard(start);
+
+                if (run == null)
+                {
+                    NoteHazardAbort($"start of '{kind}' was refused");
+                    return;
+                }
+
+                hazardRun = run;
+                hazardRunKind = kind;
+                SetHazardCount(now);
+
+                log.Info($"[WORLDEVENT] run={RunId} hazard started kind={kind} element={hazardElement} pattern={start.Pattern ?? "-"} count={HazardCountNow(now)}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hazard start threw", ex);
+                NoteHazardAbort("start threw");
+            }
+        }
+
+        /// <summary>Hands the live run the ramped count and remembers it for the status line.</summary>
+        private void SetHazardCount(double now)
+        {
+            var count = HazardCountNow(now);
+
+            hazardLiveCount = count;
+            hazardRun.SetLiveCount(count);
+        }
+
+        private IWorldEventHazardRun StartLiveHazard(WorldEventHazardStart start)
+        {
+            var run = HazardManager.Start(start.Region, start.Kind, start.Args, start.Host, null, start.Pattern, start.Landblock, start.SettingsLayer, "world_events_hazard_" + start.Kind, out var error);
+
+            if (run == null)
+            {
+                log.Warn($"[WORLDEVENT] run={RunId} hazard '{start.Kind}' refused: {error}");
+                return null;
+            }
+
+            return new WorldEventHazardRunAdapter(run);
+        }
+
+        /// <summary>One more consecutive Aborted run (or failed start). Past <see cref="WorldEventHazards.MaxConsecutiveAborts"/> the event gives the hazard up.</summary>
+        private void NoteHazardAbort(string why)
+        {
+            hazardAbortStreak++;
+
+            if (hazardAbortStreak > WorldEventHazards.MaxConsecutiveAborts)
+            {
+                hazardDone = true;
+                log.Warn($"[WORLDEVENT] run={RunId} hazard given up after {hazardAbortStreak} consecutive aborts ({why})");
+            }
+            else
+                log.Info($"[WORLDEVENT] run={RunId} hazard abort {hazardAbortStreak}/{WorldEventHazards.MaxConsecutiveAborts} ({why}); restarting");
+        }
+
+        /// <summary>
+        /// Active tick: settle any run that ended (Completed chains a new run, Aborted restarts up to 3 times in a row, anything
+        /// else gives the hazard up), start a run when none is live, and hand the live run the ramped count. Never throws.
+        /// </summary>
+        private void TickHazards(double now)
+        {
+            if (hazardPlan == null || hazardDone || finishInvoked)
+                return;
+
+            try
+            {
+                while (hazardHost.TryDequeue(out var key, out var outcome))
+                {
+                    if (hazardRun == null || !ReferenceEquals(hazardRun.Key, key))
+                        continue; // an end we already settled, or a run we stopped ourselves.
+
+                    hazardRun = null;
+                    hazardRunKind = null;
+
+                    switch (outcome)
+                    {
+                        case HazardOutcome.Completed:
+                            hazardAbortStreak = 0;
+                            log.Info($"[WORLDEVENT] run={RunId} hazard run completed; chaining the next");
+                            break;
+
+                        case HazardOutcome.Aborted:
+                        case HazardOutcome.Reaped:
+                            NoteHazardAbort(outcome == HazardOutcome.Reaped ? "run reaped" : "run aborted");
+                            break;
+
+                        default:
+                            hazardDone = true;
+                            log.Info($"[WORLDEVENT] run={RunId} hazard run ended {outcome}; no restart");
+                            break;
+                    }
+                }
+
+                if (hazardDone)
+                    return;
+
+                if (hazardRun == null)
+                    StartHazard(now);
+
+                if (hazardRun != null)
+                    SetHazardCount(now);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hazard tick threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Stops the live hazard run and forbids any further one. Idempotent: the run is released before it is stopped, so a
+        /// repeat call (Finish, then CompleteCleanup) stops nothing twice. Never throws.
+        /// </summary>
+        private void StopHazards(string reason)
+        {
+            hazardDone = true;
+
+            var run = hazardRun;
+
+            hazardRun = null;
+            hazardRunKind = null;
+
+            if (run == null)
+                return;
+
+            try
+            {
+                run.Stop($"world event {RunId} {reason}");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} hazard stop threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Active ticks that ran the normal wave cadence (TickWaves). Stays put while the objective's
+        /// <see cref="IWorldEventObjective.ReplacesWaveCadence"/> is true, and while wave 0 is still waiting
+        /// on <see cref="IWorldEventObjective.FirstWaveReady"/>. Diagnostic and test seam only.
+        /// </summary>
+        internal int NormalWaveCadenceTicks { get; private set; }
+
+        private bool ObjectiveReplacesWaveCadence()
+        {
+            try
+            {
+                return Objective?.ReplacesWaveCadence ?? false;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective ReplacesWaveCadence threw; running the normal cadence", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The objective's <see cref="IWorldEventObjective.FailureOutcome"/>, clamped to a failure: null, a
+        /// throw, and any outcome that is not a failure (None, or one that pays the success crate - success
+        /// is IsComplete's job) all read as "not failed", the last two with a log line.
+        /// </summary>
+        private WorldEventOutcome? ObjectiveFailureOutcome()
+        {
+            WorldEventOutcome? outcome;
+
+            try
+            {
+                outcome = Objective?.FailureOutcome;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} objective FailureOutcome threw; not failed", ex);
+                return null;
+            }
+
+            if (outcome != null && !IsObjectiveFailureOutcome(outcome.Value))
+            {
+                log.Warn($"[WORLDEVENT] run={RunId} objective FailureOutcome {outcome.Value} is not a failure; ignored");
+                return null;
+            }
+
+            return outcome;
+        }
+
+        /// <summary>Whether <paramref name="outcome"/> may end a run as an objective failure: anything but None and the success outcomes.</summary>
+        internal static bool IsObjectiveFailureOutcome(WorldEventOutcome outcome)
+        {
+            return outcome != WorldEventOutcome.None && !PaysSuccessCrate(outcome);
+        }
+
+        /// <summary>The progress line for a log, never throwing.</summary>
+        private string ProgressTextForLog()
+        {
+            try
+            {
+                return ProgressText;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[WORLDEVENT] run={RunId} progress text threw", ex);
+                return "(unavailable)";
+            }
+        }
+
         private void TickActive(double now)
         {
             // Champion BEFORE waves (2026-08-16): a champion due on the same tick as a wave claims the
@@ -2504,7 +3546,22 @@ namespace ACE.Server.WorldEvents
             // placement failure at exactly that collision. The objective is still judged after both, below.
             TickChampion(now);
 
-            TickWaves(now);
+            TickHazards(now);
+
+            // Objective hook: a goal that drives its own cadence (IWorldEventObjective.ReplacesWaveCadence)
+            // gets no normal wave tick at all. Otherwise a wave 0 that was not ready on the Active edge
+            // (IWorldEventObjective.FirstWaveReady) is retried here every tick, and the tick that releases it
+            // runs no cadence, exactly like the Active edge itself; the cadence takes over from the next tick.
+            if (!ObjectiveReplacesWaveCadence())
+            {
+                if (firstWaveOutstanding)
+                    ReleaseFirstWaveIfReady(now);
+                else
+                {
+                    NormalWaveCadenceTicks++;
+                    TickWaves(now);
+                }
+            }
 
             TickBossDamage();
 
@@ -2518,6 +3575,27 @@ namespace ACE.Server.WorldEvents
             {
                 log.Error($"[WORLDEVENT] run={RunId} objective tick threw", ex);
             }
+
+            // Presence payout: one sample per Active tick, taken BEFORE the Success early-return below so the tick
+            // that completes the objective is credited too. The window closes on the FIRST tick the objective is
+            // complete - including a completion the minimum duration then holds open - and that close reuses this
+            // tick's sample rather than walking the online list again.
+            SamplePresence(now);
+
+            // Objective hook: the objective's own verdict that the run is lost (IWorldEventObjective.FailureOutcome).
+            // After this tick's presence sample, so the failing tick is credited like a completing one, and before
+            // IsComplete, so a run can never both fail and succeed on one tick. Finish closes the presence window.
+            var objectiveFailure = ObjectiveFailureOutcome();
+
+            if (objectiveFailure != null)
+            {
+                log.Info($"[WORLDEVENT] run={RunId} objective failed ({objectiveFailure.Value}): {ProgressTextForLog()}");
+                Finish(objectiveFailure.Value);
+                return;
+            }
+
+            if (Objective != null && Objective.IsComplete)
+                ClosePresence(now, "objective complete");
 
             // TECH-DESIGN 2.15: true once the objective has been MET but the minimum duration is still
             // holding the run open. It is the only way execution reaches the timers below with a satisfied
@@ -2647,7 +3725,7 @@ namespace ACE.Server.WorldEvents
         private void FeedWipeTimer(double now, int presence)
         {
             var anchor = Composition?.AnchorPosition;
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveParticipantRadius;
 
             if (anchor == null || radius <= 0)
                 return;
@@ -2699,7 +3777,11 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         public void OnCreatureDied(Creature creature, DamageHistoryInfo lastDamager, DamageHistoryInfo topDamager)
         {
-            LastCreditAt = Now();
+            // A friendly this run placed for the players to defend (WorldEventSpawner.IsFriendlyGuid) was killed by the
+            // monsters, not by the players: it is no credit, so it neither keeps an empty run alive nor arms the wipe rule.
+            // Every other death is credit exactly as before.
+            if (creature == null || !Spawner.IsFriendlyGuid(creature.Guid.Full))
+                LastCreditAt = Now();
 
             // Before Spawner.OnDied, purely so the classification reads the spawner's sets exactly as they
             // were when this creature was alive. Wrapped like every other forward here: a throw measuring
@@ -2793,8 +3875,19 @@ namespace ACE.Server.WorldEvents
             finishInvoked = true;
             Outcome = outcome;
 
+            // Objective hooks, before anything below can stop, announce or clean up: the frozen progress line
+            // (IWorldEventObjective.FreezesProgressAtFinish), then OnFinish.
+            FinishObjective(outcome, now);
+
+            // First, so no outcome leaves a hazard running or lets it restart (idempotent; CompleteCleanup repeats it).
+            StopHazards($"finish:{outcome}");
+
             if (Transition(WorldEventState.Resolved, $"finish:{outcome}"))
                 ResolvedAt = now;
+
+            // Presence payout: a window the objective never closed closes here (timeout, wipe, abandon, abort).
+            // A no-op when it already closed, or when the run never went Active (Begin never ran).
+            ClosePresence(now, $"finish:{outcome}");
 
             LogThroughputLine(now);
 
@@ -2816,7 +3909,9 @@ namespace ACE.Server.WorldEvents
 
                 WorldEventAnnouncer.Broadcast(WorldEventAnnouncer.OutcomeLine(
                     outcome, Composition?.Goal, AnchorName, mvp, Participation.TopKiller(), Participation.Count, bossName,
-                    Composition?.GoalDisplayName, Composition?.SuccessTemplate, Composition?.FailTemplate,
+                    Composition?.GoalDisplayName,
+                    ObjectiveOutcomeTemplate(Composition?.SuccessTemplate, success: true),
+                    ObjectiveOutcomeTemplate(Composition?.FailTemplate, success: false),
                     Composition?.ObjectiveNoun, Composition?.ObjectiveNounPlural),
                     relayToDiscord: relayedToDiscord);
 
@@ -2853,6 +3948,11 @@ namespace ACE.Server.WorldEvents
                     window = DefaultClaimWindowSeconds;
 
                 ClaimWindowEndsAt = now + window;
+
+                // Pooled loot: the seats are frozen and the bank dealt BEFORE the caches exist, so the first claim
+                // can already find its share. The ledger is final here - DestroyEventCreatures below cuts every
+                // back-reference, and contact credit is gated on Active.
+                DealLootPool();
 
                 try
                 {
@@ -2941,6 +4041,13 @@ namespace ACE.Server.WorldEvents
         /// </summary>
         private void CompleteCleanup(double now, string reason)
         {
+            // Pooled loot: every share nobody claimed (and, on an abort, every undealt bank) vanishes here, held
+            // rares included. First, and outside the Transition guard, so no path to Done can skip it.
+            DisposeLootPool();
+
+            // Idempotent with Finish's call; here so no path to Done can leave a hazard behind.
+            StopHazards(reason);
+
             if (Transition(WorldEventState.Cleanup, reason))
             {
                 // Captured BEFORE anything below erases the evidence: DestroyAll queues every held object's
@@ -3229,7 +4336,8 @@ namespace ACE.Server.WorldEvents
         {
             return outcome == WorldEventOutcome.FailedTimeout
                 || outcome == WorldEventOutcome.FailedWipe
-                || outcome == WorldEventOutcome.FailedNoParticipants;
+                || outcome == WorldEventOutcome.FailedNoParticipants
+                || outcome == WorldEventOutcome.FailedObjectiveLost;
         }
 
         private static bool IsAborted(WorldEventOutcome outcome)
@@ -3246,9 +4354,9 @@ namespace ACE.Server.WorldEvents
                 if (audienceSampler != null)
                     return audienceSampler();
 
-                var radius = Composition?.Source?.RewardRadius ?? 0f;
+                var radius = EffectiveParticipantRadius;
 
-                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius);
+                return WorldEventAudienceSampler.Sample(Composition?.AnchorPosition, radius, ObjectiveCountsStaff());
             }
             catch (Exception ex)
             {
@@ -3270,9 +4378,9 @@ namespace ACE.Server.WorldEvents
             if (presenceCounter != null)
                 return presenceCounter();
 
-            var radius = Composition?.Source?.RewardRadius ?? 0f;
+            var radius = EffectiveParticipantRadius;
 
-            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius);
+            return WorldEventAudienceSampler.CountAliveNear(Composition?.AnchorPosition, radius, ObjectiveCountsStaff());
         }
 
         private double Now() => clock();

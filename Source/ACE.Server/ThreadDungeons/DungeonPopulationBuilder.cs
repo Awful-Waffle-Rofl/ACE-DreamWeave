@@ -133,11 +133,111 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The defense softening factor (dynamic_dungeons_defense_curve_rate_above_375, owner ruling
-        /// 2026-10-08): above MONSTER level 375 the effective melee, missile and magic defense standard grows at
-        /// this fraction of its fitted rate. 0.5 by default; 1.0 is the unsoftened curve and 0 freezes effective
-        /// defense at its level-375 value. Sanitized to [0, 1] by <see cref="DungeonStatCurve.SanitizeDefenseRate"/>.
+        /// 2026-10-08): above MONSTER level 300 the effective melee and missile defense standard grows at this
+        /// fraction of its fitted rate. 0.5 by default; 1.0 is the unsoftened curve and 0 freezes effective
+        /// defense at its level-300 value. Sanitized to [0, 1] by <see cref="DungeonStatCurve.SanitizeDefenseRate"/>.
+        /// Magic defense has its own dial since 2026-10-28, <see cref="MagicDefenseCurveRateAbove300"/>.
         /// </summary>
         public readonly double DefenseCurveRateAbove375;
+
+        /// <summary>
+        /// The magic defense rate above monster level 300 (dynamic_dungeons_magic_defense_curve_rate_above_300, owner
+        /// ruling 2026-10-28): the retail magic defense curve's log-slope above 300 is scaled by this. 0 by default:
+        /// magic defense frozen at its level-300 value (about 520); 0.5 reproduces the curve the shared dial gave
+        /// before the split. Sanitized to [0, 1] by <see cref="DungeonStatCurve.SanitizeMagicDefenseRate"/>. A
+        /// default(...) struct reads 0, the shipped value.
+        /// </summary>
+        public readonly double MagicDefenseCurveRateAbove300;
+
+        /// <summary>
+        /// The damage growth rate above the stat-curve pivot (dynamic_dungeons_damage_curve_rate_above_pivot, owner ruling
+        /// 2026-10-29): above the pivot the Damage axis (body-part DVal and wielded weapon Damage only) grows at this fraction
+        /// of its fitted slope. 0.75 by default; 1.0 is the unsoftened curve. Sanitized to [0, 1] by
+        /// <see cref="DungeonStatCurve.SanitizeDamageRate"/>. A default(...) struct reads 0 (damage frozen at the pivot);
+        /// the constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double DamageCurveRateAbovePivot;
+
+        /// <summary>
+        /// The Threads ceiling on a monster's MAGIC ATTACK skill (dynamic_dungeons_magic_attack_skill_cap, owner ruling
+        /// 2026-10-30): the pre-enchantment War, Life, Void and Creature Enchantment skill of every Thread run creature is
+        /// held at this value (see <see cref="Creature.MagicAttackSkillCeiling"/>). 0 disables it. Sanitized by
+        /// <see cref="DungeonCombatNormalizer.SanitizeMagicAttackSkillCap"/>. A default(...) struct reads 0 (off); the
+        /// constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double MagicAttackSkillCap;
+
+        /// <summary>
+        /// Master switch for the archetype uplift (dynamic_dungeons_archetype_uplift, design steps 8-9, 2026-10-23): an
+        /// adaptive-band uplifted NON-boss entry is normalized against the standard of its own archetype
+        /// (<see cref="ArchetypeUplift"/>) instead of the cross-archetype band standard. False is the pre-existing uplift
+        /// byte for byte: the builder computes no archetype state and the spawner takes the BandUplift path.
+        /// </summary>
+        public readonly bool ArchetypeUplift;
+
+        /// <summary>rho_off (dynamic_dungeons_uplift_offense_ratio): the multiple of the archetype standard the offense axes aim at. 0 leaves them authored.</summary>
+        public readonly double UpliftOffenseRatio;
+
+        /// <summary>rho_def (dynamic_dungeons_uplift_defense_ratio): the multiple of the archetype standard the defense axes aim at. 0 leaves them authored.</summary>
+        public readonly double UpliftDefenseRatio;
+
+        /// <summary>
+        /// The OFFENSE cap (dynamic_dungeons_uplift_archetype_cap): every archetype-uplift OFFENSE axis target is held at or
+        /// below this multiple of rho_off x S_A(L), never below the creature's own value. 0 applies no cap.
+        /// </summary>
+        public readonly double UpliftArchetypeCap;
+
+        /// <summary>
+        /// The DEFENSE cap (dynamic_dungeons_uplift_defense_cap, owner ruling 2026-10-23): the headroom over the archetype
+        /// median the defensive axes (health, armour, the three defense skills, DamageResistRating, Endurance, Quickness)
+        /// may keep. 1.0 lands every defensive axis exactly on rho_def x S_A(L) (the own x k term cannot lift it above);
+        /// an authored value above it is still kept. 0 applies no cap.
+        /// </summary>
+        public readonly double UpliftDefenseCap;
+
+        /// <summary>
+        /// s (dynamic_dungeons_family_archetype_weighting, 2026-10-27): on a run whose family-eligibility band WIDENED, how
+        /// far the family draw moves from the legacy preferred-weight draw toward weights whose expected archetype mix
+        /// matches what an UN-widened run fields (<see cref="UnwidenedMix"/>, <see cref="FamilyArchetypeWeighting"/>). final share = (1 - s) x legacy + s x
+        /// matched. 0 is the legacy draw byte for byte; a run that did not widen is never affected. Independent of the archetype
+        /// uplift switch: it changes which creatures are drawn, not how they are scaled. A default(...)
+        /// struct reads 0 (legacy); the constructor defaults to the shipped value.
+        /// </summary>
+        public readonly double FamilyArchetypeWeighting;
+
+        /// <summary>
+        /// dynamic_dungeons_uplift_resist_floor (2026-10-27): an archetype-uplifted creature's elemental resists
+        /// (ResistX) and physical ArmorModVsX are floored at its archetype's natural median, so an uplifted creature is
+        /// never softer per element than the natural creatures of its kind. A default(...) struct reads false.
+        /// </summary>
+        public readonly bool UpliftResistFloor;
+
+        /// <summary>dynamic_dungeons_weak_point: whether every Thread creature gets a weak point (<see cref="DungeonWeakPoint"/>).</summary>
+        public readonly bool WeakPoint;
+
+        /// <summary>dynamic_dungeons_weak_point_armor_cut: the fraction of BaseArmor the weak-point parts lose. 0 disables the weak point.</summary>
+        public readonly double WeakPointArmorCut;
+
+        /// <summary>
+        /// dynamic_dungeons_damage_ceiling (<see cref="ThreadDungeons.DamageCeiling"/>): whether a Thread creature's melee and
+        /// missile per-hit damage is compressed against the gem level's median and held at the solo ceiling in a group.
+        /// </summary>
+        public readonly bool DamageCeiling;
+
+        /// <summary>dynamic_dungeons_damage_ceiling_ratio: the per-hit cap as a multiple of the median (sanitized at the read).</summary>
+        public readonly double DamageCeilingRatio;
+
+        /// <summary>
+        /// dynamic_dungeons_damage_ceiling_reference_ratio: the worst ratio that maps exactly onto the cap, or 0 = auto (the
+        /// pool's own worst predicted ratio, DamageCeilingBaseline.TopFor). Sanitized at the read.
+        /// </summary>
+        public readonly double DamageCeilingReferenceRatio;
+
+        /// <summary>
+        /// dynamic_dungeons_uplift_attributes: the Threads-only attribute raise of the BAND uplift (the spawner reads the same dial
+        /// per creature). Carried here so the damage ceiling's baseline predicts a band-uplifted member with the live setting.
+        /// </summary>
+        public readonly bool UpliftAttributes;
 
         /// <summary>How far the boss's DamageRating must exceed the pack's (dynamic_dungeons_boss_damage_rating_floor).</summary>
         public readonly int BossDamageRatingFloor;
@@ -259,6 +359,18 @@ namespace ACE.Server.ThreadDungeons
         /// widening (dynamic_dungeons_min_family_pool). 0 or less disables per-family widening.
         /// </summary>
         public readonly int MinFamilyPool;
+
+        /// <summary>
+        /// Speed courses only (<see cref="WithForcedFamilyWidening"/>); false for every Threads run, which is then
+        /// built exactly as before. When true and the gem FORCES a family that has no in-band trash member at the
+        /// cross-family eligibility band, the selection band keeps widening (the same
+        /// <see cref="DungeonRosterSelector.ResolveEligibilityBand"/> ladder down to the same floor, asked about that
+        /// one family) until the forced family is eligible. Without it, a forced family whose table has a level gap
+        /// opens the run with no trash, because the cross-family count is already satisfied and PickFamily refuses a
+        /// forced family it cannot field. Picks reached this way sit below the natural low edge and are uplifted to
+        /// the gem level like any other widened pick.
+        /// </summary>
+        public readonly bool WidenForForcedFamily;
 
         /// <summary>
         /// Whether an uplifted creature's name is prefixed (dynamic_dungeons_uplift_rename). A normalized
@@ -414,6 +526,15 @@ namespace ACE.Server.ThreadDungeons
         public const bool DefaultReachUp = true;
         public const bool DefaultStatCurve = true;
         public const double DefaultDefenseCurveRateAbove375 = DungeonStatCurve.DefaultDefenseRateAbove375;
+        public const double DefaultMagicDefenseCurveRateAbove300 = DungeonStatCurve.DefaultMagicDefenseRateAbove300;
+        public const double DefaultDamageCurveRateAbovePivot = DungeonStatCurve.DefaultDamageRateAbovePivot;
+
+        /// <summary>
+        /// Owner ruling 2026-10-30: a top player (about 530 magic defense) resists about 66% of monster spells at top Threads.
+        /// Resist = 1/(1 + e^(0.03 * (A - D))) (WorldObject.MagicDefenseCheck, factor 0.03), so for resist 0.66 at D = 530,
+        /// A = 530 + ln(0.34 / 0.66) / 0.03 = 507.9, which rounds to 508.
+        /// </summary>
+        public const double DefaultMagicAttackSkillCap = 508.0;
         public const int DefaultBossDamageRatingFloor = 30;
         public const int DefaultBossDamageResistFloor = 15;
         public const double DefaultBossLevelMargin = 1.10;
@@ -439,6 +560,46 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>Default of dynamic_dungeons_uplift_attributes: the Threads-only attribute and effective-skill uplift (BandUplift.RaiseAttributes).</summary>
         public const bool DefaultUpliftAttributes = true;
+
+        /// <summary>Default of dynamic_dungeons_archetype_uplift (ships ON, the fork convention for a new setting).</summary>
+        public const bool DefaultArchetypeUplift = true;
+
+        /// <summary>Defaults of dynamic_dungeons_uplift_offense_ratio / _defense_ratio: neutral (1.0 = the archetype standard itself).</summary>
+        public const double DefaultUpliftOffenseRatio = 1.0;
+        public const double DefaultUpliftDefenseRatio = 1.0;
+
+        /// <summary>Typo ceiling for the two uplift ratios, on the boss band ratios' reasoning (MaxBossBandRatio).</summary>
+        public const double MaxUpliftRatio = 5.0;
+
+        /// <summary>Default of dynamic_dungeons_uplift_archetype_cap (orchestrator ruling 2026-10-23): shape kept within [median, 1.25 x median].</summary>
+        public const double DefaultUpliftArchetypeCap = 1.25;
+
+        /// <summary>Typo ceiling for dynamic_dungeons_uplift_archetype_cap and dynamic_dungeons_uplift_defense_cap.</summary>
+        public const double MaxUpliftArchetypeCap = 10.0;
+
+        /// <summary>
+        /// Default of dynamic_dungeons_uplift_defense_cap (owner ruling 2026-10-23: "defensive axes aiming at the archetype
+        /// median - these are very sensitive, and misses are very frustrating"): exactly the median.
+        /// </summary>
+        public const double DefaultUpliftDefenseCap = 1.0;
+
+        /// <summary>Default of dynamic_dungeons_family_archetype_weighting (ships ON at full strength, the fork convention for a new setting).</summary>
+        public const double DefaultFamilyArchetypeWeighting = 1.0;
+
+        /// <summary>Ceiling of dynamic_dungeons_family_archetype_weighting: a blend fraction, so 1 is the domain's own top.</summary>
+        public const double MaxFamilyArchetypeWeighting = 1.0;
+
+        /// <summary>Default of dynamic_dungeons_uplift_resist_floor (ships ON, the fork convention for a new setting).</summary>
+        public const bool DefaultUpliftResistFloor = true;
+
+        /// <summary>Default of dynamic_dungeons_weak_point (ships ON, the fork convention for a new setting).</summary>
+        public const bool DefaultWeakPoint = true;
+
+        /// <summary>Default of dynamic_dungeons_weak_point_armor_cut (owner ruling 2026-10-24): the weak-point parts keep 60 percent of their BaseArmor.</summary>
+        public const double DefaultWeakPointArmorCut = 0.4;
+
+        /// <summary>Typo ceiling for dynamic_dungeons_weak_point_armor_cut: a cut of 1 takes the weak-point parts' stored armour to zero.</summary>
+        public const double MaxWeakPointArmorCut = 1.0;
 
         /// <summary>
         /// The prefix an uplifted creature's name carries when <see cref="UpliftRename"/> is on. ASCII only,
@@ -573,8 +734,40 @@ namespace ACE.Server.ThreadDungeons
             int healthCurveTopLevel = DefaultHealthCurveTopLevel,
             bool reachUp = DefaultReachUp,
             bool statCurve = DefaultStatCurve,
-            double defenseCurveRateAbove375 = DefaultDefenseCurveRateAbove375)
+            double defenseCurveRateAbove375 = DefaultDefenseCurveRateAbove375,
+            bool archetypeUplift = DefaultArchetypeUplift,
+            double upliftOffenseRatio = DefaultUpliftOffenseRatio,
+            double upliftDefenseRatio = DefaultUpliftDefenseRatio,
+            double upliftArchetypeCap = DefaultUpliftArchetypeCap,
+            double upliftDefenseCap = DefaultUpliftDefenseCap,
+            bool weakPoint = DefaultWeakPoint,
+            double weakPointArmorCut = DefaultWeakPointArmorCut,
+            bool damageCeiling = ThreadDungeons.DamageCeiling.DefaultEnabled,
+            double damageCeilingRatio = ThreadDungeons.DamageCeiling.DefaultCap,
+            double damageCeilingReferenceRatio = ThreadDungeons.DamageCeiling.DefaultReferenceRatio,
+            bool upliftAttributes = DefaultUpliftAttributes,
+            double familyArchetypeWeighting = DefaultFamilyArchetypeWeighting,
+            bool upliftResistFloor = DefaultUpliftResistFloor,
+            double magicDefenseCurveRateAbove300 = DefaultMagicDefenseCurveRateAbove300,
+            double damageCurveRateAbovePivot = DefaultDamageCurveRateAbovePivot,
+            double magicAttackSkillCap = DefaultMagicAttackSkillCap)
         {
+            MagicAttackSkillCap = magicAttackSkillCap;
+            MagicDefenseCurveRateAbove300 = magicDefenseCurveRateAbove300;
+            DamageCurveRateAbovePivot = damageCurveRateAbovePivot;
+            UpliftAttributes = upliftAttributes;
+            DamageCeiling = damageCeiling;
+            DamageCeilingRatio = damageCeilingRatio;
+            DamageCeilingReferenceRatio = damageCeilingReferenceRatio;
+            FamilyArchetypeWeighting = familyArchetypeWeighting;
+            UpliftResistFloor = upliftResistFloor;
+            WeakPoint = weakPoint;
+            WeakPointArmorCut = weakPointArmorCut;
+            UpliftArchetypeCap = upliftArchetypeCap;
+            UpliftDefenseCap = upliftDefenseCap;
+            ArchetypeUplift = archetypeUplift;
+            UpliftOffenseRatio = upliftOffenseRatio;
+            UpliftDefenseRatio = upliftDefenseRatio;
             HealthCurveTopLevel = healthCurveTopLevel;
             ReachUp = reachUp;
             StatCurve = statCurve;
@@ -624,6 +817,47 @@ namespace ACE.Server.ThreadDungeons
             HealthCurveAnchorLow = healthCurveAnchorLow;
             HealthCurveAnchorHigh = healthCurveAnchorHigh;
         }
+
+        /// <summary>
+        /// Copy constructor behind <see cref="WithMonsterCounts"/>: every field (the private group snapshot
+        /// included) is copied by the struct assignment, then only the two counts are overwritten, so a field
+        /// added to this struct later is carried without anyone remembering to list it here.
+        /// </summary>
+        private DungeonPopulationLimits(DungeonPopulationLimits source, int minMonsters, int maxMonsters)
+        {
+            this = source;
+            MinMonsters = minMonsters;
+            MaxMonsters = maxMonsters;
+        }
+
+        /// <summary>
+        /// A copy of these limits with ONLY <see cref="MinMonsters"/> and <see cref="MaxMonsters"/> replaced. The
+        /// values are taken as given: the builder already bounds a minimum above the cap by the cap.
+        /// </summary>
+        public DungeonPopulationLimits WithMonsterCounts(int min, int max) => new DungeonPopulationLimits(this, min, max);
+
+        /// <summary>Copy constructor behind <see cref="WithForcedFamilyWidening"/>; same struct-assignment rule as above.</summary>
+        private DungeonPopulationLimits(DungeonPopulationLimits source, bool widenForForcedFamily)
+        {
+            this = source;
+            WidenForForcedFamily = widenForForcedFamily;
+        }
+
+        /// <summary>A copy of these limits with ONLY <see cref="WidenForForcedFamily"/> set. Speed courses only.</summary>
+        public DungeonPopulationLimits WithForcedFamilyWidening(bool on = true) => new DungeonPopulationLimits(this, on);
+
+        /// <summary>Copy constructor behind <see cref="WithoutGroup"/>; same struct-assignment rule as above.</summary>
+        private DungeonPopulationLimits(DungeonPopulationLimits source, GroupScaling group)
+        {
+            this = source;
+            this.group = group;
+        }
+
+        /// <summary>
+        /// A copy of these limits with the group snapshot dropped (solo). The damage ceiling's baseline memo keys on the whole
+        /// limits VALUE (ThreadPlanCache) and the baseline never reads the group, whose instance is per run.
+        /// </summary>
+        internal DungeonPopulationLimits WithoutGroup() => new DungeonPopulationLimits(this, (GroupScaling)null);
     }
 
     public sealed class DungeonSpawnPlanEntry
@@ -690,6 +924,21 @@ namespace ACE.Server.ThreadDungeons
     }
 
     /// <summary>
+    /// The resolved weak point of one run (see <see cref="DungeonWeakPoint"/>): which attack height its trash and
+    /// its boss are weak at (null = no height differential, so a random third of the hittable parts)
+    /// and how much BaseArmor the weak parts lose.
+    /// </summary>
+    public sealed class WeakPointPlan
+    {
+        public AttackHeight? TrashHeight { get; set; }
+
+        /// <summary>The boss's height; the family's height when weak-points.json gives no bossHeight.</summary>
+        public AttackHeight? BossHeight { get; set; }
+
+        public double ArmorCut { get; set; }
+    }
+
+    /// <summary>
     /// One run's complete population, decided before a single object exists. <see cref="Entries"/> holds EVERY
     /// creature the run will place, boss included - the boss is an entry with <see cref="DungeonRole.Boss"/>,
     /// not a field alongside them, because ThreadDungeonRun's clear rule counts the boss into both Planned
@@ -702,6 +951,37 @@ namespace ACE.Server.ThreadDungeons
         public List<DungeonSpawnPlanEntry> Entries { get; } = new List<DungeonSpawnPlanEntry>();
         public uint BossWcid { get; set; }
         public string FamilyId { get; set; }
+
+        /// <summary>
+        /// The run's weak point (<see cref="DungeonWeakPoint"/>), or NULL - which the spawner reads as "no weak
+        /// point" - whenever dynamic_dungeons_weak_point is off, the armour cut is 0, the run drew no family, or the
+        /// family has no row in weak-points.json. Deliberately NOT a plan note: Notes are part of the pinned plan
+        /// fingerprint, and the builder draws nothing from the rng for this either.
+        /// </summary>
+        public WeakPointPlan WeakPoint { get; set; }
+
+        /// <summary>
+        /// The damage ceiling's ONE shared physical median at this gem level (<see cref="DamageCeilingStandard"/>: the lower
+        /// median of the worst predicted hit of every creature the trash+elite spawn pool can field), against which melee
+        /// AND missile are both measured; or 0 - which the spawner reads as "leave damage alone" - when
+        /// dynamic_dungeons_damage_ceiling is off or the caller supplied no per-hit delegate (speed courses and the offline
+        /// harness pass none). Like <see cref="WeakPoint"/>, NOT a plan note and not a fingerprint field, and the builder
+        /// draws nothing from the rng for it.
+        /// </summary>
+        public double PerHitMedian { get; set; }
+
+        /// <summary>How many pool members dealt damage, i.e. the median's sample size (diagnostic; 0 with no median).</summary>
+        public int PerHitSample { get; set; }
+
+        /// <summary>dynamic_dungeons_damage_ceiling_ratio as it applied to this plan (sanitized).</summary>
+        public double DamageCeilingCap { get; set; } = DamageCeiling.DefaultCap;
+
+        /// <summary>
+        /// The reference ratio top this plan compresses with: the pool's worst predicted ratio to the median when
+        /// dynamic_dungeons_damage_ceiling_reference_ratio is 0 (auto, the default), else that forced value. 0 with no median.
+        /// </summary>
+        public double DamageCeilingTop { get; set; }
+
         public double HealthMultiplier { get; set; } = 1.0;
         public double BossHealthMultiplier { get; set; } = 1.0;
 
@@ -780,6 +1060,14 @@ namespace ACE.Server.ThreadDungeons
         public DungeonStatCurve.Anchored StatCurve { get; set; }
 
         /// <summary>
+        /// The archetype uplift's state (dynamic_dungeons_archetype_uplift, design steps 8-9), or NULL - which the spawner
+        /// reads as "take the BandUplift path" - whenever the switch is off, no non-boss entry was uplifted, or the caller
+        /// supplied no archetype profile delegate. Every uplifted non-boss entry's <see cref="ArchetypeUpliftInfo"/> is
+        /// already resolved inside it when the builder returns.
+        /// </summary>
+        public ArchetypeUpliftContext ArchetypeUplift { get; set; }
+
+        /// <summary>
         /// The reach-up pivot P = floor(authored top / band high) this plan was built against (326 on the shipped
         /// roster), or 0 when neither reach-up nor the stat curve is on. Carried for the log line and tests.
         /// </summary>
@@ -836,6 +1124,14 @@ namespace ACE.Server.ThreadDungeons
         /// bonus inside BossDamageRating could be swallowed by the floor (ruling R15).
         /// </summary>
         public int GroupDamageRatingBonus { get; set; }
+
+        /// <summary>
+        /// The family's group creature abilities (DAMAGE-CEILING-PLAN.md step 6; <see cref="FamilyAbilityPlanner.Resolve"/>).
+        /// NOT set by Build: the spawner resolves it once per run right after Build, from the live tunables and the run seed,
+        /// so it takes no draw from the plan rng, adds no note and is no fingerprint field. Null (speed courses, the offline
+        /// harness, a plan built without it) attaches nothing.
+        /// </summary>
+        public FamilyAbilityPlan CreatureAbilities { get; set; }
 
         /// <summary>Per-kill XP and luminance factor for trash and elites: H * B / T. 1.0 on a solo plan.</summary>
         public double GroupTrashRewardFactor { get; set; } = 1.0;
@@ -986,6 +1282,15 @@ namespace ACE.Server.ThreadDungeons
         public double CategoryResistFloor { get; set; } = DungeonPopulationLimits.DefaultCategoryResistFloor;
         public double CategoryArmorModCeiling { get; set; } = DungeonPopulationLimits.DefaultCategoryArmorModCeiling;
         public double DefenseSkillCapOffset { get; set; } = DungeonPopulationLimits.DefaultDefenseSkillCapOffset;
+
+        /// <summary>
+        /// DungeonPopulationLimits.MagicAttackSkillCap, as it applied to this plan (0 = off). Defaults to 0 so a hand-built
+        /// plan carries no ceiling; the builder copies the limits value in.
+        /// </summary>
+        public double MagicAttackSkillCap { get; set; }
+
+        /// <summary>DungeonPopulationLimits.UpliftResistFloor, as it applied to this plan (the spawner's per-creature resist floor gate).</summary>
+        public bool UpliftResistFloor { get; set; }
     }
 
     /// <summary>
@@ -1104,7 +1409,8 @@ namespace ACE.Server.ThreadDungeons
         public static DungeonSpawnPlan Build(DungeonGemSpec spec, DungeonEntryDef dungeon, ThreadDungeonStore store,
             IReadOnlyDictionary<string, SpeciesTableDef> species, Func<uint, int> levelOf, Func<uint, uint> healthOf,
             DungeonPopulationLimits limits, Random rng, Func<uint, DungeonStatProfile> profileOf = null,
-            Func<uint, bool> fitsDungeon = null, ThreadPlanMemo memo = null)
+            Func<uint, bool> fitsDungeon = null, ThreadPlanMemo memo = null, Func<uint, float> movementHeightOf = null,
+            Func<uint, DungeonStatProfile> archetypeProfileOf = null, Func<uint, CreaturePerHit> perHitOf = null)
         {
             var plan = new DungeonSpawnPlan();
             var mods = store.Modifiers;
@@ -1127,10 +1433,7 @@ namespace ACE.Server.ThreadDungeons
             //
             // A value ABOVE 1.0 also reads as 1.0 rather than as an error: a floor above the natural low edge
             // could only describe widening UPWARD, and the high edge never moves.
-            var lowFloor = double.IsNaN(limits.BandLowFloorRatio) || double.IsInfinity(limits.BandLowFloorRatio)
-                || limits.BandLowFloorRatio <= 0 || limits.BandLowFloorRatio > 1.0
-                ? 1.0
-                : limits.BandLowFloorRatio;
+            var lowFloor = SanitizedBandLowFloor(limits.BandLowFloorRatio);
 
             // ---- reach-up: the pivot projection (owner ruling 2026-10-08) ----
             // The authored roster stops at AuthoredTop (375 on the shipped tables), so above the pivot
@@ -1189,9 +1492,22 @@ namespace ACE.Server.ThreadDungeons
             // and a key without k would serve a switched-off run the entries a reach-up run stored, or the
             // reverse, the moment an admin toggled dynamic_dungeons_reach_up.
             DungeonRosterBand EligibilityBandOf(IReadOnlyDictionary<string, SpeciesTableDef> tables, DungeonRosterBand natural)
-                => memo != null
+            {
+                var resolved = memo != null
                     ? memo.ResolveEligibilityBand(tables, spec.Level, projLevelOf, natural, lowFloor, limits.MinEligibleFamilies, reachScale)
                     : DungeonRosterSelector.ResolveEligibilityBand(tables, spec.Level, projLevelOf, natural, lowFloor, limits.MinEligibleFamilies);
+
+                // Speed courses only (WidenForForcedFamily is false for every Threads run, so this is skipped and the
+                // band above is returned unchanged). The same resolver, asked about the forced family alone with a
+                // threshold of one table, continues the ladder from where the cross-family search stopped.
+                if (!limits.WidenForForcedFamily || string.IsNullOrEmpty(spec.Family) || spec.Family == DungeonGemSpec.Any
+                    || tables == null || !tables.TryGetValue(spec.Family, out var forced) || forced == null
+                    || DungeonRosterSelector.IsEligible(forced, spec.Level, projLevelOf, resolved))
+                    return resolved;
+
+                var alone = new Dictionary<string, SpeciesTableDef> { [forced.Id ?? spec.Family] = forced };
+                return DungeonRosterSelector.ResolveEligibilityBand(alone, spec.Level, projLevelOf, resolved, lowFloor, 1);
+            }
 
             int EligibleFamiliesAt(IReadOnlyDictionary<string, SpeciesTableDef> tables, DungeonRosterBand at)
                 => memo != null
@@ -1439,16 +1755,7 @@ namespace ACE.Server.ThreadDungeons
             // When nothing widened, no pick can be below that edge by construction, so an unwidened run at or
             // below the pivot tags nothing at all.
             DungeonSpawnPlanEntry EntryFor(uint wcid, DungeonRole role, DungeonSpawnPointDef point)
-            {
-                var projected = projLevelOf(wcid);
-
-                if (projected < plan.NaturalBandLow)
-                    return new DungeonSpawnPlanEntry(wcid, role, point, spec.Level);
-
-                var raw = levelOf(wcid);
-
-                return new DungeonSpawnPlanEntry(wcid, role, point, 0, projected > raw ? projected : 0);
-            }
+                => TagEntry(wcid, role, point, projLevelOf(wcid), () => levelOf(wcid), plan.NaturalBandLow, spec.Level);
 
             // ---- family ----
             SpeciesTableDef family = null;
@@ -1468,14 +1775,53 @@ namespace ACE.Server.ThreadDungeons
             // call is what makes I-A and I-E true at the source rather than by a branch further down.
             var eligibilityBand = EligibilityBandOf(speciesForSelection, band);
 
-            if (eligibilityBand.Low < band.Low)
+            if (limits.WidenForForcedFamily && eligibilityBand.Low < band.Low && EligibleFamiliesAt(speciesForSelection, band) >= limits.MinEligibleFamilies)
+                plan.Notes.Add($"band: forced family '{spec.Family}' has no trash member in the natural band; low edge widened from " +
+                               $"x{band.Low:0.##} to x{eligibilityBand.Low:0.##} (speed course forced-family widening)");
+            else if (eligibilityBand.Low < band.Low)
                 plan.Notes.Add($"band: only {EligibleFamiliesAt(speciesForSelection, band)} " +
                                $"family/families in the natural band; low edge widened from x{band.Low:0.##} to x{eligibilityBand.Low:0.##} " +
                                $"(want {limits.MinEligibleFamilies})");
 
+            // The archetype-weighted family draw (dynamic_dungeons_family_archetype_weighting, 2026-10-27). ONLY on a run
+            // whose eligibility band WIDENED, for a free (not forced) family at an indoor dungeon, with the dial on and an
+            // archetype profile delegate; every condition is checked before the delegate is read, so any other run never
+            // touches it and draws exactly as before. The roster it classifies with is handed to the archetype context
+            // below, so the two cannot classify a wcid differently.
+            RosterArchetypes weightingRoster = null;
+
+            var familyForced = !string.IsNullOrEmpty(spec.Family) && spec.Family != DungeonGemSpec.Any;
+            var weightingDial = double.IsNaN(limits.FamilyArchetypeWeighting) ? 0.0 : Math.Min(limits.FamilyArchetypeWeighting, DungeonPopulationLimits.MaxFamilyArchetypeWeighting);
+
             try
             {
-                family = DungeonRosterSelector.PickFamily(speciesForSelection, spec.Family, dungeon.Families, dungeon.CreatureTypes, spec.Level, projLevelOf, rng, eligibilityBand);
+                FamilyWeightingDraw weighted = null;
+
+                if (weightingDial > 0 && archetypeProfileOf != null && eligibilityBand.Low < band.Low && !familyForced && !dungeon.IsOutdoor)
+                {
+                    weightingRoster = memo != null && memo.HasArchetypeProfiles
+                        ? memo.Roster(species, band, lowFloor, archetypeProfileOf)
+                        : new RosterArchetypes(species, band, lowFloor, archetypeProfileOf);
+
+                    weighted = FamilyWeighting(spec, dungeon, speciesForSelection, projLevelOf, band, eligibilityBand, lowFloor,
+                        limits.MinFamilyPool, weightingDial, weightingRoster);
+                }
+
+                if (weighted != null)
+                {
+                    family = DungeonRosterSelector.PickFamilyWeighted(weighted.Families, weighted.Shares, rng);
+
+                    var drawn = weighted.Families.ToList().IndexOf(family);
+                    plan.Notes.Add($"family: archetype-weighted draw x{weightingDial:0.##} over {weighted.Families.Count} eligible famil{(weighted.Families.Count == 1 ? "y" : "ies")} " +
+                                   $"(target: un-widened mix {Mix(weighted.NaturalMix)} over {weighted.NaturalFamilies.Count} natural-band famil{(weighted.NaturalFamilies.Count == 1 ? "y" : "ies")}); expected mix {Mix(weighted.ExpectedMix)} " +
+                                   $"(legacy {Mix(weighted.LegacyMix)}); drew {family?.Id} at {Pct(drawn >= 0 ? weighted.Shares[drawn] : 0)} (legacy {Pct(drawn >= 0 ? weighted.LegacyShares[drawn] : 0)})");
+                }
+                else
+                {
+                    // Open World Threads (F11): an outdoor site draws only its themed tables when any is eligible.
+                    family = DungeonRosterSelector.PickFamily(speciesForSelection, spec.Family, dungeon.Families, dungeon.CreatureTypes, spec.Level, projLevelOf, rng, eligibilityBand,
+                        themedOnly: dungeon.IsOutdoor);
+                }
             }
             catch (ArgumentException ex)
             {
@@ -1490,10 +1836,30 @@ namespace ACE.Server.ThreadDungeons
             {
                 if (!familyNoted)
                     plan.Notes.Add($"family: no species table has a trash member in the level-{spec.Level} band");
+
+                // A run with no drawn family still places a boss, and every Thread creature has a weak point (owner
+                // ruling): a random third, seeded with the family key "none" by the spawner. No rng draw, no plan note.
+                if (limits.WeakPoint && limits.WeakPointArmorCut > 0)
+                    plan.WeakPoint = new WeakPointPlan { TrashHeight = null, BossHeight = null, ArmorCut = limits.WeakPointArmorCut };
             }
             else
             {
                 plan.FamilyId = family.Id;
+
+                // The weak point (owner ruling 2026-10-24). A pure lookup: no rng draw and no plan note (Notes are in
+                // the pinned plan fingerprint), so the plan is identical with the feature on, off or missing a row. A family
+                // with no row leaves WeakPoint null; the spawner warns once per run.
+                if (limits.WeakPoint && limits.WeakPointArmorCut > 0 && store.WeakPoints != null
+                    && store.WeakPoints.TryGetValue(family.Id, out var weakRow)
+                    && DungeonWeakPoint.TryParseHeight(weakRow.Height, out var trashHeight))
+                {
+                    var bossHeight = trashHeight;
+
+                    if (weakRow.BossHeight != null)
+                        DungeonWeakPoint.TryParseHeight(weakRow.BossHeight, out bossHeight);
+
+                    plan.WeakPoint = new WeakPointPlan { TrashHeight = trashHeight, BossHeight = bossHeight, ArmorCut = limits.WeakPointArmorCut };
+                }
 
                 // Per-family widening, starting from the band the family was SELECTED at rather than from the
                 // natural band - a family that only became eligible through the widening above may have no
@@ -1539,6 +1905,8 @@ namespace ACE.Server.ThreadDungeons
                 // group count's lower bound (R27): a group cap below the solo count can never lower the count
                 // and so inflate H. The group count answers to the GROUP cap, not MaxMonsters. Solo takes no
                 // part of this block, so its slot count and its rng draws are exactly what they were.
+                var soloSlotsForGroup = slots;
+
                 if (group.IsGroup)
                 {
                     var soloSlots = slots;
@@ -1561,22 +1929,49 @@ namespace ACE.Server.ThreadDungeons
                 var eliteShare = DungeonRewardMath.RunValue(spec, mods, DungeonRewardMath.EliteShare, DefaultEliteShare, levelScale);
                 var picks = DungeonRosterSelector.PickPopulation(trashPool, elitePool, slots, eliteShare, rng);
 
-                // Shuffle the points so a count_mult below 1, or a MaxMonsters cap, does not always drop the
-                // same (deepest) rooms - the curated list comes out of the tool in BFS order.
-                var shuffled = points.OrderBy(_ => rng.Next()).ToList();
-
-                // The first min(slots, shuffled.Count) picks go to distinct points exactly as before. Any
-                // overflow (count_mult > 1, or MinMonsters exceeding the curated point count) wraps
-                // round-robin over the SAME shuffled order, so no point takes a second creature until every
-                // point has one, and point loads differ by at most 1.
-                for (var i = 0; i < picks.Count && shuffled.Count > 0; i++)
-                    plan.Entries.Add(EntryFor(picks[i].Wcid, picks[i].Role, shuffled[i % shuffled.Count]));
-
-                if (picks.Count > shuffled.Count && shuffled.Count > 0)
+                // Open World Threads (R6): an OUTDOOR site assigns its points by OutdoorPopulation.Assign instead - interior
+                // points as a guaranteed quota, the per-point height fit, and overflow scattered at least 2 m apart. Its own
+                // branch, so the dungeon path below (and its rng draws) is untouched.
+                if (dungeon.IsOutdoor)
                 {
-                    var maxPerPoint = (picks.Count + shuffled.Count - 1) / shuffled.Count;
-                    plan.Notes.Add($"population: {picks.Count} creature(s) shared across {shuffled.Count} curated point(s) " +
-                                   $"(up to {maxPerPoint} per point)");
+                    var drop = OutdoorDrop(dungeon);
+
+                    // The boss anchor is reserved: no pack creature lands within the spacing rule of the spot the boss takes.
+                    var assigned = OutdoorPopulation.Assign(picks.Select(p => p.Wcid).ToList(), points, rng, movementHeightOf,
+                        (source, copy) => drop != null && OutdoorPopulation.AdmitsScatter(dungeon.Outdoor, drop.Value, source, copy),
+                        dungeon.BossAnchor != null ? new[] { dungeon.BossAnchor } : null, out var droppedPicks);
+
+                    foreach (var (pick, point) in assigned)
+                        plan.Entries.Add(EntryFor(picks[pick].Wcid, picks[pick].Role, point));
+
+                    // Group scaling (spec 6.1) must use the count actually PLACED, not the slot count: picks with no
+                    // admissible point are gone, and a C_actual over the slot count would leave each creature too weak.
+                    if (group.IsGroup && droppedPicks > 0)
+                        plan.GroupCountActual = OutdoorGroupCountActual(soloSlotsForGroup, assigned.Count);
+
+                    var interiorPoints = points.Count(OutdoorPopulation.IsInterior);
+                    plan.Notes.Add($"outdoor population: {assigned.Count} of {picks.Count} creature(s) placed over {points.Count} point(s) " +
+                                   $"({interiorPoints} interior, {assigned.Count(a => a.Point.Scattered)} scattered overflow, {droppedPicks} with no admissible point)");
+                }
+                else
+                {
+                    // Shuffle the points so a count_mult below 1, or a MaxMonsters cap, does not always drop the
+                    // same (deepest) rooms - the curated list comes out of the tool in BFS order.
+                    var shuffled = points.OrderBy(_ => rng.Next()).ToList();
+
+                    // The first min(slots, shuffled.Count) picks go to distinct points exactly as before. Any
+                    // overflow (count_mult > 1, or MinMonsters exceeding the curated point count) wraps
+                    // round-robin over the SAME shuffled order, so no point takes a second creature until every
+                    // point has one, and point loads differ by at most 1.
+                    for (var i = 0; i < picks.Count && shuffled.Count > 0; i++)
+                        plan.Entries.Add(EntryFor(picks[i].Wcid, picks[i].Role, shuffled[i % shuffled.Count]));
+
+                    if (picks.Count > shuffled.Count && shuffled.Count > 0)
+                    {
+                        var maxPerPoint = (picks.Count + shuffled.Count - 1) / shuffled.Count;
+                        plan.Notes.Add($"population: {picks.Count} creature(s) shared across {shuffled.Count} curated point(s) " +
+                                       $"(up to {maxPerPoint} per point)");
+                    }
                 }
 
                 if (picks.Count == 0)
@@ -1590,8 +1985,10 @@ namespace ACE.Server.ThreadDungeons
             plan.BossOffenseBandRatio = NonNegativeOrZero(limits.BossOffenseBandRatio);
             plan.BossDefenseBandRatio = NonNegativeOrZero(limits.BossDefenseBandRatio);
             plan.StripCombatTraits = limits.StripCombatTraits;
+            plan.MagicAttackSkillCap = DungeonCombatNormalizer.SanitizeMagicAttackSkillCap(limits.MagicAttackSkillCap);
             plan.CategoryResistFloor = NonNegativeOrZero(limits.CategoryResistFloor);
             plan.CategoryArmorModCeiling = NonNegativeOrZero(limits.CategoryArmorModCeiling);
+            plan.UpliftResistFloor = limits.UpliftResistFloor;
             // NOT NonNegativeOrZero: a negative offset is this axis's OWN "disable" value (0 is a valid cap,
             // exactly at the band's effective median), so only a negative value reads that way. NaN/Infinity is
             // garbage, not a deliberate "disable" - it reads as the compiled default, the same contract
@@ -1698,14 +2095,14 @@ namespace ACE.Server.ThreadDungeons
             {
                 plan.BossHealthMultiplier = DungeonRewardMath.HealthMultiplier(spec, mods, bossModifiers, forBoss: true, levelScale: levelScale);
 
-                // HealthMultiplier(forBoss: true) folds every gem modifier whose Target is "monster" (the default)
-                // plus every boss-targeted one, on top of the boss row's own extra modifiers, each at MinMagnitude.
-                // The pack figure above (plan.HealthMultiplier, forBoss left false) excludes boss-targeted gem
-                // modifiers, so a gem's boss-only effect (e.g. boss_guarded) lands on the boss alone and never
-                // leaks onto the pack. So boss >= pack holds exactly when no extra boss health_mult row authors a
-                // magnitude below 1.0 - true of the shipped modifiers.json (boss_guarded 1.5) and pinned by a test
-                // over the shipped file. Clamped anyway while normalizing, because "boss outranks its pack" must
-                // survive a content edit.
+                // HealthMultiplier(forBoss: true) takes the GREATEST health_mult magnitude across every gem modifier
+                // whose Target is "monster" (the default) plus every boss-targeted one, and the boss row's own extra
+                // modifiers (each at MinMagnitude) - the maximum, not the product (owner ruling), so Hardy and
+                // boss_guarded no longer stack. The pack figure above (plan.HealthMultiplier, forBoss left false)
+                // excludes boss-targeted gem modifiers, so a gem's boss-only effect (e.g. boss_guarded) can raise
+                // the boss alone and never leaks onto the pack. The boss view is a superset of the pack view and
+                // the result is a maximum floored at 1.0, so boss >= pack now holds by construction. The clamp
+                // below stays anyway, because "boss outranks its pack" must survive a content edit.
                 if (plan.BossNormalize)
                     plan.BossHealthMultiplier = Math.Max(plan.BossHealthMultiplier, plan.HealthMultiplier);
 
@@ -1861,12 +2258,18 @@ namespace ACE.Server.ThreadDungeons
                 // own sample again, i.e. the flat standard the curve exists to replace.
                 if (curveApplies)
                 {
-                    plan.StatCurve = new DungeonStatCurve.Anchored(MeasuredStandardAt(pivot, 1.0, profileOf, band), pivot, limits.DefenseCurveRateAbove375);
+                    plan.StatCurve = new DungeonStatCurve.Anchored(MeasuredStandardAt(pivot, 1.0, profileOf, band), pivot, limits.DefenseCurveRateAbove375,
+                        limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot);
                     plan.BandStandard = plan.StatCurve.StandardAt(spec.Level);
                 }
                 else
                 {
-                    plan.BandStandard = BandStandardAt(band);
+                    // Owner ruling 2026-10-22: monster magic defense follows the RETAIL curve from level 301 up,
+                    // replacing the measured magic defense standard, including at 301..pivot where the curve
+                    // above does not apply. Same stat-curve switch; a no-op at or below 300.
+                    plan.BandStandard = limits.StatCurve
+                        ? DungeonStatCurve.WithRetailMagicDefense(BandStandardAt(band), spec.Level, limits.MagicDefenseCurveRateAbove300)
+                        : BandStandardAt(band);
                 }
 
                 // The uplift note reports the UPLIFT, so it is written only when something was tagged; a standard
@@ -1876,6 +2279,39 @@ namespace ACE.Server.ThreadDungeons
                         ? $"uplift: {plan.Entries.Count(e => e.UpliftLevel > 0)} entry/entries tagged for level {spec.Level} but the band sample had no usable data; only the level is normalized"
                         : $"uplift: {plan.Entries.Count(e => e.UpliftLevel > 0)} entry/entries normalized to level {spec.Level} against a {plan.BandStandard.SampleCount}-member band standard " +
                           $"(sample low x{plan.BandStandard.SampleLowRatio:0.##}, dmg {plan.BandStandard.MaxBodyDamage}, armor {plan.BandStandard.MaxBaseArmor}, {plan.BandStandard.SkillMedians.Count} skill(s))");
+            }
+
+            // ---- archetype uplift (dynamic_dungeons_archetype_uplift, design steps 8-9) ----
+            // Only for a plan that tagged a NON-boss entry for uplift, with the switch on and an archetype profile
+            // delegate: otherwise nothing below runs and the plan is exactly what it was before the feature (the spawner
+            // then takes the BandUplift path). Resolved after the band standard so a note can sit beside the uplift's.
+            if (limits.ArchetypeUplift && archetypeProfileOf != null && plan.Entries.Any(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss))
+            {
+                plan.ArchetypeUplift = BuildArchetypeContext(spec, species, limits, plan, archetypeProfileOf, memo, weightingRoster);
+
+                var resolved = plan.Entries.Where(e => e.UpliftLevel > 0 && e.Role != DungeonRole.Boss).Select(e => e.Wcid).Distinct()
+                    .Select(w => plan.ArchetypeUplift.For(w)).ToList();
+
+                plan.Notes.Add($"archetype uplift: {resolved.Count(i => i != null)} of {resolved.Count} uplifted wcid(s) resolved " +
+                               $"({string.Join(", ", resolved.Where(i => i != null).GroupBy(i => i.Archetype).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}"))}); " +
+                               $"standards measured at level {plan.ArchetypeUplift.ReferenceLevel}{(plan.ArchetypeUplift.Extrapolated ? " and carried up the stat curve" : "")}, " +
+                               $"off x{plan.ArchetypeUplift.OffenseRatio:0.##} def x{plan.ArchetypeUplift.DefenseRatio:0.##}");
+            }
+
+            // ---- damage ceiling (DAMAGE-CEILING-PLAN.md step 1; baseline reworked 2026-10-26) ----
+            // The ONE shared physical median the spawner compresses every creature against, and the reference ratio top:
+            // the median of what actually spawns at this gem level (DamageCeilingBaselineFor). A pure function of the gem
+            // level, the dials and the gem's additive DamageRating (never of the seed, the family or the picks), so it adds no note, takes no rng draw and is
+            // no fingerprint field: a plan is byte-identical with the switch on, off, or with no per-hit delegate (speed
+            // courses and the offline harness pass none, which leaves the median 0, the spawner's no-op).
+            if (limits.DamageCeiling && perHitOf != null)
+            {
+                var baseline = DamageCeilingBaselineFor(spec, species, levelOf, limits, perHitOf, profileOf, archetypeProfileOf, plan.DamageRating, memo);
+
+                plan.PerHitMedian = baseline.Median;
+                plan.PerHitSample = baseline.SampleSize;
+                plan.DamageCeilingCap = DamageCeiling.SanitizeCap(limits.DamageCeilingRatio);
+                plan.DamageCeilingTop = baseline.Median > 0 ? baseline.TopFor(DamageCeiling.SanitizeReferenceRatio(limits.DamageCeilingReferenceRatio)) : 0.0;
             }
 
             // ---- Group Threads health, damage and reward factors (spec 6.1, 6.2) ----
@@ -1947,11 +2383,360 @@ namespace ACE.Server.ThreadDungeons
             return ordered[ordered.Count - 1];
         }
 
+        /// <summary>
+        /// The adaptive band's floor as the builder reads it (pure): a garbled (NaN, infinite, non-positive) value or one
+        /// above 1.0 reads as 1.0, the disabled value. Shared by Build and BuildArchetypeContext so the two cannot disagree.
+        /// </summary>
+        internal static double SanitizedBandLowFloor(double ratio)
+            => double.IsNaN(ratio) || double.IsInfinity(ratio) || ratio <= 0 || ratio > 1.0 ? 1.0 : ratio;
+
+        /// <summary>
+        /// The archetype-uplift context for a plan (pure over the delegates; also the entry point an offline tool uses to
+        /// ask what a run at this gem would make of any wcid). Re-derives the builder's own band, floor, pivot, reach-up
+        /// scale and curve gate from the same limits, so the two cannot disagree:
+        ///   - ABOVE THE PIVOT WITH THE STAT CURVE ON, the run-level standards are measured at the PIVOT's natural band over
+        ///     the raw profiles and carried up the curve per archetype (DungeonArchetypeStandards.Extrapolate);
+        ///   - otherwise they are measured at the run level over the PROJECTED profiles (reach-up's k), with magic defense
+        ///     on the retail curve when the stat curve is on - the same two readings the band standard itself takes;
+        ///   - a creature's OWN-level standards are always measured at its authored level over the raw profiles.
+        /// Health is priced on DungeonHealthCurve at both ends.
+        /// </summary>
+        internal static ArchetypeUpliftContext BuildArchetypeContext(DungeonGemSpec spec, IReadOnlyDictionary<string, SpeciesTableDef> species,
+            DungeonPopulationLimits limits, DungeonSpawnPlan plan, Func<uint, DungeonStatProfile> archetypeProfileOf, ThreadPlanMemo memo = null,
+            RosterArchetypes roster = null)
+        {
+            var band = new DungeonRosterBand(limits.RosterBandLow, limits.RosterBandHigh);
+            var lowFloor = SanitizedBandLowFloor(limits.BandLowFloorRatio);
+
+            // The plan's own pivot and scale when there is a plan (so the context provably uses the builder's numbers);
+            // re-derived from the same rule otherwise.
+            var pivot = plan != null
+                ? plan.ReachUpPivot
+                : limits.ReachUp || limits.StatCurve ? ReachUpPivot(AuthoredTopLevel(species, w => archetypeProfileOf(w)?.Level ?? 0), band.High) : 0;
+            var reachScale = plan != null ? plan.ReachUpScale : limits.ReachUp ? ReachUpScale(spec.Level, pivot) : 1.0;
+            var curveApplies = limits.StatCurve && pivot > 0 && spec.Level > pivot;
+
+            // The family draw's roster when it classified with one (the same tables, band, floor and delegate), so the
+            // weighting and the uplift cannot classify a wcid differently; otherwise built here exactly as before.
+            roster ??= memo != null && memo.HasArchetypeProfiles
+                ? memo.Roster(species, band, lowFloor, archetypeProfileOf)
+                : new RosterArchetypes(species, band, lowFloor, archetypeProfileOf);
+
+            Func<uint, DungeonStatProfile> projected = reachScale == 1.0
+                ? archetypeProfileOf
+                : w =>
+                {
+                    var profile = archetypeProfileOf(w);
+                    return profile == null ? null : profile.WithLevel(ProjectLevel(profile.Level, reachScale));
+                };
+
+            var ownMemo = new System.Collections.Concurrent.ConcurrentDictionary<int, DungeonArchetypeStandards>();
+            var runReferenceMemo = new System.Collections.Concurrent.ConcurrentDictionary<int, DungeonArchetypeStandards>();
+
+            // The roster was built at lowFloor, so every memoised measurement keys on it as the roster floor, whatever
+            // floor the sample itself walks to (code review 2026-10-23: the natural-only run standards depend on the
+            // configured band_low_floor through the roster's classification).
+            DungeonArchetypeStandards MeasureAt(int level, Func<uint, DungeonStatProfile> profiles, double scale, double floor)
+                => memo != null && memo.HasArchetypeProfiles
+                    ? memo.ArchetypeStandards(species, level, profiles, roster, band, floor, scale, rosterFloor: lowFloor)
+                    : DungeonArchetypeStandards.Measure(species, level, profiles, roster, band, floor);
+
+            // The RUN-level standards S_A(L) are measured over the NATURAL band only (orchestrator ruling 2026-10-23,
+            // option a): never over the widened band, so dynamic_dungeons_band_low_floor cannot move the target. Walking
+            // the low edge down there sampled weaker, lower-level creatures exactly when the band was widened, i.e. exactly
+            // when the uplift is active. An archetype thin in the natural band is ratio-transferred (ArchetypeUpliftContext's
+            // RunEnd, from the highest band below where it is adequate IN ITS NATURAL BAND - that reference walk is natural-
+            // band-only too, or the floor would move the target through the ratio instead). The OWN-level standards S_A(l)
+            // and their own ratio-transfer references keep the band floor's walk.
+            var referenceLevel = curveApplies ? pivot : spec.Level;
+            var runSample = RunStandardsSample(spec.Level, pivot, reachScale, limits.StatCurve, archetypeProfileOf, projected);
+            var runMeasured = MeasureAt(runSample.Level, runSample.Profiles, runSample.Scale, NaturalBandOnly);
+
+            return new ArchetypeUpliftContext(spec.Level, referenceLevel, curveApplies, limits.DefenseCurveRateAbove375,
+                limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot, limits.StatCurve, runMeasured,
+                level => ownMemo.GetOrAdd(level, l => MeasureAt(l, archetypeProfileOf, 1.0, lowFloor)), roster,
+                level => DungeonHealthCurve.Target(level, limits), NonNegativeOrZero(limits.UpliftOffenseRatio),
+                NonNegativeOrZero(limits.UpliftDefenseRatio), NonNegativeOrZero(limits.UpliftArchetypeCap),
+                defenseCapRatio: NonNegativeOrZero(limits.UpliftDefenseCap),
+                measureRunReference: level => runReferenceMemo.GetOrAdd(level, l => MeasureAt(l, archetypeProfileOf, 1.0, NaturalBandOnly)));
+        }
+
+        /// <summary>The low-floor ratio that keeps a sample walk inside the natural band (no downward widening).</summary>
+        internal const double NaturalBandOnly = 1.0;
+
+        /// <summary>
+        /// The damage ceiling's baseline at a gem level (owner decisions 2026-10-26, <see cref="DamageCeilingStandard"/>):
+        /// the trash+elite spawn pool every eligible family can field, each member predicted as the spawner fields it
+        /// BEFORE the ceiling, and the shared median and automatic top over that pool. Also the entry point an offline tool
+        /// (damage-ceiling-census) uses, so the census reports exactly the numbers a plan carries.
+        ///
+        /// A pure function of (the tables, the gem level, the limits, <paramref name="gemDamageRating"/> and the weenie data):
+        /// never of a plan, a seed or a pick. Re-derives the builder's band, floor, pivot, reach-up scale, projected level read
+        /// and curve gate from the same limits by the same rule Build uses. The pool is read over the RAW species tables (no
+        /// dungeon fit filter), as the band statistics are.
+        ///
+        /// MEMOISED WHOLE (code review 2026-10-26, F5 option b) when <paramref name="memo"/> carries a per-hit read: one entry
+        /// per (tables, level, full limits value, gem rating, delegate presence) in ThreadPlanCache. WITH NO MEMO (the plan cache
+        /// switched off, or a caller without one) the archetype context is built through a SCRATCH memo (ThreadPlanMemo.Scratch,
+        /// code review 2026-10-26 F5), so the result equals the cache-on one; the cost is a roster classification and several
+        /// standard measurements per plan while the cache is off.
+        ///
+        /// The prediction per member (<see cref="DamageCeilingStandard.Predict"/>):
+        ///   - UPLIFTED (projected below the natural low edge): the archetype uplift when it is on, there is a memo and the
+        ///     context resolves the wcid (<see cref="CreaturePerHit.UpliftedByArchetype"/>, with the DamageRating offset of
+        ///     the rating floor plus <paramref name="gemDamageRating"/>, the solo plan's additive rating), else the band
+        ///     uplift against the band standard the plan would carry (the curve's at the run level above the pivot, else the
+        ///     measured one), with the attribute raise per <see cref="DungeonPopulationLimits.UpliftAttributes"/>;
+        ///   - STAMPED (projected above authored): carried up the stat curve when the curve applies and a profile delegate
+        ///     exists (plan.StatCurve's own condition), else the level alone;
+        ///   - otherwise authored.
+        /// Boss normalization is not predicted: the boss is not a pool member.
+        /// </summary>
+        internal static DamageCeilingBaseline DamageCeilingBaselineFor(DungeonGemSpec spec, IReadOnlyDictionary<string, SpeciesTableDef> species,
+            Func<uint, int> levelOf, DungeonPopulationLimits limits, Func<uint, CreaturePerHit> perHitOf, Func<uint, DungeonStatProfile> profileOf,
+            Func<uint, DungeonStatProfile> archetypeProfileOf, int gemDamageRating = 0, ThreadPlanMemo memo = null)
+        {
+            if (spec == null || species == null || levelOf == null || perHitOf == null || spec.Level <= 0)
+                return DamageCeilingBaseline.Empty;
+
+            if (memo != null && memo.HasPerHits)
+                return memo.DamageCeilingBaseline(species, spec.Level, limits, gemDamageRating, profileOf != null, archetypeProfileOf != null,
+                    () => ComputeDamageCeilingBaseline(spec, species, levelOf, limits, memo.PerHitOf, profileOf, archetypeProfileOf, gemDamageRating, memo));
+
+            return ComputeDamageCeilingBaseline(spec, species, levelOf, limits, perHitOf, profileOf, archetypeProfileOf, gemDamageRating, memo);
+        }
+
+        private static DamageCeilingBaseline ComputeDamageCeilingBaseline(DungeonGemSpec spec, IReadOnlyDictionary<string, SpeciesTableDef> species,
+            Func<uint, int> levelOf, DungeonPopulationLimits limits, Func<uint, CreaturePerHit> perHitOf, Func<uint, DungeonStatProfile> profileOf,
+            Func<uint, DungeonStatProfile> archetypeProfileOf, int gemDamageRating, ThreadPlanMemo memo)
+        {
+            var band = new DungeonRosterBand(limits.RosterBandLow, limits.RosterBandHigh);
+            var lowFloor = SanitizedBandLowFloor(limits.BandLowFloorRatio);
+            var pivot = limits.ReachUp || limits.StatCurve ? ReachUpPivot(AuthoredTopLevel(species, levelOf), band.High) : 0;
+            var reachScale = limits.ReachUp ? ReachUpScale(spec.Level, pivot) : 1.0;
+            var curveApplies = limits.StatCurve && pivot > 0 && spec.Level > pivot;
+            Func<uint, int> projLevelOf = reachScale == 1.0 ? levelOf : w => ProjectLevel(levelOf(w), reachScale);
+
+            var eligibility = memo != null
+                ? memo.ResolveEligibilityBand(species, spec.Level, projLevelOf, band, lowFloor, limits.MinEligibleFamilies, reachScale)
+                : DungeonRosterSelector.ResolveEligibilityBand(species, spec.Level, projLevelOf, band, lowFloor, limits.MinEligibleFamilies);
+            var pool = DamageCeilingStandard.SpawnPool(species, spec.Level, projLevelOf, band, lowFloor, limits.MinEligibleFamilies, limits.MinFamilyPool, eligibility);
+
+            // Built only when a member is actually uplifted, and once.
+            ArchetypeUpliftContext archetypes = null;
+            var archetypesResolved = false;
+            DungeonBandStandard standard = null;
+            var standardResolved = false;
+
+            DungeonBandStandard StandardAtRun()
+            {
+                if (standardResolved)
+                    return standard;
+
+                standardResolved = true;
+
+                if (profileOf == null)
+                    return standard = null;
+
+                DungeonBandStandard Measured(int level, double scale, Func<uint, DungeonStatProfile> profiles)
+                    => memo != null ? memo.BandStandard(species, level, profiles, band, lowFloor, scale) : DungeonBandStandard.Compute(species, level, profiles, band, lowFloor);
+
+                if (curveApplies)
+                    return standard = new DungeonStatCurve.Anchored(Measured(pivot, 1.0, profileOf), pivot, limits.DefenseCurveRateAbove375,
+                        limits.MagicDefenseCurveRateAbove300, limits.DamageCurveRateAbovePivot).StandardAt(spec.Level);
+
+                Func<uint, DungeonStatProfile> projProfileOf = reachScale == 1.0
+                    ? profileOf
+                    : w =>
+                    {
+                        var profile = profileOf(w);
+                        return profile == null ? null : profile.WithLevel(ProjectLevel(profile.Level, reachScale));
+                    };
+
+                return standard = Measured(spec.Level, reachScale, projProfileOf);
+            }
+
+            CreaturePerHit Uplift(uint wcid, CreaturePerHit raw)
+            {
+                if (!archetypesResolved)
+                {
+                    archetypesResolved = true;
+
+                    // With the plan cache off (no memo) the context is built through a SCRATCH memo, a private cache
+                    // generation thrown away with this call (code review 2026-10-26 F5), so the median is the cache-on one.
+                    if (limits.ArchetypeUplift && archetypeProfileOf != null)
+                        archetypes = BuildArchetypeContext(spec, species, limits, null, archetypeProfileOf,
+                            memo ?? ThreadPlanMemo.Scratch(levelOf, profileOf, archetypeProfileOf, perHitOf));
+                }
+
+                var info = archetypes?.For(wcid);
+
+                return info != null
+                    ? raw.UpliftedByArchetype(spec.Level, info, gemDamageRating)
+                    : raw.UpliftedByBand(spec.Level, StandardAtRun(), limits.UpliftAttributes);
+            }
+
+            // A stamp's ratio exactly as the live stamp reads it (plan.StatCurve.Ratio: the run's three rates, damage split at
+            // the pivot), so the ceiling's median is taken over the damage the spawner really fields.
+            double StampRatio(DungeonStatAxis axis, int fromLevel, int toLevel)
+                => DungeonStatCurve.Ratio(axis, fromLevel, toLevel, limits.DefenseCurveRateAbove375, limits.MagicDefenseCurveRateAbove300,
+                    limits.DamageCurveRateAbovePivot, pivot);
+
+            return DamageCeilingStandard.Compute(pool, perHitOf, projLevelOf, levelOf, DungeonRosterSelector.NaturalLowEdge(spec.Level, band), spec.Level,
+                curveApplies && profileOf != null ? StampRatio : (Func<DungeonStatAxis, int, int, double>)null, Uplift);
+        }
+
+        /// <summary>
+        /// The (level, profiles, scale) the RUN-level archetype standards are measured at (pure), shared by
+        /// BuildArchetypeContext's runMeasured and the family draw's natural mix q so the two cannot sample different
+        /// populations: above the pivot with the stat curve on, the PIVOT's natural band over the raw profiles (scale 1);
+        /// otherwise the run level over the PROJECTED profiles (reach-up's k). <paramref name="projected"/> is the caller's
+        /// projection of <paramref name="raw"/> when it already has one (so the memo keys on the same instance); built here
+        /// otherwise.
+        /// </summary>
+        internal static (int Level, Func<uint, DungeonStatProfile> Profiles, double Scale) RunStandardsSample(int level, int pivot, double reachScale, bool statCurve,
+            Func<uint, DungeonStatProfile> raw, Func<uint, DungeonStatProfile> projected = null)
+        {
+            if (statCurve && pivot > 0 && level > pivot)
+                return (pivot, raw, 1.0);
+
+            projected ??= reachScale == 1.0 || raw == null
+                ? raw
+                : w =>
+                {
+                    var profile = raw(w);
+                    return profile == null ? null : profile.WithLevel(ProjectLevel(profile.Level, reachScale));
+                };
+
+            return (level, projected, reachScale);
+        }
+
+        /// <summary>One archetype-weighted family draw's inputs and shares, for the draw and its plan note.</summary>
+        internal sealed class FamilyWeightingDraw
+        {
+            /// <summary>The eligible families, Id-ordinal (DungeonRosterSelector.EligibleFamiliesOrdered).</summary>
+            public IReadOnlyList<SpeciesTableDef> Families;
+
+            /// <summary>The final draw shares, aligned with <see cref="Families"/>.</summary>
+            public double[] Shares;
+
+            public double[] LegacyShares;
+
+            /// <summary>q: the archetype mix an UN-widened run fields (the legacy draw's expected mix over <see cref="NaturalFamilies"/>).</summary>
+            public double[] NaturalMix;
+
+            /// <summary>The families eligible in the NATURAL (un-widened) eligibility band, Id-ordinal.</summary>
+            public IReadOnlyList<SpeciesTableDef> NaturalFamilies;
+
+            public double[] ExpectedMix;
+            public double[] LegacyMix;
+            public IReadOnlyList<double[]> FamilyMixes;
+        }
+
+        /// <summary>
+        /// The archetype mix an UN-widened run fields (pure): the legacy family draw's expected trash mix over the families
+        /// eligible in the NATURAL eligibility band - sum over f of legacyShare_f x p_f(a), legacyShare_f being PickFamily's
+        /// preference weighting (3 preferred, 1 otherwise, DungeonRosterSelector.PreferenceWeightOf) normalised over that set
+        /// and p_f the family's trash-pool mix at the trash band it would get with the natural eligibility band
+        /// (ResolveFamilyTrashBand from <paramref name="natural"/>). Families in Id-ordinal order, archetypes in
+        /// FamilyArchetypeWeighting.Order. Null when no family is eligible in the natural band.
+        /// </summary>
+        internal static (double[] Mix, IReadOnlyList<SpeciesTableDef> Families) UnwidenedMix(DungeonGemSpec spec, DungeonEntryDef dungeon,
+            IReadOnlyDictionary<string, SpeciesTableDef> speciesForSelection, Func<uint, int> projLevelOf, DungeonRosterBand natural, double lowFloor, int minFamilyPool,
+            Func<uint, CreatureArchetype> archetypeOf)
+        {
+            var families = DungeonRosterSelector.EligibleFamiliesOrdered(speciesForSelection, spec.Level, projLevelOf, natural);
+
+            if (families.Count == 0)
+                return (null, families);
+
+            var preference = families.Select(f => (double)DungeonRosterSelector.PreferenceWeightOf(f, dungeon.Families, dungeon.CreatureTypes)).ToList();
+            var mixes = FamilyMixes(families, spec.Level, projLevelOf, natural, lowFloor, minFamilyPool, archetypeOf);
+
+            return (FamilyArchetypeWeighting.ExpectedMix(FamilyArchetypeWeighting.LegacyShares(preference), mixes), families);
+        }
+
+        /// <summary>Each family's trash-pool archetype mix at the trash band ResolveFamilyTrashBand gives it from <paramref name="eligibilityBand"/>.</summary>
+        private static List<double[]> FamilyMixes(IReadOnlyList<SpeciesTableDef> families, int level, Func<uint, int> projLevelOf, DungeonRosterBand eligibilityBand,
+            double lowFloor, int minFamilyPool, Func<uint, CreatureArchetype> archetypeOf)
+            => families.Select(f =>
+            {
+                var trashBand = DungeonRosterSelector.ResolveFamilyTrashBand(f, level, projLevelOf, eligibilityBand, lowFloor, minFamilyPool);
+                return FamilyArchetypeWeighting.FamilyMix(DungeonRosterSelector.PoolFor(f, level, DungeonRole.Trash, projLevelOf, trashBand), archetypeOf);
+            }).ToList();
+
+        /// <summary>
+        /// The archetype-weighted family shares for a widened run (pure over the delegates; FamilyArchetypeWeighting has the
+        /// rule). The goal is that a widened run plays like an un-widened one, so q is the archetype mix an un-widened run
+        /// actually FIELDS (<see cref="UnwidenedMix"/>), not the natural band's distinct-wcid population. Each family
+        /// eligible in the WIDENED band has its p_f at the band the builder would draw it from: ResolveFamilyTrashBand from
+        /// <paramref name="eligibilityBand"/>, over <paramref name="speciesForSelection"/>. Null when no family is eligible
+        /// in the natural band or in the widened band (the caller then takes the legacy draw).
+        /// </summary>
+        internal static FamilyWeightingDraw FamilyWeighting(DungeonGemSpec spec, DungeonEntryDef dungeon, IReadOnlyDictionary<string, SpeciesTableDef> speciesForSelection,
+            Func<uint, int> projLevelOf, DungeonRosterBand natural, DungeonRosterBand eligibilityBand, double lowFloor, int minFamilyPool, double s, RosterArchetypes roster)
+        {
+            CreatureArchetype ArchetypeOf(uint wcid) => roster.Classify(wcid).Archetype;
+
+            var (q, naturalFamilies) = UnwidenedMix(spec, dungeon, speciesForSelection, projLevelOf, natural, lowFloor, minFamilyPool, ArchetypeOf);
+
+            if (q == null)
+                return null;
+
+            var families = DungeonRosterSelector.EligibleFamiliesOrdered(speciesForSelection, spec.Level, projLevelOf, eligibilityBand);
+
+            if (families.Count == 0)
+                return null;
+
+            var preference = families.Select(f => (double)DungeonRosterSelector.PreferenceWeightOf(f, dungeon.Families, dungeon.CreatureTypes)).ToList();
+            var mixes = FamilyMixes(families, spec.Level, projLevelOf, eligibilityBand, lowFloor, minFamilyPool, ArchetypeOf);
+
+            var shares = FamilyArchetypeWeighting.Weights(preference, mixes, q, s);
+            var legacy = FamilyArchetypeWeighting.LegacyShares(preference);
+
+            return new FamilyWeightingDraw
+            {
+                Families = families,
+                Shares = shares,
+                LegacyShares = legacy,
+                NaturalMix = q,
+                NaturalFamilies = naturalFamilies,
+                FamilyMixes = mixes,
+                ExpectedMix = FamilyArchetypeWeighting.ExpectedMix(shares, mixes),
+                LegacyMix = FamilyArchetypeWeighting.ExpectedMix(legacy, mixes),
+            };
+        }
+        private static string Pct(double share) => (share * 100.0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+        /// <summary>A mix vector as "Caster 30%, MeleeTank 70%" (non-zero archetypes only, enum order).</summary>
+        private static string Mix(IReadOnlyList<double> mix)
+            => string.Join(", ", FamilyArchetypeWeighting.Order.Select((a, i) => (a, v: mix[i])).Where(x => x.v > 0).Select(x => $"{x.a} {Pct(x.v)}"));
+
         /// <summary>A ratio dial as the plan carries it: NaN, Infinity or a negative value reads as 0 ("axis disabled").</summary>
         private static double NonNegativeOrZero(double value)
             => double.IsNaN(value) || double.IsInfinity(value) || value < 0 ? 0.0 : value;
 
         // ---- reach-up (owner ruling 2026-10-08) -------------------------------------------------------------
+
+        /// <summary>
+        /// The uplift and reach-up tag for one roster pick (pure; the builder's local EntryFor delegates here so every
+        /// construction site of a DungeonSpawnPlanEntry gets the identical rule, and so an offline tool can ask what a
+        /// run would tag a wcid).
+        ///   - a pick whose PROJECTED level sits below the natural band's low edge could only have been reached by the
+        ///     extension, and carries the gem's level as its normalization target (uplift level);
+        ///   - otherwise a pick whose projected level is above its authored (raw) one is STAMPED at the projected level;
+        ///   - everything else carries neither.
+        /// The raw (authored) level is read through a delegate and ONLY on the second branch, exactly as the old local did, so a
+        /// memoised levelOf sees the same number of lookups.
+        /// </summary>
+        internal static DungeonSpawnPlanEntry TagEntry(uint wcid, DungeonRole role, DungeonSpawnPointDef point,
+            int projectedLevel, Func<int> rawLevelOf, int naturalBandLow, int gemLevel)
+        {
+            if (projectedLevel < naturalBandLow)
+                return new DungeonSpawnPlanEntry(wcid, role, point, gemLevel);
+
+            return new DungeonSpawnPlanEntry(wcid, role, point, 0, projectedLevel > rawLevelOf() ? projectedLevel : 0);
+        }
 
         /// <summary>
         /// The highest LIVE level among the role-0 (trash) members of the RAW species tables - 375 on the shipped
@@ -2017,6 +2802,24 @@ namespace ACE.Server.ThreadDungeons
                 return raw;
 
             return (int)Math.Clamp(Math.Round(raw * scale, MidpointRounding.AwayFromZero), 1, int.MaxValue);
+        }
+
+        /// <summary>
+        /// C_actual for an outdoor group run once its picks are placed (spec 6.1, F8), pure. Placement drops picks only when
+        /// the site runs out of admissible points, so <paramref name="placed"/> is then the site's capacity, and a solo run
+        /// of the same site would have placed min(<paramref name="soloSlots"/>, capacity). The ratio is placed over that,
+        /// so H = E / C_actual keeps the group's total health E times what a solo run there actually gets.
+        /// </summary>
+        internal static double OutdoorGroupCountActual(int soloSlots, int placed)
+            => GroupScaling.CountActualFor(Math.Min(soloSlots, placed), placed);
+
+        /// <summary>An outdoor site's drop (its entry position) on the outdoor grid, or null when the entry does not parse.</summary>
+        internal static OutdoorPos? OutdoorDrop(DungeonEntryDef dungeon)
+        {
+            if (!OutdoorSiteGeometry.TryParsePositionText(dungeon?.Entry, out var cell, out var x, out var y, out _))
+                return null;
+
+            return new OutdoorPos((ushort)(cell >> 16), x, y);
         }
 
         /// <summary>

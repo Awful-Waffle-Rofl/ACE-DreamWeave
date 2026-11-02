@@ -12,8 +12,9 @@ using ACE.Server.Entity.AccountVault;
 namespace ACE.Server.Managers.Market
 {
     /// <summary>
-    /// The suit builder's transfer routes: move items from the session account's vault into one of its
-    /// ONLINE characters' pack. POST is a WRITE (write bucket); the status GET is a read. Both are gated by
+    /// The suit builder's transfer routes: move items from the session account's vault, or from a mule shared
+    /// with the character (a line's vault_key), or out of another of the account's characters' PACK (a line's
+    /// holder_guid, SuitTransferService_Holder), into one of its ONLINE characters' pack. POST is a WRITE (write bucket); the status GET is a read. Both are gated by
     /// suit_builder_enabled only, checked after the session like the other suit routes.
     ///
     /// Handlers are thin: every rule (shape, cap, idempotency, single-flight, the online lookup and all of
@@ -36,6 +37,12 @@ namespace ACE.Server.Managers.Market
             public long? Wcid { get; set; }
             public string ClassKey { get; set; }
             public long? Count { get; set; }
+
+            /// <summary>Optional: null or absent for the caller's own vault, "s:<grant id>" for a shared mule (SuitItem.vault_key).</summary>
+            public string VaultKey { get; set; }
+
+            /// <summary>Optional: another character on the caller's account whose PACK holds item_guid (SuitItem.holder_guid). Mutually exclusive with vault_key.</summary>
+            public long? HolderGuid { get; set; }
         }
 
         /// <summary>The transfer POST's body cap: 24 lines need a few KB at most, so 64 KiB is generous and still bounded.</summary>
@@ -132,6 +139,8 @@ namespace ACE.Server.Managers.Market
                         reason = status.Reason == MarketError.None ? null : MarketErrorCodes.ToCode(status.Reason),
                         items = status.Items.Select(i => new
                         {
+                            vault_key = i.VaultKey,
+                            holder_guid = i.HolderGuid,
                             item_guid = i.ItemGuid,
                             wcid = i.Wcid,
                             class_key = i.ClassKey,
@@ -168,7 +177,15 @@ namespace ACE.Server.Managers.Market
                 if (item.Count.Value < 1 || item.Count.Value > int.MaxValue)
                     return false;
 
-                lines.Add(new SuitTransferLine(item.ItemGuid == null ? (uint?)null : (uint)item.ItemGuid.Value, (uint)item.Wcid.Value, item.ClassKey, (int)item.Count.Value));
+                if (item.HolderGuid != null && (item.HolderGuid.Value <= 0 || item.HolderGuid.Value > uint.MaxValue))
+                    return false;
+
+                // A vault key the server cannot parse is a malformed line, never silently the own vault.
+                if (!MarketManager.TryParseVaultKey(item.VaultKey, out var sharedGrantId))
+                    return false;
+
+                lines.Add(new SuitTransferLine(item.ItemGuid == null ? (uint?)null : (uint)item.ItemGuid.Value, (uint)item.Wcid.Value, item.ClassKey, (int)item.Count.Value, sharedGrantId,
+                    item.HolderGuid == null ? (uint?)null : (uint)item.HolderGuid.Value));
             }
 
             return true;

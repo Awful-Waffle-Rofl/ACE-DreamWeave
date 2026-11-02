@@ -252,7 +252,12 @@ namespace ACE.Server.Tests
 
             var baseRadius = D("class_ability_crimsonharvest_radius"); // 8.0
             var extended = baseRadius + Max(EquipmentModId.Bloodletting); // 9.0
-            var maxTargets = (int)PropertyManager.GetLong("class_ability_crimsonharvest_max_targets").Item; // 4
+            // the RANK 3 cap (4 extras), through the same helper and keys TryCrimsonHarvest reads - not the
+            // retiring single-rank class_ability_crimsonharvest_max_targets
+            var maxTargets = CrimsonHarvestMath.SecondaryTargetCap(3,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item); // 4
 
             var atBase = CrimsonHarvestMath.SelectSecondaryTargets(distances, baseRadius, maxTargets);
             var atExtended = CrimsonHarvestMath.SelectSecondaryTargets(distances, extended, maxTargets);
@@ -448,6 +453,51 @@ namespace ACE.Server.Tests
             AssertLastParameterIsOptionalAndZero(typeof(ExsanguinateMath), nameof(ExsanguinateMath.BurstMultiplier));
             AssertLastParameterIsOptionalAndZero(typeof(BloodPriceMath), nameof(BloodPriceMath.DamageBonus));
             AssertLastParameterIsOptionalAndZero(typeof(SanguineWardMath), nameof(SanguineWardMath.WardFraction));
+
+            // the affinity-scaled variants added by the Blood Mage buff pass keep the same contract
+            AssertLastParameterIsOptionalAndZero(typeof(BloodPriceMath), nameof(BloodPriceMath.ScaledDamageBonus));
+            AssertLastParameterIsOptionalAndZero(typeof(SanguineWardMath), nameof(SanguineWardMath.ScaledWardFraction));
+        }
+
+        // ---- the affinity variants (Blood Mage buff pass) ------------------------------------------
+        //
+        // Shape: rankBonus * affinityMultiplier + gear. The gear term is OUTSIDE the multiply.
+
+        [TestMethod]
+        public void AffinityVariants_AtTheNeutralMultiplier_AreBitIdenticalToTheGearOnlyHelpers()
+        {
+            for (var rank = 0; rank <= 3; rank++)
+            {
+                Assert.AreEqual(BloodPriceMath.DamageBonus(rank, 0.10, 0.20, 0.30, 0.025),
+                                BloodPriceMath.ScaledDamageBonus(rank, 0.10, 0.20, 0.30, 1.0, 0.025),
+                                0.0, $"rank {rank}: Blood Price at multiplier 1.0 must be bit-identical");
+
+                Assert.AreEqual(SanguineWardMath.WardFraction(rank, 0.60, 0.90, 1.20, 0.10),
+                                SanguineWardMath.ScaledWardFraction(rank, 0.60, 0.90, 1.20, 1.0, 0.10),
+                                0.0, $"rank {rank}: Sanguine Ward at multiplier 1.0 must be bit-identical");
+            }
+        }
+
+        [TestMethod]
+        public void Clotting_GearStaysOutsideTheCookingMultiplier()
+        {
+            // 0.60 * 2.0 + 0.10 = 1.30
+            Assert.AreEqual(1.30, SanguineWardMath.ScaledWardFraction(1, 0.60, 0.90, 1.20, 2.0, 0.10), 1e-9);
+
+            // CONTROL - multiplying the gear too would be (0.60 + 0.10) * 2.0 = 1.40
+            Assert.AreNotEqual((0.60 + 0.10) * 2.0, SanguineWardMath.ScaledWardFraction(1, 0.60, 0.90, 1.20, 2.0, 0.10), 1e-4,
+                "the Clotting gear term must never be multiplied by the affinity");
+        }
+
+        [TestMethod]
+        public void BloodPriceGear_StaysOutsideTheLifeMagicMultiplier()
+        {
+            // 0.30 * 1.5 + 0.025 = 0.475
+            Assert.AreEqual(0.475, BloodPriceMath.ScaledDamageBonus(3, 0.10, 0.20, 0.30, 1.5, 0.025), 1e-9);
+
+            // CONTROL - multiplying the gear too would be (0.30 + 0.025) * 1.5 = 0.4875
+            Assert.AreNotEqual((0.30 + 0.025) * 1.5, BloodPriceMath.ScaledDamageBonus(3, 0.10, 0.20, 0.30, 1.5, 0.025), 1e-4,
+                "the Blood Price gear term must never be multiplied by the affinity");
         }
 
         private static void AssertLastParameterIsOptionalAndZero(Type type, string methodName)

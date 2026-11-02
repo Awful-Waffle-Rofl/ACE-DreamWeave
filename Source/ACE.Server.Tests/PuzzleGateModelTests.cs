@@ -34,6 +34,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual(PuzzleGateSolveAction.Open, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1006850));
             Assert.AreEqual(PuzzleGateSolveAction.Open, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1006853));
             Assert.AreEqual(PuzzleGateSolveAction.Open, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1006855));
+            Assert.AreEqual(PuzzleGateSolveAction.Open, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1007507), "arch hall door: 1.0 s open anim");
 
             Assert.AreEqual(PuzzleGateSolveAction.Destroy, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1006854), "reinforced: zero-length open anim");
             Assert.AreEqual(PuzzleGateSolveAction.Destroy, PuzzleGateTunables.SolveActionFor(PuzzleGateForm.Door, 1006856), "barrier wcid as a door: zero-length open anim");

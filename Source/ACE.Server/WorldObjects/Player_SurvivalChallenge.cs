@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Common;
@@ -658,11 +659,20 @@ namespace ACE.Server.WorldObjects
         /// <para/>
         /// The one condition that stays is Duration != -1 on the equipped-item pass - see below.
         /// </summary>
-        public void StripRareGemBuffs()
+        /// <param name="includePack">
+        /// Also scan every possession that is NOT equipped (the pack and side containers). Off by default, so the
+        /// Proving Grounds and PvP callers keep their behaviour. The Knot entry passes true (owner ruling 2026-10-22):
+        /// an item-redirected buff survives on an item that was unequipped before entry and would come back into effect
+        /// when re-equipped inside the fight.
+        /// </param>
+        /// <returns>True when anything was removed.</returns>
+        public bool StripRareGemBuffs(bool includePack = false)
         {
             var strippableSpellIds = ACE.Server.Entity.RareGemSpells.GetStrippableSpellIds();
             if (strippableSpellIds.Count == 0)
-                return;
+                return false;
+
+            var removedAny = false;
 
             // (1) buffs that landed on the player's own enchantment registry
             var toDispel = Biota.PropertiesEnchantmentRegistry.Clone(BiotaDatabaseLock)
@@ -670,7 +680,10 @@ namespace ACE.Server.WorldObjects
                 .ToList();
 
             if (toDispel.Count > 0)
+            {
                 EnchantmentManager.Dispel(toDispel);
+                removedAny = true;
+            }
 
             // (2) item-redirectable rare-gem buffs (the Prodigal Impen/Bane family) land on the EQUIPPED ITEM's
             // registry, not the player's (see Gem.cs item-redirect handling), so scan each equipped item too.
@@ -679,14 +692,38 @@ namespace ACE.Server.WorldObjects
             // - which are part of the item and must never be stripped. A rare item whose own spellbook contains a
             // Prodigal spell therefore keeps its innate aura when the player walks through the portal.
             foreach (var item in EquippedObjects.Values)
-            {
-                var itemBuffs = item.Biota.PropertiesEnchantmentRegistry.Clone(item.BiotaDatabaseLock)
-                    .Where(e => strippableSpellIds.Contains((uint)e.SpellId) && e.Duration != -1)
-                    .ToList();
+                removedAny |= StripItemRareGemBuffs(item, strippableSpellIds);
 
-                foreach (var entry in itemBuffs)
-                    item.EnchantmentManager.Remove(entry);
+            // (3) opt-in: the same item pass over everything not equipped (the equipped items were done above)
+            if (includePack)
+            {
+                foreach (var item in GetAllPossessions())
+                {
+                    if (!EquippedObjects.ContainsKey(item.Guid))
+                        removedAny |= StripItemRareGemBuffs(item, strippableSpellIds);
+                }
             }
+
+            return removedAny;
+        }
+
+        private static bool StripItemRareGemBuffs(WorldObject item, ICollection<uint> strippableSpellIds)
+        {
+            var itemBuffs = SelectStrippableItemBuffs(item.Biota.PropertiesEnchantmentRegistry.Clone(item.BiotaDatabaseLock), strippableSpellIds);
+
+            foreach (var entry in itemBuffs)
+                item.EnchantmentManager.Remove(entry);
+
+            return itemBuffs.Count > 0;
+        }
+
+        /// <summary>
+        /// The pure item-pass filter: entries whose spell is strippable AND that are timed. Duration == -1 is an
+        /// equip-sourced aura (the item's own permanent spell) and is always kept.
+        /// </summary>
+        internal static List<ACE.Entity.Models.PropertiesEnchantmentRegistry> SelectStrippableItemBuffs(IEnumerable<ACE.Entity.Models.PropertiesEnchantmentRegistry> registry, ICollection<uint> strippableSpellIds)
+        {
+            return registry.Where(e => strippableSpellIds.Contains((uint)e.SpellId) && e.Duration != -1).ToList();
         }
 
         /// <summary>
@@ -699,7 +736,8 @@ namespace ACE.Server.WorldObjects
         /// applies on its equipped-item pass, so an item's own innate rare aura can produce a false positive here
         /// (an extra StripRareGemBuffs call that removes nothing) - never a false negative.
         /// </summary>
-        public bool HasAnyStrippableRareGemBuff()
+        /// <param name="includePack">Also checks non-equipped possessions, matching <see cref="StripRareGemBuffs"/>(true).</param>
+        public bool HasAnyStrippableRareGemBuff(bool includePack = false)
         {
             var strippableSpellIds = ACE.Server.Entity.RareGemSpells.GetStrippableSpellIds();
             if (strippableSpellIds.Count == 0)
@@ -712,6 +750,15 @@ namespace ACE.Server.WorldObjects
             {
                 if (item.Biota.PropertiesEnchantmentRegistry.HasAnyEnchantment(strippableSpellIds, item.BiotaDatabaseLock))
                     return true;
+            }
+
+            if (includePack)
+            {
+                foreach (var item in GetAllPossessions())
+                {
+                    if (!EquippedObjects.ContainsKey(item.Guid) && item.Biota.PropertiesEnchantmentRegistry.HasAnyEnchantment(strippableSpellIds, item.BiotaDatabaseLock))
+                        return true;
+                }
             }
 
             return false;

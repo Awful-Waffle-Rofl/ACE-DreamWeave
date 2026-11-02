@@ -257,7 +257,7 @@ namespace ACE.Server.Managers
             Meter.CreateCounter<long>("ace.teleport.started.login", "teleports", "Pending-teleport windows opened by a login");
 
         public static readonly Counter<long> TeleportCompleted =
-            Meter.CreateCounter<long>("ace.teleport.completed", "teleports", "Pending-teleport windows closed by the client's LoginComplete");
+            Meter.CreateCounter<long>("ace.teleport.completed", "teleports", "Pending-teleport windows closed by an arrival (the client's LoginComplete or a forced completion)");
 
         public static readonly Counter<long> TeleportPending10s =
             Meter.CreateCounter<long>("ace.teleport.pending_10s", "teleports", "Teleports still pending 10s after they started");
@@ -278,6 +278,61 @@ namespace ACE.Server.Managers
                 case ACE.Server.Entity.TeleportKind.Portal: TeleportStartedPortal.Add(1); break;
                 case ACE.Server.Entity.TeleportKind.Login: TeleportStartedLogin.Add(1); break;
                 default: TeleportStartedTeleport.Add(1); break;
+            }
+        }
+
+        // Arrival completion (Player_TeleportArrival): how long arrivals take and what completed them. UNTAGGED, one
+        // instrument per completion source, per the rule at the top of the tick-phase block, so the three duration
+        // histograms (exported as aceserver_ace_teleport_complete_<source>_duration_s summaries) add 3 to the Meter's
+        // histogram count, well inside both sidecars' MaxHistograms=64. Seconds, not ms: arrivals are 5-40 s.
+        // forced_complete.<reason> counts the decision; the matching duration histogram counts the materialize, which a
+        // logout during the landblock wait can still prevent.
+        // One window can count under BOTH forced_complete.movement and forced_complete.timer (movement re-drives a window
+        // the timer already forced, or the other way round, while its landblock wait runs), so the forced counters can sum
+        // to more than the number of windows. The duration histograms record each window once, under its FIRST requester.
+
+        private static readonly Histogram<double> TeleportCompleteClientSeconds =
+            Meter.CreateHistogram<double>("ace.teleport.complete.client.duration", "s", "Arrival duration (start to materialize) for windows whose first requester was the client's LoginComplete");
+
+        private static readonly Histogram<double> TeleportCompleteMovementSeconds =
+            Meter.CreateHistogram<double>("ace.teleport.complete.movement.duration", "s", "Arrival duration (start to materialize) when the server forced it on movement from the destination");
+
+        private static readonly Histogram<double> TeleportCompleteTimerSeconds =
+            Meter.CreateHistogram<double>("ace.teleport.complete.timer.duration", "s", "Arrival duration (start to materialize) when the teleport_forced_complete_seconds backstop forced it");
+
+        private static readonly Counter<long> TeleportForcedCompleteMovement =
+            Meter.CreateCounter<long>("ace.teleport.forced_complete.movement", "teleports", "Arrivals the server forced on movement from the destination while the client had not sent LoginComplete. A window can also count under forced_complete.timer, so the two can sum past the window count");
+
+        private static readonly Counter<long> TeleportForcedCompleteTimer =
+            Meter.CreateCounter<long>("ace.teleport.forced_complete.timer", "teleports", "Arrivals the server forced because LoginComplete had not arrived within teleport_forced_complete_seconds. A window can also count under forced_complete.movement, so the two can sum past the window count");
+
+        /// <summary>
+        /// A movement-forced completion whose MoveToState echoed a teleport sequence other than the one this client was
+        /// last sent. Observation only: it shows whether the echo is reliable enough to enforce later.
+        /// </summary>
+        public static readonly Counter<long> TeleportForcedMovementSequenceMismatch =
+            Meter.CreateCounter<long>("ace.teleport.forced_complete.movement_seq_mismatch", "teleports", "Movement-forced arrivals whose MoveToState teleport sequence did not match the one the client was last sent");
+
+        /// <summary>The client's LoginComplete arriving after a forced completion already took the window (once per window).</summary>
+        public static readonly Counter<long> TeleportLateClientComplete =
+            Meter.CreateCounter<long>("ace.teleport.late_client_complete", "teleports", "Client LoginCompletes that arrived after the server had already forced the arrival");
+
+        public static void RecordTeleportArrival(ACE.Server.Entity.TeleportCompletionSource source, double seconds)
+        {
+            switch (source)
+            {
+                case ACE.Server.Entity.TeleportCompletionSource.Movement: TeleportCompleteMovementSeconds.Record(seconds); break;
+                case ACE.Server.Entity.TeleportCompletionSource.Timer: TeleportCompleteTimerSeconds.Record(seconds); break;
+                default: TeleportCompleteClientSeconds.Record(seconds); break;
+            }
+        }
+
+        public static void RecordTeleportForcedComplete(ACE.Server.Entity.TeleportCompletionSource source)
+        {
+            switch (source)
+            {
+                case ACE.Server.Entity.TeleportCompletionSource.Movement: TeleportForcedCompleteMovement.Add(1); break;
+                case ACE.Server.Entity.TeleportCompletionSource.Timer: TeleportForcedCompleteTimer.Add(1); break;
             }
         }
 

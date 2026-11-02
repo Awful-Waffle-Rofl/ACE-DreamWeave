@@ -909,8 +909,9 @@ namespace ACE.Server.MlDigsite
         /// Round 16: a FIXED 8-wave run, not endless. A cleared field schedules the next wave after
         /// ml_digsite_inter_wave_seconds (the death hook arms it), each wave bigger and harder than the last.
         /// Clearing wave MlDigsiteRules.TotalWaves (8) is a WIN, requested from the wave-clear tail of
-        /// OnEncounterCreatureDied (not from this method - DriveWaves never sees the run end that way, only
-        /// the OTHER ends below). Short of that, the run still ends by /digsite bail, a wipe, the TTL, or one
+        /// OnEncounterCreatureDied (OnWaveCleared). DriveWaves itself ends a run only by the two wave clocks
+        /// below, or - for a last wave that stays empty after its one re-spawn - by OnWaveSkipped. Short of a
+        /// win, the run still ends by /digsite bail, a wipe, the TTL, or one
         /// of the two wave clocks below, and pays the tier it reached (MlDigsiteRules.WaveTierFraction) times
         /// the fail multiplier (MlDigsiteRules.EncounterPayoutFraction) - never 100%, since none of those is a
         /// win.
@@ -929,6 +930,16 @@ namespace ACE.Server.MlDigsite
         /// </summary>
         private static void DriveWaves(MlDigsiteEncounter encounter, DateTime now)
         {
+            // Before anything reads the wave state: a tracked creature that was destroyed without dying can
+            // never be reported by the death hook, so it would hold the wave open until a clock ends the run.
+            PruneVanishedWaveCreatures(encounter, now);
+
+            // The prune can itself request the run's end (a last wave left empty twice). Tick only skips Drive
+            // for a request that was already pending, so stop here rather than place anything into a run that
+            // is on its way out.
+            if (encounter.EndRequested)
+                return;
+
             // While a wave is scheduled the clocks are not consulted at all: the field is clear, and the
             // breather is the game's own pause, not a stall. WavesTick enforces that too.
             var due = encounter.NextWaveDueUtc;
@@ -943,7 +954,13 @@ namespace ACE.Server.MlDigsite
             var tick = MlDigsiteRules.WavesTick(waveScheduled, waveScheduled && now >= due.Value, clockExpired);
 
             if (tick == MlDigsiteWavesTick.SpawnWave)
-                SpawnNextWave(encounter, NewRandom());
+            {
+                SpawnNextWave(encounter, NewRandom(), respawnLastWave: encounter.TakeLastWaveRespawnPending());
+
+                // The spawn's own empty-field skip can request the end (a last wave empty twice).
+                if (encounter.EndRequested)
+                    return;
+            }
 
             if (tick == MlDigsiteWavesTick.EndRun)
             {
@@ -973,6 +990,87 @@ namespace ACE.Server.MlDigsite
             // may still arrive DURING a wave being fought - that is the point of it - but never onto the tick
             // that ends one.
             DriveForcedCheckpoint(encounter, now, tick);
+        }
+
+        /// <summary>
+        /// Reconciles the live wave and the checkpoint mini-boss against the world (see
+        /// MlDigsiteEncounter.PruneVanishedWaveCreatures): a creature destroyed without a death is logged
+        /// loudly - the discriminating evidence for "the wave counted down with nothing to fight". When that
+        /// empties the field the wave is a real clear when at least half of it was killed\n        /// (MlDigsiteRules.VanishCountsAsClear), and otherwise SKIPPED (OnWaveSkipped), never credited. Corruption and
+        /// Boss Rush objectives vanishing is out of scope here.
+        /// </summary>
+        private static void PruneVanishedWaveCreatures(MlDigsiteEncounter encounter, DateTime now)
+        {
+            var vanishedCheckpoint = encounter.PruneVanishedCheckpoint();
+
+            if (vanishedCheckpoint != null)
+                log.Warn($"[ML_DIGSITE] {encounter} checkpoint mini-boss 0x{vanishedCheckpoint.Guid.Full:X8} wcid={vanishedCheckpoint.WeenieClassId} was destroyed without dying (inWorld={vanishedCheckpoint.CurrentLandblock != null}, loc={vanishedCheckpoint.Location?.ToLOCString()}); cleared with no credit");
+
+            var vanished = encounter.PruneVanishedWaveCreatures(now, out var waveNowEmpty, out var realClear);
+
+            if (vanished.Count == 0)
+                return;
+
+            foreach (var creature in vanished)
+                log.Warn($"[ML_DIGSITE] {encounter} wave {encounter.WavesSpawned} creature 0x{creature.Guid.Full:X8} wcid={creature.WeenieClassId} was destroyed without dying (inWorld={creature.CurrentLandblock != null}, loc={creature.Location?.ToLOCString()}); dropped from the live wave, waveLeft={encounter.LiveWaveCount}");
+
+            if (!waveNowEmpty)
+                return;
+
+            // At least half the wave was already killed: that is a real clear, run through the same tail a
+            // last kill uses. Otherwise nobody earned it: skip it.
+            if (realClear)
+            {
+                log.Warn($"[ML_DIGSITE] {encounter} wave {encounter.WavesSpawned} emptied by vanishing creatures after most of it was killed; counting it as cleared");
+                OnWaveCleared(encounter, now);
+            }
+            else
+            {
+                OnWaveSkipped(encounter, now);
+            }
+        }
+
+        /// <summary>
+        /// A wave that ended with no live creature and no kill (placed 0 after its retry, or every body
+        /// vanished). NOT credited: HighestWaveCleared and WaveWon are never touched here. By
+        /// MlDigsiteRules.EmptyWaveAction, a wave short of the last is skipped to the next after the breather;
+        /// the last wave is re-spawned ONCE after the breather, and if it is empty again the run ends at once
+        /// as Stalled/Scored - the outcome the stall clock would have produced - instead of making the player
+        /// wait it out.
+        /// </summary>
+        private static void OnWaveSkipped(MlDigsiteEncounter encounter, DateTime now)
+        {
+            var wave = encounter.WavesSpawned;
+
+            switch (MlDigsiteRules.EmptyWaveAction(wave, encounter.LastWaveRespawnUsed, encounter.CheckpointAlive))
+            {
+                case MlDigsiteEmptyWaveAction.SkipToNext:
+                    log.Error($"[ML_DIGSITE] {encounter} wave {wave} has NO live creatures and no kills; skipping to wave {wave + 1} after the breather (not credited)");
+                    encounter.ScheduleNextWave(now + MlDigsiteTunables.InterWaveDelay);
+                    break;
+
+                case MlDigsiteEmptyWaveAction.RespawnLast:
+                    if (encounter.TryClaimLastWaveRespawn())
+                    {
+                        log.Error($"[ML_DIGSITE] {encounter} last wave {wave} has NO live creatures and no kills; re-spawning it once after the breather (not credited)");
+                        encounter.ScheduleNextWave(now + MlDigsiteTunables.InterWaveDelay);
+                    }
+
+                    break;
+
+                case MlDigsiteEmptyWaveAction.EndRun:
+                    if (encounter.TryRequestEnd(MlDigsiteRules.EndReasons.Stalled, MlDigsiteResult.Scored))
+                    {
+                        log.Error($"[ML_DIGSITE] {encounter} last wave {wave} is empty again after its re-spawn; ending the run at the tier reached");
+                        Announce(encounter, "The dig falls quiet as the fight goes out of it. The cache gives up what you earned.");
+                    }
+
+                    break;
+
+                case MlDigsiteEmptyWaveAction.LeaveToClock:
+                    log.Error($"[ML_DIGSITE] {encounter} last wave {wave} is empty again after its re-spawn, but a checkpoint mini-boss is alive; leaving the run to the stall clock so the boss kill can count");
+                    break;
+            }
         }
 
         /// <summary>
@@ -1071,10 +1169,13 @@ namespace ACE.Server.MlDigsite
         /// death is not a win - it adds one checkpoint kill to the tier. The per-wave latch
         /// (TryClaimCheckpoint) means a wave can only ever claim its checkpoint once. If the PREVIOUS
         /// checkpoint mini-boss is still standing, the new one is skipped rather than stacked on top of it.
+        ///
+        /// <paramref name="respawnLastWave"/> is true only for the single re-spawn of an empty last wave: the
+        /// wave number stays at WavesSpawned (it is not advanced) and the clocks restart via NoteWaveRespawned.
         /// </summary>
-        private static int SpawnNextWave(MlDigsiteEncounter encounter, Random rng, bool announceStart = true)
+        private static int SpawnNextWave(MlDigsiteEncounter encounter, Random rng, bool announceStart = true, bool respawnLastWave = false)
         {
-            var waveNumber = encounter.WavesSpawned + 1;
+            var waveNumber = respawnLastWave ? encounter.WavesSpawned : encounter.WavesSpawned + 1;
 
             var participants = MlDigsiteAudience.Count(encounter.Anchor, MlDigsiteTunables.AudienceRadiusMetres);
 
@@ -1086,7 +1187,21 @@ namespace ACE.Server.MlDigsite
             // would not notice.
             var placed = MlDigsiteSpawner.SpawnWave(encounter, count, rng, waveNumber);
 
-            encounter.NoteWaveSpawned(DateTime.UtcNow);
+            // A wave that put NOTHING on the field is retried once, on fresh scatter points (the placement
+            // rolls a new random point per creature, so this is a different set of spots, not a repeat). An
+            // empty wave would otherwise count down its clocks with nothing to fight and end the run on the
+            // stall timeout at partial credit.
+            if (placed == 0 && count > 0 && encounter.RunValid)
+            {
+                log.Warn($"[ML_DIGSITE] {encounter} wave {waveNumber} placed nothing (asked {count}); retrying once at fresh scatter points");
+
+                placed = MlDigsiteSpawner.SpawnWave(encounter, count, rng, waveNumber);
+            }
+
+            if (respawnLastWave)
+                encounter.NoteWaveRespawned(DateTime.UtcNow, encounter.LiveWaveCount);
+            else
+                encounter.NoteWaveSpawned(DateTime.UtcNow, encounter.LiveWaveCount);
 
             log.Info($"[ML_DIGSITE] {encounter} wave {waveNumber} placed={placed} (asked {count}, participants {participants})");
 
@@ -1107,6 +1222,11 @@ namespace ACE.Server.MlDigsite
                     Announce(encounter, "Something heavier shoulders its way up through the loose earth alongside them.", ChatMessageType.WorldBroadcast);
                 }
             }
+
+            // Still nothing on the field after the retry: say so loudly and keep the run moving instead of
+            // letting the clocks run down an empty field. Skipped, never credited (OnWaveSkipped).
+            if (encounter.Type == MlDigsiteType.WavesAndMiniBoss && encounter.LiveWaveCount == 0 && encounter.RunValid)
+                OnWaveSkipped(encounter, DateTime.UtcNow);
 
             return placed;
         }
@@ -1425,6 +1545,16 @@ namespace ACE.Server.MlDigsite
             if (!waveNowEmpty || encounter.Type != MlDigsiteType.WavesAndMiniBoss)
                 return;
 
+            OnWaveCleared(encounter, now);
+        }
+
+        /// <summary>
+        /// The wave-clear tail, shared by the last kill of a wave (OnEncounterCreatureDied) and by the
+        /// vanished-creature prune (PruneVanishedWaveCreatures), so both end a wave the same way. The caller has
+        /// already recorded the clear (HighestWaveCleared) inside the encounter's lock.
+        /// </summary>
+        private static void OnWaveCleared(MlDigsiteEncounter encounter, DateTime now)
+        {
             // Round 16: clearing wave TotalWaves (8) wins outright - a FullClear paying 100%, whatever the
             // tier table would have said. KNOWN NARROW RACE: TryRequestEnd's first-request-wins rule means a
             // bail or wipe that reached the encounter's lock a moment earlier still owns the end - the win
@@ -1433,7 +1563,7 @@ namespace ACE.Server.MlDigsite
             // which is a safe, merely slightly conservative payout rather than a broken one.
             if (MlDigsiteRules.WaveWon(encounter.HighestWaveCleared))
             {
-                if (encounter.TryRequestEnd(MlDigsiteRules.EndReasons.WavesWon, MlDigsiteResult.FullClear))
+                if (encounter.TryRequestEnd(MlDigsiteRules.EndReasons.WavesWon, encounter.VanishSkips > 0 ? MlDigsiteResult.Scored : MlDigsiteResult.FullClear))
                     Announce(encounter, $"The last of them falls. Wave {MlDigsiteRules.TotalWaves} is cleared - the dig is yours.", ChatMessageType.WorldBroadcast);
 
                 return;

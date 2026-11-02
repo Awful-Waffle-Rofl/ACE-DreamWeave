@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities.Abilities;
 
 namespace ACE.Server.ClassAbilities
@@ -124,6 +125,59 @@ namespace ACE.Server.ClassAbilities
                 CostPerRank = new[] { 1, 1, 1 },
                 MaxRank = 3,
             },
+
+            // Retired 2026-10-24 (Berserker pass): Heavy Blows takes the Berserker T2 slot, and the per-swing
+            // stamina surcharge plumbing went with it. Verified against SavageBlowsAbility.cs as it stood
+            // immediately before deletion (lines 27/31/32): Name = "savageblows" (no underscore), MaxRank = 3,
+            // CostPerRank = { 1, 1, 1 }.
+            ["savageblows"] = new RetiredEntry
+            {
+                DisplayName = "Savage Blows",
+                CostPerRank = new[] { 1, 1, 1 },
+                MaxRank = 3,
+            },
+
+            // Retired 2026-10-24 (Berserker pass): Intimidate takes the Berserker T2 slot. Verified against
+            // VengeanceAbility.cs as it stood immediately before deletion (lines 38/43/44): Name = "vengeance",
+            // MaxRank = 3, CostPerRank = { 2, 2, 2 } (the 2026-09-13 premium reprice).
+            ["vengeance"] = new RetiredEntry
+            {
+                DisplayName = "Vengeance",
+                CostPerRank = new[] { 2, 2, 2 },
+                MaxRank = 3,
+            },
+
+            // Retired 2026-10-24 (Berserker pass, owner ruling). Verified against EnhancedStatAbility.cs as it
+            // stood immediately before the exclusion (VitalCost line 58, the vital CostPerRank selection line
+            // 306, MaxTier line 46): Name = "enhanced_stamina" ("enhanced_" + "MaxStamina" with "Max" removed,
+            // lowercased), MaxRank = 3, CostPerRank = { 1, 1, 1 } - the flat Stamina/Mana vital rate, not the
+            // premium Health 2/2/2.
+            ["enhanced_stamina"] = new RetiredEntry
+            {
+                DisplayName = "Enhanced Stamina",
+                CostPerRank = new[] { 1, 1, 1 },
+                MaxRank = 3,
+            },
+
+            // Retired 2026-10-24 (Archmage pass, owner ruling): Elemental Inversion takes the Archmage T1 slot.
+            // Verified against QuickenedCastingAbility.cs as it stood immediately before deletion (lines
+            // 43/48/49): Name = "quickened_casting", MaxRank = 5, CostPerRank = { 1, 1, 1, 1, 1 }.
+            ["quickened_casting"] = new RetiredEntry
+            {
+                DisplayName = "Quickened Casting",
+                CostPerRank = new[] { 1, 1, 1, 1, 1 },
+                MaxRank = 5,
+            },
+
+            // Retired 2026-10-24 (Archmage pass, owner ruling): Arcane Hollow takes the Archmage T2 slot.
+            // Verified against FlatCastSpeedAbility.cs as it stood immediately before deletion (lines
+            // 21/24/25): Name = "flatcastspeed" (no underscore), MaxRank = 3, CostPerRank = { 1, 1, 1 }.
+            ["flatcastspeed"] = new RetiredEntry
+            {
+                DisplayName = "Flat Cast Speed",
+                CostPerRank = new[] { 1, 1, 1 },
+                MaxRank = 3,
+            },
         };
 
         /// <summary>
@@ -150,6 +204,11 @@ namespace ACE.Server.ClassAbilities
             [ClassAbilityId.ShieldCheck] = "shieldcheck",
             [ClassAbilityId.Surefooted] = "surefooted",
             [EnhancedStatAbility.ClassIdForSkill(Skill.MissileDefense)] = "enhanced_missiledefense",
+            [ClassAbilityId.SavageBlows] = "savageblows",
+            [ClassAbilityId.Vengeance] = "vengeance",
+            [EnhancedStatAbility.ClassIdForVital(PropertyAttribute2nd.MaxStamina)] = "enhanced_stamina",
+            [ClassAbilityId.QuickenedCasting] = "quickened_casting",
+            [ClassAbilityId.FlatCastSpeed] = "flatcastspeed",
         };
 
         /// <summary>

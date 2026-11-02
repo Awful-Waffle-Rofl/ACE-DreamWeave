@@ -106,6 +106,13 @@ namespace ACE.Server.Managers.Market
         /// buy orders want - a forge-fresh full salvage bag and a full-charge Hammer both collapse -
         /// so a store that skipped those rows told a seller holding exactly the wanted item that they
         /// held none.
+        ///
+        /// A counted CLASS LINE COUNTS, one per item, tested through one materialized representative of
+        /// the line. A player-made salvage bag is not identical to its weenie, so it does not reach the
+        /// ledger; the vault folds equivalent ones into a class row instead, and that is the normal
+        /// shape of a seller's own bags. Everything an order predicate reads (Structure, MaxStructure,
+        /// SalvageToolCharges, MaterialType) is constant across one display line, so the representative
+        /// answers for every item on it.
         /// </summary>
         int CountMatching(uint accountId, Func<WorldObject, bool> predicate);
 
@@ -113,13 +120,15 @@ namespace ACE.Server.Managers.Market
         /// Takes exactly <paramref name="count"/> whole holdings that satisfy <paramref name="predicate"/>
         /// into the caller's hands, ALL OR NOTHING. MUST run inside <see cref="RunSerialized"/> for the seller.
         /// Every member of a group row is tested individually, never assumed from its representative, and a
-        /// collapsed ledger row is drawn on for as many units as are still needed (see <see cref="CountMatching"/>).
+        /// collapsed ledger row or counted class line is drawn on for as many units as are still needed (see
+        /// <see cref="CountMatching"/>), in the vault's own entry order: stored rows, then ledger rows, then
+        /// class lines. Every object taken is still re-checked against the predicate on its own.
         /// On a shortfall everything already taken is returned to the seller INSIDE the same region (never
         /// by opening another), <paramref name="taken"/> is empty and the error is NoMatchingItems.
         /// THE CALLER OWNS EVERY RETURNED OBJECT, as for <see cref="TryTakeForSale"/>.
         ///
         /// A TAKE MAY THEREFORE BE MIXED, and <paramref name="taken"/> does not say which object came
-        /// from where - once withdrawn the two are indistinguishable. <paramref name="receipt"/> is how
+        /// from where - once withdrawn the three kinds are indistinguishable. <paramref name="receipt"/> is how
         /// the store remembers, and it is the ONLY thing that makes a later compensation correct: a
         /// caller unwinding this take must call <see cref="UndoTake"/> with it, never
         /// <see cref="TryReturnToSeller"/>, whose single asLedger flag cannot describe a mixed batch.
@@ -150,18 +159,24 @@ namespace ACE.Server.Managers.Market
 
     /// <summary>
     /// The provenance half of a take's result: which of the objects it handed over came out of a
-    /// COLLAPSED LEDGER row rather than out of a vault container.
+    /// COLLAPSED LEDGER row or a counted CLASS line rather than out of a vault container, and for a
+    /// class-sourced object, which line.
     ///
     /// It exists because the undo is not one operation. A ledger-derived object must be credited back
-    /// to the ledger and its carrier destroyed; a stored biota must go back into a container. Doing
+    /// to the ledger and its carrier destroyed; a class-derived object must be credited back into its
+    /// class row, with its own Value (its pooled share) returned to the pool, and its carrier destroyed;
+    /// a stored biota must go back into a container. Doing
     /// either the wrong way round is silent, and the two mistakes are not even the same size. Filing a
     /// ledger-derived object as a biota bypasses the entry cap - AccountVaultStore.TryReturnWithdrawn
     /// skips that check on the reasoning that a stored biota was already counted while it sat there,
     /// says so in its own remarks, and tells callers not to generalize the exemption out - and leaves
     /// units that can never re-collapse. Crediting a real stored biota to the ledger DESTROYS it and
     /// replaces it with vendor-fresh units, which is the item degradation VaultCollapse exists to
-    /// prevent. So an unknown provenance is resolved toward "stored biota", the direction that never
-    /// destroys anything.
+    /// prevent. Filing a class-derived object as a biota is the ledger mistake again with a second cost:
+    /// its pooled share leaves the line's total for good. So an unknown provenance is resolved toward
+    /// "stored biota", the direction that never destroys anything, and the store records every
+    /// ledger- and class-sourced object BEFORE it re-checks the object against the predicate, so no
+    /// object it took can be missing from the receipt.
     ///
     /// OPAQUE ON PURPOSE. A caller takes one from <see cref="IMarketItemStore.TryTakeMatching"/> and
     /// hands it straight back to <see cref="IMarketItemStore.UndoTake"/>. It cannot read one, cannot
@@ -172,17 +187,48 @@ namespace ACE.Server.Managers.Market
     public sealed class MarketTakeReceipt
     {
         private readonly HashSet<uint> ledgerSourced;
+        private readonly Dictionary<uint, string> classSourced;
 
-        /// <summary>Copies the set, so the store's own live bookkeeping cannot change a receipt already issued.</summary>
+        /// <summary>
+        /// A receipt with no class-sourced objects. Kept beside the two-argument form because test fakes
+        /// that never draw on a class line build their receipts through it.
+        /// </summary>
         internal MarketTakeReceipt(IEnumerable<uint> ledgerSourcedGuids)
+            : this(ledgerSourcedGuids, null)
         {
-            ledgerSourced = ledgerSourcedGuids == null ? new HashSet<uint>() : new HashSet<uint>(ledgerSourcedGuids);
         }
 
-        /// <summary>A take that drew on no ledger row. Also the honest answer for a take that handed over nothing.</summary>
-        public static MarketTakeReceipt Empty { get; } = new MarketTakeReceipt(null);
+        /// <summary>
+        /// Copies both collections, so the store's own live bookkeeping cannot change a receipt already
+        /// issued. <paramref name="classSourced"/> maps each class-sourced object's guid to the display id
+        /// (VaultEntry.ClassDisplayId) of the line it came off.
+        /// </summary>
+        internal MarketTakeReceipt(IEnumerable<uint> ledgerSourcedGuids, IReadOnlyDictionary<uint, string> classSourced)
+        {
+            ledgerSourced = ledgerSourcedGuids == null ? new HashSet<uint>() : new HashSet<uint>(ledgerSourcedGuids);
+
+            this.classSourced = new Dictionary<uint, string>();
+
+            if (classSourced != null)
+            {
+                foreach (var kvp in classSourced)
+                {
+                    if (kvp.Value != null)
+                        this.classSourced[kvp.Key] = kvp.Value;
+                }
+            }
+        }
+
+        /// <summary>A take that drew on no ledger row and no class line. Also the honest answer for a take that handed over nothing.</summary>
+        public static MarketTakeReceipt Empty { get; } = new MarketTakeReceipt(null, null);
 
         internal bool IsLedgerSourced(WorldObject item) => item != null && ledgerSourced.Contains(item.Guid.Full);
+
+        internal bool IsClassSourced(WorldObject item) => item != null && classSourced.ContainsKey(item.Guid.Full);
+
+        /// <summary>The display id of the class line <paramref name="item"/> came off, or null when it is not class-sourced.</summary>
+        internal string ClassLineOf(WorldObject item)
+            => item != null && classSourced.TryGetValue(item.Guid.Full, out var line) ? line : null;
     }
 
     /// <summary>

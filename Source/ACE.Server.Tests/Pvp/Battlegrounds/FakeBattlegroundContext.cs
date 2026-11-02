@@ -70,6 +70,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
         public void ReplaceZoneMarkers(KothZone zone) => ReplacedZones.Add(zone);
 
+        /// <summary>Every objective-time credit the handler made (performance stats), in order.</summary>
+        public List<(uint Id, int Seconds)> ObjectiveTime { get; } = new();
+
+        public void CreditObjectiveTime(uint characterId, int seconds) => ObjectiveTime.Add((characterId, seconds));
+
         public PvpParticipant Member(int team, int index) => TeamList[team].Members[index];
 
         public void SetRespawning(PvpParticipant p, bool respawning)

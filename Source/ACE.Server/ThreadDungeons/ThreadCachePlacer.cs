@@ -8,6 +8,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Knots;
 using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
@@ -22,7 +23,10 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>Clear or late kill: top up placed caches, then form new ones for what is left.</summary>
         Auto,
 
-        /// <summary>/spawncache with unclaimed loot: form a cache at the player, then fill it.</summary>
+        /// <summary>
+        /// /spawncache with unclaimed loot: first move the requester's already-placed non-empty caches to the player (as
+        /// Move does), then form new caches at the player and fill them with the unclaimed loot.
+        /// </summary>
         Summon,
 
         /// <summary>/spawncache with nothing unclaimed: move every non-empty cache to the player.</summary>
@@ -316,10 +320,13 @@ namespace ACE.Server.ThreadDungeons
             var owner = PlayerManager.GetOnlinePlayer(run.OwnerGuid);
             var ownerInside = IsOwnerInside(run, owner);
 
+            // The one decision: does this request move the placed caches to the owner? (Move and Summon, when inside.)
+            var movesPlaced = MovesPlacedCachesFirst(mode, ownerInside);
+
             if (mode == CacheRequestMode.Move)
             {
-                if (ownerInside)
-                    MoveCaches(run, landblock, owner);
+                if (movesPlaced)
+                    MoveCaches(run, landblock, owner, quiet: false);
 
                 // Loot banked after /spawncache chose Move (a kill whose own trigger found this latch held), or overflow a
                 // transfer produced, has no other trigger.
@@ -329,82 +336,168 @@ namespace ACE.Server.ThreadDungeons
                 return;
             }
 
-            // BUILD (owner ruling 2026-09-22): materialise the shared pool into the owner's held pile,
-            // budget-limited, never touching a cache directly - see ThreadCacheFiller.BuildPile. Runs for Auto
-            // and Summon alike, exactly where the old per-cache Fill used to draw from the ledger and bonus.
-            //
-            // ledgerSnapshot (item 1a fix, 2026-09-22): the ledger count taken BEFORE the build, so a late kill
-            // that appends to the ledger while this very call is draining it - or one that lands between this
-            // step and the next of a multi-step chain - is never counted toward what THIS segment waits for.
-            // ledgerClaimed, what BuildPile actually drained of that snapshot, is what the gate below reads
-            // instead of run.HasUndealtLoot's raw ledger clause.
-            var ledgerSnapshot = run.LedgerCount;
-            var ledgerClaimed = 0;
+            // A Summon also gathers the caches already placed: move them to the player FIRST, then build and form new
+            // ones for the unclaimed loot below. The moved caches are registered placed caches, so the form pass's
+            // exclusion scan sees them and the new caches keep 1.5 m clear of them. The summoned exit portal is NOT
+            // seen that way (a relocated portal sits in pendingAdditions, which the portal scan does not read), so
+            // the move leaves it alone and FinishSummon relocates it once, after the form pass. Only the chain's first
+            // step carries Summon (stepMode drops to Auto after it), so this runs once per request.
+            var summonMove = new CacheMoveResult();
+            CacheFormPass pass = null;
 
-            if (run.HasUndealtLoot && !budget.Exhausted)
-                ledgerClaimed = ThreadCacheFiller.BuildPile(run, budget, ledgerSnapshot);
-
-            // PLACEMENT WAITS FOR THE SNAPSHOT, NOT FOR EVERY LATER KILL (owner ruling 2026-09-22; snapshot gate,
-            // item 1a fix, 2026-09-22). ledgerClaimed < ledgerSnapshot means the budget ran out before this
-            // segment's OWN ledger entries were fully built - keep waiting exactly as before (the chain's own
-            // continuation test, budget.Exhausted && run.HasUnclaimedLoot, brings a later step back). Once the
-            // snapshot is satisfied, HasUndealtNonLedgerLoot is the only remaining "still building" signal
-            // (bonus, overflow and the deal buffers are never fed by a late kill the way the ledger is, so they
-            // still gate on the whole pending amount); a late kill's own ledger entry, appended to the ledger
-            // AFTER the snapshot, is left for this run's NEXT placement pass rather than blocking this one.
-            // MarkPlacementWanted covers the case where this step's budget is not exhausted (so the chain would
-            // otherwise treat "still building" as terminal) or the owner has left.
-            if (ledgerClaimed < ledgerSnapshot || run.HasUndealtNonLedgerLoot)
+            try
             {
-                run.MarkPlacementWanted();
-                return;
-            }
+                if (mode == CacheRequestMode.Summon && movesPlaced)
+                    SummonMoveGuarded(run, landblock, owner, summonMove);
 
-            if (!run.HasHeldPile(run.OwnerGuid))
-                return;
+                // BUILD (owner ruling 2026-09-22): materialise the shared pool into the owner's held pile,
+                // budget-limited, never touching a cache directly - see ThreadCacheFiller.BuildPile. Runs for Auto
+                // and Summon alike, exactly where the old per-cache Fill used to draw from the ledger and bonus.
+                //
+                // ledgerSnapshot (item 1a fix, 2026-09-22): the ledger count taken BEFORE the build, so a late kill
+                // that appends to the ledger while this very call is draining it - or one that lands between this
+                // step and the next of a multi-step chain - is never counted toward what THIS segment waits for.
+                // ledgerClaimed, what BuildPile actually drained of that snapshot, is what the gate below reads
+                // instead of run.HasUndealtLoot's raw ledger clause.
+                var ledgerSnapshot = run.LedgerCount;
+                var ledgerClaimed = 0;
 
-            if (!ownerInside)
-            {
-                // Retried by ThreadDungeonManager.Tick the next time the owner is seen inside.
-                run.MarkPlacementWanted();
-                return;
-            }
+                if (run.HasUndealtLoot && !budget.Exhausted)
+                    ledgerClaimed = ThreadCacheFiller.BuildPile(run, budget, ledgerSnapshot);
 
-            if (mode == CacheRequestMode.Auto)
-            {
-                // Spec section 4 trigger: top up caches already standing before forming a new one. Reuses the
-                // group pile-placement path unchanged (ThreadGroupCacheDelivery.FillFromPile): a solo run's owner
-                // is a roster member like any other, so the same merge, sort and top-up apply with no new code.
-                foreach (var cache in run.PlacedCachesSnapshot())
+                // PLACEMENT WAITS FOR THE SNAPSHOT, NOT FOR EVERY LATER KILL (owner ruling 2026-09-22; snapshot gate,
+                // item 1a fix, 2026-09-22). ledgerClaimed < ledgerSnapshot means the budget ran out before this
+                // segment's OWN ledger entries were fully built - keep waiting exactly as before (the chain's own
+                // continuation test, budget.Exhausted && run.HasUnclaimedLoot, brings a later step back). Once the
+                // snapshot is satisfied, HasUndealtNonLedgerLoot is the only remaining "still building" signal
+                // (bonus, overflow and the deal buffers are never fed by a late kill the way the ledger is, so they
+                // still gate on the whole pending amount); a late kill's own ledger entry, appended to the ledger
+                // AFTER the snapshot, is left for this run's NEXT placement pass rather than blocking this one.
+                // MarkPlacementWanted covers the case where this step's budget is not exhausted (so the chain would
+                // otherwise treat "still building" as terminal) or the owner has left.
+                if (ledgerClaimed < ledgerSnapshot || run.HasUndealtNonLedgerLoot)
                 {
-                    if (!run.HasHeldPile(run.OwnerGuid))
-                        break;
-
-                    Deliver(run, cache, FillDeliveringLanded(run, cache, (r, c) => ThreadGroupCacheDelivery.FillFromPile(r, c, run.OwnerGuid), (c, landed) => Deliver(run, c, landed)));
+                    run.MarkPlacementWanted();
+                    return;
                 }
 
                 if (!run.HasHeldPile(run.OwnerGuid))
                     return;
+
+                if (!ownerInside)
+                {
+                    // Retried by ThreadDungeonManager.Tick the next time the owner is seen inside.
+                    run.MarkPlacementWanted();
+                    return;
+                }
+
+                if (mode == CacheRequestMode.Auto)
+                {
+                    // Spec section 4 trigger: top up caches already standing before forming a new one. Reuses the
+                    // group pile-placement path unchanged (ThreadGroupCacheDelivery.FillFromPile): a solo run's owner
+                    // is a roster member like any other, so the same merge, sort and top-up apply with no new code.
+                    foreach (var cache in run.PlacedCachesSnapshot())
+                    {
+                        if (!run.HasHeldPile(run.OwnerGuid))
+                            break;
+
+                        Deliver(run, cache, FillDeliveringLanded(run, cache, (r, c) => ThreadGroupCacheDelivery.FillFromPile(r, c, run.OwnerGuid), (c, landed) => Deliver(run, c, landed)));
+                    }
+
+                    if (!run.HasHeldPile(run.OwnerGuid))
+                        return;
+                }
+
+                // Invariant 4 lives in FormAndFill: a chest is filled only after an attempt accepted it. Reuses
+                // FormAndFillAtMember, the exact function a group member's pass runs, rather than re-wiring
+                // candidates/placement/fill for solo a second time.
+                pass = FormAndFillAtMember(run, landblock, owner, () => run.HasHeldPile(run.OwnerGuid));
+
+                // A fresh, EMPTY cache refused everything left in the pile, so no cache ever will: destroyed rather
+                // than left to hold the copy alive for nothing (the same fix group's ServeMember applies).
+                if (pass.FreshCacheAcceptedNothing)
+                    ThreadGroupCacheDelivery.DestroyUnplaceable(run, run.OwnerGuid);
+
+                // A Summon tells the owner once, in FinishSummon, covering the move and the form pass together.
+                if (mode != CacheRequestMode.Summon)
+                {
+                    // Spec section 5: one success line per delivery pass, however many caches it formed.
+                    if (pass.CachesFormed > 0)
+                        owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(FormedMessage, ChatMessageType.Broadcast));
+
+                    // Total failure: nothing was claimed (invariant 4). No periodic retry; /spawncache is the fallback.
+                    if (pass.NoRoom)
+                        owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(NoRoomMessage, ChatMessageType.Broadcast));
+                }
             }
-
-            // Invariant 4 lives in FormAndFill: a chest is filled only after an attempt accepted it. Reuses
-            // FormAndFillAtMember, the exact function a group member's pass runs, rather than re-wiring
-            // candidates/placement/fill for solo a second time.
-            var pass = FormAndFillAtMember(run, landblock, owner, () => run.HasHeldPile(run.OwnerGuid));
-
-            // A fresh, EMPTY cache refused everything left in the pile, so no cache ever will: destroyed rather
-            // than left to hold the copy alive for nothing (the same fix group's ServeMember applies).
-            if (pass.FreshCacheAcceptedNothing)
-                ThreadGroupCacheDelivery.DestroyUnplaceable(run, run.OwnerGuid);
-
-            // Spec section 5: one success line per delivery pass, however many caches it formed.
-            if (pass.CachesFormed > 0)
-                owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(FormedMessage, ChatMessageType.Broadcast));
-
-            // Total failure: nothing was claimed (invariant 4). No periodic retry; /spawncache is the fallback.
-            if (pass.NoRoom)
-                owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(NoRoomMessage, ChatMessageType.Broadcast));
+            finally
+            {
+                if (mode == CacheRequestMode.Summon)
+                    FinishSummon(run, landblock, owner, summonMove, pass);
+            }
         }
+
+        /// <summary>What a quiet <see cref="MoveCaches"/> did: how many caches arrived, and whether a placement found no room. Mutable on purpose: MoveCaches updates it per cache, so a throw partway keeps the progress made.</summary>
+        internal sealed class CacheMoveResult
+        {
+            public int Moved;
+            public bool NoRoom;
+        }
+
+        /// <summary>
+        /// The single chat line of a Summon (moved caches and newly formed ones together): the formed line when anything
+        /// moved or formed, the no-room line only when nothing did and a placement found no room, otherwise nothing. Pure.
+        /// </summary>
+        internal static string SummonLine(int moved, int formed, bool noRoom)
+            => moved > 0 || formed > 0 ? FormedMessage : noRoom ? NoRoomMessage : null;
+
+        /// <summary>
+        /// The Summon move, guarded: a throw is logged at Error and the form step still runs. Quiet and without the exit
+        /// relocation, both of which <see cref="FinishSummon"/> does once after the form pass.
+        /// </summary>
+        private static void SummonMoveGuarded(ThreadDungeonRun run, Landblock landblock, Player owner, CacheMoveResult progress)
+        {
+            try
+            {
+                MoveCaches(run, landblock, owner, quiet: true, progress);
+            }
+            catch (Exception ex)
+            {
+                // The caches already moved stay moved, and progress counts them, so the exit and the line still follow.
+                log.Error($"[DYNDUNGEON] {run} the Summon's move of placed caches threw after {progress.Moved} cache(s); new caches still form", ex);
+            }
+        }
+
+        /// <summary>
+        /// A Summon's tail: relocate the exit portal once if anything moved (after the form pass, so the pass's exclusions
+        /// never saw it move), then send the one line. Never throws: it runs in a finally.
+        /// </summary>
+        private static void FinishSummon(ThreadDungeonRun run, Landblock landblock, Player owner, CacheMoveResult move, CacheFormPass pass)
+        {
+            try
+            {
+                if (move.Moved > 0)
+                    ThreadDungeonRewardSpawner.RelocateExit(run, landblock, owner);
+
+                var line = SummonLine(move.Moved, pass?.CachesFormed ?? 0, move.NoRoom || (pass?.NoRoom ?? false));
+
+                if (line != null)
+                    owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(line, ChatMessageType.Broadcast));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[DYNDUNGEON] {run} finishing a Summon threw", ex);
+            }
+        }
+
+        /// <summary>
+        /// Does this request move the requester's already-placed caches to them? Move always (when inside); Summon too,
+        /// so one /spawncache gathers everything at the player whether or not loot is still unclaimed. Auto never.
+        /// The single decision Execute reads for both its Move and Summon branches (the group path decides the same in
+        /// ThreadGroupCacheDelivery.Run).
+        /// </summary>
+        internal static bool MovesPlacedCachesFirst(CacheRequestMode mode, bool requesterInside)
+            => requesterInside && (mode == CacheRequestMode.Move || mode == CacheRequestMode.Summon);
 
         /// <summary>
         /// The form-and-fill loop, with the world behind seams so invariant 4 is testable with real Containers. Each
@@ -550,30 +643,49 @@ namespace ACE.Server.ThreadDungeons
 
             return FormAndFill(run, MaxCachesPerPass, hasMore,
                 () => BuildCandidatesAt(run, scan, member, out exclusions),
-                c => TryPlaceEmpty(run, member, c, exclusions),
+                c => TryPlaceEmpty(run, member, c, exclusions, CacheWcidFor(run, memberGuid)),
                 (r, cache) => ThreadGroupCacheDelivery.FillFromPile(r, cache, memberGuid),
                 (cache, result) => Deliver(run, cache, result),
                 () => { });
         }
 
         /// <summary>Group Threads (Task 10): the /spawncache move for one member, over that member's caches only.</summary>
-        internal static void MoveMemberCaches(ThreadDungeonRun run, Landblock landblock, Player member) => MoveCaches(run, landblock, member);
+        internal static void MoveMemberCaches(ThreadDungeonRun run, Landblock landblock, Player member) => MoveCaches(run, landblock, member, quiet: false);
+
+        /// <summary>Group Summon: the same move, quiet and without the exit relocation (the caller sends one line and relocates once).</summary>
+        internal static void MoveMemberCachesQuiet(ThreadDungeonRun run, Landblock landblock, Player member, CacheMoveResult progress) => MoveCaches(run, landblock, member, quiet: true, progress);
+
+        /// <summary>Group Summon: the exit portal follows the member, once, after the form pass.</summary>
+        internal static void RelocateExitFor(ThreadDungeonRun run, Landblock landblock, Player member) => ThreadDungeonRewardSpawner.RelocateExit(run, landblock, member);
 
         /// <summary>Group Threads (Task 10): the solo live delivery and rare broadcast, for a group top-up.</summary>
         internal static void DeliverFill(ThreadDungeonRun run, Container cache, CacheFillResult result) => Deliver(run, cache, result);
 
-        private static Chest PlaceNewCache(ThreadDungeonRun run, ExclusionScan scan, Player owner)
+        /// <summary>
+        /// The cache weenie a fresh pooled cache forms as (Knots design section 3.4): the Knotted Thread Cache while the
+        /// holder's held pile holds a Fiber or a Pattern - the pile sorts those first (ThreadLootStacking.SortPileForPlacement),
+        /// so they land in the cache formed for them - otherwise the plain Thread Cache.
+        /// </summary>
+        internal static uint CacheWcidFor(ThreadDungeonRun run, uint holderGuid)
+            => ChooseCacheWcid(run.HeldPileContains(holderGuid, KnotItems.IsKnotDrop));
+
+        /// <summary>The pure half of <see cref="CacheWcidFor"/>.</summary>
+        internal static uint ChooseCacheWcid(bool pileHoldsKnotDrop)
+            => pileHoldsKnotDrop ? KnotItems.KnottedThreadCacheWcid : ThreadDungeonRewardSpawner.BossCacheWcid;
+
+        /// <summary>A fresh empty cache at <paramref name="owner"/>, as weenie <paramref name="wcid"/> (a move keeps the old cache's).</summary>
+        private static Chest PlaceNewCache(ThreadDungeonRun run, ExclusionScan scan, Player owner, uint wcid)
         {
             var candidates = BuildCandidatesAt(run, scan, owner, out var exclusions);
 
-            return PlaceFirstAccepted(candidates, c => TryPlaceEmpty(run, owner, c, exclusions)) as Chest;
+            return PlaceFirstAccepted(candidates, c => TryPlaceEmpty(run, owner, c, exclusions, wcid)) as Chest;
         }
 
         /// <summary>The section 5 candidates from the owner's position, and the exclusions they were filtered by.</summary>
         private static IReadOnlyList<CacheCandidate> BuildCandidatesAt(ThreadDungeonRun run, ExclusionScan scan, Player owner, out List<(float X, float Y, float Z)> exclusions)
         {
-            exclusions = scan.Collect();
             var at = owner.Location;
+            exclusions = scan.Collect(at);
 
             return ThreadCachePlacement.BuildCandidates(at.Cell, at.PositionX, at.PositionY, at.PositionZ, at.RotationZ, at.RotationW,
                 run.Dungeon?.Points, exclusions);
@@ -602,7 +714,7 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>One attempt: a fresh chest, every acceptance rule from spec section 5, destroyed on any failure.</summary>
-        private static Container TryPlaceEmpty(ThreadDungeonRun run, Player owner, CacheCandidate candidate, IReadOnlyList<(float X, float Y, float Z)> exclusions)
+        private static Container TryPlaceEmpty(ThreadDungeonRun run, Player owner, CacheCandidate candidate, IReadOnlyList<(float X, float Y, float Z)> exclusions, uint wcid)
         {
             // Argument order as ThreadDungeonRewardSpawner.TrySpawnBossCache: rotation w LAST.
             var position = new Position(candidate.Cell, candidate.X, candidate.Y, candidate.Z, 0f, 0f, candidate.QZ, candidate.QW, run.Instance);
@@ -610,17 +722,16 @@ namespace ACE.Server.ThreadDungeons
             if (candidate.RecomputeCell)
                 position.LandblockId = new LandblockId(position.GetCell());
 
-            if (position.LandblockId.Landblock != run.Dungeon.Landblock)
+            if (!ThreadRunGeometry.IsOnRunLandblock(run, position))
                 return null;
 
             if (!owner.IsDirectVisible(position))
                 return null;
 
-            // A cache belongs to the player it forms at. The run owner (every solo cache) takes the owner-stamped factory
-            // exactly as before; a group member's cache is stamped for that member (Task 7's three-argument factory).
-            var chest = owner.Guid.Full == run.OwnerGuid
-                ? ThreadDungeonRewardSpawner.CreateCacheChest(run, "pooled cache")
-                : ThreadDungeonRewardSpawner.CreateCacheChest(run, "pooled cache", owner.Guid.Full);
+            // A cache belongs to the player it forms at: the factory stamps it for that player (the run owner for every
+            // solo cache, a group member for theirs), as weenie wcid - the plain Thread Cache, or the Knotted Thread Cache
+            // when the caller found a Knot drop waiting (CacheWcidFor), or the old cache's own weenie on a move.
+            var chest = ThreadDungeonRewardSpawner.CreateCacheChest(run, "pooled cache", owner.Guid.Full, wcid);
 
             if (chest == null)
                 return null;
@@ -648,7 +759,7 @@ namespace ACE.Server.ThreadDungeons
 
             // Everything physics could have changed is re-checked on the resting spot: still on this run's landblock,
             // still within 2 m of the owner's height, still 1.5 m clear of every exclusion.
-            if (landed == null || landed.LandblockId.Landblock != run.Dungeon.Landblock
+            if (landed == null || !ThreadRunGeometry.IsOnRunLandblock(run, landed)
                 || Math.Abs(landed.PositionZ - owner.Location.PositionZ) > ThreadCachePlacement.MaxZDelta
                 || ThreadCachePlacement.IsExcluded(landed.PositionX, landed.PositionY, landed.PositionZ, exclusions))
             {
@@ -672,8 +783,10 @@ namespace ACE.Server.ThreadDungeons
         ///
         /// The exit-portal half needs Landblock.GetAllWorldObjectsForDiagnostics, which copies the landblock's
         /// whole object dictionary to a list (Entity/Landblock.cs:1798-1803). Nothing a pass itself does creates,
-        /// moves or destroys this run's summoned exit portal - that is ThreadDungeonRewardSpawner.TrySummonExit,
-        /// once, from AnnounceCleared, before the first delivery is even requested - so re-running that scan for
+        /// moves or destroys this run's summoned exit portal while it is running - that is
+        /// ThreadDungeonRewardSpawner.TrySummonExit, once, from AnnounceCleared, before the first delivery is even
+        /// requested, and ThreadDungeonRewardSpawner.RelocateExit, which MoveCaches calls only AFTER its last
+        /// placement (so the pass's own cache attempts never see the portal move) - so re-running that scan for
         /// EVERY cache attempt, which is what a per-attempt CollectExclusions did, bought nothing. It is scanned
         /// once, lazily, and reused for the rest of the pass; a fresh scan starts with each delivery step. The
         /// worst a stale portal set could cost is the 1.5 m spacing nicety for the remaining caches of ONE pass,
@@ -696,16 +809,22 @@ namespace ACE.Server.ThreadDungeons
                 this.landblock = landblock;
             }
 
-            /// <summary>Placed caches and this run's summoned exit portal(s): nothing forms within 1.5 m of them.</summary>
-            public List<(float X, float Y, float Z)> Collect()
+            /// <summary>
+            /// Placed caches and this run's summoned exit portal(s): nothing forms within 1.5 m of them. Every position is in
+            /// the landblock-local frame of <paramref name="frame"/> (the player the candidates are built around), so an exit
+            /// or cache across a footprint seam is compared in the same frame as the candidates (Open World Threads).
+            /// </summary>
+            public List<(float X, float Y, float Z)> Collect(Position frame)
             {
-                portals ??= CollectExitPortals(run, landblock);
+                var frameLandblock = frame?.LandblockId.Landblock ?? landblock.Id.Landblock;
+
+                portals ??= CollectExitPortals(run, landblock, frameLandblock);
 
                 var list = new List<(float X, float Y, float Z)>();
 
                 foreach (var cache in run.PlacedCachesSnapshot())
                     if (cache.Location != null)
-                        list.Add((cache.Location.PositionX, cache.Location.PositionY, cache.Location.PositionZ));
+                        list.Add(InFrame(cache.Location, frameLandblock));
 
                 list.AddRange(portals);
 
@@ -713,17 +832,44 @@ namespace ACE.Server.ThreadDungeons
             }
         }
 
-        /// <summary>This run's summoned exit portal(s). One full landblock object scan; see <see cref="ExclusionScan"/>.</summary>
-        private static List<(float X, float Y, float Z)> CollectExitPortals(ThreadDungeonRun run, Landblock landblock)
+        /// <summary>
+        /// A position re-expressed in <paramref name="frameLandblock"/>'s local frame (metres from its south-west corner),
+        /// so two positions on neighbouring footprint landblocks compare as the one outdoor grid they are on. Identity
+        /// for a position already on that landblock, which is every position of a dungeon copy. Pure.
+        /// </summary>
+        internal static (float X, float Y, float Z) InFrame(Position position, ushort frameLandblock)
+        {
+            var landblock = position.LandblockId.Landblock;
+
+            if (landblock == frameLandblock)
+                return (position.PositionX, position.PositionY, position.PositionZ);
+
+            var dx = ((landblock >> 8) - (frameLandblock >> 8)) * OutdoorSiteGeometry.BlockLength;
+            var dy = ((landblock & 0xFF) - (frameLandblock & 0xFF)) * OutdoorSiteGeometry.BlockLength;
+
+            return ((float)(position.PositionX + dx), (float)(position.PositionY + dy), position.PositionZ);
+        }
+
+        /// <summary>
+        /// This run's summoned exit portal(s), across every loaded landblock the run's copy owns (the primary alone for a
+        /// dungeon; every loaded footprint member for an outdoor run, Open World Threads), in <paramref name="frameLandblock"/>'s
+        /// frame. One full object scan per landblock; see <see cref="ExclusionScan"/>. GetAllWorldObjectsForDiagnostics is a
+        /// snapshot copy, so the scan of a member owned by another landblock thread is read-only and at worst one step stale,
+        /// which costs the 1.5 m spacing nicety and nothing else.
+        /// </summary>
+        private static List<(float X, float Y, float Z)> CollectExitPortals(ThreadDungeonRun run, Landblock landblock, ushort frameLandblock)
         {
             var list = new List<(float X, float Y, float Z)>();
 
-            foreach (var wo in landblock.GetAllWorldObjectsForDiagnostics())
+            foreach (var copy in ThreadDungeonManager.LoadedRunLandblocks(run, landblock))
             {
-                if (wo is Portal && wo.WeenieClassId == ThreadDungeonRewardSpawner.SummonedExitWcid
-                    && wo.GetProperty(PropertyInt.ThreadDungeonRunId) == (int)run.RunId && wo.Location != null)
+                foreach (var wo in copy.GetAllWorldObjectsForDiagnostics())
                 {
-                    list.Add((wo.Location.PositionX, wo.Location.PositionY, wo.Location.PositionZ));
+                    if (wo is Portal && wo.WeenieClassId == ThreadDungeonRewardSpawner.SummonedExitWcid
+                        && wo.GetProperty(PropertyInt.ThreadDungeonRunId) == (int)run.RunId && wo.Location != null)
+                    {
+                        list.Add(InFrame(wo.Location, frameLandblock));
+                    }
                 }
             }
 
@@ -755,6 +901,16 @@ namespace ACE.Server.ThreadDungeons
                 cache.ApplySoundEffects(Sound.TriggerActivated, 10);
             }
 
+            // Knots (design section 3.4): a Fiber or a Pattern that just landed tells the cache's holder, with the rare
+            // branch's sound. Every delivery path (solo form, top-up, group, partial fill) reaches it through here.
+            if (result.Added.Count > 0)
+            {
+                var knotDrops = result.Added.Where(KnotItems.IsKnotDrop).ToList();
+
+                if (knotDrops.Count > 0)
+                    KnotDrops.AnnounceLanded(run, cache, knotDrops);
+            }
+
             // Debug, not Info: a time-budgeted chain fills caches once per step, so this is dozens to hundreds of
             // lines per clear. The chain's finished line and the run summary carry the totals at Info.
             if ((result.Added.Count > 0 || result.Overflowed > 0 || result.Destroyed > 0) && log.IsDebugEnabled)
@@ -765,9 +921,9 @@ namespace ACE.Server.ThreadDungeons
         /// Spec section 6 move: for each non-empty placed cache, form a new EMPTY cache at the owner, then move
         /// the items, then destroy the emptied old cache. A failed placement leaves that old cache untouched.
         /// </summary>
-        private static void MoveCaches(ThreadDungeonRun run, Landblock landblock, Player owner)
+        private static CacheMoveResult MoveCaches(ThreadDungeonRun run, Landblock landblock, Player owner, bool quiet, CacheMoveResult progress = null)
         {
-            var moved = 0;
+            progress ??= new CacheMoveResult();
             var scan = new ExclusionScan(run, landblock);
 
             foreach (var old in run.PlacedCachesSnapshot())
@@ -779,11 +935,16 @@ namespace ACE.Server.ThreadDungeons
                 if (run.IsGroup && !ThreadLootPool.IsCacheFor(old, owner.Guid.Full))
                     continue;
 
-                var fresh = PlaceNewCache(run, scan, owner);
+                // The fresh cache keeps the old one's weenie, so a Knotted Thread Cache moved by /spawncache stays Knotted.
+                var fresh = PlaceNewCache(run, scan, owner, old.WeenieClassId);
 
                 if (fresh == null)
                 {
-                    owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(NoRoomMessage, ChatMessageType.Broadcast));
+                    progress.NoRoom = true;
+
+                    if (!quiet)
+                        owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(NoRoomMessage, ChatMessageType.Broadcast));
+
                     break;
                 }
 
@@ -808,11 +969,20 @@ namespace ACE.Server.ThreadDungeons
                     log.Error($"[DYNDUNGEON] {run} move left {old.Inventory.Count} item(s) in cache 0x{old.Guid.Full:X8}; it stays placed");
                 }
 
-                moved++;
+                progress.Moved++;
             }
 
-            if (moved > 0)
+            // A quiet move (a Summon's) tells nobody and leaves the exit portal where it is: FinishSummon sends the one
+            // line and relocates the exit after the form pass.
+            if (progress.Moved > 0 && !quiet)
+            {
                 owner.Session?.Network.EnqueueSend(new GameMessageSystemChat(FormedMessage, ChatMessageType.Broadcast));
+
+                // The run's exit portal travels with the cache. No-op when the run has no live exit portal.
+                ThreadDungeonRewardSpawner.RelocateExit(run, landblock, owner);
+            }
+
+            return progress;
         }
     }
 }

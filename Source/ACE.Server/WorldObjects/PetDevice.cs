@@ -65,6 +65,22 @@ namespace ACE.Server.WorldObjects
             if (!(activator is Player player))
                 return;
 
+            // Custom Summons: a blank caster summon (SummonSpellBinder still set) has fewer than two spells bound
+            // and summons nothing. Refused before anything is spent.
+            if (GetProperty(PropertyBool.SummonSpellBinder) == true)
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(BlankCasterRefusedText, ChatMessageType.Broadcast));
+                return;
+            }
+
+            // Custom Summons: a Duo Summon Gem summons nothing until it has absorbed its second summon. A blank gem
+            // carries no PetClass, charges or cooldown either; this is the explicit gate. Refused before anything is spent.
+            if (DuoSummonGem.IsDuoGem(this) && !DuoSummonGem.IsBound(this))
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(DuoSummonGem.UnboundText, ChatMessageType.Broadcast));
+                return;
+            }
+
             // PvP arena (Docs/Pvp/DESIGN.md H13): no summons during a match. Refused before a charge
             // (Structure) is spent.
             if (player.IsInPvpMatch)
@@ -89,9 +105,16 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
-            var wcid = (uint)PetClass;
+            var sources = GetSummonSources();
 
-            var result = SummonCreature(player, wcid, out var placementFailed);
+            // a Duo Gem whose slots will not read describes no pets: nothing is summoned and nothing is spent
+            if (sources.Count < 2)
+            {
+                log.Error($"{activator.Name}.ActOnUse({Name}) - PetDevice 0x{Guid.Full:X8} described {sources.Count} summon sources");
+                return;
+            }
+
+            var result = SummonCreature(player, sources[0], out var placementFailed);
 
             // class ability: Summon 2x brings out the second combat pet in this SAME activation - one
             // double-click, one charge, one cooldown. Re-reading CanSummonAdditionalCombatPet after the first
@@ -103,7 +126,7 @@ namespace ACE.Server.WorldObjects
             // The second summon's result is deliberately not folded into the structure/cooldown decision
             // below: if it fails, the player still got the first pet for the one charge they spent.
             if (result == true && player.CanSummonAdditionalCombatPet())
-                SummonCreature(player, wcid, out _, true);
+                SummonCreature(player, sources[1], out _, true);
 
             if (result == null || result.Value)
             {
@@ -126,6 +149,135 @@ namespace ACE.Server.WorldObjects
             {
                 // this would be a good place to send a friendly reminder to install the latest summoning updates from ACE-World-Patch
             }
+        }
+
+        public const string BlankCasterRefusedText = "This summon has not been given its two spells yet. Use it on a spell scroll to bind one.";
+
+        /// <summary>
+        /// A blank caster summon (SummonSpellBinder) is used ON a spell scroll to bind that scroll's spell. Any other
+        /// device falls through to the recipe manager as before. Every exit sends use-done.
+        /// </summary>
+        public override void HandleActionUseOnTarget(Player player, WorldObject target)
+        {
+            // Custom Summons: a Duo Summon Gem used ON a summon item absorbs it (DuoSummonGem.Absorb). Checked first so a
+            // gem never falls through to the recipe manager. A bound gem refuses as full.
+            if (DuoSummonGem.IsDuoGem(this))
+            {
+                DuoSummonGem.UseOnTarget(player, this, target);
+                player.SendUseDoneEvent();
+                return;
+            }
+
+            if (GetProperty(PropertyBool.SummonSpellBinder) != true)
+            {
+                base.HandleActionUseOnTarget(player, target);
+                return;
+            }
+
+            TryBindScroll(player, target);
+
+            player.SendUseDoneEvent();
+        }
+
+        /// <summary>
+        /// The Player-facing shell around SummonSpellBindRules. A refused scroll and the blank are both left untouched,
+        /// with a chat line naming the reason. The second accepted scroll completes the device: the element is written
+        /// to UiEffects, SummonSpellBinder is cleared, and the item is rewritten to plain Contained with a full object
+        /// update so a double-click summons (the Gem.cs mule-token pattern).
+        /// </summary>
+        private void TryBindScroll(Player player, WorldObject target)
+        {
+            if (!(target is Scroll scroll) || scroll.SpellDID == null)
+            {
+                SayBind(player, "A blank summon can only be used on a spell scroll.");
+                return;
+            }
+
+            if (VerifyUseRequirements(player, this, scroll) != WeenieError.None)
+            {
+                SayBind(player, "Both the summon and the scroll must be in your pack.");
+                return;
+            }
+
+            // the scroll's own Spell is built without the world DB; the facts need it
+            var spell = new ACE.Server.Entity.Spell(scroll.SpellDID.Value);
+
+            if (spell.NotFound)
+            {
+                SayBind(player, "That scroll's spell could not be read.");
+                return;
+            }
+
+            var spell1 = GetProperty(PropertyDataId.SummonBoundSpell1);
+            var spell2 = GetProperty(PropertyDataId.SummonBoundSpell2);
+
+            var verdict = SummonSpellBindRules.Classify(SummonSpellBindRules.BoundCount(spell1, spell2), spell, player);
+
+            var outcome = SummonSpellBindRules.Apply(spell1, spell2, spell.Id, verdict);
+
+            if (!outcome.ConsumeScroll)
+            {
+                SayBind(player, SummonSpellBindRules.Message(verdict, spell.Name));
+                return;
+            }
+
+            if (!player.TryConsumeFromInventoryWithNetworking(scroll, 1))
+            {
+                SayBind(player, "The scroll could not be used.");
+                return;
+            }
+
+            var slotProperty = spell1.HasValue ? PropertyDataId.SummonBoundSpell2 : PropertyDataId.SummonBoundSpell1;
+
+            player.UpdateProperty(this, slotProperty, spell.Id);
+
+            // persist at once: a crash after the scroll is consumed must not lose the binding
+            SaveBiotaToDatabase();
+
+            if (outcome.Completed)
+            {
+                CompleteBinding(player, outcome);
+
+                SaveBiotaToDatabase();
+            }
+
+            player.UpdateProperty(this, PropertyString.LongDesc, SummonItemDescription.Compose(this));
+            player.EnqueueBroadcast(new GameMessageUpdateObject(this));
+
+            SayBind(player, outcome.Completed
+                ? $"{spell.Name} is bound. The {Name} now holds both spells and is ready to summon."
+                : $"{spell.Name} is bound. One more scroll to go.");
+        }
+
+        private void CompleteBinding(Player player, BindOutcome outcome)
+        {
+            var spells = new List<(bool, DamageType)>();
+
+            foreach (var id in new[] { outcome.Spell1, outcome.Spell2 })
+            {
+                var s = new ACE.Server.Entity.Spell(id.Value);
+
+                spells.Add((s.IsHarmful, s.DamageType));
+            }
+
+            var element = SummonSpellBindRules.CasterElement(spells);
+
+            player.UpdateProperty(this, PropertyInt.UiEffects, SummonSpellBindRules.WithElement(GetProperty(PropertyInt.UiEffects), element));
+            player.UpdateProperty(this, PropertyBool.SummonSpellBinder, (bool?)null);
+
+            // the blank has no SharedCooldown (so VTank cannot mistake it for a summon); completing it makes it one
+            SummonSpellBindRules.ApplySummonCooldown(this);
+
+            // the blank carried a use-on-target cursor; now a plain double-click must reach ActOnUse
+            player.UpdateProperty(this, PropertyInt.ItemUseable, (int)Usable.Contained);
+
+            if (player.FindObject(Guid.Full, Player.SearchLocations.MyInventory) != null)
+                player.MoveItemToFirstContainerSlot(this);
+        }
+
+        private static void SayBind(Player player, string text)
+        {
+            player.Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
         }
 
         /// <summary>
@@ -228,6 +380,15 @@ namespace ACE.Server.WorldObjects
             if (!baseRequirements.Success)
                 return baseRequirements;
 
+            // Custom Summons: a Duo Summon Gem that cannot describe two pets (unbound, or a slot that will not read) is refused.
+            // An unbound gem has no PetClass, and the retail-stow branch below casts PetClass. Refusing here also keeps the
+            // activation from starting any cooldown (OnActivate starts it after this gate).
+            if (DuoSummonGem.IsDuoGem(this) && DuoSummonGem.GetSources(this).Count < 2)
+            {
+                player.Session?.Network.EnqueueSend(new GameMessageSystemChat(DuoSummonGem.UnboundText, ChatMessageType.Broadcast));
+                return new ActivationResult(false);
+            }
+
             // verify summoning mastery
             if (!MeetsMasteryRequirement(SummoningMastery, player.SummoningMastery, MasteryUnrestrictedSource()))
             {
@@ -295,13 +456,33 @@ namespace ACE.Server.WorldObjects
             return weenie != null && weenie.WeenieType == WeenieType.CombatPet;
         }
 
+        /// <summary>
+        /// The pets one activation of this device can bring out, in summon order: index 0 is the first
+        /// summon, index 1 the Summon 2x second one. A normal device describes the same pet twice - its own
+        /// PetClass and ratings, which is what Summon 2x has always done - and ActOnUse only reads index 1
+        /// when CanSummonAdditionalCombatPet allows it. A device carrying two different pets returns two
+        /// different sources here: a bound Duo Summon Gem returns slot A's pet then slot B's, read from its
+        /// snapshots, and an unbound or unreadable one returns none.
+        /// </summary>
+        public virtual IReadOnlyList<PetSummonSource> GetSummonSources()
+        {
+            if (DuoSummonGem.IsDuoGem(this))
+                return DuoSummonGem.GetSources(this);
+
+            var source = PetSummonSource.FromDevice(this);
+
+            return new[] { source, source };
+        }
+
         /// <param name="placementFailed">
         /// TRUE when Init got past its active-pet gate but could place the pet neither in front of the owner nor
         /// on the owner's own spot (see Pet.PlacementFailed). FALSE for every other result.
         /// </param>
-        public bool? SummonCreature(Player player, uint wcid, out bool placementFailed, bool spawnStagger = false)
+        public bool? SummonCreature(Player player, PetSummonSource source, out bool placementFailed, bool spawnStagger = false)
         {
             placementFailed = false;
+
+            var wcid = source.PetWcid;
 
             var wo = WorldObjectFactory.CreateNewWorldObject(wcid);
 
@@ -318,7 +499,7 @@ namespace ACE.Server.WorldObjects
                 log.Error($"{player.Name}.SummonCreature({wcid}) - PetDevice {WeenieClassId} - {WeenieClassName} tried to summon {wo.WeenieClassId} - {wo.WeenieClassName} of unknown type {wo.WeenieType}");
                 return false;
             }
-            var success = pet.Init(player, this, spawnStagger);
+            var success = pet.Init(player, this, source, spawnStagger);
 
             placementFailed = pet.PlacementFailed;
 

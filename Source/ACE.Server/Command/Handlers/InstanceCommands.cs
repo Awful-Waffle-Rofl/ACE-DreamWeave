@@ -60,6 +60,51 @@ namespace ACE.Server.Command.Handlers
             player.Teleport(new Position(player.Location, landblock.Instance));
         }
 
+        /// <summary>
+        /// Open World Threads P0: the one way to exercise an outdoor instance group before any content uses it.
+        /// Developer only. Every player-reachable creator (Threads, PvP, /enter-instance, instanced portals) still
+        /// refuses non-dungeon landblocks; this is deliberately not one of them.
+        /// </summary>
+        [CommandHandler("enter-instance-group", AccessLevel.Developer, CommandHandlerFlag.RequiresWorld, "Creates a fresh ephemeral instance group of the outdoor landblocks around you and teleports you into it.", "[radius 0-2, default 1]")]
+        public static void HandleEnterInstanceGroup(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+            var currentLandblock = player.CurrentLandblock;
+
+            if (currentLandblock == null || currentLandblock.IsDungeon)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "Instance groups are only supported outdoors. Use /enter-instance for a dungeon.");
+                return;
+            }
+
+            if (player.Location.IsEphemeralRealm)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "You are already inside an ephemeral instance. Use /exitinstance first.");
+                return;
+            }
+
+            var radius = 1;
+            if (parameters.Length > 0 && (!int.TryParse(parameters[0], out radius) || radius < 0 || radius > 2))
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "Radius must be 0, 1 or 2.");
+                return;
+            }
+
+            var landblock = RealmManager.GetNewEphemeralGroupLandblock(currentLandblock.Id, radius, player);
+            if (landblock == null)
+            {
+                CommandHandlerHelper.WriteOutputInfo(session, "Failed to create the instance group.");
+                return;
+            }
+
+            // stamp where /exitinstance (or an expired-instance login) returns to
+            player.SetPosition(PositionType.EphemeralRealmExitTo, new Position(player.Location));
+
+            var side = radius * 2 + 1;
+            CommandHandlerHelper.WriteOutputInfo(session, $"Entering instance group 0x{landblock.Instance:X8}: {side}x{side} landblocks around 0x{landblock.Id.Landblock:X4}. Landblocks outside it are bare terrain.");
+            player.Teleport(new Position(player.Location, landblock.Instance));
+        }
+
         [CommandHandler("exitinstance", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Leaves the current ephemeral instance.")]
         public static void HandleExitInstance(Session session, params string[] parameters)
         {

@@ -496,6 +496,67 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// /mule autosalvage [on|off]: reads or sets the caller's OWN account's salvage-combine
+        /// preference. A share grantee reaches only their own account's vault here, never the owner's.
+        /// Null enabled is the status query. Both the read and the write run on the store's mutation
+        /// queue; a failed read or write gets the generic unavailable reply rather than a guessed state.
+        /// </summary>
+        public void HandleActionMuleAutoSalvage(bool? enabled)
+        {
+            if (!TryStartMuleVaultCommand())
+                return;
+
+            var store = AccountVaultManager.GetStore(Account?.AccountId ?? 0);
+
+            if (store == null)
+            {
+                SendTransientError(AccountVaultStore.UnavailableMessage);
+                return;
+            }
+
+            bool? current = null;
+            var wrote = false;
+
+            if (enabled.HasValue)
+            {
+                wrote = store.TrySetSalvageCombine(enabled.Value, VaultActor.From(this), out _);
+            }
+            else if (!store.Enqueue(() => current = store.TryGetSalvageCombineEnabled()))
+            {
+                current = null;
+            }
+
+            var value = enabled.HasValue ? (wrote ? enabled : null) : current;
+
+            if (value == null)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat(MuleAutoSalvageUnavailable, ChatMessageType.System));
+                return;
+            }
+
+            Session.Network.EnqueueSend(new GameMessageSystemChat(FormatMuleAutoSalvageReply(enabled.HasValue, value.Value, PropertyManager.GetBool("account_vault_salvage_combine").Item), ChatMessageType.System));
+        }
+
+        internal const string MuleAutoSalvageUnavailable = "Your vault settings are unavailable right now. Please try again shortly.";
+
+        /// <summary>The /mule autosalvage reply text, pure so it is testable without a Player.</summary>
+        internal static string FormatMuleAutoSalvageReply(bool wasSet, bool value, bool serverEnabled)
+        {
+            string text;
+
+            if (wasSet)
+                text = value
+                    ? "Auto-combine of partial salvage is now ON for your vault. Partial bags sold to your mule will be combined into full bags."
+                    : "Auto-combine of partial salvage is now OFF for your vault. Partial bags will be stored as they are.";
+            else
+                text = value
+                    ? "Auto-combine of partial salvage is ON for your vault."
+                    : "Auto-combine of partial salvage is OFF for your vault.";
+
+            return serverEnabled ? text : text + " (Currently disabled server-wide.)";
+        }
+
+        /// <summary>
         /// /mule log (DESIGN section 13 and the closing paragraph of section 10): the caller's own
         /// recent vault activity - deposits, withdrawals, grants and revocations, each with the actor
         /// who did it. Actor and grantee names in these rows are SNAPSHOTS taken at write time, so a row
@@ -570,6 +631,15 @@ namespace ACE.Server.WorldObjects
 
                 case AccountVaultAction.Revoke:
                     return itemName;
+
+                // A partial-salvage combine writes one row per changed class row with a SIGNED count:
+                // negative for bags taken off a row, positive for bags it produced. The generic branch
+                // below would drop both the sign and the number of a debit.
+                case AccountVaultAction.Combine:
+                    if (count < 0)
+                        return $"{itemName} (combined away x{-count})";
+
+                    return count > 0 ? $"{itemName} (combined into x{count})" : itemName;
 
                 default:
                     return count > 0 ? $"{itemName} x{count}" : itemName;

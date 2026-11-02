@@ -132,6 +132,38 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public void A_drain_on_an_immune_monster_takes_nothing_and_heals_nothing()
+        {
+            // Pinnacle review C5 and the no-free-heal ruling (2026-10-19): the transfer's loss AND its gain go through
+            // WorldObject.MonsterDrainAfterAbsorb, the helper HandleCastSpell_Transfer calls ahead of the fellow split
+            var caster = TestCreatures.CreateDefender(maxHealth: 500);
+            var victim = TestCreatures.CreateDefender(maxHealth: 500);
+
+            victim.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec())));
+            victim.P_DigsiteImmune = true;
+
+            var (loss, gain) = WorldObject.MonsterDrainAfterAbsorb(victim, caster, 200, 130, 0.35f, 1.0f);
+
+            Assert.AreEqual(0u, loss, "the source loses nothing");
+            Assert.AreEqual(0u, gain, "the caster gains nothing");
+        }
+
+        [TestMethod]
+        public void A_drain_on_a_monster_with_no_filter_keeps_its_loss_and_gain()
+        {
+            // the control: the same call on a creature whose immunity is off changes neither number
+            var caster = TestCreatures.CreateDefender(maxHealth: 500);
+            var victim = TestCreatures.CreateDefender(maxHealth: 500);
+
+            victim.AttachMonsterEffectsForTest(MonsterEffectSet.BuildFromHandlers((Effect, Spec())));
+
+            var (loss, gain) = WorldObject.MonsterDrainAfterAbsorb(victim, caster, 200, 130, 0.35f, 1.0f);
+
+            Assert.AreEqual(200u, loss);
+            Assert.AreEqual(130u, gain, "an unfiltered drain keeps the gain the caps already set");
+        }
+
+        [TestMethod]
         public void With_the_flag_SET_every_point_is_filtered_to_zero_whatever_the_damage_type()
         {
             var attacker = TestCreatures.CreateDefender(maxHealth: 500);
@@ -521,7 +553,7 @@ namespace ACE.Server.Tests
             var src = PooledLootSourceText.Read("Source/ACE.Server/WorldObjects/Player_Combat.cs");
 
             var method = PooledLootSourceText.MethodBody(src,
-                "public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f, bool primaryTarget = true, bool multiShotArrow = false)");
+                "public DamageEvent DamageTarget(Creature target, WorldObject damageSource, float damageMultiplier = 1.0f, bool primaryTarget = true, bool powerBarSwing = true)");
 
             StringAssert.Contains(method, "var digsiteImmuneBlocked = targetPlayer == null && damageEvent.HasDamage && target.IsDigsiteImmuneActive();",
                 "the same predicate drives both the notification and the splatter suppression");

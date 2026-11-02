@@ -18,9 +18,44 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("cap")]
         public int Cap { get; set; }
 
+        /// <summary>
+        /// World Events Hold wave size (world_events_hold_wave_size_base_players): growth starts after this many players.
+        /// 0 = from the first player, as always. Runtime only.
+        /// </summary>
+        [JsonIgnore]
+        public int PlayersFrom { get; set; }
+
+        /// <summary>World Events Hold wave size (world_events_hold_wave_size_max_players): growth stops at this many players. 0 = no limit. Runtime only.</summary>
+        [JsonIgnore]
+        public int PlayersUpTo { get; set; }
+
+        /// <summary>
+        /// Runtime only: Hold's own wave size setting owns this dial, so the global world_events_wave_count_* override (read at
+        /// SourceThemeDef's call site) does not replace it. False for anything read from a file.
+        /// </summary>
+        [JsonIgnore]
+        public bool OwnsBase { get; set; }
+
+        [JsonIgnore]
+        public bool OwnsPerParticipant { get; set; }
+
+        [JsonIgnore]
+        public bool OwnsCap { get; set; }
+
+        /// <summary>The player count growth is computed from (<see cref="PlayersFrom"/>, <see cref="PlayersUpTo"/>); unchanged by default.</summary>
+        public int MapPlayers(int participants)
+        {
+            var n = participants;
+
+            if (PlayersUpTo > 0)
+                n = Math.Min(n, PlayersUpTo);
+
+            return PlayersFrom > 0 ? Math.Max(0, n - PlayersFrom) : n;
+        }
+
         public int Resolve(int participants)
         {
-            return Resolve(Base, PerParticipant, Cap, participants);
+            return Resolve(Base, PerParticipant, Cap, MapPlayers(participants));
         }
 
         /// <summary>
@@ -33,7 +68,7 @@ namespace ACE.Server.WorldEvents.Defs
         /// </summary>
         public int ResolveRaw(int participants)
         {
-            return ResolveRaw(Base, PerParticipant, participants);
+            return ResolveRaw(Base, PerParticipant, MapPlayers(participants));
         }
 
         /// <summary>

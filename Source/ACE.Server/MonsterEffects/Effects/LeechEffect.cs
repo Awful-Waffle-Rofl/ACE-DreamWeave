@@ -1,5 +1,6 @@
 using System;
 
+using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.ClassAbilities.Abilities;
 using ACE.Server.Entity;
@@ -22,7 +23,7 @@ namespace ACE.Server.MonsterEffects.Effects
     /// vital. Reuses BloodlustAbility.AccrueHeal for the fractional carry so a small percentage of a small
     /// hit still pays out over time instead of always rounding to zero.
     /// </summary>
-    public sealed class LeechEffect : IMonsterEffect, IMonsterOutgoingHit
+    public sealed class LeechEffect : IMonsterEffect, IMonsterOutgoingHit, IMonsterReflectedRider
     {
         public string Kind => "leech";
 
@@ -47,7 +48,27 @@ namespace ACE.Server.MonsterEffects.Effects
 
         public void OnOutgoingHit(Creature attacker, Creature defender, DamageEvent damageEvent, MonsterEffectSpec spec, ref MonsterEffectState state)
         {
-            if (damageEvent.Damage <= 0.0f)
+            Leech(attacker, damageEvent.Damage, spec, ref state);
+        }
+
+        /// <summary>
+        /// Reflect (Vanguard T3) bounced this monster's missile: the leech is MIRRORED. The reflector gains,
+        /// into the authored vital, exactly what this monster would have leeched from the damage the shot
+        /// would have dealt it; the monster gains nothing. Same pct=, same cap, same fractional carry (the
+        /// carry stays in this monster's own state slot). Leech has no spell-hit hook, so only a missile
+        /// bounce reaches here.
+        /// </summary>
+        public void OnReflected(Creature monster, Creature reflector, MonsterEffectTrigger firedAs, DamageType damageType, float damage, MonsterEffectSpec spec, ref MonsterEffectState state)
+        {
+            if (reflector == null || reflector.IsDead)
+                return;
+
+            Leech(reflector, damage, spec, ref state);
+        }
+
+        private static void Leech(Creature gainer, float damage, MonsterEffectSpec spec, ref MonsterEffectState state)
+        {
+            if (damage <= 0.0f)
                 return;
 
             var pct = spec.GetDouble("pct", 0.0);
@@ -59,9 +80,9 @@ namespace ACE.Server.MonsterEffects.Effects
                 return;
 
             var vital = spec.GetEnum("vital", MonsterEffectVital.Health);
-            var creatureVital = attacker.GetCreatureVital(ToAttribute(vital));
+            var creatureVital = gainer.GetCreatureVital(ToAttribute(vital));
 
-            var exactHeal = damageEvent.Damage * clamped;
+            var exactHeal = damage * clamped;
 
             var heal = BloodlustAbility.AccrueHeal(state.Carry, exactHeal, out var newCarry);
             state.Carry = newCarry;
@@ -69,7 +90,7 @@ namespace ACE.Server.MonsterEffects.Effects
             if (heal <= 0)
                 return;
 
-            attacker.UpdateVitalDelta(creatureVital, heal);
+            gainer.UpdateVitalDelta(creatureVital, heal);
         }
 
         private static PropertyAttribute2nd ToAttribute(MonsterEffectVital vital) => vital switch

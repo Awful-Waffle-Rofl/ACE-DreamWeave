@@ -26,7 +26,7 @@ namespace ACE.Server.ThreadDungeons
     /// EFFECTIVE skill, not InitLevel. The attributes climb on their own slopes, so the skill's InitLevel is
     /// re-derived as target effective minus the attribute term over the RAISED attributes
     /// (<see cref="DungeonStatCurve.InitFor"/>). Without that the attribute climb would carry the effective
-    /// defense past the softened rate above level 375, which is exactly what the softening exists to prevent.
+    /// defense past the softened rate above level 300, which is exactly what the softening exists to prevent.
     ///
     /// HEALTH IS NOT TOUCHED HERE: the run's health terms (HealthNormalizeRatio onto T(run level), the trash
     /// floor, the gem multiplier) already price every non-boss creature, stamped or not, and the spawner applies

@@ -218,11 +218,15 @@ namespace ACE.Server.Tests.Pvp
 
             Assert.IsNull(player.PvpTemplateCastBlocked(3));
             Assert.AreEqual(PvpTemplateText.NonTemplateSpell, player.PvpTemplateCastBlocked(9));
+            Assert.IsNull(player.PvpTemplateCastBlocked((uint)ACE.Entity.Enum.SpellId.CurseRavenFury),
+                "always granted, even from a record persisted without it (a player templated across the deploy)");
 
             player.SetProperty(PropertyString.PvpTemplateRestore, "{garbage");
 
             Assert.IsTrue(player.IsPvpTemplated, "an unreadable record still counts as templated");
             Assert.AreEqual(PvpTemplateText.NonTemplateSpell, player.PvpTemplateCastBlocked(3), "inert, never open");
+            Assert.AreEqual(PvpTemplateText.NonTemplateSpell, player.PvpTemplateCastBlocked((uint)ACE.Entity.Enum.SpellId.CurseRavenFury),
+                "an unreadable record refuses even the always-granted spell");
         }
 
         // ================= apply precheck: a record is never overwritten =================

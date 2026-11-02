@@ -713,6 +713,30 @@ namespace ACE.Server.Managers.Market
         /// <see cref="Mods"/>.
         /// </summary>
         public string WeaponQualityTier { get; set; }
+
+        /// <summary>
+        /// The suit-builder projection of the listed item (SuitItemProjector), so the web app can offer
+        /// another player's listing as a suit candidate. Wire name <c>suit</c>: a CROSS-REPO CONTRACT.
+        /// NULL when the item is not suit-relevant (ValidLocations names no suit slot), which is the
+        /// common case (weapons, salvage, ammo).
+        ///
+        /// Its ItemGuid is ALWAYS null on a ledger or class listing, which has no single real item (the
+        /// probe's own guid is meaningless and is destroyed straight after); ClassKey names the pool
+        /// on a class line. A template-weenie projection also has no Reductions.
+        ///
+        /// Suit.Count and Suit.Listed are NOT MEANINGFUL here (always 1 and false): a snapshot is shared
+        /// across viewers and accounts, so it never carries a pool size; the unit count is the listing's
+        /// own count. Also null for an item bound to one wielder (AllowedWielder set), which is no
+        /// general candidate and whose character guid is not published. Present on LISTING
+        /// snapshots (list, backfill) and on vault-view CLASS lines (they share the listing path's
+        /// cached class snapshot; there Count (1) and Listed are not meaningful); never on a character
+        /// sheet or a stored/ledger vault-view row.
+        ///
+        /// ADDED 2026-10-10, in projection version 5. A snapshot below version 5 carries null whether or
+        /// not the item is a suit piece; an ACTIVE listing is repaired by the backfill, a CLOSED one
+        /// carries null forever.
+        /// </summary>
+        public Suit.SuitItem Suit { get; set; }
     }
 
     /// <summary>

@@ -9,6 +9,7 @@ using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Pvp;
 using ACE.Server.Pvp.Battlegrounds;
@@ -39,6 +40,148 @@ namespace ACE.Server.WorldObjects
         public PvpPlayerBinding PvpBinding => pvpBinding;
 
         public bool IsInPvpMatch => PvpPlayerRules.InMatch(pvpBinding);
+
+        /// <summary>
+        /// pvp_match_free_components: true while the player is in a match and the setting is on. Computed, never stored:
+        /// SpellComponentsRequired is a saved PropertyBool, so writing it would let a crash mid-match leave the player
+        /// casting free forever. The cast path (HasComponentsForSpell, TryBurnComponents) and the client sync read this.
+        /// </summary>
+        public bool PvpMatchComponentsWaived => IsInPvpMatch && PvpArenaHookSettings.MatchFreeComponentsSource();
+
+        /// <summary>
+        /// pvp_match_block_dual_wield (Docs/Pvp/TEMPLATES.md "Dual wield"): true when equipping <paramref name="itemIsShield"/>'s item into
+        /// <paramref name="slot"/> must be refused for this player. "In a match" is a match binding OR a worn issued template kit (the
+        /// logout path's own test, Player.cs: PvpBinding != null || IsPvpTemplated), so the kit-apply window before the binding is covered.
+        /// The decision itself is the pure <see cref="PvpDualWieldRule.Refuses"/>. Computed, never stored; the setting is read per call.
+        /// </summary>
+        internal bool PvpDualWieldRefuses(EquipMask slot, bool itemIsShield)
+            => PvpDualWieldRule.Refuses(IsInPvpMatch || IsPvpTemplated, PvpArenaHookSettings.MatchBlockDualWieldSource(), slot, itemIsShield);
+
+        /// <summary>
+        /// Clears a weapon the player holds in the off-hand when <see cref="PvpDualWieldRefuses"/> says it may not stay: a kit that
+        /// contains one (called right after the kit is issued) or the player's own gear in a mode with no kit (called at match entry).
+        /// Warns in the log naming <paramref name="templateKey"/>, and tells the player. A shield is never touched.
+        ///   - An ISSUED item (<see cref="PvpTemplate.IsMarkedIssued"/>: at kit apply the player's own gear is already stripped, so any
+        ///     off-hand weapon is the kit's) is consumed with DequipObjectAction.ConsumeItem. The restore destroys issued items anyway,
+        ///     so this needs no pack room and cannot leave the rule defeated by a full pack.
+        ///   - An unmarked (own) weapon goes to the pack. If the pack has no room, or anything throws after the dequip, it is re-equipped
+        ///     the way Player_Facets.TryDetachAndEquipForFacet recovers: a throw is judged by HasEquippedItem, never assumed either way.
+        /// Never throws. Player queue only.
+        /// </summary>
+        internal bool ClearPvpOffHandWeapon(string templateKey)
+        {
+            try
+            {
+                if (!PvpDualWieldRefuses(EquipMask.Shield, itemIsShield: false))
+                    return false;
+
+                var weapon = GetDualWieldWeapon();
+
+                if (weapon == null)
+                    return false;
+
+                var name = weapon.Name;
+                var issued = PvpTemplate.IsMarkedIssued(weapon);
+
+                if (!TryDequipObjectWithNetworking(weapon.Guid, out var dequipped, issued ? DequipObjectAction.ConsumeItem : DequipObjectAction.DequipToPack))
+                {
+                    PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): could not take the off-hand weapon {name} off (template {templateKey ?? "(none)"}); dual wielding stays on this player.");
+                    return false;
+                }
+
+                if (issued)
+                {
+                    Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.DualWieldDisabled, ChatMessageType.Broadcast));
+
+                    PvpArenaHookSettings.Log.Warn($"[PVP] {Name} (0x{Guid.Full:X8}): the issued off-hand weapon {name} was removed because pvp_match_block_dual_wield is on (template {templateKey ?? "(none)"}); the restore would destroy it anyway.");
+
+                    return true;
+                }
+
+                // An own weapon: to the pack. Everything after the dequip is guarded, because the item is in neither place until it lands.
+                var inPack = false;
+
+                try
+                {
+                    inPack = TryCreateInInventoryWithNetworking(dequipped, out _, burdenCheck: false);
+                }
+                catch (Exception ex)
+                {
+                    PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): putting the off-hand weapon {name} in the pack threw (template {templateKey ?? "(none)"}).", ex);
+                }
+
+                if (!inPack)
+                {
+                    bool reEquipped;
+
+                    try
+                    {
+                        reEquipped = TryEquipObjectWithNetworking(dequipped, EquipMask.Shield);
+                    }
+                    catch (Exception ex)
+                    {
+                        // As in TryDetachAndEquipForFacet: TryEquipObject runs first, so a throw usually means the item IS worn again.
+                        PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): re-equipping the off-hand weapon {name} threw (template {templateKey ?? "(none)"}).", ex);
+                        reEquipped = HasEquippedItem(dequipped.Guid);
+                    }
+
+                    if (reEquipped)
+                        PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): no pack room for the off-hand weapon {name} (template {templateKey ?? "(none)"}); put back in the off-hand.");
+                    else
+                        PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): the off-hand weapon {name} (0x{dequipped.Guid.Full:X8}) could not go to the pack AND could not be re-equipped (template {templateKey ?? "(none)"}). It is in NEITHER place - manual recovery required.");
+
+                    return false;
+                }
+
+                Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.DualWieldDisabled, ChatMessageType.Broadcast));
+
+                PvpArenaHookSettings.Log.Warn($"[PVP] {Name} (0x{Guid.Full:X8}): off-hand weapon {name} moved to the pack because pvp_match_block_dual_wield is on (template {templateKey ?? "(none)"}).");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): clearing the off-hand weapon (template {templateKey ?? "(none)"}) threw.", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The SpellComponentsRequired value the client should hold right now: false while waived, else the player's real
+        /// effective value. The one computation behind the login send, the match-bind send and the match-exit send.
+        /// </summary>
+        internal bool ClientSpellComponentsRequired => !PvpMatchComponentsWaived && SpellComponentsRequired && PvpArenaHookSettings.RequireSpellCompsSource();
+
+        /// <summary>
+        /// Teaches the player, for free, every level 7 War/Life spell the Omni-School Professor teaches plus Curse of Raven Fury
+        /// that they do not already know (PvpMatchSpellGrant). Idempotent. Called at queue join (PvpMatchManager.Join) and again as a
+        /// safety net just before the template restore record is captured (ApplyPvpTemplateNow), so a granted spell is already in the
+        /// spellbook when Capture decides which template spells the exit must remove. NEVER call it while templated or inside a match
+        /// bind: a spell granted after Capture that the template also names would be recorded as template-added and removed at exit.
+        /// Never throws: a failure is logged and the caller carries on.
+        /// </summary>
+        internal void GrantPvpMatchSpells()
+        {
+            try
+            {
+                var taught = PvpMatchSpellGrant.Grant(
+                    PvpArenaHookSettings.MatchGrantSpellsSource(),
+                    PvpArenaHookSettings.MatchGrantSpellListSource,
+                    AddKnownSpell,
+                    id => Session?.Network.EnqueueSend(new GameEventMagicUpdateSpell(Session, (ushort)id)));
+
+                if (taught > 0)
+                    Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpMatchSpellGrant.TaughtMessage(taught), ChatMessageType.Magic));
+            }
+            catch (Exception ex)
+            {
+                PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): the free spell grant threw.", ex);
+            }
+        }
+
+        /// <summary>Pushes ClientSpellComponentsRequired to the client (the match bind and exit sites).</summary>
+        private void SendClientSpellComponentsRequired()
+            => Session?.Network.EnqueueSend(new GameMessagePrivateUpdatePropertyBool(this, PropertyBool.SpellComponentsRequired, ClientSpellComponentsRequired));
 
         /// <summary>
         /// WaffleACE: IP active-player limit. True while the player is in a live PvP arena match AND still
@@ -99,6 +242,12 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>Throttles the friendly-fire line: an AoE or cleave checks every target in range in one swing.</summary>
         private DateTime pvpFriendlyFireNoticeAtUtc;
+
+        /// <summary>Throttles the Tugak Brawl "only Curse of Raven Fury can hurt" line (pvp_arena_ffa_spell_only): a cleave or volley asks once per target.</summary>
+        private DateTime pvpFfaSpellOnlyNoticeAtUtc;
+
+        /// <summary>When the Tugak Brawl spell-only line last went out (default when never). Read by tests; a plain read, no Player static.</summary>
+        internal DateTime PvpFfaSpellOnlyNoticeAtUtc => pvpFfaSpellOnlyNoticeAtUtc;
 
         /// <summary>
         /// Per-target throttle for the "is protected for a moment longer" line: target guid to the last time it was sent. Bounded
@@ -195,6 +344,16 @@ namespace ACE.Server.WorldObjects
             }
 
             pvpBinding = binding;
+
+            // 2b. free components for the match: the client must be told (it refuses a cast without components otherwise)
+            SendClientSpellComponentsRequired();
+
+            // 2c. pvp_match_block_dual_wield: an off-hand weapon the player brought in (a mode with no kit; a kit is cleared when it is
+            // issued) goes to the pack now that the binding makes the rule apply.
+            ClearPvpOffHandWeapon(binding.Template?.Key);
+
+            // 2d. PropertyBool.PveOnly: a PvE-only item the player brought in goes to the pack (an issued kit one is consumed).
+            ClearPvpPveOnlyItems(binding.Template?.Key);
 
             // 3. the hook caches bake in ClassAbilitySuppressed, so rebuild them now; drop every in-memory stack and ward
             InvalidateClassAbilityHookCaches();
@@ -345,6 +504,9 @@ namespace ACE.Server.WorldObjects
 
             pvpBinding = null;
 
+            // the player's real components setting goes back to the client (the binding was the only thing waiving it)
+            SendClientSpellComponentsRequired();
+
             if (marker != null)
             {
                 var restored = (PlayerKillerStatus)marker.Value;
@@ -414,6 +576,11 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         internal void ReportPvpLogoutForfeit()
         {
+            // Deserter lockout (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): a logout the server or staff forced is never a strike. The
+            // one-shot eviction flag is consumed on every call, in a match or not, so it can never leak into a later logout.
+            var evicted = PvpServerLogoffPending;
+            PvpServerLogoffPending = false;
+
             var binding = pvpBinding;
 
             if (!PvpPlayerRules.InMatch(binding) || pvpForfeitReportedFor == binding.Match.MatchId)
@@ -421,8 +588,26 @@ namespace ACE.Server.WorldObjects
 
             pvpForfeitReportedFor = binding.Match.MatchId;
 
-            PvpMatchManager.Report(PvpMatchManager.LogoutForfeit(Guid.Full, binding.Match.MatchId, DateTime.UtcNow));
+            var serverCaused = evicted;
+
+            try
+            {
+                serverCaused |= PvpDeserterRules.IsServerCausedTermination(Session?.PendingTermination?.Reason);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): classifying the logout's termination reason threw; treating it as the player's own", ex);
+            }
+
+            PvpMatchManager.Report(PvpMatchManager.LogoutForfeit(Guid.Full, binding.Match.MatchId, DateTime.UtcNow, serverCaused));
         }
+
+        /// <summary>
+        /// One-shot: set immediately before a server eviction that logs the player off with no session termination reason (the IP-limit
+        /// sweep and the higher-level-character evict), so the match forfeit that logout reports is not a deserter strike. Consumed by
+        /// <see cref="ReportPvpLogoutForfeit"/>.
+        /// </summary>
+        public bool PvpServerLogoffPending { get; set; }
 
         /// <summary>
         /// Player.Die (DESIGN H4): latches whether this death is a match death, and the waiver it gets, from the
@@ -503,6 +688,20 @@ namespace ACE.Server.WorldObjects
 
             if (decision == PvpGateDecision.Allow)
             {
+                // Tugak Brawl is spell-only (owner ruling 2026-10-15, pvp_arena_ffa_spell_only): an attack that carries no spell - a
+                // swing, a shot, a cleave or multi-shot extra, a riposte - never lands between two players of the same Live FFA match.
+                // The refusal is silent at the call sites (the throttled line below is the only message) because a cleave or volley asks
+                // once per target. A missile is refused here at IMPACT, not at launch, so the shot's ammo is already spent.
+                var inFfa = mine.Match.ModeKey == ArenaMapCatalog.FfaKey;
+
+                if (spell == null && inFfa && PvpArenaSpellRules.IsPhysicalRefused(inFfa, PvpArenaHookSettings.FfaSpellOnlySource()))
+                {
+                    SendPvpFfaSpellOnlyNotice();
+
+                    result = PvpArenaHookSettings.SpawnProtectedRefusal;
+                    return true;
+                }
+
                 // Doctide-ported arena spell rules (Docs/Pvp/DESIGN.md "Arena spell rules"): a harmful spell the
                 // gate above already allowed can still be refused by school/category, or by FFA. Resolved
                 // against targetPlayer, the SAME creature the gate itself just checked - unlike Doctide, which
@@ -519,6 +718,12 @@ namespace ACE.Server.WorldObjects
                         return true;
                     }
                 }
+
+                // Conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals"): a clean allow of a hostile action on an ENEMY of the same Live
+                // match is activity for the attacker, whether or not it then lands (misses and resists count). A teammate (friendly fire on)
+                // and a Countdown vuln never stamp.
+                if (PvpConductRules.IsHostileAttempt(mine, theirs))
+                    StampPvpActivity(mine.Match.MatchId, PvpArenaHookSettings.UtcNow());
 
                 return true;
             }
@@ -652,6 +857,90 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        /// <summary>True while the last position commit had this player inside their own team's spawn room (the edge detector for the refill).</summary>
+        private bool pvpWasInOwnSpawnRoom;
+
+        /// <summary>When this player's last spawn-room refill fired (UtcNow seam clock), for pvp_bg_spawn_refill_cooldown_seconds. Default = never.</summary>
+        private DateTime pvpLastSpawnRefillUtc;
+
+        /// <summary>
+        /// Respawn-zone refill (Docs/Pvp/TEMPLATES.md "Respawn zone"): called right after the position commit, beside
+        /// <see cref="CheckPvpSpawnRoomExit"/>. On the step that carries the player INTO their own team's spawn room during a Live match,
+        /// health, stamina and mana go to full, at most once per pvp_bg_spawn_refill_cooldown_seconds. A no-op, one volatile read, for
+        /// everyone without a binding. The whole decision lives in <see cref="RunPvpSpawnRoomEntry"/>, which a test drives with a counting refill.
+        /// </summary>
+        internal void CheckPvpSpawnRoomEntry() => RunPvpSpawnRoomEntry(RefillPvpSpawnRoomVitals);
+
+        /// <summary>
+        /// The refill decision as a seam: runs <paramref name="refill"/> exactly when this call is an entry (<see cref="TrackPvpSpawnRoomEntry"/>)
+        /// and the cooldown has lapsed. <paramref name="refill"/> returns whether it actually refilled; only then is the cooldown started.
+        /// Returns whether it did. The edge flag follows the position through a cooldown, so a skipped entry is not retried while inside.
+        /// </summary>
+        internal bool RunPvpSpawnRoomEntry(Func<bool> refill)
+        {
+            if (!TrackPvpSpawnRoomEntry())
+                return false;
+
+            var now = PvpArenaHookSettings.UtcNow();
+            var cooldown = PvpArenaHookSettings.SpawnRefillCooldownSecondsSource();
+
+            if (cooldown > 0 && pvpLastSpawnRefillUtc != default && (now - pvpLastSpawnRefillUtc).TotalSeconds < cooldown)
+                return false;
+
+            try
+            {
+                if (!refill())
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): the spawn-room refill threw.", ex);
+                return false;
+            }
+
+            pvpLastSpawnRefillUtc = now;
+            return true;
+        }
+
+        /// <summary>Sets Health, Stamina and Mana to max through the respawn's vital path (Player.UpdateVital sends each change). False for a dead player.</summary>
+        private bool RefillPvpSpawnRoomVitals()
+        {
+            if (IsDead || IsInDeathProcess)
+                return false;
+
+            PvpPlayerRules.RestoreRespawnVitals(v => Vitals[v].MaxValue, (v, max) => UpdateVital(Vitals[v], max));
+            return true;
+        }
+        /// <summary>
+        /// The edge detector behind <see cref="CheckPvpSpawnRoomEntry"/>: true exactly when this call sees the player inside their OWN
+        /// team's spawn room (the binding's <see cref="PvpPlayerBinding.SpawnRoom"/>, so an enemy room never counts) in a Live match, not
+        /// respawning, having been outside on the previous call. The flag follows the position whatever the match state, so the first
+        /// Live step inside the room after leaving it is the next entry.
+        /// </summary>
+        internal bool TrackPvpSpawnRoomEntry()
+        {
+            var binding = pvpBinding;
+
+            var inRoom = binding != null && binding.SpawnRoom != null && binding.IsInSpawnRoom(Location);
+            var was = pvpWasInOwnSpawnRoom;
+
+            pvpWasInOwnSpawnRoom = inRoom;
+
+            return inRoom && !was && binding.State == PvpMatchState.Live && !binding.Respawning;
+        }
+
+        private void SendPvpFfaSpellOnlyNotice()
+        {
+            var now = PvpArenaHookSettings.UtcNow();
+
+            if ((now - pvpFfaSpellOnlyNoticeAtUtc).TotalSeconds < PvpArenaHookSettings.FfaSpellOnlyNoticeIntervalSeconds)
+                return;
+
+            pvpFfaSpellOnlyNoticeAtUtc = now;
+
+            Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.FfaSpellOnlyAttacker, ChatMessageType.Broadcast));
+        }
+
         private void SendPvpFriendlyFireNotice()
         {
             var now = DateTime.UtcNow;
@@ -710,10 +999,8 @@ namespace ACE.Server.WorldObjects
                 PvpArenaHookSettings.Log.Error($"[PVP] {Name} (0x{Guid.Full:X8}): the template restore on leaving the pen threw ({why}).", ex);
             }
 
-            var exitTo = GetPosition(PositionType.EphemeralRealmExitTo);
-            var destination = (exitTo != null ? new Position(exitTo) : Sanctuary) ?? Instantiation;
-
-            SetPosition(PositionType.EphemeralRealmExitTo, null);
+            // The one PvP return resolver: back inside a Thread they were pulled from when it still takes them, else the stamp, else home.
+            var destination = ResolvePvpReturn($"left the battleground pen: {why}") ?? Instantiation;
 
             if (destination == null)
             {
@@ -724,6 +1011,62 @@ namespace ACE.Server.WorldObjects
             PvpArenaHookSettings.Log.Info($"[PVP] {Name} (0x{Guid.Full:X8}): returned from the battleground pen to {destination} ({why}).");
 
             WorldManager.ThreadSafeTeleport(this, destination);
+        }
+
+        // ---------------- the PvP return (Docs/Pvp/BATTLEGROUNDS.md "Pulled from a Thread") ----------------
+
+        /// <summary>
+        /// THE ONE PvP RETURN RESOLVER, called by every path that sends a player home from a match: the coordinator's return
+        /// (LivePvpPlayerGateway.ReturnToExit), a match death (ThreadSafeTeleportOnDeath), the battleground pen return
+        /// (<see cref="ReturnFromBattlegroundPenNow"/>) and the login relocation (WorldManager.DoPlayerEnterWorld_Inner). None of them reads
+        /// EphemeralRealmExitTo itself. Returns the destination (a copy) and leaves the stamp as the decision says
+        /// (PvpReturnRules.Decide): a player pulled from a Thread goes back to the exact spot they left when the run registered for that
+        /// instance is still the very run they left (by reference: run ids are re-issued), it has not ended, its copy is loaded and its
+        /// realm accepts them; the Thread's outer stamp then stays their EphemeralRealmExitTo. Otherwise the stamp (cleared; never a dead
+        /// or refusing instance), else <paramref name="seatExit"/>, else home, and an invalid Thread entry is released.
+        /// <paramref name="keepAwayEntry"/> (a login whose battleground seat is held for a rejoin) leaves any Thread entry for after the
+        /// match. <paramref name="homeFallback"/> false (the login path) returns null when there is neither a Thread return nor a stamp,
+        /// so the caller keeps its own fallback. Player queue (or the world thread at login).
+        /// </summary>
+        internal Position ResolvePvpReturn(string why, Position seatExit = null, bool keepAwayEntry = false, bool homeFallback = true)
+        {
+            var guid = Guid.Full;
+            var stamp = GetPosition(PositionType.EphemeralRealmExitTo);
+
+            ACE.Server.ThreadDungeons.ThreadPvpAway.Entry entry = null;
+            var hasEntry = !keepAwayEntry && ACE.Server.ThreadDungeons.ThreadPvpAway.TryGet(guid, out entry);
+            var threadValid = false;
+
+            if (hasEntry)
+            {
+                var instance = entry.Inside.Instance;
+                var registered = ACE.Server.ThreadDungeons.ThreadDungeonManager.GetRun(instance);
+                var landblock = LandblockManager.GetEphemeralLandblock(instance);
+                var accepts = landblock?.InnerRealmInfo?.Accepts(this) ?? false;
+
+                threadValid = ACE.Server.ThreadDungeons.ThreadPvpAway.IsReturnValid(ReferenceEquals(registered, entry.Run),
+                    entry.Run.State == ACE.Server.ThreadDungeons.ThreadDungeonRunState.Ended, landblock != null, accepts);
+            }
+
+            var stampUsable = false;
+
+            if (stamp != null)
+            {
+                ACE.Server.Realms.InstanceRouting.ValidateInstanceDestination(stamp, this, out var rejection);
+                stampUsable = rejection == ACE.Server.Realms.InstanceRejection.None;
+            }
+
+            var decision = PvpReturnRules.Decide(hasEntry, threadValid, entry?.Inside, stamp, stampUsable, seatExit, Sanctuary, Instantiation, homeFallback);
+
+            if (decision.ReleaseThreadEntry)
+                ACE.Server.ThreadDungeons.ThreadPvpAway.Release(guid, entry.Run);
+
+            if (!decision.KeepStamp)
+                SetPosition(PositionType.EphemeralRealmExitTo, null);
+
+            PvpArenaHookSettings.Log.Info($"[PVP] {Name} (0x{guid:X8}): PvP return ({why}): {decision.Kind}{(hasEntry ? $" (Thread entry for {entry.Run}: {(threadValid ? "valid" : "not valid, released")})" : "")} -> {decision.Destination?.ToString() ?? "none"}");
+
+            return decision.Destination != null ? new Position(decision.Destination) : null;
         }
 
         /// <summary>

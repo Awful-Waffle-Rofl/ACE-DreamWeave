@@ -75,7 +75,7 @@ namespace ACE.Server.ThreadDungeons
             => Math.Max(1, Math.Min(budget?.MaxRolls ?? MaxRollsPerDeal, MaxRollsPerDeal));
 
         /// <summary>
-        /// Test seam for the DUPLICATED half of the boss bonus - the Trade Note stack and the salvage bags, one
+        /// Test seam for the DUPLICATED half of the boss bonus - the Trade Note stack, the Durable Legendary Key and the salvage bags, one
         /// full set per deal seat. Production is ThreadDungeonRewardSpawner.BuildBossBonusPerSeatItems(run, B).
         /// A group run never reaches ThreadCacheFiller's one-argument BonusBuilder, which is the solo path and
         /// still builds all three components together.
@@ -106,15 +106,31 @@ namespace ACE.Server.ThreadDungeons
             /// <summary>The /spawncache move for one member.</summary>
             public Action<uint> MoveFor;
 
+            /// <summary>
+            /// The Summon's move for one member: quiet (no chat) and without the exit relocation, recording what it did into the
+            /// result it is given as it goes (so a throw partway keeps the count).
+            /// Null skips the move.
+            /// </summary>
+            public Action<uint, ThreadCachePlacer.CacheMoveResult> SummonMoveFor;
+
+            /// <summary>The exit portal follows the member; called once, after a Summon's forming, when something moved.</summary>
+            public Action<uint> RelocateExitFor;
+
             /// <summary>A chat line to one member.</summary>
             public Action<uint, string> Tell;
+
+            /// <summary>
+            /// Is this roster member online? Gates the once-per-member share-waits line, so an offline member does not
+            /// spend it on a line nobody hears. Null reads as online.
+            /// </summary>
+            public Func<uint, bool> IsOnline;
 
             /// <summary>The live update and rare broadcast for one filled cache.</summary>
             public Action<Container, CacheFillResult> Deliver;
 
             public Func<ThreadLootLedgerEntry, List<WorldObject>> Materialize;
 
-            /// <summary>The duplicated half of the boss bonus, per seat: Trade Notes and salvage bags.</summary>
+            /// <summary>The duplicated half of the boss bonus, per seat: Trade Notes, Durable Legendary Key and salvage bags.</summary>
             public Func<ThreadDungeonRun, double, List<WorldObject>> BuildBonus;
 
             /// <summary>The pooled half: the Legendary-table rolls. (run, factor, cap); the cap is the batch size when <see cref="CountPooledRolls"/> is set.</summary>
@@ -153,7 +169,20 @@ namespace ACE.Server.ThreadDungeons
                     if (ThreadRunPresence.IsMemberInside(run, member))
                         ThreadCachePlacer.MoveMemberCaches(run, landblock, member);
                 },
+                SummonMoveFor = (guid, progress) =>
+                {
+                    var member = PlayerManager.GetOnlinePlayer(guid);
+                    if (ThreadRunPresence.IsMemberInside(run, member))
+                        ThreadCachePlacer.MoveMemberCachesQuiet(run, landblock, member, progress);
+                },
+                RelocateExitFor = guid =>
+                {
+                    var member = PlayerManager.GetOnlinePlayer(guid);
+                    if (ThreadRunPresence.IsMemberInside(run, member))
+                        ThreadCachePlacer.RelocateExitFor(run, landblock, member);
+                },
                 Tell = (guid, text) => PlayerManager.GetOnlinePlayer(guid)?.Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast)),
+                IsOnline = guid => PlayerManager.GetOnlinePlayer(guid)?.Session != null,
                 Deliver = (cache, result) => ThreadCachePlacer.DeliverFill(run, cache, result),
                 Materialize = ThreadCacheFiller.EntryMaterializer,
                 BuildBonus = BonusBuilder,
@@ -165,9 +194,11 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// One group delivery pass (task 10 steps 3 and 4).
         ///   Auto: deal, then serve every roster member in roster order.
-        ///   Summon: deal, then serve the requester by forming caches at them from their pile (no top-up, as the solo
-        ///   Summon); when the deal handed anything out, every other member is served as Auto serves them, so a pile
-        ///   dealt by this pass is never left without a delivery attempt or a retry flag.
+        ///   Summon: first the requester's own placed caches move to them (as Move, but quiet and without the exit
+        ///   relocation), then deal, then serve the requester by forming caches at them from their pile (no top-up,
+        ///   as the solo Summon). The requester hears ONE line for the move and the forming together and the exit
+        ///   follows once, after the forming. When the deal handed anything out, every other member is served as
+        ///   Auto serves them, so a pile dealt by this pass is never left without a delivery attempt or a retry flag.
         ///   Move: the requester's own caches move to them; nothing is dealt.
         /// Every mode ends by leaving the run-level placement flag set when undealt loot remains, so a kill banked while
         /// this pass held the latch (its own trigger was dropped as Busy) is retried by the Tick.
@@ -186,10 +217,46 @@ namespace ACE.Server.ThreadDungeons
 
                 case CacheRequestMode.Summon:
                 {
+                    // The requester's own already-placed caches come to them first (Move's work; the move touches only
+                    // caches stamped for that member), then new caches form from their pile. The move is guarded on its
+                    // own so a throw still lets the forming run.
+                    var move = new ThreadCachePlacer.CacheMoveResult();
+                    var requesterInside = run.IsRosterMember(requesterGuid) && world.IsInside(requesterGuid);
+
+                    if (requesterInside && world.SummonMoveFor != null)
+                    {
+                        try
+                        {
+                            world.SummonMoveFor(requesterGuid, move);
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Error($"[DYNDUNGEON] {run} the Summon's move for 0x{requesterGuid:X8} threw; new caches still form", ex);
+                        }
+                    }
+
                     var round = Deal(run, world.Materialize, world.BuildBonus, world.BuildPooledRolls, budget, world.CountPooledRolls);
 
+                    CacheFormPass pass = null;
+
                     if (run.IsRosterMember(requesterGuid))
-                        ServeMember(run, requesterGuid, false, world);
+                        pass = ServeMemberCore(run, requesterGuid, false, world, quiet: true);
+
+                    // After the forming, so its exclusions never saw the portal move; then the one line.
+                    try
+                    {
+                        if (move.Moved > 0)
+                            world.RelocateExitFor?.Invoke(requesterGuid);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[DYNDUNGEON] {run} relocating the exit for 0x{requesterGuid:X8} threw", ex);
+                    }
+
+                    var line = ThreadCachePlacer.SummonLine(move.Moved, pass?.CachesFormed ?? 0, move.NoRoom || (pass?.NoRoom ?? false));
+
+                    if (line != null)
+                        world.Tell(requesterGuid, line);
 
                     if (round > 0)
                     {
@@ -224,13 +291,23 @@ namespace ACE.Server.ThreadDungeons
         /// member is logged and does not stop the others; FillFromPile has already returned what did not land.
         /// </summary>
         internal static void ServeMember(ThreadDungeonRun run, uint memberGuid, bool topUp, DeliveryWorld world)
+            => ServeMemberCore(run, memberGuid, topUp, world, quiet: false);
+
+        /// <summary>
+        /// ServeMember, returning the form pass it ran (null when none ran). <paramref name="quiet"/> withholds the
+        /// Formed / NoRoom line so a Summon can send one line for the move and the forming together.
+        /// </summary>
+        internal static CacheFormPass ServeMemberCore(ThreadDungeonRun run, uint memberGuid, bool topUp, DeliveryWorld world, bool quiet)
         {
+            // Hoisted so a throw after the form pass (DestroyUnplaceable, a chat send) still hands the caller what the pass did.
+            CacheFormPass pass = null;
+
             try
             {
                 run.TryClaimMemberDeliveryWanted(memberGuid);
 
                 if (!run.HasHeldPile(memberGuid))
-                    return;
+                    return null;
 
                 if (topUp)
                 {
@@ -246,34 +323,60 @@ namespace ACE.Server.ThreadDungeons
                     }
 
                     if (!run.HasHeldPile(memberGuid))
-                        return;
+                        return null;
                 }
 
-                var pass = world.IsInside(memberGuid) ? world.FormAt(memberGuid, () => run.HasHeldPile(memberGuid)) : null;
+                pass = world.IsInside(memberGuid) ? world.FormAt(memberGuid, () => run.HasHeldPile(memberGuid)) : null;
 
                 if (pass == null)
                 {
                     // Not inside (or gone since the test): wait for their arrival (ruling R20).
                     run.MarkMemberDeliveryWanted(memberGuid);
-                    return;
+                    TellShareWaits(run, memberGuid, world);
+                    return null;
                 }
 
-                if (pass.CachesFormed > 0)
+                if (!quiet && pass.CachesFormed > 0)
                     world.Tell(memberGuid, ThreadCachePlacer.FormedMessage);
 
                 // Inside and no room: not flagged, matching solo. /spawncache is the fallback (ruling R20).
-                if (pass.NoRoom)
+                if (!quiet && pass.NoRoom)
                     world.Tell(memberGuid, ThreadCachePlacer.NoRoomMessage);
 
                 // A fresh, EMPTY cache refused everything left in the pile, so no cache ever will. Kept, those items would
                 // hold the copy alive (GroupLootOwed) until TTL for nothing (fix round 1, minor 2).
                 if (pass.FreshCacheAcceptedNothing)
                     DestroyUnplaceable(run, memberGuid);
+
+                return pass;
             }
             catch (Exception ex)
             {
                 log.Error($"[DYNDUNGEON] {run} group cache delivery for 0x{memberGuid:X8} threw", ex);
+                return pass;
             }
+        }
+
+        /// <summary>
+        /// The deal-time half of the share-waits notice: a member dealt a pile while outside the cleared copy is told,
+        /// once per run (ThreadDungeonRun.TryMarkShareWaitsNotice), that re-entering to collect it is free. Sent only
+        /// while that is actually true (DungeonGemRules.IsClearedReturnFor) and only to an online member, so the latch
+        /// is never spent on a line nobody hears.
+        /// </summary>
+        internal static void TellShareWaits(ThreadDungeonRun run, uint memberGuid, DeliveryWorld world)
+            => TellShareWaits(run, memberGuid, world.IsOnline, world.Tell);
+
+        /// <summary>The seam-level form of <see cref="TellShareWaits(ThreadDungeonRun, uint, DeliveryWorld)"/>: a null <paramref name="isOnline"/> reads as online.</summary>
+        internal static void TellShareWaits(ThreadDungeonRun run, uint memberGuid, Func<uint, bool> isOnline, Action<uint, string> tell)
+        {
+            if (run == null || !(isOnline?.Invoke(memberGuid) ?? true))
+                return;
+
+            if (!DungeonGemRules.IsClearedReturnFor(run, memberGuid))
+                return;
+
+            if (run.TryMarkShareWaitsNotice(memberGuid))
+                tell?.Invoke(memberGuid, GroupRosterRules.ShareWaitsInsideText(memberGuid == run.OwnerGuid));
         }
 
         /// <summary>
@@ -498,7 +601,7 @@ namespace ACE.Server.ThreadDungeons
                 // run-end drain if the run ends first), and a roll never built is just a number the drain zeroes. The DUPLICATED half stays atomic: it is a handful of stackables per seat, and building
                 // it across steps would split one member's currency across deal rounds for no measurable gain.
                 //
-                // DUPLICATED half, unchanged from that contract: the Trade Note stack and the salvage bags, one
+                // DUPLICATED half, unchanged from that contract: the Trade Note stack, the Durable Legendary Key and the salvage bags, one
                 // full set per seat at B, straight into that member's pile. Currency and salvage scale per player.
                 foreach (var seat in seats)
                 {
@@ -521,10 +624,15 @@ namespace ACE.Server.ThreadDungeons
                     bonus = ThreadLootStacking.Consolidate(bonus, out var mergedBonus);
                     run.Perf.RecordStacksMerged(mergedBonus);
 
+                    // Tagged with its list index (notes, key, salvage) so SortPileForPlacement keeps them right after any Knot-family item, ahead of stackables and the rest.
+                    var fixedIndex = 0;
+
                     foreach (var item in bonus ?? new List<WorldObject>())
                     {
                         if (item != null && seen.Add(item))
-                            tally.Direct += Pile(run, seat, item, null, round);
+                            tally.Direct += Pile(run, seat, item, null, round, fixedIndex);
+
+                        fixedIndex++;
                     }
                 }
 
@@ -840,9 +948,9 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>Adds one item to a member's pile; a refused item (the run has Ended) is destroyed. Returns 1 when piled.</summary>
-        private static int Pile(ThreadDungeonRun run, uint memberGuid, WorldObject item, string rareFinderName, int round)
+        private static int Pile(ThreadDungeonRun run, uint memberGuid, WorldObject item, string rareFinderName, int round, int? fixedOrder = null)
         {
-            if (run.AddToHeldPile(memberGuid, new HeldPileItem(item, rareFinderName, round)))
+            if (run.AddToHeldPile(memberGuid, new HeldPileItem(item, rareFinderName, round, null, fixedOrder)))
                 return 1;
 
             item.Destroy();

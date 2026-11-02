@@ -75,6 +75,14 @@ namespace ACE.Server.Managers.Analytics
         private static readonly ConcurrentQueue<AnalyticsDatabase.DungeonRunRow> dungeonRunQueue = new ConcurrentQueue<AnalyticsDatabase.DungeonRunRow>();
         private static long dungeonRunDropped;
 
+        // Knot telemetry (knot_event). Its OWN cap, queue and drop counter, like chat and dungeon runs: the stream
+        // is driven by Knot play and must neither starve nor be starved by the others. Volume is small (a handful
+        // of rows per run and per fight), so reaching the cap would mean the analytics DB has been unreachable
+        // for a very long time.
+        private const int KnotEventQueueCap = 50_000;
+        private static readonly ConcurrentQueue<AnalyticsDatabase.KnotEventRow> knotEventQueue = new ConcurrentQueue<AnalyticsDatabase.KnotEventRow>();
+        private static long knotEventDropped;
+
         // Character sessions (login/logout), for the IP integrity dashboard. One FIFO queue for both kinds so a
         // character's close always reaches the writer after its open. Volume is bounded by logins, not
         // gameplay, so this is the smallest stream; the cap only matters if the analytics DB is unreachable
@@ -478,6 +486,30 @@ namespace ACE.Server.Managers.Analytics
             dungeonRunQueue.Enqueue(row);
         }
 
+        /// <summary>True while analytics is enabled. KnotTelemetry reads it so a disabled server builds no rows at all.</summary>
+        internal static bool IsEnabled => enabled;
+
+        /// <summary>
+        /// One Knot-economy event, fully materialised by KnotTelemetry (nothing is read off a live object here).
+        /// Bounded: at <see cref="KnotEventQueueCap"/> the row is dropped and counted, never blocked on.
+        /// </summary>
+        internal static void RecordKnotEvent(AnalyticsDatabase.KnotEventRow row)
+        {
+            if (!enabled || row == null)
+                return;
+
+            if (knotEventQueue.Count >= KnotEventQueueCap)
+            {
+                Interlocked.Increment(ref knotEventDropped);
+                return;
+            }
+
+            knotEventQueue.Enqueue(row);
+        }
+
+        /// <summary>Knot events dropped because the queue was full, since process start.</summary>
+        internal static long KnotEventsDropped => Interlocked.Read(ref knotEventDropped);
+
         // --- session capture (IP integrity) ---
 
         /// <summary>
@@ -585,6 +617,26 @@ namespace ACE.Server.Managers.Analytics
             Interlocked.Exchange(ref sessionDroppedLogged, 0);
         }
 
+        internal static void ResetKnotQueueForTests()
+        {
+            while (knotEventQueue.TryDequeue(out _))
+            {
+            }
+
+            Interlocked.Exchange(ref knotEventDropped, 0);
+        }
+
+        internal static List<AnalyticsDatabase.KnotEventRow> DrainKnotQueueForTests()
+        {
+            var rows = new List<AnalyticsDatabase.KnotEventRow>();
+            while (knotEventQueue.TryDequeue(out var row))
+                rows.Add(row);
+            return rows;
+        }
+
+        /// <summary>The Knot queue cap, so a test can fill it without hard-coding the number.</summary>
+        internal const int KnotEventQueueCapForTests = KnotEventQueueCap;
+
         internal static List<SessionEventRow> DrainSessionQueueForTests()
         {
             var rows = new List<SessionEventRow>();
@@ -615,6 +667,7 @@ namespace ACE.Server.Managers.Analytics
                 DrainTier2();
                 DrainChat();
                 DrainDungeonRuns();
+                DrainKnotEvents();
                 DrainSessions();
 
                 if (DateTime.UtcNow - lastFlushUtc < flushInterval)
@@ -691,6 +744,29 @@ namespace ACE.Server.Managers.Analytics
             catch (Exception ex)
             {
                 log.Error("AnalyticsManager: dungeon run write failed.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Drains Knot telemetry rows, at most 1000 a tick (one multi-row INSERT of 28 parameters a row). Its own
+        /// try/catch: a failed knot_event write loses that batch and nothing else.
+        /// </summary>
+        private static void DrainKnotEvents()
+        {
+            if (knotEventQueue.IsEmpty)
+                return;
+
+            var rows = new List<AnalyticsDatabase.KnotEventRow>();
+            while (rows.Count < 1000 && knotEventQueue.TryDequeue(out var row))
+                rows.Add(row);
+
+            try
+            {
+                AnalyticsDatabase.WriteKnotEvents(rows);
+            }
+            catch (Exception ex)
+            {
+                log.Error("AnalyticsManager: knot event write failed.", ex);
             }
         }
 
@@ -889,6 +965,12 @@ namespace ACE.Server.Managers.Analytics
         /// </summary>
         internal static void FinalSessionPass()
         {
+            // One bounded drain of the Knot events first, so the attempt ends and spends a shutdown produces are not
+            // lost with the queue. Runs before the sessionWriter check: Knot telemetry does not need one.
+            var knotGuard = 0;
+            while (!knotEventQueue.IsEmpty && knotGuard++ < 10)
+                DrainKnotEvents();
+
             if (sessionWriter == null)
                 return;
 

@@ -4,6 +4,7 @@ using System.Linq;
 
 using ACE.Entity;
 using ACE.Entity.Enum;
+using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
@@ -53,6 +54,88 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// The /sky-decor disable choice (PropertyBool 9079), persisted on the character's biota so it survives a relog. TRUE means
+        /// "never send me server-generated sky decor"; absent is FALSE (decor shown). Enabling removes the property rather than storing false.
+        /// </summary>
+        public bool HideSkyDecor
+        {
+            get => GetProperty(PropertyBool.HideSkyDecor) ?? false;
+            set
+            {
+                if (value)
+                    SetProperty(PropertyBool.HideSkyDecor, true);
+                else
+                    RemoveProperty(PropertyBool.HideSkyDecor);
+            }
+        }
+
+        /// <summary>
+        /// Pure: whether TrackObject may send this object to a client, as far as the sky decor opt-out is concerned.
+        /// Only an object flagged IsSkyDecor is ever withheld, and only from a player who chose to hide it.
+        /// </summary>
+        internal static bool ShouldSendToClient(WorldObject worldObject, bool hideSkyDecor)
+        {
+            return !(hideSkyDecor && worldObject.IsSkyDecor);
+        }
+
+        /// <summary>
+        /// /sky-decor disable: persists the choice, then deletes every sky decor object this client currently holds.
+        /// The objects stay in ObjMaint (TrackObject skips only the send), so the matching enable can re-send them
+        /// without waiting for a landblock change. Idempotent. Runs on the player's world thread (in-game command).
+        /// Returns the number of objects deleted from the client, or -1 when decor was already hidden.
+        /// </summary>
+        public int HideSkyDecorNow()
+        {
+            if (HideSkyDecor)
+                return -1;
+
+            HideSkyDecor = true;
+
+            var sent = 0;
+
+            foreach (var wo in GetKnownObjects())
+            {
+                if (!wo.IsSkyDecor)
+                    continue;
+
+                Session.Network.EnqueueSend(new GameMessageDeleteObject(wo));
+
+                // The client drops the object's emitters with it, so allow a re-send on the next create (as RemoveTrackedObject does).
+                VisualEffectManager.Forget(Session, wo);
+                sent++;
+            }
+
+            return sent;
+        }
+
+        /// <summary>
+        /// /sky-decor enable: clears the choice and re-sends every known sky decor object through TrackObject. Idempotent.
+        /// Returns the number of objects re-sent, or -1 when decor was not hidden.
+        /// </summary>
+        public int ShowSkyDecorNow()
+        {
+            if (!HideSkyDecor)
+                return -1;
+
+            HideSkyDecor = false;
+
+            // Accepted: if this lands inside the post-teleport TeleportCreateObjectDelay window, TrackObject can send an object the
+            // client is about to receive again, a benign double CreateObject (the same as the /fi resend).
+            var sent = 0;
+
+            foreach (var wo in GetKnownObjects())
+            {
+                if (!wo.IsSkyDecor)
+                    continue;
+
+                TrackObject(wo);
+                sent++;
+            }
+
+            return sent;
+        }
+
+        /// <summary>
         /// Sends a network message to player for CreateObject, if applicable
         /// </summary>
         /// <param name="sharedCreate">
@@ -80,6 +163,16 @@ namespace ACE.Server.WorldObjects
             // If Visibility is true, do not send object to client, object is meant for server side only, unless Adminvision is true.
             if (worldObject.Visibility && !Adminvision)
                 return;
+
+            // Sky decor opt-out: the object stays in ObjMaint (known/visible) like a Visibility object, only the send is skipped.
+            // Every CreateObject for a landblock object reaches here (enqueue_obj/enqueue_objs, AddTrackedObject, NotifyPlayers).
+            // Cheap runtime field first: the biota property is read only for sky decor, never for ordinary objects.
+            if (worldObject.IsSkyDecor && !ShouldSendToClient(worldObject, HideSkyDecor))
+                return;
+
+            // teleport_flush_scope 2: entering a landblock this client holds from another copy deletes that copy
+            // first. Under scopes 0 and 1 this only reads the ledger and sends nothing. See Player_TeleportFlush.
+            DeleteOtherCopyBeforeCreate(worldObject);
 
             Session.Network.EnqueueSend(sharedCreate != null && !Adminvision
                 ? sharedCreate
@@ -295,11 +388,16 @@ namespace ACE.Server.WorldObjects
         /// instance's objects before the new instance's (same-guid) objects can be
         /// created for it. Clears both sides of the object tracking tables and sends
         /// DeleteObject for everything known.
+        ///
+        /// This is teleport_flush_scope 1 (the default) with pacing off, and it must stay exactly this: the counts are
+        /// the only addition, for the [TELEPORT] line. See Player_TeleportFlush for the other arms.
         /// </summary>
-        public void FlushKnownObjectsForInstanceChange()
+        public TeleportFlushCounts FlushKnownObjectsForInstanceChange()
         {
+            var counts = default(TeleportFlushCounts);
+
             if (PhysicsObj?.ObjMaint == null)
-                return;
+                return counts;
 
             foreach (var knownObj in GetKnownObjects())
             {
@@ -310,10 +408,16 @@ namespace ACE.Server.WorldObjects
                 }
 
                 if (knownObj is Player knownPlayer)
+                {
                     knownPlayer.RemoveTrackedObject(this, false);
+                    counts.ObserverDeletes++;
+                }
 
                 RemoveTrackedObject(knownObj, false);
+                counts.DeletedNow++;
             }
+
+            return counts;
         }
 
         public void HandlePreTeleportVisibility(ACE.Entity.Position newPosition)

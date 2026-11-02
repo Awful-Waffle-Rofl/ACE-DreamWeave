@@ -125,7 +125,7 @@ namespace ACE.Server.WorldObjects
                     Session.Network.EnqueueSend(new GameEventWeenieError(Session, WeenieError.YouHaveMovedTooFar));
                     return;
                 }
-                Teleport(house.SlumLord.Location);
+                Teleport(house.SlumLord.Location, source: TeleportSource.House);
             });
 
             actionChain.EnqueueChain();
@@ -206,7 +206,7 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
-                Teleport(Sanctuary);
+                Teleport(Sanctuary, source: TeleportSource.Lifestone);
             });
 
             lifestoneChain.EnqueueChain();
@@ -293,7 +293,7 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
-                Teleport(marketplaceDrop);
+                Teleport(marketplaceDrop, source: TeleportSource.Marketplace);
             });
 
             // Set the chain to run
@@ -332,7 +332,7 @@ namespace ACE.Server.WorldObjects
             // resolved (and possibly null) here, but reported from inside the helper, so that an Olthoi /
             // PK-locked / academy / busy player still gets their own error rather than a realm message
             HandleActionTeleToNetworkHub("the Drift Network", DriftNetworkDrop,
-                RealmManager.GetRealm(DriftNetworkRealmId), "The Drift Network is not available on this world.");
+                RealmManager.GetRealm(DriftNetworkRealmId), "The Drift Network is not available on this world.", TeleportSource.Drift);
         }
 
         /// <summary>
@@ -342,7 +342,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void HandleActionTeleToTownNetwork()
         {
-            HandleActionTeleToNetworkHub("the Town Network", TownNetworkDrop, RealmManager.BaseRealm, null);
+            HandleActionTeleToNetworkHub("the Town Network", TownNetworkDrop, RealmManager.BaseRealm, null, TeleportSource.Town);
         }
 
         /// <summary>
@@ -354,7 +354,7 @@ namespace ACE.Server.WorldObjects
         /// guards, so an unavailable network never masks the more specific "you are busy / in PK / an
         /// Olthoi" refusal the player actually needs to see.
         /// </summary>
-        private void HandleActionTeleToNetworkHub(string networkName, Position drop, WorldRealm realm, string unavailableMessage)
+        private void HandleActionTeleToNetworkHub(string networkName, Position drop, WorldRealm realm, string unavailableMessage, string source)
         {
             if (IsOlthoiPlayer)
             {
@@ -400,8 +400,16 @@ namespace ACE.Server.WorldObjects
             }
 
             // Threads pooled loot: a recall out of a Cleared run with loot still pooled asks first (spec section 7).
-            if (ACE.Server.ThreadDungeons.ThreadExitGuard.TryHoldExit(this, () => HandleActionTeleToNetworkHub(networkName, drop, realm, unavailableMessage)))
+            if (ACE.Server.ThreadDungeons.ThreadExitGuard.TryHoldExit(this, () => HandleActionTeleToNetworkHub(networkName, drop, realm, unavailableMessage, source)))
                 return;
+
+            if (CombatMode != CombatMode.NonCombat)
+            {
+                // this should be handled by a different thing, probably a function that forces player into peacemode
+                var updateCombatMode = new GameMessagePrivateUpdatePropertyInt(this, PropertyInt.CombatMode, (int)CombatMode.NonCombat);
+                SetCombatMode(CombatMode.NonCombat);
+                Session.Network.EnqueueSend(updateCombatMode);
+            }
 
             EnqueueBroadcast(new GameMessageSystemChat($"{Name} is recalling to {networkName}.", ChatMessageType.Recall), LocalBroadcastRange, ChatMessageType.Recall);
 
@@ -425,7 +433,7 @@ namespace ACE.Server.WorldObjects
 
                 // bind the drop point to the target realm's default instance - same mechanism the realm
                 // portal uses via PropertyInt.PortalRealm, and what @telerealm does by hand
-                Teleport(new Position(drop, realm.DefaultInstanceID));
+                Teleport(new Position(drop, realm.DefaultInstanceID), source: source);
             });
 
             hubChain.EnqueueChain();
@@ -504,7 +512,7 @@ namespace ACE.Server.WorldObjects
                 if (!VerifyRecallAllegianceHometown())
                     return;
 
-                Teleport(Allegiance.Sanctuary);
+                Teleport(Allegiance.Sanctuary, source: TeleportSource.Allegiance);
             });
 
             actionChain.EnqueueChain();
@@ -605,7 +613,7 @@ namespace ACE.Server.WorldObjects
                 if (allegianceHouse == null)
                     return;
 
-                Teleport(allegianceHouse.SlumLord.Location);
+                Teleport(allegianceHouse.SlumLord.Location, source: TeleportSource.Mansion);
             }); 
 
             actionChain.EnqueueChain();
@@ -722,7 +730,7 @@ namespace ACE.Server.WorldObjects
                 var rng = ThreadSafeRandom.Next(0, pkArenaLocs.Count - 1);
                 var loc = pkArenaLocs[rng];
 
-                Teleport(loc);
+                Teleport(loc, source: TeleportSource.PkArena);
             });
 
             actionChain.EnqueueChain();
@@ -810,7 +818,7 @@ namespace ACE.Server.WorldObjects
                 var rng = ThreadSafeRandom.Next(0, pklArenaLocs.Count - 1);
                 var loc = pklArenaLocs[rng];
 
-                Teleport(loc);
+                Teleport(loc, source: TeleportSource.PklArena);
             });
 
             actionChain.EnqueueChain();
@@ -837,8 +845,11 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// This is not thread-safe. Consider using WorldManager.ThreadSafeTeleport() instead if you're calling this from a multi-threaded subsection.
         /// </summary>
-        public void Teleport(Position _newPosition, bool fromPortal = false)
+        /// <param name="source">the [TELEPORT] line's src= label, one of <see cref="TeleportSource"/>; logging only</param>
+        public void Teleport(Position _newPosition, bool fromPortal = false, string source = null)
         {
+            var teleportSource = TeleportSource.Resolve(source, fromPortal);
+
             // single choke point for instance safety: every teleport destination must
             // land in a registered realm, and ephemeral instances must be live and
             // accept this player - otherwise reroute to the home realm's default
@@ -905,12 +916,19 @@ namespace ACE.Server.WorldObjects
                 var delayTelport = new ActionChain();
                 delayTelport.AddAction(this, () => ClearFogColor());
                 delayTelport.AddDelaySeconds(1);
-                delayTelport.AddAction(this, () => WorldManager.ThreadSafeTeleport(this, _newPosition));
+                // carries the src= label through the re-queue. fromPortal is still dropped here, as it always was.
+                delayTelport.AddAction(this, () => WorldManager.ThreadSafeTeleport(this, _newPosition, source: teleportSource));
 
                 delayTelport.EnqueueChain();
 
                 return;
             }
+
+            // Threads (owner ruling 2026-10-10): a solo owner's willing exit, armed by ThreadExitGuard.TryHoldExit, retires
+            // their gem once the teleport really leaves the cleared copy. After the fog re-queue (which comes back
+            // through here) and before the teleport starts; a cross-instance teleport always takes the marker.
+            if (Location != null && Location.Instance != newPosition.Instance)
+                ACE.Server.ThreadDungeons.ThreadWillingExit.OnTeleport(this, Location.Instance, newPosition.Instance);
 
             // pending-teleport diagnostics: was a previous teleport still waiting on LoginComplete (see Player_TeleportWatch)
             var teleportingBefore = Teleporting;
@@ -936,6 +954,9 @@ namespace ACE.Server.WorldObjects
             // UpdatePlayerPosition) opens its own window, which this call's baseline must not overwrite.
             var watchStamp = LastTeleportStartTimestamp;
             OpenTeleportWatch(fromPortal ? TeleportKind.Portal : TeleportKind.Teleport, teleportingBefore, newPosition.Cell, newPosition.Instance);
+
+            // server-side arrival fallback: force the arrival if the client never sends LoginComplete (Player_TeleportArrival)
+            ScheduleForcedArrivalBackstop();
 
             Session.Network.EnqueueSend(new GameMessagePlayerTeleport(this));
 
@@ -983,8 +1004,35 @@ namespace ACE.Server.WorldObjects
             // authority for the destination - the same way an ordinary, non-instance-changing teleport
             // already behaves. Uses newPosition (the validated destination) for the destination side,
             // since Location is not relocated until UpdatePlayerPosition runs.
-            if (TeleportRequiresClientObjectFlush(originInstancedLandblock, newPosition.InstancedLandblock))
-                FlushKnownObjectsForInstanceChange();
+            //
+            // teleport_flush_scope (Player_TeleportFlush) switches this live. The default, scope 1 with pacing off, is
+            // the two legacy lines below, unchanged; every other arm runs at this same point. On an instance change, every
+            // scope then runs the residual broadcast-link cut (CutResidualBroadcastLinks) after its own flush.
+            var flushSettings = ReadTeleportFlushSettings();
+            var flushCounts = default(TeleportFlushCounts);
+            string ledgerNote;
+
+            if (flushSettings.Scope == TeleportFlushScope.Legacy && !flushSettings.Pacing)
+            {
+                ledgerNote = $"shadow:{ClientObjectLedgerShadow(newPosition.InstancedLandblock)}";
+
+                if (TeleportRequiresClientObjectFlush(originInstancedLandblock, newPosition.InstancedLandblock))
+                    flushCounts = FlushKnownObjectsForInstanceChange();
+            }
+            else
+            {
+                var flushAction = TeleportFlushPolicy.Decide(flushSettings.Scope, flushSettings.Pacing, originInstancedLandblock, newPosition.InstancedLandblock);
+
+                // the shadow is taken before anything is flushed, so it is what a scope-2 fire would have deleted here
+                var shadow = (flushAction & TeleportFlushAction.LedgerFire) == 0 ? ClientObjectLedgerShadow(newPosition.InstancedLandblock) : 0;
+
+                flushCounts = RunTeleportFlushVariant(flushAction, originInstancedLandblock, newPosition.InstancedLandblock, out var ledgerFired);
+
+                ledgerNote = (flushAction & TeleportFlushAction.LedgerFire) != 0 ? $"fired:{ledgerFired}" : $"shadow:{shadow}";
+            }
+
+            // every scope: the broadcast links the flush above cannot see (not in KnownObjects) - see Player_TeleportFlush
+            var residualCut = CutResidualBroadcastLinks(flushSettings.Scope, flushSettings.Pacing, originInstancedLandblock, newPosition.InstancedLandblock);
 
             var landblockUpdate = UpdatePlayerPosition(new Position(newPosition), true);
 
@@ -1011,7 +1059,10 @@ namespace ACE.Server.WorldObjects
             log.Info($"[TELEPORT] {Name} (0x{Guid.Full:X8}) from 0x{originCell:X8} instance 0x{originInstance:X8} " +
                      $"- requested 0x{_newPosition.Cell:X8} instance 0x{_newPosition.Instance:X8}, " +
                      $"validated 0x{newPosition.Cell:X8} instance 0x{newPosition.Instance:X8}, " +
-                     $"landed {landed} (landblockUpdate {landblockUpdate})");
+                     $"landed {landed} (landblockUpdate {landblockUpdate}) " +
+                     $"src={teleportSource} scope={(int)flushSettings.Scope} pacing={(flushSettings.Pacing ? 1 : 0)} " +
+                     $"delNow={flushCounts.DeletedNow} delDeferred={flushCounts.Deferred} obsDel={flushCounts.ObserverDeletes} " +
+                     $"purged={flushCounts.Purged} ledger={ledgerNote} pending={PendingTeleportDeletes()} residual={residualCut}");
 
             // LAST, so the teleport message, the fake position and UpdatePlayerPosition's own send above are all
             // inside the H3 baseline and only later sends count as extra
@@ -1164,6 +1215,9 @@ namespace ACE.Server.WorldObjects
         private ulong preMaterializeWaitLongId;
         private DateTime preMaterializeWaitStart;
 
+        // At most one live retry chain for the wait above, however many arrival sources re-drive it (see PreMaterializeChainGate).
+        private readonly PreMaterializeChainGate preMaterializeChainGate = new PreMaterializeChainGate();
+
         // Not persisted: a fresh login always re-announces, which is what we want, since the
         // client never carries the realm line across a reconnect either.
         private uint? lastAnnouncedRealmInstance;
@@ -1252,6 +1306,11 @@ namespace ACE.Server.WorldObjects
 
         public void OnTeleportComplete()
         {
+            // Once per window (Player_TeleportArrival): a window that already materialized - by the client, or by a forced
+            // completion the client's late LoginComplete now follows - runs none of the side effects below again.
+            if (ArrivalAlreadyMaterialized())
+                return;
+
             if (CurrentLandblock != null && !CurrentLandblock.CreateWorldObjectsCompleted)
             {
                 var waitStamp = LastTeleportStartTimestamp;
@@ -1276,10 +1335,16 @@ namespace ACE.Server.WorldObjects
 
                 if (waited < MaxPreMaterializeWait)
                 {
+                    // At most one live retry chain per window: an arrival source re-driving this window during the
+                    // wait (Player_TeleportArrival) must not start another one; the live chain will get here again.
+                    if (!preMaterializeChainGate.TryClaim(waitStamp, waitLongId))
+                        return;
+
                     // If the critical landblock resources haven't been loaded yet, we keep the player in the pink bubble state
                     // We'll check periodically to see when it's safe to let them materialize in
                     var actionChain = new ActionChain();
                     actionChain.AddDelaySeconds(0.1);
+                    actionChain.AddAction(this, () => preMaterializeChainGate.Release(waitStamp, waitLongId));
                     actionChain.AddAction(this, OnTeleportComplete);
                     actionChain.EnqueueChain();
                     return;
@@ -1297,6 +1362,11 @@ namespace ACE.Server.WorldObjects
             // the degenerate case where the stamp cannot tell two arrivals apart; leaving it set would
             // hand that arrival an already-expired clock and a zero-length wait.
             preMaterializeWaitStart = DateTime.MinValue;
+            preMaterializeChainGate.Clear();
+
+            // the once-only latch for this window, and which source (client, movement, timer) completed it
+            if (!TryMaterializeArrival(out var arrivalSource))
+                return;
 
             // set materialize physics state
             // this takes the player from pink bubbles -> fully materialized
@@ -1309,7 +1379,11 @@ namespace ACE.Server.WorldObjects
             // pending-teleport diagnostics: reads Teleporting, so before it is cleared
             TeleportWatchOnComplete();
 
+            // ace.teleport.complete.<source>.duration and the Debug [TELEPORT_COMPLETE] elapsed= line
+            RecordArrivalCompleted(arrivalSource);
+
             Teleporting = false;
+            LastArrivalTicks = System.DateTime.UtcNow.Ticks; // outdoor perimeter arrival grace (Open World Threads R19)
 
             // Re-send the server's current stance + CombatMode to our own client. A client that lost the stance
             // motion in portal space can show the missile bar while its character stands in peace stance, and
@@ -1333,6 +1407,13 @@ namespace ACE.Server.WorldObjects
             // Threads (WaffleACE): we are past the pink-bubble retry above, so the player is really
             // in this instance now. Latch that on the run, if this instance is one.
             NoteThreadDungeonArrival();
+
+            // IP active-player limit (WaffleACE): enforced on arrival, after the exit reconciliations above so
+            // activity confinement reflects the post-arrival state. Marshalled onto the world queue because this
+            // method can run on a landblock thread (forced-arrival timer, pink-bubble retry); the check reads
+            // every household member and two members arriving in the same tick would otherwise each see the
+            // other as outside and both be logged off. Never throws.
+            WorldManager.EnqueueAction(new ActionEventDelegate(() => IpLimitManager.CheckOnArrival(this)));
 
             CheckMonsters();
             CheckHouse();

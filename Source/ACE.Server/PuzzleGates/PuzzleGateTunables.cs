@@ -168,6 +168,12 @@ namespace ACE.Server.PuzzleGates
         /// <summary>Olthoi door (Setup 0x020005F2). Opens normally.</summary>
         public const uint OlthoiGateWcid = 1006855;
 
+        /// <summary>
+        /// Arch hall door (Setup 0x020010A8, the look of retail wcid 27562 doorarchall). Its MotionTable 0x0900015E has a
+        /// 1.0 s NonCombat Off -> On link (motionlength), so it opens normally. A Speed Season 3 wcid (owner ruling 2026-10-24).
+        /// </summary>
+        public const uint ArchHallGateWcid = 1007507;
+
         /// <summary>Ward Barrier panel (Setup 0x020014FF). Its MotionTable 0x0900019B has a ZERO-length open animation.</summary>
         public const uint BarrierPanelWcid = 1006856;
 
@@ -189,7 +195,7 @@ namespace ACE.Server.PuzzleGates
 
         /// <summary>
         /// The open-vs-destroy rule. A barrier and a focal object are always destroyed; a door is destroyed when
-        /// its wcid is in <see cref="DestroyOnSolveWcids"/> and opened otherwise (1006850, 1006853, 1006855).
+        /// its wcid is in <see cref="DestroyOnSolveWcids"/> and opened otherwise (1006850, 1006853, 1006855, 1007507).
         /// </summary>
         public static PuzzleGateSolveAction SolveActionFor(PuzzleGateForm form, uint wcid)
         {

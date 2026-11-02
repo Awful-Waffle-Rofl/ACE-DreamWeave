@@ -56,8 +56,30 @@ namespace ACE.Server.WorldObjects
         public virtual int UpdateVital(CreatureVital vital, int newVal)
         {
             var before = vital.Current;
-            vital.Current = (uint)Math.Clamp(newVal, 0, vital.MaxValue);
+            var clamped = (uint)Math.Clamp(newVal, 0, vital.MaxValue);
+
+            // DIVERGES FROM UPSTREAM (WaffleACE, 2026-10-24): the speed-course boss health floor. Every damage sink on a
+            // non-player creature (Creature.TakeDamage, SpellProjectile.DamageTarget, life-magic harm and drain,
+            // Hotspot, a negative heal-over-time tick, negative regeneration) writes health through this method and
+            // only then tests Health.Current for death, so pinning the write here is what keeps an overkill from
+            // killing a boss whose phase has not cleared. A no-op for every creature with P_HealthFloor 0.
+            if (P_HealthFloor > 0 && vital.Vital == PropertyAttribute2nd.MaxHealth && !(this is Player))
+                clamped = ClampToHealthFloor(before, clamped, P_HealthFloor);
+
+            vital.Current = clamped;
             return (int)(vital.Current - before);
+        }
+
+        /// <summary>
+        /// The health floor rule (pure): a proposed value at or above <paramref name="current"/> (a heal or no change) is
+        /// returned as is; a lower one is raised to min(<paramref name="current"/>, <paramref name="floor"/>). Floor 0 is a no-op.
+        /// </summary>
+        public static uint ClampToHealthFloor(uint current, uint proposed, uint floor)
+        {
+            if (floor == 0 || proposed >= current)
+                return proposed;
+
+            return Math.Max(proposed, Math.Min(current, floor));
         }
 
         public virtual int UpdateVital(CreatureVital vital, uint newVal)

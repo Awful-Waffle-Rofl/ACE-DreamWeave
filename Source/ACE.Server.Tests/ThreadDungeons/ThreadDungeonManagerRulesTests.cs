@@ -170,31 +170,41 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// Owner ruling (2026-09-27): a solo run is never put on the loot hold, whatever it still owes - its gem
-        /// is destroyed at the clear, so nobody can re-enter it, and undelivered loot left behind is forfeit at
-        /// run end. This is the discriminating case an earlier item 1b fix (2026-09-22) got backwards: a real
-        /// solo run with a pending loot bonus (undealt loot by ThreadRunPresence's own test) still reaps on
-        /// schedule here, because ThreadDungeonManager.Tick's solo groupLootHeld answer is always false
-        /// (ThreadDungeonRun.GroupLootHoldActive requires isGroup) - the seam this test exercises is that same
-        /// answer, not a hardcoded literal, so it would fail if Tick ever computed a hold for solo again.
+        /// Owner ruling 2026-10-10 (superseding ruling A1, which destroyed a solo gem at the clear and never held a
+        /// solo run): a Cleared solo run that still owes loot is on the loot hold while its owner gem lives, so an
+        /// owner who died to the monsters left behind can come back for it. The discriminating PAIR: the same real
+        /// run, the same ShouldEnd inputs, and the only change is RetireOwnerGem (a willing exit) - held before,
+        /// reaped after. Both answers come from the production seams Tick uses (ThreadRunPresence.LootOwed and
+        /// ThreadDungeonRun.LootHoldActive), not literals. Against the old code (GroupLootHoldActive required
+        /// isGroup) the first half fails: the solo run reaped at once.
         /// </summary>
         [TestMethod]
-        public void Cleared_solo_run_owing_loot_is_reaped_once_the_grace_has_passed_with_no_hold()
+        public void Cleared_solo_run_owing_loot_is_held_until_its_owner_gem_is_retired()
         {
             var run = NewRun();
             run.MarkPooledLoot(true);
-            Assert.IsTrue(run.TryMarkLootBonusPending(), "fixture: a pending bonus is undealt loot");
+            Assert.IsTrue(run.TryMarkLootBonusPending(), "fixture: a pending bonus is unclaimed loot");
+            var hold = TimeSpan.FromMinutes(30);
 
-            var groupLootOwed = run.IsGroup && ThreadRunPresence.GroupLootOwed(run);
-            var groupLootHeld = ThreadDungeonRun.GroupLootHoldActive(ThreadDungeonRunState.Cleared, run.IsGroup, groupLootOwed, TimeSpan.FromMinutes(30));
-            Assert.IsFalse(groupLootHeld, "a solo run is never held, whatever the hold tunable or how much loot it owes");
+            var heldBefore = ThreadDungeonRun.LootHoldActive(ThreadDungeonRunState.Cleared, ThreadRunPresence.LootOwed(run), hold);
+            Assert.IsTrue(heldBefore, "a cleared solo run owing loot is held while its gem lives");
 
-            var end = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true,
-                createCompleted: true, playerEverObserved: true, playerPresent: false, groupLootHeld: groupLootHeld, sinceStart: TimeSpan.FromMinutes(20),
-                sinceCleared: TimeSpan.FromSeconds(30), now: Now, expiresUtc: NotExpired, out var reason);
+            var endBefore = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true,
+                createCompleted: true, playerEverObserved: true, playerPresent: false, lootHeld: heldBefore, sinceStart: TimeSpan.FromMinutes(20),
+                sinceCleared: TimeSpan.FromSeconds(30), now: Now, expiresUtc: NotExpired, out var reasonBefore);
+            Assert.IsFalse(endBefore, "held: the cleared-and-empty reap stands down");
+            Assert.IsNull(reasonBefore);
 
-            Assert.IsTrue(end, "with no hold in play, a Cleared solo run reaps once empty and past the grace, loot owed or not");
-            Assert.AreEqual("cleared and empty", reason);
+            run.RetireOwnerGem();
+
+            var heldAfter = ThreadDungeonRun.LootHoldActive(ThreadDungeonRunState.Cleared, ThreadRunPresence.LootOwed(run), hold);
+            Assert.IsFalse(heldAfter, "a retired gem owes nothing more, whatever the run still holds");
+
+            var endAfter = ThreadDungeonManager.ShouldEnd(ThreadDungeonRunState.Cleared, landblockPresent: true,
+                createCompleted: true, playerEverObserved: true, playerPresent: false, lootHeld: heldAfter, sinceStart: TimeSpan.FromMinutes(20),
+                sinceCleared: TimeSpan.FromSeconds(30), now: Now, expiresUtc: NotExpired, out var reasonAfter);
+            Assert.IsTrue(endAfter, "the same run reaps once its owner left willingly");
+            Assert.AreEqual("cleared and empty", reasonAfter);
         }
 
         /// <summary>
@@ -289,14 +299,13 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// Owner ruling A1: the gem dies the moment the run is Cleared. A run populated with nothing reaches
-        /// Cleared the instant MarkPopulated runs (0 spawned, 0 killed required), so OnRunPopulated's call
-        /// into AnnounceCleared is the trigger here - no creature death needed. The announcement latch
-        /// (TryClaimClearedAnnouncement) is what keeps a second OnRunPopulated call from firing the destroyer
-        /// again.
+        /// Owner ruling 2026-10-10 (superseding ruling A1): a solo gem SURVIVES the clear. A run populated with
+        /// nothing reaches Cleared the instant MarkPopulated runs (0 spawned, 0 killed required), so OnRunPopulated's
+        /// call into AnnounceCleared is the clear path here - no creature death needed - and it must not call the
+        /// destroyer at all. Against the old code this counted 1.
         /// </summary>
         [TestMethod]
-        public void Cleared_destroys_the_gem_once()
+        public void Cleared_does_not_destroy_the_solo_gem()
         {
             var run = NewRun();
             run.MarkPopulated(0, 0, 0);
@@ -314,7 +323,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 ThreadDungeonManager.GemDestroyer = original;
             }
 
-            Assert.AreEqual(1, calls);
+            Assert.AreEqual(0, calls, "the gem survives the clear; it dies on a willing exit or at run end");
         }
 
         /// <summary>
@@ -345,12 +354,11 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// Cleared THEN ended: the destroyer runs twice (once from each trigger), by design - idempotency is
-        /// DestroyGem's own re-resolution of the gem, not a latch here, so the routine must tolerate a second
-        /// call rather than suppress it.
+        /// Cleared THEN ended: the destroyer runs once, from run end (owner ruling 2026-10-10: the clear destroys
+        /// nothing). Idempotency against a gem a willing exit already consumed is DestroyGem's own re-resolution.
         /// </summary>
         [TestMethod]
-        public void Cleared_then_ended_invokes_the_destroyer_twice_and_the_routine_tolerates_it()
+        public void Cleared_then_ended_invokes_the_destroyer_once_at_run_end()
         {
             var run = NewRun();
             run.MarkPopulated(0, 0, 0);
@@ -369,7 +377,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 ThreadDungeonManager.GemDestroyer = original;
             }
 
-            Assert.AreEqual(2, calls);
+            Assert.AreEqual(1, calls);
         }
 
         /// <summary>

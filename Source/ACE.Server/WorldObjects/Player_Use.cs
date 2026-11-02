@@ -167,7 +167,7 @@ namespace ACE.Server.WorldObjects
             // so this covers every use-on-target regardless of which branch fires.
             if (TinkerLock.IsRefused(sourceItem, target))
             {
-                SendTransientError(TinkerLock.RefusalMessage(target));
+                SendTransientError(TinkerLock.RefusalMessage(sourceItem, target));
                 SendUseDoneEvent();
                 return;
             }
@@ -192,6 +192,17 @@ namespace ACE.Server.WorldObjects
                 if (sourceItem.GetProperty(PropertyString.DungeonGemSpec) != null && target.GetProperty(PropertyBool.DungeonGemPress) != true)
                 {
                     Session.Network.EnqueueSend(new GameMessageSystemChat(ThreadDungeons.RawFragmentRules.RefuseNotAValidTarget, ChatMessageType.Broadcast));
+                    SendUseDoneEvent();
+                    return;
+                }
+
+                // Threads: the Fragment Mold consumes components from the player's packs into its target, so
+                // the target must be in those packs too. Refused here, before the walk, so clicking a fragment
+                // lying on the ground does not march the player over to it first. FragmentMold.UseObjectOnTarget
+                // re-checks with FindObject(MyInventory) because this guard only sees landblock targets.
+                if (sourceItem.GetProperty(PropertyBool.FragmentMold) == true)
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat(ThreadDungeons.FragmentMoldRules.RefuseNotInPack, ChatMessageType.Broadcast));
                     SendUseDoneEvent();
                     return;
                 }

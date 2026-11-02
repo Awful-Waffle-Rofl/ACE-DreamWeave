@@ -6,6 +6,7 @@ using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using System.Collections.Generic;
 
+using ACE.Server.Entity;
 using ACE.Server.Factories;
 using ACE.Server.Factories.Enum;
 using ACE.Server.Factories.Tables;
@@ -42,7 +43,7 @@ namespace ACE.Server.ThreadDungeons
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
-        /// <summary>Thread Cache - the boss chest. Content/sql/weenies/1003603 Thread Cache.sql.</summary>
+        /// <summary>Thread Cache - the boss chest. Content/sql/weenies/1003603 Thread Cache.sql. Also the World Events pooled-loot share chest (WorldEventShareDelivery.ShareChestWcid), renamed and re-described in code there.</summary>
         public const uint BossCacheWcid = 1003603;
 
         /// <summary>Thread Exit - the click-to-enter summoned exit. Content/sql/weenies/1003604 Thread Exit (Summoned).sql.</summary>
@@ -206,10 +207,10 @@ namespace ACE.Server.ThreadDungeons
             if (run == null)
                 return;
 
-            // Explicit fallback, not GetBool's built-in one: GetBool defaults to FALSE before
-            // PropertyManager.DoWork has seeded a row from DefaultBooleanProperties, and a switch shipped
-            // default-true that reads false until the next sync would contradict its own default. Same
-            // reasoning as dynamic_dungeons_uplift_rename at ThreadDungeonSpawner.cs:166.
+            // Explicit fallback, not GetBool's built-in one: this switch ships default-true, and GetBool's own
+            // FALSE is returned only before PropertyManager.Initialize pre-seeds the defaults, or for a key
+            // missing from DefaultBooleanProperties. Same reasoning as dynamic_dungeons_uplift_rename in
+            // ThreadDungeonSpawner.TryPopulate.
             if (!PropertyManager.GetBool("dynamic_dungeons_boss_chest_enabled", true).Item)
                 return;
 
@@ -232,9 +233,9 @@ namespace ACE.Server.ThreadDungeons
             // would drag the cache into a block nothing is keeping awake or cleaning up - and, because this
             // runs on the run landblock's tick thread, would reach LandblockManager.AddObject for a
             // landblock this thread does not own.
-            if (position.LandblockId.Landblock != run.Dungeon.Landblock)
+            if (!ThreadRunGeometry.IsOnRunLandblock(run, position))
             {
-                log.Warn($"[DYNDUNGEON] {run} bossAnchor {position.ToLOCString()} is not on landblock 0x{run.Dungeon.Landblock:X4}; no cache spawned");
+                log.Warn($"[DYNDUNGEON] {run} bossAnchor {position.ToLOCString()} is not on the run's landblock(s) (primary 0x{run.Dungeon.Landblock:X4}); no cache spawned");
                 return;
             }
 
@@ -253,11 +254,12 @@ namespace ACE.Server.ThreadDungeons
             // call and handed to TryAddToInventory as an explicit PlacementPosition, incremented only on a
             // successful add. Container.TryAddToInventory INCREMENTS every existing item at >= the position
             // it is handed, so adding in strictly increasing order always APPENDS and nothing already placed
-            // is ever shifted. MMD goes first (slot 0), the targeted salvage bag(s) next, and the rolled
-            // loot last - the two things a player most wants to see land in the first two slots
-            // GameEventViewContents renders, ahead of whatever loot happened to roll.
+            // is ever shifted. MMD goes first (slot 0), the Durable Legendary Key next, then the targeted
+            // salvage bag(s), and the rolled loot last - the things a player most wants to see land in the
+            // first slots GameEventViewContents renders, ahead of whatever loot happened to roll.
             var nextPlacement = 0;
             var notes = FillMmd(run, chest, ref nextPlacement);
+            var key = FillLegendaryKey(run, chest, ref nextPlacement);
             var salvage = FillSalvage(run, chest, ref nextPlacement);
             var loot = FillLoot(run, chest, ref nextPlacement);
 
@@ -268,7 +270,7 @@ namespace ACE.Server.ThreadDungeons
                 return;
             }
 
-            log.Info($"[DYNDUNGEON] {run} boss cache 0x{chest.Guid.Full:X8} at {position.ToLOCString()} notes={notes} salvage={salvage} loot={loot}");
+            log.Info($"[DYNDUNGEON] {run} boss cache 0x{chest.Guid.Full:X8} at {position.ToLOCString()} notes={notes} key={key} salvage={salvage} loot={loot}");
 
             var owner = PlayerManager.GetOnlinePlayer(run.OwnerGuid);
             owner?.Session?.Network.EnqueueSend(new GameMessageSystemChat("A Thread Cache has formed where the boss fell.", ChatMessageType.Broadcast));
@@ -282,12 +284,34 @@ namespace ACE.Server.ThreadDungeons
         /// </summary>
         /// <param name="purpose">Names the caller in the one error line; the boss path's "boss cache" keeps that line exactly as it was.</param>
         internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose)
+            => CreateCacheChest(run, purpose, run.OwnerGuid, BossCacheWcid);
+
+        /// <summary>
+        /// The factory every Thread cache goes through, for any cache weenie: the plain Thread Cache
+        /// (<see cref="BossCacheWcid"/>) or the Knotted Thread Cache (Knots design section 3.4) that the pooled placer
+        /// forms when the holder's pile holds a Fiber or a Pattern. Every stamp below applies to both, so a Knotted
+        /// cache gets exactly the plain cache's in-code treatment; the label alone differs, by base name
+        /// (<see cref="CacheBaseNameFor"/>). Stamped for <paramref name="ownerGuid"/>: the run owner gets the run's
+        /// owner name, a group member the roster name (blank, so the plain base name, for a guid not on the roster).
+        /// </summary>
+        internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid, uint wcid)
+            => CreateCacheChest(ownerGuid, ownerGuid == run.OwnerGuid ? run.OwnerName : run.GetMember(ownerGuid)?.Name, wcid, run.RunId, $"{run} {purpose}");
+
+        /// <summary>
+        /// The run-free cache factory (Pinnacle encounters have no Thread run): the same weenie resolution, owner
+        /// stamp, rot guard, infinite reset interval and possessive label the run overload gives a Thread cache,
+        /// with the run stamp written only when <paramref name="runId"/> is given. The run overload forwards here
+        /// with the run's id, the holder's label and a purpose that already names the run, so its output is unchanged.
+        /// <paramref name="ownerName"/> is the holder's display name for the label (blank leaves the plain base name).
+        /// Returns the chest with no Location, never entered. Null, logged, when the wcid is not a Chest.
+        /// </summary>
+        internal static Chest CreateCacheChest(uint ownerGuid, string ownerName, uint wcid, uint? runId, string purpose)
         {
-            var wo = WorldObjectFactory.CreateNewWorldObject(BossCacheWcid);
+            var wo = WorldObjectFactory.CreateNewWorldObject(wcid);
 
             if (!(wo is Chest chest))
             {
-                log.Error($"[DYNDUNGEON] {run} {purpose} wcid {BossCacheWcid} did not resolve to a Chest; no cache spawned");
+                log.Error($"[DYNDUNGEON] {purpose} wcid {wcid} did not resolve to a Chest; no cache spawned");
                 wo?.Destroy();
                 return null;
             }
@@ -305,11 +329,12 @@ namespace ACE.Server.ThreadDungeons
             // it is also why the cache's contents are deliberately left unstamped.
             //
             // Written before the caller's EnterWorld (this factory returns the chest with no Location and never enters it), following ThreadDungeonSpawner.TryPlace's ordering rule.
-            chest.SetProperty(PropertyInt.ThreadDungeonRunId, (int)run.RunId);
+            if (runId.HasValue)
+                chest.SetProperty(PropertyInt.ThreadDungeonRunId, (int)runId.Value);
 
             // Owner-only access. Read by Chest.CheckUseRequirements, which is the gate every use path goes
             // through; null on every other chest in the game, which is what makes the check inert for them.
-            chest.P_DungeonCacheOwnerGuid = run.OwnerGuid;
+            chest.P_DungeonCacheOwnerGuid = ownerGuid;
 
             // Mandatory. A hand-spawned object has a dynamic guid and no Generator back-reference, so
             // IsDecayable() is true for it and the landblock heartbeat would Destroy it at DefaultTimeToRot -
@@ -340,10 +365,21 @@ namespace ACE.Server.ThreadDungeons
             // this factory hands back a chest with no Location, so the name is already on the instance when the
             // client is first told the object exists (GameMessageCreateObject serialises Name from the biota). Set
             // after EnterWorld it would need an explicit update message to reach anyone.
-            ApplyCacheName(chest, run.OwnerName);
+            ApplyCacheName(chest, ownerName, CacheBaseNameFor(wcid));
 
             return chest;
         }
+
+        /// <summary>
+        /// The unadorned name of a cache weenie: <see cref="ACE.Server.Knots.KnotItems.KnottedThreadCacheName"/> for the
+        /// Knotted Thread Cache, <see cref="ACE.Server.Knots.KnotItems.PinnacleCacheName"/> for the Pinnacle Cache,
+        /// <see cref="CacheBaseName"/> for everything else. Each MUST equal its weenie's Name row;
+        /// tests assert both against the shipped SQL.
+        /// </summary>
+        internal static string CacheBaseNameFor(uint wcid)
+            => wcid == ACE.Server.Knots.KnotItems.KnottedThreadCacheWcid ? ACE.Server.Knots.KnotItems.KnottedThreadCacheName
+             : wcid == ACE.Server.Knots.KnotItems.PinnacleCacheWcid ? ACE.Server.Knots.KnotItems.PinnacleCacheName
+             : CacheBaseName;
 
         /// <summary>
         /// The cache's unadorned name. MUST equal the Name row of weenie <see cref="BossCacheWcid"/> in
@@ -355,12 +391,12 @@ namespace ACE.Server.ThreadDungeons
         internal const string CacheBaseName = "Thread Cache";
 
         /// <summary>
-        /// Labels a cache for its holder. Idempotent: it always composes from <see cref="CacheBaseName"/>, never
-        /// from <paramref name="chest"/>'s current name, so calling it twice cannot produce
-        /// "Member's Owner's Thread Cache".
+        /// Labels a cache for its holder. Idempotent: it always composes from the weenie's base name
+        /// (<see cref="CacheBaseNameFor"/>), never from <paramref name="chest"/>'s current name, so calling it twice
+        /// cannot produce "Member's Owner's Thread Cache".
         /// </summary>
-        private static void ApplyCacheName(Chest chest, string holderName)
-            => chest.SetProperty(PropertyString.Name, ComposeCacheName(holderName, CacheBaseName));
+        private static void ApplyCacheName(Chest chest, string holderName, string baseName)
+            => chest.SetProperty(PropertyString.Name, ComposeCacheName(holderName, baseName));
 
         /// <summary>
         /// "<c>Holder's Thread Cache</c>". Pure, so the possessive has one definition and its own tests rather
@@ -390,26 +426,13 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
-        /// Group Threads: a cache for one roster member. The two-argument factory with every stamp, then the owner
-        /// stamp overwritten with <paramref name="ownerGuid"/>, so Chest.CheckUseRequirements admits that member
-        /// alone. Null when the factory returns null.
-        ///
-        /// The LABEL is overwritten with the owner stamp and for the same reason: the factory named it for the run
-        /// owner, and this cache belongs to a member. Still before the caller's EnterWorld, since the factory never
-        /// enters the chest. A guid that is not on the roster leaves the plain name rather than a wrong one.
+        /// Group Threads: a plain Thread Cache for one roster member, stamped for <paramref name="ownerGuid"/> so
+        /// Chest.CheckUseRequirements admits that member alone, and labelled with that member's roster name. Still
+        /// before the caller's EnterWorld, since the factory never enters the chest. A guid that is not on the roster
+        /// leaves the plain name rather than a wrong one. Null when the factory returns null.
         /// </summary>
         internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid)
-        {
-            var chest = CreateCacheChest(run, purpose);
-
-            if (chest != null)
-            {
-                chest.P_DungeonCacheOwnerGuid = ownerGuid;
-                ApplyCacheName(chest, run.GetMember(ownerGuid)?.Name);
-            }
-
-            return chest;
-        }
+            => CreateCacheChest(run, purpose, ownerGuid, BossCacheWcid);
 
         /// <summary>
         /// One stack of Trade Notes, 1..MmdMaxForLevel(gem level), inclusive.
@@ -570,6 +593,42 @@ namespace ACE.Server.ThreadDungeons
         }
 
         /// <summary>
+        /// The Durable Legendary Key (wcid <see cref="BankLegendaryKeyTable.DurableWcid"/>, 10 uses) every player's
+        /// boss bonus carries, owner ruling 2026-10-30. Placed right after the MMD and before the salvage - see the
+        /// ordering note on <see cref="TrySpawnBossCache"/>. Not scaled by the group reward bonus: one key per player.
+        /// A fresh weenie already carries its full 10 uses (the /bank withdraw path, Player_Bank.TryCreateLegendaryKey,
+        /// creates it the same way and sets nothing), so no Structure write is needed.
+        /// </summary>
+        /// <returns>1 when the key landed in the cache, else 0.</returns>
+        private static int FillLegendaryKey(ThreadDungeonRun run, Chest chest, ref int nextPlacement)
+        {
+            var key = BuildLegendaryKey(run);
+
+            if (key == null)
+                return 0;
+
+            if (chest.TryAddToInventory(key, nextPlacement))
+            {
+                nextPlacement++;
+                return 1;
+            }
+
+            key.Destroy();
+            return 0;
+        }
+
+        /// <summary>One Durable Legendary Key, or null (logged) when the wcid does not resolve.</summary>
+        internal static WorldObject BuildLegendaryKey(ThreadDungeonRun run)
+        {
+            var key = WorldObjectFactory.CreateNewWorldObject(BankLegendaryKeyTable.DurableWcid);
+
+            if (key == null)
+                log.Error($"[DYNDUNGEON] {run} could not create durable legendary key wcid {BankLegendaryKeyTable.DurableWcid} for the boss cache");
+
+            return key;
+        }
+
+        /// <summary>
         /// One full bag of the run's own targeted salvage per distinct material its gem's affinities carry
         /// (ordinarily one, at the shipped RawFragmentRules.DefaultMaxSalvageMods of 1), so the gem's gimmick
         /// materializes as a guaranteed application's worth in the cache rather than only as a per-kill
@@ -628,6 +687,9 @@ namespace ACE.Server.ThreadDungeons
                 // green garnet 21050 ship with a non-null Structure), then fills it FULL rather than leaving
                 // it empty for a player to top up - this bag is meant to arrive complete.
                 bag.Structure = bag.MaxStructure ?? 100;
+                // Same name every other bag path gives (Player_Crafting.TryAddSalvage, /createsalvage), so the
+                // vault stacks this bag with player-made ones instead of keeping it on its own line.
+                bag.Name = $"Salvage ({bag.Structure})";
                 bag.NumItemsInMaterial = 1;
                 bag.ItemWorkmanship = Math.Clamp(WorkmanshipChance.Roll(tier), 1, 10);
 
@@ -758,7 +820,7 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// The boss bonus as loose items, for the pooled model (Docs/Threads/POOLED-LOOT-CACHE-DESIGN.md
-        /// section 3): Trade Notes, then the targeted salvage bags, then the Legendary-table loot - the same
+        /// section 3): Trade Notes, the Durable Legendary Key, then the targeted salvage bags, then the Legendary-table loot - the same
         /// three builders, in the same order, the boss-death cache fills from. Always added on a pooled boss
         /// death (user ruling 2026-09-14); the boss-chest switch governs only the OFF path, so nothing here
         /// reads it.
@@ -771,6 +833,7 @@ namespace ACE.Server.ThreadDungeons
                 return items;
 
             AddBonusTradeNotes(run, items);
+            AddBonusLegendaryKey(run, items);
             AddBonusSalvageBags(run, items);
 
             // The ruling named Trade Notes and salvage bags; the Legendary-table items are kept pending a
@@ -803,6 +866,7 @@ namespace ACE.Server.ThreadDungeons
                 return items;
 
             AddBonusTradeNotes(run, items, rewardBonus);
+            AddBonusLegendaryKey(run, items);
             AddBonusSalvageBags(run, items);
             AddBonusLegendaryItems(run, items, rewardBonus);
 
@@ -812,7 +876,7 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// Owner ruling, 2026-09-17 ("each player should get the mmds and salvage. other loot should be split"):
         /// the DUPLICATED half of a group run's boss bonus, built once per deal seat. Trade Notes scaled by B,
-        /// then the salvage bags. No Legendary-table rolls - those are pooled by
+        /// one Durable Legendary Key (not scaled), then the salvage bags. No Legendary-table rolls - those are pooled by
         /// <see cref="BuildBossBonusPooledRolls"/> and snake-dealt instead.
         ///
         /// Delegates to the same two step helpers <see cref="BuildBossBonusItems(ThreadDungeonRun, double)"/>
@@ -831,14 +895,15 @@ namespace ACE.Server.ThreadDungeons
             else
                 AddBonusTradeNotes(run, items);
 
+            AddBonusLegendaryKey(run, items);
             AddBonusSalvageBags(run, items);
 
             return items;
         }
 
         /// <summary>
-        /// The FIXED half of a SOLO run's boss bonus: the Trade Notes and the targeted salvage bags, in that order,
-        /// with no reward bonus (a solo run has none). Exactly the first two steps of
+        /// The FIXED half of a SOLO run's boss bonus: the Trade Notes, the Durable Legendary Key and the targeted salvage
+        /// bags, in that order, with no reward bonus (a solo run has none). Exactly the first three steps of
         /// <see cref="BuildBossBonusItems(ThreadDungeonRun)"/>, by delegation, so the currency and salvage a solo
         /// player gets are byte-for-byte what they were; the third step, the Legendary-table rolls, is counted and
         /// built a batch at a time by the delivery steps instead (ThreadCacheFiller, 2026-09-19), the way the group
@@ -891,6 +956,15 @@ namespace ACE.Server.ThreadDungeons
 
             if (note != null)
                 items.Add(note);
+        }
+
+        /// <summary>One Durable Legendary Key per player, never scaled by the group reward bonus (owner ruling 2026-10-30).</summary>
+        private static void AddBonusLegendaryKey(ThreadDungeonRun run, List<WorldObject> items)
+        {
+            var key = BuildLegendaryKey(run);
+
+            if (key != null)
+                items.Add(key);
         }
 
         private static void AddBonusTradeNotes(ThreadDungeonRun run, List<WorldObject> items, double rewardBonus)
@@ -975,8 +1049,128 @@ namespace ACE.Server.ThreadDungeons
             if (!PropertyManager.GetBool("dynamic_dungeons_clear_portal_enabled", true).Item)
                 return;
 
-            if (owner.Location == null || owner.Location.Instance != run.Instance)
+            var portal = CreateExitAt(run, owner);
+
+            if (portal == null)
                 return;
+
+            run.SummonedExitGuid = portal.Guid.Full;
+
+            log.Info($"[DYNDUNGEON] {run} summoned exit 0x{portal.Guid.Full:X8} at {portal.Location.ToLOCString()}");
+
+            owner.Session?.Network.EnqueueSend(new GameMessageSystemChat("A Thread Exit opens beside you.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// /spawncache companion: when this run already has a live summoned exit in <paramref name="landblock"/>,
+        /// stand a fresh one where <paramref name="player"/> is and destroy the old ones, so the exit travels with
+        /// the relocated cache. Does nothing (and summons nothing) when the run has no live exit portal - a run
+        /// whose clear portal was disabled by dynamic_dungeons_clear_portal_enabled, or never summoned one, gets
+        /// none here. The new portal is created BEFORE the old ones are destroyed, so a refused entry leaves
+        /// the run's existing exit exactly where it was.
+        /// </summary>
+        internal static void RelocateExit(ThreadDungeonRun run, Landblock landblock, Player player)
+        {
+            if (run == null || landblock == null || player == null)
+                return;
+
+            // The exit's guid is recorded when it is created. landblock.GetObject sees objects still in
+            // pendingAdditions, which a GetAllWorldObjectsForDiagnostics scan does not. The scan stays only as the
+            // fallback for a run whose exit was created without a recorded guid (before the guid was tracked).
+            var old = new System.Collections.Generic.List<WorldObject>();
+
+            // Open World Threads: the exit may stand on any footprint landblock of an outdoor copy, so every loaded run
+            // landblock is searched (the primary alone for a dungeon, so its search is exactly as before). GetObject is
+            // only asked of the landblock this step runs on; any other member is read through its snapshot copy.
+            foreach (var copy in ThreadDungeonManager.LoadedRunLandblocks(run, landblock))
+            {
+                var own = ReferenceEquals(copy, landblock);
+
+                if (run.SummonedExitGuid != 0)
+                {
+                    var found = own
+                        ? copy.GetObject(run.SummonedExitGuid)
+                        : copy.GetAllWorldObjectsForDiagnostics().Find(wo => wo.Guid.Full == run.SummonedExitGuid);
+
+                    if (found is Portal known && known.WeenieClassId == SummonedExitWcid)
+                        old.Add(known);
+                }
+                else
+                {
+                    foreach (var wo in copy.GetAllWorldObjectsForDiagnostics())
+                    {
+                        if (wo is Portal && wo.WeenieClassId == SummonedExitWcid
+                            && wo.GetProperty(PropertyInt.ThreadDungeonRunId) == (int)run.RunId)
+                        {
+                            old.Add(wo);
+                        }
+                    }
+                }
+            }
+
+            Portal created = null;
+
+            // An old exit on ANOTHER member is destroyed on that member's own action queue, never from this thread.
+            var moved = TryRelocateExit(old, AllowsExitRelocation(run.IsGroup, player.Guid.Full == run.OwnerGuid),
+                () => created = CreateExitAt(run, player), wo => DestroyOnOwnQueue(wo, landblock));
+
+            if (!moved)
+                return;
+
+            run.SummonedExitGuid = created.Guid.Full;
+
+            log.Info($"[DYNDUNGEON] {run} moved exit to 0x{created.Guid.Full:X8} at {created.Location.ToLOCString()}");
+
+            player.Session?.Network.EnqueueSend(new GameMessageSystemChat("Your Thread Exit moves to your cache.", ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Destroys <paramref name="wo"/> now when it lives on <paramref name="current"/> (the landblock this step runs on),
+        /// else enqueues the destroy on the landblock that holds it, so an object on another footprint member is only ever
+        /// touched from its own landblock thread.
+        /// </summary>
+        private static void DestroyOnOwnQueue(WorldObject wo, Landblock current)
+        {
+            var home = wo.CurrentLandblock;
+
+            if (home == null || ReferenceEquals(home, current))
+                wo.Destroy();
+            else
+                home.EnqueueAction(new ACE.Server.Entity.Actions.ActionEventDelegate(() => wo.Destroy()));
+        }
+
+        /// <summary>
+        /// Group runs share ONE exit: only the owner's /spawncache may move it. A member's own caches still move.
+        /// </summary>
+        internal static bool AllowsExitRelocation(bool isGroupRun, bool isOwner) => !isGroupRun || isOwner;
+
+        /// <summary>
+        /// The relocation seam, free of landblock and physics. Does nothing when not allowed or when there is no
+        /// old portal; otherwise creates the replacement FIRST, and only if that succeeded (<paramref name="create"/>
+        /// returned non-null) destroys the old ones. Returns true only when the swap happened.
+        /// </summary>
+        internal static bool TryRelocateExit<T>(System.Collections.Generic.IReadOnlyList<T> old, bool allowed, Func<object> create, Action<T> destroy)
+        {
+            if (!allowed || old == null || old.Count == 0)
+                return false;
+
+            if (create() == null)
+                return false;
+
+            foreach (var wo in old)
+                destroy(wo);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Builds and enters one summoned exit at <paramref name="owner"/>'s position, or returns null (logged, and
+        /// the object destroyed) when the player is not inside the copy or the portal cannot be made or entered.
+        /// </summary>
+        private static Portal CreateExitAt(ThreadDungeonRun run, Player owner)
+        {
+            if (owner.Location == null || owner.Location.Instance != run.Instance)
+                return null;
 
             var wo = WorldObjectFactory.CreateNewWorldObject(SummonedExitWcid);
 
@@ -984,7 +1178,7 @@ namespace ACE.Server.ThreadDungeons
             {
                 log.Error($"[DYNDUNGEON] {run} summoned exit wcid {SummonedExitWcid} did not resolve to a Portal; not summoned");
                 wo?.Destroy();
-                return;
+                return null;
             }
 
             // A copy of the owner's own position, re-stamped with the run instance. The instance is already
@@ -1003,12 +1197,10 @@ namespace ACE.Server.ThreadDungeons
             {
                 log.Error($"[DYNDUNGEON] {run} summoned exit failed to enter the world at {portal.Location?.ToLOCString()}");
                 portal.Destroy();
-                return;
+                return null;
             }
 
-            log.Info($"[DYNDUNGEON] {run} summoned exit 0x{portal.Guid.Full:X8} at {portal.Location.ToLOCString()}");
-
-            owner.Session?.Network.EnqueueSend(new GameMessageSystemChat("A Thread Exit opens beside you.", ChatMessageType.Broadcast));
+            return portal;
         }
 
         /// <summary>Narrows a long tunable to int without wrapping; the tunables here are all small.</summary>

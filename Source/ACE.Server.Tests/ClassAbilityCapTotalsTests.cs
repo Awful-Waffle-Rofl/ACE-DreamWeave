@@ -87,10 +87,11 @@ namespace ACE.Server.Tests
             // IN THE REPRICING - it moved prices only, never homes - so every count below reflects the
             // new-ability wave plus the 2026-09-14 re-homing.
             //
-            // Archer T3 stays 12: crit_rating went 1/2/3 -> 2/2/2, which is 6 either way.
+            // Archer T3 was 12 (crit_rating went 1/2/3 -> 2/2/2, which is 6 either way) and is now 9: the
+            // Archer pass (reprice wave 5) took crit_rating to flat 1/1/1, which is 3.
             // Archer T2 is 12, down from 15: Pinning Shot's 2026-09-13 premium reprice (2/rank) was
             // REVERSED 2026-09-29 back to 1/rank (Fast Aim rework companion change), -3.
-            (ClassAbilityClass.Archer,     14, 12, 12, 38),   // entries 4/4/3
+            (ClassAbilityClass.Archer,     14, 12, 9, 35),   // entries 4/4/3
             // Rogue T3 is the highest T3 in the system at 18: Killer Instinct (2/2/2 = 6, priced that way by
             // the design table for a stacking crit-damage-and-crit-chance engine) now sits beside
             // attackspeed, repriced to 2/2/2 as well. Rogue T2 is 18 because Enhanced Melee Defense returned
@@ -109,22 +110,40 @@ namespace ACE.Server.Tests
             // gates are REACHABLE, so it stays green; this is a real balance consequence of the ruling, not a
             // test artifact.
             (ClassAbilityClass.Vanguard,   17, 16, 15, 48),   // entries 5/5/4
-            // Berserker T1 is 17, up from 14: Enhanced Stamina re-homed here 2026-09-14 (see above).
-            (ClassAbilityClass.Berserker,  17, 18, 12, 47),   // entries 5/5/3
-            // Archmage T3 stays 15. Echo Cast went 1/2/3 -> 2/2/2 (6 either way), so the only reason this
-            // column is above 9 is Echo Cast's 6 plus Mana Barrier's 6 - and Mana Barrier is now the LAST
-            // entry in the system still on the 1/2/3 escalator, Echo Cast having left it.
-            // Archmage T1 is 17, up from 14: Enhanced Mana re-homed here 2026-09-14 (see above).
-            (ClassAbilityClass.Archmage,   17, 15, 15, 47),   // entries 5/4/3
+            // BERSERKER PASS 2026-10-24 (ClassAbilityRepricing wave 3), deliberate rather than papered over.
+            // T1 stays 17 with the same 5 entries but a different roster: Enhanced Stamina RETIRED (-3) and
+            // Bloodlust moved T3 -> T1 (+3). T2 18 -> 15: Savage Blows (3) and Vengeance (2/2/2 = 6) RETIRED,
+            // Heavy Blows and Intimidate (1/1/1 each) added, so -9 +6. T3 12 -> 9: Damage Rating 2/2/2 -> 1/1/1
+            // (-3), Whirlwind one rank at 3 -> three at 1/1/1 (unchanged at 3), Bloodlust left (-3), Berserk Rage
+            // added (+3). Class total 47 -> 41. Entry counts stay 5/5/3.
+            (ClassAbilityClass.Berserker,  17, 15, 9, 41),    // entries 5/5/3
+            // ARCHMAGE PASS 2026-10-24 (ClassAbilityRepricing wave 6), deliberate rather than papered over.
+            // T1 stays 17 with the same 5 entries: Quickened Casting (5 x 1) RETIRED, Elemental Inversion (5 x 1)
+            // added. T2 15 -> 12: Flat Cast Speed (3) RETIRED and Arcane Hollow (1/1/1) added in its place, and
+            // Overchannel 2/2/2 -> 1/1/1 (-3). T3 15 -> 12: Echo Cast 2/2/2 -> 1/1/1 (-3), Mana Barrier 1/2/3 ->
+            // 1/1/1 (-3) - it was the last 1/2/3 escalator entry in the system - and Volatile Wall (1/1/1) added
+            // (+3). Class total 47 -> 41. Entry counts 5/4/3 -> 5/4/4.
+            (ClassAbilityClass.Archmage,   17, 12, 12, 41),   // entries 5/4/4
+            // Void/Summon is UNCHANGED by the Archmage pass: Nether Rush became Mana Rush (display name, every
+            // school, +50% cap) at the same T1 price, so no column moves.
             (ClassAbilityClass.VoidSummon, 14, 18, 15, 47),   // entries 4/5/4
             // Blood Mage T1 is 17, which RESTORES the "a maxed T1 alone unlocks T3" property the data pass
             // had broken by taking it to 12 against a 15-point gate. See
             // BloodMageAbilityDefinitionTests.MaxedTier1_ExactlyMeetsTheTier3SpentInClassGate, whose
             // equality assertion this deliberately ended. The repricing did not touch T1, so it still holds.
-            (ClassAbilityClass.BloodMage,  17, 15, 15, 47),   // entries 5/4/3
+            // Blood Mage T3 is 9, down from 15: the Blood Mage buff pass (ClassAbilityRepricing wave 1) took
+            // Blood Price 2/2/2 -> 1/1/1 and Sanguine Ward 1/2/3 -> 1/1/1 (-3 each); Exsanguinate and
+            // Crimson Harvest (T2) went from one rank at 3 to three at 1/1/1, unchanged at 3. Entry counts
+            // are unchanged.
+            (ClassAbilityClass.BloodMage,  17, 15, 9, 41),    // entries 5/4/3
             // Spellsword T2 is 15: it lost Enhanced Melee Defense (-3), Runic Ward replaced it (+3) in the
             // same wave, and sundermark's reprice then added 3.
-            (ClassAbilityClass.Spellsword, 17, 15, 12, 44),   // entries 5/4/3
+            // SPELLSWORD PASS 2026-10-24 (ClassAbilityRepricing wave 4): Sundermark 2/2/2 -> 1/1/1 takes T2
+            // 15 -> 12, and Dispelling Edge (displayed "Dispelling Dance") 2/2/2 -> 1/1/1 takes T3 12 -> 9.
+            // Spellsurge (T2), Spellstorm and Cascade (T3) went from one rank at 3 CAP to three ranks at
+            // 1/1/1, so each buyout stays 3 and none of them moves a column. Entry counts are unchanged.
+            // VOLATILE ELEMENTS 2026-10-30: a new T2 entry at 1/1/1 takes T2 12 -> 15 and the total 38 -> 41.
+            (ClassAbilityClass.Spellsword, 17, 15, 9, 41),    // entries 5/5/3
         };
 
         [TestMethod]

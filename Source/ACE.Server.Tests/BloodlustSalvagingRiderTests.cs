@@ -119,9 +119,10 @@ namespace ACE.Server.Tests
         [TestMethod]
         public void SalvagingAffinity_SpecializedContributesTheSameLifestealAsTrained()
         {
-            // 300 Salvaging at 0.12 per 100 = a 1.36x factor on rank 3's 4.5%, giving 6.12%
-            Assert.AreEqual(0.0612, AbilityFraction(3, 300, false), 1e-9);
-            Assert.AreEqual(0.0612, AbilityFraction(3, 300, true), 1e-9);
+            // 300 Salvaging at 0.12 per 100 = a 1.36x factor on rank 3's 9% (0.03 per rank since the 2026-10-24
+            // Berserker pass, was 0.015), giving 12.24%
+            Assert.AreEqual(0.1224, AbilityFraction(3, 300, false), 1e-9);
+            Assert.AreEqual(0.1224, AbilityFraction(3, 300, true), 1e-9);
         }
 
         [TestMethod]

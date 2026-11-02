@@ -214,7 +214,8 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// The GearMaxHealth value reported to the CLIENT. Now simply the server's gear rating.
+        /// The GearMaxHealth value reported to the CLIENT: the server's gear rating minus the Knot max-health penalty
+        /// (Shield of the Rose), the signed term the client rebuilds max health with.
         ///
         /// This used to subtract 2 per enlightenment. The client rebuilds max health itself as
         /// InitLevel + Ranks + Endurance/2 + Enlightenment * 2 + GearMaxHealth, so while the server sent
@@ -232,10 +233,12 @@ namespace ACE.Server.WorldObjects
         /// Kept as a named method rather than inlined so the call sites stay greppable and the history above
         /// stays attached to them.
         /// </summary>
-        public int GetNetworkGearMaxHealth() => GetGearMaxHealth();
+        // Knot loot: Shield of the Rose's max-health penalty rides here as the signed term the client rebuilds max health with.
+        public int GetNetworkGearMaxHealth() => GetGearMaxHealth() - GetKnotMaxHealthPenalty();
 
         /// <summary>
-        /// Called when a player equips/dequips an item w/ GearMaxHealth
+        /// Called when a player equips/dequips an item w/ GearMaxHealth or a Knot ShieldTrade item, and from
+        /// KnotTraitHeartbeat when the resolved Knot max-health penalty differs from the last value sent
         /// </summary>
         public void HandleMaxHealthUpdate()
         {
@@ -253,6 +256,9 @@ namespace ACE.Server.WorldObjects
                 Health.Current = Health.MaxValue;
 
             Session.Network.EnqueueSend(new GameMessagePrivateUpdateAttribute2ndLevel(this, Vital.Health, Health.Current));
+
+            // Knot loot: record the penalty this update sent, so KnotTraitHeartbeat resyncs only on a change
+            knotMaxHealthPenaltySent = GetKnotMaxHealthPenalty();
         }
     }
 }

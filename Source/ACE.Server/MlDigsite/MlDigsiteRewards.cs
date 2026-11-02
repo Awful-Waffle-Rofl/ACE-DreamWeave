@@ -396,20 +396,10 @@ namespace ACE.Server.MlDigsite
                 return;
             }
 
-            var position = new Position(plan.Position);
-
-            try
-            {
-                position.AdjustMapCoords();
-            }
-            catch (Exception ex)
-            {
-                log.Error($"[ML_DIGSITE] {encounter} chest terrain snap failed at {position.ToLOCString()}", ex);
-                chest.Destroy();
-                return;
-            }
-
-            chest.Location = position;
+            // Pulled off the landblock edge BEFORE the first attempt - see LandblockEdgeMarginMetres.
+            // Clamped in the ANCHOR's landblock frame (a helper scatter point can already sit in a neighbour).
+            var candidates = PlacementCandidates(plan.Position, encounter.Anchor);
+            var position = candidates[0];
 
             // ---- every stamp, before EnterWorld ------------------------------------------------------------
 
@@ -441,24 +431,54 @@ namespace ACE.Server.MlDigsite
             var loot = FillLoot(encounter, chest, fraction, ref placement);
             var keptSiraluun = FillKeptSiraluunDrops(encounter, chest, plan.KeptSiraluunDrops, ref placement);
 
-            bool entered;
+            // The terrain snap is part of each attempt, so a snap failure on any candidate (the first
+            // included) falls through to the next one and finally to the pack fallback; the filled chest is
+            // never destroyed before that.
+            var entered = false;
+            var threw = false;
+            var retries = 0;
 
-            try
+            // RETRY ON THE SAME CHEST. A failed attempt leaves a chest that is safe to enter again, because
+            // the failure path in WorldObject.AddPhysicsObj tears the physics object down and nulls it
+            // (PhysicsObj.DestroyObject removes it from the ServerObjectManager) and Landblock.
+            // AddWorldObjectInternal nulls CurrentLandblock, so the next EnterWorld takes the same
+            // PhysicsObj == null branch (InitPhysicsObj) as a first entry. Rebuilding would instead re-roll
+            // the loot, which is not the reward the digger earned. An attempt that THREW is not retried: it
+            // may have left the physics object half-built, and that state was not traced.
+            for (var i = 0; !entered && !threw && i < candidates.Count; i++)
             {
-                entered = chest.EnterWorld();
-            }
-            catch (Exception ex)
-            {
-                log.Error($"[ML_DIGSITE] {encounter} chest EnterWorld threw at {position.ToLOCString()}", ex);
-                entered = false;
+                var next = candidates[i];
+
+                if (!TrySnapToTerrain(encounter, next))
+                    continue;
+
+                chest.Location = next;
+                position = next;
+                retries = i;
+
+                entered = TryEnterWorld(encounter, chest, position, out threw);
             }
 
             if (!entered)
             {
-                log.Error($"[ML_DIGSITE] {encounter} chest failed to enter the world at {position.ToLOCString()}");
+                log.Error($"[ML_DIGSITE] {encounter} chest failed to enter the world at {position.ToLOCString()} after {retries} retries");
+
+                try
+                {
+                    DeliverToPack(encounter, plan, chest);
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"[ML_DIGSITE] {encounter} pack fallback threw for owner 0x{plan.OwnerGuid:X8}", ex);
+                }
+
+                // Whatever DeliverToPack did not detach goes with the chest.
                 chest.Destroy();
                 return;
             }
+
+            if (retries > 0)
+                log.Info($"[ML_DIGSITE] {encounter} chest for 0x{plan.OwnerGuid:X8} placed after {retries} retries at {position.ToLOCString()} (planned {plan.Position.ToLOCString()})");
 
             log.Info($"[ML_DIGSITE] {encounter} {result} chest 0x{chest.Guid.Full:X8} for 0x{plan.OwnerGuid:X8} (digger={plan.IsDigger}) at {position.ToLOCString()} fraction={fraction:0.###} doubloons={doubloons} notes={notes} loot={loot} keptSiraluun={keptSiraluun} ttl={chest.TimeToRot}s");
 
@@ -472,6 +492,273 @@ namespace ACE.Server.MlDigsite
                     ? "Something buried at the dig gives way, and a cache settles into the loose earth. It answers only to you."
                     : "For your part in the fight, a smaller cache settles into the loose earth at the dig. It answers only to you.",
                 ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// How far inside a landblock edge a chest is kept, in metres. The failure this exists for (prod,
+        /// 2026-10-21, digsite 39) placed a chest at local X 191.918, 8 cm from the 192 m edge, and spawn
+        /// physics moved it to X 0.363 of the NEIGHBOURING landblock (about 0.45 m of travel across the edge);
+        /// PhysicsObj.SetPosition discards a world entry that ends up in a different landblock. 3 m is several
+        /// times that observed nudge, and well under the 4 m helper scatter, so it never moves a chest far
+        /// from where the dig is.
+        /// </summary>
+        internal const float LandblockEdgeMarginMetres = 3.0f;
+
+        /// <summary>Side of an outdoor landblock in metres (Position.BlockLength, which is not public).</summary>
+        private const float LandblockSideMetres = 192.0f;
+
+        /// <summary>Fallback offsets (metres east, metres north) from the clamped position, nearest first.</summary>
+        private static readonly (float Dx, float Dy)[] RetryOffsets =
+        {
+            (2.0f, 0.0f), (-2.0f, 0.0f), (0.0f, 2.0f), (0.0f, -2.0f),
+            (4.0f, 4.0f), (-4.0f, 4.0f), (4.0f, -4.0f), (-4.0f, -4.0f),
+        };
+
+        /// <summary>
+        /// A copy of <paramref name="source"/> moved (<paramref name="dx"/>, <paramref name="dy"/>) metres and
+        /// then clamped to at least <paramref name="margin"/> metres inside its OWN landblock, so the result
+        /// never crosses an edge. The outdoor cell id is recomputed through Position.Pos (SetPosition), the
+        /// same path every other relocation uses. An indoor position carries its own cell and is returned
+        /// unchanged. Pure, and internal so it is unit-testable.
+        /// </summary>
+        /// <summary>
+        /// As above, but clamped in the frame of <paramref name="anchor"/>'s landblock. A helper scatter point
+        /// (WorldEventGeometry.Disc -> Position.SetLandblock) is already normalised into the NEIGHBOURING
+        /// landblock when it falls past an edge, so clamping inside its own landblock would stand it beside
+        /// the edge of the wrong block. Its X/Y are re-expressed relative to the anchor's landblock (one block
+        /// is 192 m), clamped there, and the result is built on the anchor's landblock id and instance.
+        /// </summary>
+        internal static Position PlaceInsideLandblock(Position source, Position anchor, float dx, float dy, float margin)
+        {
+            if (anchor == null || anchor.Indoors || source.Indoors)
+                return new Position(source);
+
+            var x = source.PositionX + dx + ((int)source.LandblockX - (int)anchor.LandblockX) * LandblockSideMetres;
+            var y = source.PositionY + dy + ((int)source.LandblockY - (int)anchor.LandblockY) * LandblockSideMetres;
+
+            x = Math.Clamp(x, margin, LandblockSideMetres - margin);
+            y = Math.Clamp(y, margin, LandblockSideMetres - margin);
+
+            var placed = new Position(anchor) { Instance = anchor.Instance };
+
+            placed.Rotation = source.Rotation;
+            placed.Pos = new System.Numerics.Vector3(x, y, source.PositionZ);
+
+            return placed;
+        }
+
+        /// <summary>
+        /// The positions to try in order: the planned one pulled inside the edge margin of the ANCHOR's
+        /// landblock, then <see cref="RetryOffsets"/> around that, each clamped the same way. Repeats (clamping
+        /// near an edge or corner can collapse several offsets onto one point) are dropped, keyed on cell, X
+        /// and Y.
+        /// </summary>
+        internal static List<Position> PlacementCandidates(Position planned, Position anchor)
+        {
+            var first = PlaceInsideLandblock(planned, anchor, 0f, 0f, LandblockEdgeMarginMetres);
+            var result = new List<Position> { first };
+            var seen = new HashSet<(uint, float, float)> { (first.Cell, first.PositionX, first.PositionY) };
+
+            foreach (var (dx, dy) in RetryOffsets)
+            {
+                var next = PlaceInsideLandblock(first, anchor, dx, dy, LandblockEdgeMarginMetres);
+
+                if (seen.Add((next.Cell, next.PositionX, next.PositionY)))
+                    result.Add(next);
+            }
+
+            return result;
+        }
+
+        private static bool TrySnapToTerrain(MlDigsiteEncounter encounter, Position position)
+        {
+            try
+            {
+                position.AdjustMapCoords();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[ML_DIGSITE] {encounter} chest terrain snap failed at {position.ToLOCString()}", ex);
+                return false;
+            }
+        }
+
+        private static bool TryEnterWorld(MlDigsiteEncounter encounter, Chest chest, Position position, out bool threw)
+        {
+            threw = false;
+
+            try
+            {
+                return chest.EnterWorld();
+            }
+            catch (Exception ex)
+            {
+                threw = true;
+                log.Error($"[ML_DIGSITE] {encounter} chest EnterWorld threw at {position.ToLOCString()}", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// LAST RESORT when the chest could not be stood anywhere: hand each item to the owner's pack rather
+        /// than destroy the reward. On THIS (the anchor landblock's) thread every item is only DETACHED from
+        /// the chest; the grant itself is queued on the owner (Player.EnqueueAction), because the owner may
+        /// stand on a different landblock and TryCreateInInventoryWithNetworking mutates the player's pack and
+        /// session (same routing as MlDigsiteBossMechanics and ThreadDungeonGemHandler). An owner who is
+        /// offline now, or who has gone by the time the queued action runs, gets nothing delivered: every item
+        /// is logged at ERROR for an admin to re-grant. The caller destroys the chest afterwards.
+        /// </summary>
+        private static void DeliverToPack(MlDigsiteEncounter encounter, ChestPlan plan, Chest chest)
+        {
+            var owner = PlayerManager.GetOnlinePlayer(plan.OwnerGuid);
+            var items = new List<WorldObject>();
+            var lost = new List<string>();
+
+            foreach (var item in chest.Inventory.Values.ToList())
+            {
+                if (!chest.TryRemoveFromInventory(item.Guid, out var taken))
+                {
+                    // Stays in the chest and is destroyed with it, so it is reported as lost.
+                    log.Error($"[ML_DIGSITE] {encounter} could not detach {DescribeItem(item)} from the failed chest for owner 0x{plan.OwnerGuid:X8}");
+                    lost.Add(DescribeItem(item));
+                    continue;
+                }
+
+                items.Add(taken);
+            }
+
+            if (owner == null || owner.Session == null)
+            {
+                foreach (var taken in items)
+                {
+                    lost.Add(DescribeItem(taken));
+                    taken.Destroy();
+                }
+
+                ReportPackFallback(encounter, plan.OwnerGuid, 0, lost, false);
+                return;
+            }
+
+            // Recorded BEFORE the queue is used: the owner's action queue only drains on that player's tick, so
+            // a logout in between drops the action silently and this log is then the only record of the contents.
+            foreach (var taken in items)
+                log.Warn($"[ML_DIGSITE] {encounter} queuing pack grant for owner 0x{plan.OwnerGuid:X8}: {DescribeItem(taken)}");
+
+            foreach (var description in lost)
+                log.Warn($"[ML_DIGSITE] {encounter} item lost before the pack grant for owner 0x{plan.OwnerGuid:X8}: {description}");
+
+            try
+            {
+                owner.EnqueueAction(new ActionEventDelegate(() =>
+                {
+                    try
+                    {
+                        GrantToPack(encounter, plan.OwnerGuid, owner, items, lost);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[ML_DIGSITE] {encounter} queued pack grant threw for owner 0x{plan.OwnerGuid:X8}", ex);
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                log.Error($"[ML_DIGSITE] {encounter} could not queue the pack grant for owner 0x{plan.OwnerGuid:X8}", ex);
+
+                foreach (var taken in items)
+                {
+                    lost.Add(DescribeItem(taken));
+                    taken.Destroy();
+                }
+
+                ReportPackFallback(encounter, plan.OwnerGuid, 0, lost, true);
+            }
+        }
+
+        /// <summary>The owner's half of <see cref="DeliverToPack"/>; always runs on the owner's own action queue.</summary>
+        private static void GrantToPack(MlDigsiteEncounter encounter, uint ownerGuid, Player owner, List<WorldObject> items, List<string> lost)
+        {
+            // The owner can log out between the enqueue and this running.
+            var offline = owner.IsDestroyed || owner.Session == null;
+            var delivered = 0;
+
+            foreach (var taken in items)
+            {
+                var given = false;
+
+                if (!offline)
+                {
+                    try
+                    {
+                        given = owner.TryCreateInInventoryWithNetworking(taken);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"[ML_DIGSITE] {encounter} pack delivery threw for 0x{ownerGuid:X8} {DescribeItem(taken)}", ex);
+
+                        // The add happens BEFORE the networking that can throw (Player_Inventory.cs:163-166), so
+                        // an item already in a container is in the pack: destroying it would delete a delivered item.
+                        given = taken.ContainerId.HasValue;
+                    }
+                }
+
+                if (given)
+                {
+                    delivered++;
+                    continue;
+                }
+
+                lost.Add(DescribeItem(taken));
+                taken.Destroy();
+            }
+
+            ReportPackFallback(encounter, ownerGuid, delivered, lost, !offline);
+
+            if (offline)
+                return;
+
+            if (lost.Count == 0)
+            {
+                if (delivered > 0)
+                    owner.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                        "The cache could not surface at the dig, so its contents have been placed in your pack instead.", ChatMessageType.Broadcast));
+            }
+            else
+            {
+                owner.Session.Network.EnqueueSend(new GameMessageSystemChat(
+                    $"The cache could not surface at the dig, and {lost.Count} item(s) from it could not be carried. Please contact an admin so they can be restored to you.", ChatMessageType.Broadcast));
+            }
+        }
+
+        private static void ReportPackFallback(MlDigsiteEncounter encounter, uint ownerGuid, int delivered, List<string> lost, bool ownerOnline)
+        {
+            var summary = $"[ML_DIGSITE] {encounter} chest for 0x{ownerGuid:X8} could not enter the world; pack fallback delivered {delivered} item(s), {lost.Count} undelivered (owner online={ownerOnline})";
+
+            if (lost.Count == 0)
+                log.Warn(summary);
+            else
+                log.Error(summary);
+
+            foreach (var description in lost)
+                log.Error($"[ML_DIGSITE] {encounter} UNDELIVERED reward for owner 0x{ownerGuid:X8} - admin re-grant needed: {description}");
+        }
+
+        /// <summary>
+        /// Enough to re-grant a rolled item by hand: wcid, name, stack, item type, workmanship, value and
+        /// every spell id on it.
+        /// </summary>
+        private static string DescribeItem(WorldObject item)
+        {
+            var spells = new List<uint>();
+
+            if (item.Biota.PropertiesSpellBook != null)
+                spells.AddRange(item.Biota.PropertiesSpellBook.Keys.Select(k => (uint)k));
+
+            if (item.SpellDID.HasValue)
+                spells.Add(item.SpellDID.Value);
+
+            return $"wcid={item.WeenieClassId} name='{item.Name}' stack={item.StackSize ?? 1} itemType={item.ItemType} workmanship={item.Workmanship?.ToString() ?? "none"} value={item.Value ?? 0} spells=[{string.Join(",", spells)}]";
         }
 
         /// <summary>

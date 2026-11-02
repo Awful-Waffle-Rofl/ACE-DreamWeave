@@ -260,6 +260,19 @@ namespace ACE.Server.ThreadDungeons
         /// the holder. A stale copy does not count, so it cannot wedge the NPC. An unreadable spec is ignored.
         /// </summary>
         public static bool HasOutstandingGuideItem(IEnumerable<WorldObject> topLevel, uint holderGuid, int currentSerial)
+            => HasOutstandingGuideItem(topLevel, holderGuid, currentSerial, boundRunState: null);
+
+        /// <summary>
+        /// <see cref="HasOutstandingGuideItem(IEnumerable{WorldObject}, uint, int)"/> for the NPC's grant decision: a
+        /// current guide GEM whose bound run is Cleared (<paramref name="boundRunState"/> answers for the gem's run id,
+        /// null when there is no such run) does not count. Since owner ruling 2026-10-10 a solo gem survives its clear
+        /// so its owner can return for loot; without this it would hold the next grant until the run ended, although
+        /// the rung is already won. Granting is safe: Issue bumps the serial, so that gem goes stale (DecideGemUse
+        /// refuses it, the NPC takes it back), and the next guide start supersedes the cleared run (EndRun ->
+        /// OnRunEnded destroys its gem). A null <paramref name="boundRunState"/> is the three-argument form.
+        /// </summary>
+        public static bool HasOutstandingGuideItem(IEnumerable<WorldObject> topLevel, uint holderGuid, int currentSerial,
+            Func<uint, ThreadDungeonRunState?> boundRunState)
         {
             if (topLevel == null)
                 return false;
@@ -269,18 +282,30 @@ namespace ACE.Server.ThreadDungeons
                 if (item == null)
                     continue;
 
-                if (IsCurrentGuideItem(item, holderGuid, currentSerial))
+                if (TryReadSpec(item, out var spec) && CountsAsOutstanding(spec, holderGuid, currentSerial, boundRunState))
                     return true;
 
-                if (item is Container container && HasOutstandingGuideItem(container.Inventory.Values, holderGuid, currentSerial))
+                if (item is Container container && HasOutstandingGuideItem(container.Inventory.Values, holderGuid, currentSerial, boundRunState))
                     return true;
             }
 
             return false;
         }
 
-        private static bool IsCurrentGuideItem(WorldObject item, uint holderGuid, int currentSerial)
-            => TryReadSpec(item, out var spec) && ThreadGuideRules.IsCurrent(spec, holderGuid, currentSerial);
+        /// <summary>
+        /// The per-item rule, pure: a current guide item counts, unless it is bound to a run that
+        /// <paramref name="boundRunState"/> reports Cleared (the rung is won; the gem only remains for a loot return).
+        /// </summary>
+        internal static bool CountsAsOutstanding(DungeonGemSpec spec, uint holderGuid, int currentSerial, Func<uint, ThreadDungeonRunState?> boundRunState)
+        {
+            if (!ThreadGuideRules.IsCurrent(spec, holderGuid, currentSerial))
+                return false;
+
+            if (boundRunState != null && spec.IsBound && boundRunState(spec.RunId) == ThreadDungeonRunState.Cleared)
+                return false;
+
+            return true;
+        }
 
         private static bool TryReadSpec(WorldObject item, out DungeonGemSpec spec)
         {
@@ -322,8 +347,9 @@ namespace ACE.Server.ThreadDungeons
         /// <summary>
         /// A live guide run for the NPC's DecideGrant: a run owned by <paramref name="ownerGuid"/> whose spec
         /// IsGuide and which is still Starting or Active. A Cleared run does NOT count: its rung has been won
-        /// (or, for a nothing-spawned run, deliberately not won), its gem crumbled at the clear, and it only
-        /// stands until the reap - counting it would hold the next fragment for minutes after every clear.
+        /// (or, for a nothing-spawned run, deliberately not won), and it only stands until the reap or the end of
+        /// its loot hold (its gem survives the clear for a return after a death, owner ruling 2026-10-10) - counting
+        /// it would hold the next fragment for minutes after every clear.
         /// </summary>
         internal static bool HasLiveGuideRun(IEnumerable<ThreadDungeonRun> runs, uint ownerGuid)
         {

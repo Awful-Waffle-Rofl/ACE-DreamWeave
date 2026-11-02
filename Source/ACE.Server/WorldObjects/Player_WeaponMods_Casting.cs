@@ -1,6 +1,7 @@
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Server.Entity;
+using ACE.Server.KnotLoot;
 using ACE.Server.WeaponMods;
 
 namespace ACE.Server.WorldObjects
@@ -15,7 +16,7 @@ namespace ACE.Server.WorldObjects
     /// (CreatePlayerSpell(WorldObject, ...) and CreatePlayerSpell(uint)) - see the class remarks on
     /// Player_WeaponMods.cs for why a Tier B row like this is hand-wired at its one call site rather than
     /// dispatched. Called exactly once per committed cast, mirroring ApplyClassAbilityCastSpeed itself (that
-    /// call advances Nether Rush stacks as a side effect, so it is never called a second time to avoid double
+    /// call advances Mana Rush stacks as a side effect, so it is never called a second time to avoid double
     /// counting).
     ///
     /// DELIBERATELY NO CEILING (repo-owner accepted, 2026-08-17): unlike the attack-speed axis, which is
@@ -44,10 +45,8 @@ namespace ACE.Server.WorldObjects
 
             var quickRefresh = GetCasterOnlyModValue(WeaponModId.QuickRefresh);
 
-            if (quickRefresh <= 0.0)
-                return 1.0f;
-
-            return (float)(1.0 + quickRefresh);
+            // Knot loot: Mirrorglass Haste (KnotTraitId.CastSpeed, also read off the equipped wand) adds to Quick Refresh under the same scope guards above.
+            return KnotTraitCombat.CastSpeedMultiplier(quickRefresh, GetKnotCastSpeedFraction());
         }
     }
 }

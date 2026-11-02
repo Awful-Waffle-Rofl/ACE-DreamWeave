@@ -195,6 +195,20 @@ namespace ACE.Server.Pvp
                 set(vital, maxOf(vital));
         }
 
+        /// <summary>The fraction of each maximum the standard death arrival sets (Player.ThreadSafeTeleportOnDeath, retail 75%).</summary>
+        public const float StandardDeathArrivalVitalFraction = 0.75f;
+
+        /// <summary>
+        /// The value one vital is set to when the death teleport arrives (Player.ThreadSafeTeleportOnDeath). A battleground
+        /// death that went to the team pen, with the match still Live for the player at arrival, arrives at FULL
+        /// (Docs/Pvp/BATTLEGROUNDS.md "Respawn" 3): the player is still in the match and waits there to respawn. Every other
+        /// death keeps the standard 75% of the maximum, unchanged. <paramref name="max"/> is the maximum at that moment, read
+        /// after the death-arrival template step: templated for a pen death. With pvp_arena_death_keeps_enchantments off the
+        /// template buffs are not on yet; they return at respawn, where the spawn refill tops up to the higher maximum.
+        /// </summary>
+        public static uint DeathArrivalVital(uint max, bool penStillLive)
+            => penStillLive ? max : (uint)Math.Round(max * StandardDeathArrivalVitalFraction);
+
         /// <summary>
         /// Where a battleground death teleport goes: the latched pen, but ONLY when the binding the player holds right
         /// now still names the same match and is Live. Anything else - no pen latched (an arena or open-world death),

@@ -306,6 +306,31 @@ namespace ACE.Server.Tests
                 line);
         }
 
+        [TestMethod]
+        public void OutcomeLine_FailedObjectiveLost_NamesTheLostTargets_AndTheConsolationCache()
+        {
+            var line = WorldEventAnnouncer.OutcomeLine(WorldEventOutcome.FailedObjectiveLost, BuildGoal(), "the gates of Holtburg",
+                WorldEventMvp.None, null, 3, noun: "envoy", nounPlural: "envoys");
+
+            Assert.AreEqual(
+                "[World Event] Kill Count at the gates of Holtburg failed - the envoys were destroyed. A consolation cache remains for a short while.",
+                line);
+        }
+
+        [TestMethod]
+        public void OutcomeLine_FailedObjectiveLost_NoNoun_FallsBackToWards()
+        {
+            Assert.AreEqual("the wards were destroyed", WorldEventAnnouncer.ObjectiveLostReason(null));
+            Assert.AreEqual("the wards were destroyed", WorldEventAnnouncer.ObjectiveLostReason("  "));
+
+            var line = WorldEventAnnouncer.OutcomeLine(WorldEventOutcome.FailedObjectiveLost, BuildGoal(), "the gates of Holtburg",
+                WorldEventMvp.None, null, 3, failTemplate: "The defense at {anchor} failed - {reason}.");
+
+            StringAssert.Contains(line, "failed - the ");
+            StringAssert.Contains(line, "were destroyed.");
+            StringAssert.Contains(line, "A consolation cache remains for a short while.");
+        }
+
         // ---- OutcomeLine: Aborted* -----------------------------------------------------------------------
 
         [TestMethod]

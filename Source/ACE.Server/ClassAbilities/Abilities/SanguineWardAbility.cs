@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 
+using ACE.Entity.Enum;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
 using ACE.Server.WorldObjects;
@@ -11,7 +13,9 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// still spend their full health basis for damage, but the caster only actually loses 75/55/35% of it by
     /// rank - AND the health that is lost returns as a damage-absorbing ward worth 60/90/120% of that amount
     /// for 15s. The ward REFRESHES rather than stacks (so it is capped at one cast's worth) and it EXPIRES
-    /// UNUSED - it is protection while you are being hit, never a refund. Deliberately unscaled. This is the
+    /// UNUSED - it is protection while you are being hit, never a refund. Since the Blood Mage buff pass the
+    /// ABSORB fraction (only) carries a Cooking affinity multiplier, gear additive outside it; the self-cost
+    /// stays unscaled. This is the
     /// class's defensive entry: it costs no slot, changes no damage axis, and protects the pool at exactly
     /// the moment 25-50% of current health leaves it. BLOOD-MAGE-DESIGN.md sec 3 / 4a-iv.
     ///
@@ -53,8 +57,13 @@ namespace ACE.Server.ClassAbilities.Abilities
     ///
     /// Every site absorbs BEFORE its health write and after any cloak damage proc it has, replaces the
     /// damage with what the ward returns, and reports the REDUCED number - see AbsorbWithSanguineWard for
-    /// the full caller contract, including why the ward applies NO attacker filter and so deliberately
-    /// absorbs PvP and self-damage, where Mana Barrier on the same hook absorbs neither.
+    /// the full caller contract. Since 2026-10-24 the handler applies the PvE attacker filter (see
+    /// ModifyIncomingDamage), so like Mana Barrier it no longer absorbs PvP or self-damage.
+    ///
+    /// THE WARD SHIELD (owner ruling 2026-10-24): while the pool is up it also acts as a shield of
+    /// class_ability_sanguine_ward_shield_level armor level against frontal physical PvE blows, through
+    /// Player.GetWardShieldLevel in Creature.GetShieldMod. That is the one exception to the "absorb, not
+    /// damage reduction" rule below; it rides the existing shield factor and drops when the pool empties.
     ///
     /// THE ONE BEHAVIOUR THE HOOK CHANGED: the dispatch gates on class_abilities_enabled, as every class
     /// ability dispatch does, where the hand-written call sites did not. A ward can only be GRANTED while
@@ -86,11 +95,16 @@ namespace ACE.Server.ClassAbilities.Abilities
             DisplayName = "Sanguine Ward",
             Description = "Martyr's Hecatomb and Curse of Raven Fury still spend their full health basis for " +
                           "damage, but you only lose 75/55/35% of it by rank, and the health you do lose " +
-                          "returns as a damage-absorbing ward worth 60/90/120% of that amount for 15 seconds. " +
-                          "The ward refreshes rather than stacks, and expires unused.",
+                          "returns as a ward worth 60/90/120% of that amount for 15 seconds that absorbs damage " +
+                          "from monsters. While it holds, it also acts as a shield against " +
+                          "monsters' physical attacks from the front. The ward refreshes rather than stacks, and " +
+                          "expires unused. Higher Cooking multiplies the ward, never the health you pay.",
             MaxRank = 3,
-            CostPerRank = new[] { 1, 2, 3 },
+            // Blood Mage buff pass: 1/2/3 -> 1/1/1. Existing owners are refunded the difference by
+            // ClassAbilityRepricing wave 1.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
+            AffinitySkill = Skill.Cooking,
         };
 
         /// <summary>
@@ -122,14 +136,42 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// and a player who no longer holds the ability still drains a ward that is already up (see
         /// <see cref="RunsWithoutLearnedRank"/>).
         ///
-        /// Unconditional by design - no attacker filter either. The ward absorbs PvP hits, self-damage and
-        /// unattributed DoT ticks alike, so that it is never weaker on one damage path than on another,
-        /// which is why this ignores the context's filtered Attacker and passes the RAW Source through
-        /// (used only for the squelch check, and tolerating null). Do not add gates here to match Mana
-        /// Barrier: the two gate differently on purpose.
+        /// PvE ONLY since the 2026-10-24 Spellsword pass (owner ruling: ALL class abilities are PvE only).
+        /// The ruling's intent is to exclude PvP and self-damage ONLY, so the gate is written against those two
+        /// rather than against the filtered Attacker (which is also null for a DoT tick and for a hit from an
+        /// attacker that died mid-swing - both of which are monster damage the ward must keep absorbing):
+        ///  - a DoT tick (IsDamageOverTime, always sourceless) absorbs only its ENEMY-CREATURE share,
+        ///    SpellDamageFromEnemyCreature; a PvP or self-cast DoT contribution in the same tick passes through
+        ///    untouched, and a tick with no creature share leaves the pool alone;
+        ///  - any other hit is skipped only when its source is a Player, which covers both PvP and self-damage
+        ///    (the defender is a Player); a dead creature's hit is still absorbed.
+        /// The RAW Source is what is passed down, used only for the squelch check.
         /// </summary>
         public void ModifyIncomingDamage(Player defender, int rank, PreWriteDamageContext context)
         {
+            // a hazard-library hit is not absorbed (owner ruling R3): the ward pool is left untouched, not spent
+            if (context.IsHazard)
+                return;
+
+            // PvE gate (2026-10-24), DoT half: absorb only the enemy-creature share of the accumulated tick;
+            // the rest (a PvP or self-cast contribution) passes through untouched
+            if (context.IsDamageOverTime)
+            {
+                var creatureShare = Math.Min(context.Damage, context.SpellDamageFromEnemyCreature);
+
+                if (creatureShare == 0)
+                    return;
+
+                var unabsorbed = defender.AbsorbWithSanguineWard(context.Source, creatureShare);
+                context.Damage = context.Damage - creatureShare + unabsorbed;
+                return;
+            }
+
+            // PvE gate (2026-10-24), hit half: PvP and self-damage only (the defender is a Player, so one test
+            // covers both). A creature that died mid-swing is still a monster hit and is still absorbed.
+            if (context.Source is Player)
+                return;
+
             context.Damage = defender.AbsorbWithSanguineWard(context.Source, context.Damage);
         }
 
@@ -152,10 +194,11 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// Reports the ABSORB fraction (SanguineWardMath.WardFraction, 60/90/120% by rank) as a percent.
-        /// Skill is the rank's fraction, there is no legacy-skill rider, and Gear is the CLOTTING mod,
-        /// added to that fraction on the same additive axis. WardFraction has no upper clamp of its own
-        /// (the tunable is the authority, see its doc comment), so CapNote is always null.
+        /// Reports the ABSORB fraction (60/90/120% by rank) as a percent. Skill is the rank's fraction,
+        /// Affinity is the amount the COOKING multiplier adds to it (rankFraction * multiplier -
+        /// rankFraction), and Gear is the CLOTTING mod, added outside the multiply - the same expression
+        /// SanguineWardMath.ScaledWardFraction applies in Player.GrantSanguineWard. There is no upper clamp
+        /// (the tunable is the authority, see WardFraction's doc comment), so CapNote is always null.
         ///
         /// SECONDARY: the SELF-COST fraction (SanguineWardMath.SelfCostFraction, 75/55/35% by rank -
         /// unmoddable by ruling, matching Blood Price's health cost, so Affinity and Gear are always 0) is
@@ -163,20 +206,25 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// actually pays. Reported as a Secondary now that the contract supports one; mirrors
         /// Player.GetSanguineWardSelfCostFraction exactly.
         ///
-        /// The null-conditional on the gear read is for the readout unit tests, which call this with a null
-        /// Player because Player's static initializer cannot run under the test host; every live caller
-        /// (/abilities list) passes session.Player.
+        /// The null-conditionals on the affinity and gear reads are for the readout unit tests, which call
+        /// this with a null Player because Player's static initializer cannot run under the test host; every
+        /// live caller (/abilities list) passes session.Player. The affinity fallback is the NEUTRAL 1.0.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var gearFraction = player?.GetEquippedModValue(EquipmentModId.Clotting) ?? 0.0;
 
-            var fraction = SanguineWardMath.WardFraction(rank,
-                PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r1").Item,
-                PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r2").Item,
-                PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r3").Item);
+            var multiplier = player?.GetClassAbilityAffinityMultiplier(Skill.Cooking) ?? 1.0;
+
+            var a1 = PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r1").Item;
+            var a2 = PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r2").Item;
+            var a3 = PropertyManager.GetDouble("class_ability_sanguine_ward_absorb_r3").Item;
+
+            var fraction = SanguineWardMath.WardFraction(rank, a1, a2, a3);
+            var scaled = SanguineWardMath.ScaledWardFraction(rank, a1, a2, a3, multiplier);
 
             var skill = fraction * 100.0;
+            var affinity = (scaled - fraction) * 100.0;
             var gear = gearFraction * 100.0;
 
             var selfCostFraction = SanguineWardMath.SelfCostFraction(rank,
@@ -201,9 +249,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             {
                 HasValue = true,
                 Skill = skill,
-                Affinity = 0.0,
+                Affinity = affinity,
                 Gear = gear,
-                Effective = skill + gear,
+                Effective = skill + affinity + gear,
                 Unit = "%",
                 Label = "ward",
                 Per = null,

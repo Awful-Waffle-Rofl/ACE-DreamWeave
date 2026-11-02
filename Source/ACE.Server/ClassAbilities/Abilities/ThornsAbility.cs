@@ -22,7 +22,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// Player.ApplyThornsReflect, which owns the gate for every trigger). A long-range archer or caster is
     /// never answered. DoT ticks never trigger it. Physical hits arrive through this class's OnDamageTaken
     /// (the post-write IIncomingDamageAbility hook, from Player.TakeDamage); magic hits do not reach that
-    /// hook and are wired by name at their own sites through Player.ApplyThornsOnMagicHit.
+    /// hook and are wired by name at their own sites through Player.ApplyThornsOnMagicHit. A projectile the
+    /// Reflect ability bounces reaches neither, so Player.TryReflectProjectile calls the reflect itself -
+    /// synchronously at the bounce and outside the reflect latch (owner ruling 2026-10-23), so the firer's
+    /// wards and immunities apply to it like any other Thorns hit.
     ///
     /// REFLECT LOOPS ARE NO LONGER RULED OUT BY THE MONSTER SIDE. Monsters cannot learn Thorns, which is
     /// what this comment used to rest on, but a monster CAN now carry a reflect effect of its own

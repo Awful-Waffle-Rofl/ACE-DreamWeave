@@ -1,12 +1,15 @@
 using System;
+using System.Collections.Generic;
 
 using ACE.Entity.Enum;
 
 namespace ACE.Server.ClassAbilities
 {
     /// <summary>
-    /// Pure math for WEAKENED BLOOD (Blood Mage T2 game-changer): a landed Harm or Drain leaves the TARGET
-    /// carrying a life-magic vulnerability of 2.00 / 2.50 / 3.10 by the applier's rank, for 20 seconds, and
+    /// Pure math for WEAKENED BLOOD (Blood Mage T2 game-changer): a damaging Life Magic spell the Blood Mage
+    /// lands (Harm, every Drain strike, and the Health-damage life projectiles) has a per-target chance
+    /// (<see cref="ProcChance"/>) to leave the TARGET carrying a life-magic vulnerability of 2.00 / 2.50 /
+    /// 3.10 by the applier's rank, plus an attack/cast slow (<see cref="SpeedFactor"/>), for 20 seconds, and
     /// applies the retail FESTER enchantment on that target so the mark is something the player can
     /// actually see land (<see cref="FesterSpell"/>).
     ///
@@ -115,13 +118,21 @@ namespace ACE.Server.ClassAbilities
         /// refreshes Weakened Blood - that is unchanged and is not what this decides. What this decides is
         /// who the resulting vulnerability multiplies for.
         ///
-        /// User ruling, 2026-08-02: "Lets exclude drains from the blood rend/vuln. I have thoughts for
-        /// making drains better, but I think the multiplier is too much. Blood rend/vuln should apply to
-        /// harm, heca, raven." Weakened Blood IS the blood vulnerability, so:
+        /// THE RULE (Blood Mage buff pass, 2026-10-17): every spell that deals HEALTH damage benefits, except
+        /// Drain. That widens the 2026-08-02 list ("Blood rend/vuln should apply to harm, heca, raven") to
+        /// cover the Health-damage projectiles that are not LifeProjectile-typed, such as Bloodstone Bolt
+        /// (a Life Magic <see cref="SpellType.Projectile"/>, damage type Health). The Drain half of that
+        /// ruling stands unchanged:
         ///
-        ///  - <see cref="SpellType.Boost"/> on Health - HARM - benefits;
-        ///  - <see cref="SpellType.LifeProjectile"/> - MARTYR'S HECATOMB and CURSE OF RAVEN FURY - benefits;
-        ///  - <see cref="SpellType.Transfer"/> - DRAIN - does NOT.
+        ///  - <see cref="SpellType.Boost"/> / <see cref="SpellType.FellowBoost"/> - HARM - benefits. Harm's
+        ///    damage is identified by the vital it lowers, not by a damage type: the retail Harm and Drain
+        ///    rows carry no e_Type at all (ace_world.spell ids 7, 1176, 4308: e_Type NULL), so an Undef
+        ///    damage type is accepted here alongside an explicit Health one;
+        ///  - <see cref="SpellType.LifeProjectile"/> / <see cref="SpellType.Projectile"/> carrying Health -
+        ///    MARTYR'S HECATOMB, CURSE OF RAVEN FURY, BLOODSTONE BOLT - benefit;
+        ///  - a projectile of any other damage type (a war bolt, Martyr's Blight on Mana) does NOT - it is on
+        ///    its own element's axis, not this one;
+        ///  - <see cref="SpellType.Transfer"/> - DRAIN - does NOT, whatever its damage type.
         ///
         /// The mechanical reason Drain is the odd one out is spell.TransferCap: the cap binds against
         /// anything worth draining, so a vulnerability there is either invisible (scaling the roll) or turns
@@ -129,23 +140,154 @@ namespace ACE.Server.ClassAbilities
         /// design decision the user deliberately deferred, not an engineering gap to close here.
         ///
         /// Only the Drain answer is a live branch (WorldObject_Magic.HandleCastSpell_Transfer selects a
-        /// resistance accessor on it). The other two are stated rather than gated, because Harm and the life
-        /// projectiles read the axis inside Creature.GetResistanceMod with no branch to take - they are here
-        /// so the full beneficiary list is one readable, testable thing.
+        /// resistance accessor on it). The others are stated rather than gated, because Harm and the
+        /// Health-damage projectiles read the axis inside Creature.GetResistanceMod(HealthDrain) with no
+        /// branch to take - they are here so the full beneficiary list is one readable, testable thing.
         /// </summary>
-        public static bool DamageBenefits(SpellType metaSpellType)
+        public static bool DamageBenefits(SpellType metaSpellType, DamageType damageType)
         {
+            var health = (damageType & DamageType.Health) != 0;
+
             switch (metaSpellType)
             {
+                case SpellType.Transfer:
+                    return false;
+
                 case SpellType.Boost:
                 case SpellType.FellowBoost:
+                    return health || damageType == DamageType.Undef;
+
                 case SpellType.LifeProjectile:
-                    return true;
+                case SpellType.Projectile:
+                    return health;
 
                 default:
                     return false;
             }
         }
+
+        /// <summary>
+        /// The one-argument form the Drain gate in WorldObject_Magic.HandleCastSpell_Transfer calls, which
+        /// asks about a HEALTH drain specifically (it is reached only under spell.Source == Health). Kept as a
+        /// forwarder so that call site, owned elsewhere, needs no edit; it answers exactly what the two-
+        /// argument form answers for a Health spell of the given type.
+        /// </summary>
+        public static bool DamageBenefits(SpellType metaSpellType) => DamageBenefits(metaSpellType, DamageType.Health);
+
+        /// <summary>
+        /// Whether a landed spell PROJECTILE may apply the mark (WeakenedBloodAbility.OnSpellHit). Gate, in
+        /// full: a Life Magic spell, whose damage type includes Health, of type LifeProjectile (Martyr's
+        /// Hecatomb, Curse of Raven Fury) or Projectile (Bloodstone Bolt). A war or void bolt fails the school
+        /// test; a Mana-damage life projectile (Martyr's Blight) fails the damage-type test. The non-player-
+        /// target half of the gate lives in the handler, which has the target.
+        ///
+        /// Harm and Drain never come through here - they produce no projectile and apply the mark from their
+        /// own landed-spell sites in WorldObject_Magic. DoT ticks never apply it from anywhere.
+        /// </summary>
+        public static bool AppliesFromSpellProjectile(MagicSchool school, SpellType metaSpellType, DamageType damageType)
+        {
+            if (school != MagicSchool.LifeMagic)
+                return false;
+
+            if ((damageType & DamageType.Health) == 0)
+                return false;
+
+            return metaSpellType == SpellType.LifeProjectile || metaSpellType == SpellType.Projectile;
+        }
+
+        /// <summary>
+        /// The chance, per target per cast, that a landed damaging Life Magic spell applies the mark at a given
+        /// rank: 0.25 / 0.35 / 0.50 by default (class_ability_weakenedblood_proc_chance_r1..r3). Rank 0 or
+        /// below is 0 (never); a rank above 3 clamps to rank 3. The result is clamped into [0, 1] so a
+        /// misconfigured tunable cannot produce a chance the roll cannot mean.
+        /// </summary>
+        public static double ProcChance(int rank, double chanceR1, double chanceR2, double chanceR3)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            var chance = rank switch
+            {
+                1 => chanceR1,
+                2 => chanceR2,
+                _ => chanceR3,
+            };
+
+            return Math.Clamp(chance, 0.0, 1.0);
+        }
+
+        /// <summary>
+        /// The proc test: STRICTLY less than. A roll drawn from ThreadSafeRandom.Next(0f, 1f) that equals the
+        /// chance does not proc, so a chance of 0 can never fire and a chance of 1 always does.
+        /// </summary>
+        public static bool Procs(double roll, double chance) => roll < chance;
+
+        /// <summary>
+        /// The rank's raw attack/cast SLOW fraction before affinity: 0.20 / 0.35 / 0.50 by default
+        /// (class_ability_weakenedblood_slow_r1..r3). Rank 0 or below is 0; a rank above 3 clamps to rank 3;
+        /// a negative configured value is clamped to 0 (a slow can never become a haste).
+        /// </summary>
+        public static double RankSlow(int rank, double slowR1, double slowR2, double slowR3)
+        {
+            if (rank <= 0)
+                return 0.0;
+
+            var slow = rank switch
+            {
+                1 => slowR1,
+                2 => slowR2,
+                _ => slowR3,
+            };
+
+            return Math.Max(0.0, slow);
+        }
+
+        /// <summary>
+        /// Hard lower bound on the speed factor, whatever the configured floor says. The factor divides the
+        /// monster's cadence delays and cast times, so it must never reach zero; 0.10 (ten times slower) is
+        /// far below any sensible floor and exists only so a misconfigured class_ability_weakenedblood_slow_floor
+        /// of 0 or less cannot produce a division by zero.
+        /// </summary>
+        public const double MinSpeedFactor = 0.10;
+
+        /// <summary>
+        /// The speed factor a slow leaves a monster at: max(1 - slow, floor), where floor is
+        /// class_ability_weakenedblood_slow_floor (0.50 by default) clamped into [<see cref="MinSpeedFactor"/>, 1].
+        /// 1.0 means no slow. The factor multiplies animation speed and divides durations.
+        ///
+        /// THE FLOOR IS RELATIVE TO THE MONSTER'S OWN SPEED, not an absolute anim speed: it is applied after
+        /// the monster-effect speed multiplier and its cap, so an authored-slow monster is still slowed by up
+        /// to the same fraction instead of being exempt because it already sits low.
+        /// </summary>
+        public static double SpeedFactor(double slow, double floor)
+        {
+            var clampedFloor = Math.Clamp(floor, MinSpeedFactor, 1.0);
+
+            return Math.Max(1.0 - Math.Max(0.0, slow), clampedFloor);
+        }
+
+        /// <summary>
+        /// Merges an incoming speed factor with the one the target already carries. The slow SHARES THE
+        /// MARK'S EXPIRY, so <paramref name="existingExpire"/> is the mark's expiry before this application.
+        /// While that is still running the STRONGER slow wins (the smaller factor, i.e. the max slow), so a
+        /// low-rank blood mage cannot weaken a high-rank slow; once it has lapsed the old factor is ignored.
+        /// </summary>
+        public static double RefreshSpeedFactor(double now, double existingFactor, double existingExpire, double incomingFactor)
+        {
+            if (!IsActive(now, existingExpire))
+                return incomingFactor;
+
+            return Math.Min(existingFactor, incomingFactor);
+        }
+
+        /// <summary>
+        /// Whether the caster should see a "takes hold" line for this application: only when the mark freshly
+        /// took hold on the target AND nothing has been announced for this cast yet. Keyed on the caster's
+        /// cast number (MagicState.CastNum), so a Curse of Raven Fury ring, a Spell AOE splash, an Echo Cast
+        /// recast or a Crimson Harvest fan that marks five creatures in one cast produces one line, not five.
+        /// </summary>
+        public static bool ShouldAnnounce(bool tookHold, int castKey, int lastAnnouncedCastKey) =>
+            tookHold && castKey != lastAnnouncedCastKey;
 
         /// <summary>
         /// The single life-vulnerability axis, as arithmetic: the MAXIMUM of the weapon rend/cleave term and
@@ -160,6 +302,43 @@ namespace ACE.Server.ClassAbilities
         public static float VulnerabilityMod(double weaponResistanceMod, double castVulnerability)
         {
             return (float)Math.Max(1.0, Math.Max(weaponResistanceMod, castVulnerability));
+        }
+    }
+
+    /// <summary>
+    /// Enforces ONE Weakened Blood roll per TARGET per CAST (owner intent, code review 2026-10-17). Without
+    /// it the spell-hit dispatch rolls once per projectile COLLISION, so three Curse of Raven Fury
+    /// projectiles striking one large monster would roll three times - 1 - (1 - 0.5)^3 = 87.5% at rank 3
+    /// instead of 50%.
+    ///
+    /// Keyed on the caster's cast number (MagicState.CastNum): the set of targets already rolled is cleared
+    /// whenever the cast number changes, so every projectile, Spell AOE child, Cascade child, Echo Cast
+    /// recast and Crimson Harvest secondary of one cast shares one set. A projectile still in flight when
+    /// the next cast starts counts against that next cast; that can never grant more than one roll per
+    /// target per cast number.
+    ///
+    /// One instance per Player, mutated on that player's landblock thread like the rest of its class-ability
+    /// state. A plain class rather than a Player method so the rule is unit-testable without a live Player.
+    /// </summary>
+    public sealed class WeakenedBloodCastRollLedger
+    {
+        private int castNum = int.MinValue;
+
+        private readonly HashSet<uint> rolledTargets = new HashSet<uint>();
+
+        /// <summary>
+        /// TRUE when <paramref name="targetGuid"/> has not yet rolled during cast <paramref name="castNumber"/>,
+        /// and records that it now has. FALSE for a repeat - the caller then draws no roll at all.
+        /// </summary>
+        public bool TryClaimRoll(int castNumber, uint targetGuid)
+        {
+            if (castNumber != castNum)
+            {
+                castNum = castNumber;
+                rolledTargets.Clear();
+            }
+
+            return rolledTargets.Add(targetGuid);
         }
     }
 }

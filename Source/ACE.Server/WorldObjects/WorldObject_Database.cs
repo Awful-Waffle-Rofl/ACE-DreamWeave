@@ -171,7 +171,7 @@ namespace ACE.Server.WorldObjects
                 return false;
 
             // WaffleACE world events: everything a running event spawned is transient by construction.
-            if (GetProperty(PropertyInt.WorldEventId) != null)
+            if (ACE.Server.WorldEvents.WorldEventHooks.IsTransientEventObject(this))
                 return false;
 
             // WaffleACE Threads: run-owned creatures are transient by construction.

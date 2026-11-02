@@ -204,7 +204,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Berserker
             [ClassIdForAttribute(PropertyAttribute.Strength)]   = (ClassAbilityClass.Berserker, 2),
             [ClassIdForSkill(Skill.TwoHandedCombat)]            = (ClassAbilityClass.Berserker, 1),
-            [ClassIdForVital(PropertyAttribute2nd.MaxStamina)]  = (ClassAbilityClass.Berserker, 1),
+            // Enhanced Stamina (was Berserker T1) RETIRED 2026-10-24 (Berserker pass, owner ruling): it is
+            // excluded in GenerateAll below, so it has no homing row. RetiredClassAbilities["enhanced_stamina"]
+            // refunds held ranks and unused tokens.
             // Archmage
             [ClassIdForSkill(Skill.WarMagic)]                   = (ClassAbilityClass.Archmage, 1),
             [ClassIdForAttribute(PropertyAttribute.Focus)]      = (ClassAbilityClass.Archmage, 2),
@@ -292,6 +294,12 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             foreach (var vital in Vitals)
             {
+                // Enhanced Stamina RETIRED 2026-10-24 (Berserker pass, owner ruling). Its synthetic id stays
+                // reserved in RetiredClassAbilities (keyed by ClassIdForVital(MaxStamina)) so an orphaned held
+                // rank or unused token still refunds; its token catalog slot stays reserved for wcid stability.
+                if (vital == PropertyAttribute2nd.MaxStamina)
+                    continue;
+
                 // "MaxHealth" -> "Health" etc. for the player-facing token and name
                 var shortName = vital.ToString().Replace("Max", "");
 

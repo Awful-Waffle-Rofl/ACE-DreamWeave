@@ -111,6 +111,64 @@ namespace ACE.Server.Network
         private long lastClientAckSequence;
         private long lastClientAckTicks;
 
+        // Arrival-cost diagnostics ([TELEPORT_ABANDONED] creates/bytesOut/peakInflight, [TELEPORT_ARRIVAL_COST]).
+        // createObjectsEnqueued is bumped by EnqueueSend on any thread; peakInflightSinceReset is raised after every
+        // flush and zeroed by ResetArrivalPeaks when a teleport window opens. Both Interlocked. Logging only.
+        private long createObjectsEnqueued;
+        private long peakInflightSinceReset;
+
+        // Dropped-session diagnostics (Session.DropSession): distinct guids ever created on this session, each mapped to
+        // its wcid (the outbound ring resolves w= from it), capped so a long session cannot grow it without bound.
+        // Bumped by EnqueueSend on any thread. Logging only.
+        private const int DistinctCreatedCap = 4096;
+        private readonly ConcurrentDictionary<uint, uint> distinctCreatedGuids = new ConcurrentDictionary<uint, uint>();
+        private int distinctCreatedCount;
+        private volatile bool distinctCreatedCapped;
+
+        // Client object book hook (ClientObjectBook.EnqueueFollowed): delegates built once per session so the hook
+        // allocates nothing per message, and a one-shot latch so a bookkeeping failure is logged once, not per message.
+        private readonly Action<GameMessage> enqueueIntoBundle;
+        private readonly Action<Exception> noteBookFailure;
+        private int bookFailureLogged;
+
+        // Outbound ring (OutboundRing, outbound_ring_* settings): every message dequeued by SendBundle, timed against the
+        // last inbound packet, dumped when the client drops. Diagnostics only. The entry array is allocated on the
+        // first record; ringFailureLogged latches the one failure log per session.
+        private readonly OutboundRing outboundRing = new OutboundRing();
+        private int ringFailureLogged;
+
+        internal OutboundRing OutboundRing => outboundRing;
+
+        /// <summary>CreateObject messages enqueued on this session so far. Logging only.</summary>
+        public long CreateObjectsEnqueued => Interlocked.Read(ref createObjectsEnqueued);
+
+        /// <summary>Distinct guids this session was sent a CreateObject for; a floor when <see cref="DistinctCreatedCapped"/>.</summary>
+        public int DistinctCreated => Volatile.Read(ref distinctCreatedCount);
+
+        /// <summary>True once a new guid arrived after the distinct-created set reached its cap.</summary>
+        public bool DistinctCreatedCapped => distinctCreatedCapped;
+
+        /// <summary>UTC ticks of the last packet received from the client, 0 before the first. Logging only.</summary>
+        public long LastPacketReceivedTicks => Interlocked.Read(ref lastPacketReceivedTicks);
+
+        // Outbound send pacing (network_pacing_enabled, default off). Created the first time a flush runs with pacing
+        // on and never discarded after, so a session that was paced once keeps draining its held packets through the
+        // paced path even after pacing is switched off. A session that was never paced never creates one and runs the
+        // original flush loop unchanged. Every touch of the pacer is under pacerLock, because Update (and so the flush)
+        // is reachable from two threads: Session.TickOutbound on the NetworkManager Parallel.ForEach, and
+        // NetworkManager.SendLoginRequestReject / AuthenticationHandler on the connection listener thread.
+        private readonly object pacerLock = new object();
+        private volatile SendPacer<ServerPacket> pacer;
+        private volatile bool pacingEnabledLastFlush;
+        private static readonly System.Diagnostics.Stopwatch pacerClock = System.Diagnostics.Stopwatch.StartNew();
+
+        // Lock-free mirrors of the pacer's depths for the diagnostic readers (FillTeleportDiagnostics,
+        // ResetArrivalPeaks run on the world/landblock thread), which must never wait on pacerLock: the flush holds it
+        // across socket.SendTo. Written with Interlocked at the end of every paced flush, under the lock.
+        private int pacerHeldMirror;
+        private long pacerHeldBytesMirror;
+        private int pacerPeakHeldSinceReset;
+
         /// <summary>
         /// Fills the network half of a TeleportNetSnapshot. With <paramref name="includeDepths"/> false the two
         /// point-in-time depths are skipped: ConcurrentDictionary.Count takes every bucket lock, so they are read only
@@ -128,11 +186,63 @@ namespace ACE.Server.Network
             snapshot.ServerPacketSequence = ConnectionData.PacketSequence?.CurrentValue ?? 0;
             snapshot.ClientAckSequence = (uint)Interlocked.Read(ref lastClientAckSequence);
             snapshot.ClientAckTicks = Interlocked.Read(ref lastClientAckTicks);
+            snapshot.CreateObjectsEnqueued = Interlocked.Read(ref createObjectsEnqueued);
+            snapshot.BytesSent = Interlocked.Read(ref totalBytesSent);
+            snapshot.PeakInflight = Interlocked.Read(ref peakInflightSinceReset);
+            snapshot.PacingEnabled = pacingEnabledLastFlush;
 
             if (includeDepths)
             {
                 snapshot.OutboundQueueDepth = packetQueue.Count;
                 snapshot.RetainedPackets = cachedPackets.Count;
+
+                // mirrors, never the pacer itself: no lock on the reader's thread
+                snapshot.PacerHeld = Volatile.Read(ref pacerHeldMirror);
+                snapshot.PacerHeldBytes = Interlocked.Read(ref pacerHeldBytesMirror);
+                snapshot.PacerPeakHeld = Volatile.Read(ref pacerPeakHeldSinceReset);
+            }
+        }
+
+        /// <summary>
+        /// Zeroes the "since teleport start" peaks (in-flight packets, pacer held depth). Called when a teleport or
+        /// login window opens, so the peaks on its lines belong to that window. Lock-free. A paced flush running at
+        /// the same instant can still fold in the peak it sampled just before the reset, so the held peak may include
+        /// up to one flush interval from before the window opened.
+        /// </summary>
+        public void ResetArrivalPeaks()
+        {
+            Interlocked.Exchange(ref peakInflightSinceReset, 0);
+            Interlocked.Exchange(ref pacerPeakHeldSinceReset, 0);
+        }
+
+        /// <summary>
+        /// Sent-but-unacked packets: the last assigned outbound sequence minus the client's last acked sequence. Before
+        /// the first ack this is every sequenced packet sent so far. A <c>UIntSequence</c> built with
+        /// clientPrimed false starts at uint.MaxValue (SessionConnectionData does exactly that), and that sentinel means
+        /// nothing has been sent, so it is 0, not 4294967295.
+        /// </summary>
+        internal static long Inflight(uint seq, uint ack)
+        {
+            if (seq == uint.MaxValue)
+                return 0;
+
+            return seq > ack ? seq - ack : 0;
+        }
+
+        private long CurrentInflight()
+        {
+            return Inflight(ConnectionData.PacketSequence?.CurrentValue ?? 0u, (uint)Interlocked.Read(ref lastClientAckSequence));
+        }
+
+        private void SampleInflightPeak()
+        {
+            var inflight = CurrentInflight();
+
+            long current;
+            while (inflight > (current = Interlocked.Read(ref peakInflightSinceReset)))
+            {
+                if (Interlocked.CompareExchange(ref peakInflightSinceReset, inflight, current) == current)
+                    break;
             }
         }
 
@@ -180,6 +290,18 @@ namespace ACE.Server.Network
                 currentBundleLocks[i] = new object();
                 currentBundles[i] = new NetworkBundle();
             }
+
+            enqueueIntoBundle = EnqueueIntoBundle;
+            noteBookFailure = NoteBookFailure;
+        }
+
+        /// <summary>
+        /// A ClientObjectBook bookkeeping failure: the message was still enqueued. Logged once per session.
+        /// </summary>
+        private void NoteBookFailure(Exception ex)
+        {
+            if (Interlocked.Exchange(ref bookFailureLogged, 1) == 0)
+                log.Error($"[{session.LoggingIdentifier}] ClientObjectBook bookkeeping failed; the message was still sent. Further failures on this session are not logged.", ex);
         }
 
         // /netcapture diagnostic. Only touched when NetCapture.AnyFlagged.
@@ -239,15 +361,18 @@ namespace ACE.Server.Network
                 if (ACE.Server.Command.Web.WebCommandContext.IsCapturing && message is GameMessageSystemChat chat)
                     ACE.Server.Command.Web.WebCommandContext.TryCapture(session, ACE.Server.Command.Web.WebCommandContext.LevelChat, chat.Text);
 
-                var grp = message.Group;
-                var currentBundleLock = currentBundleLocks[(int) grp];
-                lock (currentBundleLock)
+                if (message.Opcode == GameMessageOpcode.ObjectCreate)
                 {
-                    var currentBundle = currentBundles[(int) grp];
-                    currentBundle.EncryptedChecksum = true;
-                    packetLog.DebugFormat("[{0}] Enqueuing Message {1}", session.LoggingIdentifier, message.Opcode);
-                    currentBundle.Enqueue(message);
+                    Interlocked.Increment(ref createObjectsEnqueued);
+                    NoteDistinctCreate(message);
                 }
+
+                // Client object book (teleport_flush_scope): bookkeeping only, never a hold or a delay. See ClientObjectBook.
+                var book = ClientObjectBook.Follows(message) ? session.Player?.ClientObjectBook : null;
+                if (book != null)
+                    ClientObjectBook.EnqueueFollowed(book, message, enqueueIntoBundle, noteBookFailure);
+                else
+                    EnqueueIntoBundle(message);
             }
         }
 
@@ -270,15 +395,109 @@ namespace ACE.Server.Network
                 if (ACE.Server.Command.Web.WebCommandContext.IsCapturing && message is GameMessageSystemChat chat)
                     ACE.Server.Command.Web.WebCommandContext.TryCapture(session, ACE.Server.Command.Web.WebCommandContext.LevelChat, chat.Text);
 
-                var grp = message.Group;
-                var currentBundleLock = currentBundleLocks[(int)grp];
-                lock (currentBundleLock)
+                if (message.Opcode == GameMessageOpcode.ObjectCreate)
                 {
-                    var currentBundle = currentBundles[(int)grp];
-                    currentBundle.EncryptedChecksum = true;
-                    packetLog.DebugFormat("[{0}] Enqueuing Message {1}", session.LoggingIdentifier, message.Opcode);
-                    currentBundle.Enqueue(message);
+                    Interlocked.Increment(ref createObjectsEnqueued);
+                    NoteDistinctCreate(message);
                 }
+
+                // Client object book (teleport_flush_scope): bookkeeping only, never a hold or a delay. See ClientObjectBook.
+                var book = ClientObjectBook.Follows(message) ? session.Player?.ClientObjectBook : null;
+                if (book != null)
+                    ClientObjectBook.EnqueueFollowed(book, message, enqueueIntoBundle, noteBookFailure);
+                else
+                    EnqueueIntoBundle(message);
+            }
+        }
+
+        /// <summary>
+        /// The bundle enqueue both EnqueueSend(GameMessage) overloads end in, unchanged from when it was inline in each.
+        /// </summary>
+        private void EnqueueIntoBundle(GameMessage message)
+        {
+            var grp = message.Group;
+            var currentBundleLock = currentBundleLocks[(int)grp];
+            lock (currentBundleLock)
+            {
+                var currentBundle = currentBundles[(int)grp];
+                currentBundle.EncryptedChecksum = true;
+                packetLog.DebugFormat("[{0}] Enqueuing Message {1}", session.LoggingIdentifier, message.Opcode);
+                currentBundle.Enqueue(message);
+            }
+        }
+
+        /// <summary>
+        /// Counts each guid this session was ever sent a CreateObject for, once, for the dropped-session line's
+        /// distinctCreated. Stops adding at <see cref="DistinctCreatedCap"/> and marks the count as a floor instead.
+        /// Logging only.
+        /// </summary>
+        private void NoteDistinctCreate(GameMessage message)
+        {
+            if (!(message is GameMessageCreateObject create))
+                return;
+
+            if (Volatile.Read(ref distinctCreatedCount) >= DistinctCreatedCap)
+            {
+                if (!distinctCreatedGuids.ContainsKey(create.ObjectId))
+                    distinctCreatedCapped = true;
+                return;
+            }
+
+            if (distinctCreatedGuids.TryAdd(create.ObjectId, create.WeenieClassId))
+                Interlocked.Increment(ref distinctCreatedCount);
+        }
+
+        /// <summary>The wcid of a guid this session was sent a CreateObject for, 0 when unknown. Logging only.</summary>
+        internal uint CreatedWcid(uint guid)
+        {
+            return distinctCreatedGuids.TryGetValue(guid, out var wcid) ? wcid : 0;
+        }
+
+        /// <summary>
+        /// Records one dequeued message in the outbound ring (SendBundle only, never EnqueueSend). Returns its ring
+        /// index, 0 when suppressed or on failure. A failure never reaches the send path; the first one per session is
+        /// logged.
+        /// </summary>
+        private long RecordOutbound(GameMessage message, long stamp)
+        {
+            try
+            {
+                OutboundMessageDecode.Decode(message, out var guid, out var aux, out var eventType);
+                return outboundRing.Record(stamp, (ushort)message.Opcode, eventType, guid, aux, (int)message.Data.Length, 0, OutboundRingSettings.Entries);
+            }
+            catch (Exception ex)
+            {
+                if (Interlocked.Exchange(ref ringFailureLogged, 1) == 0)
+                    log.Error($"[{session.LoggingIdentifier}] outbound ring record failed; the message was still sent. Further failures on this session are not logged.", ex);
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// A message's last piece just went into a packet: tags the piece so the packet's sequence can be written back to
+        /// the ring entry when the packet is stamped.
+        /// </summary>
+        internal static void TagFinalPiece(MessageFragment fragment, ServerPacketFragment piece)
+        {
+            if (fragment.RingIndex != 0 && fragment.DataRemaining <= 0)
+                piece.RingIndex = fragment.RingIndex;
+        }
+
+        /// <summary>Writes a just-stamped packet's sequence back to the ring entries whose last piece it carries.</summary>
+        private void NoteStampedRingEntries(ServerPacket packet)
+        {
+            try
+            {
+                foreach (var fragment in packet.Fragments)
+                {
+                    if (fragment is ServerPacketFragment piece && piece.RingIndex != 0)
+                        outboundRing.NotePacketSeq(piece.RingIndex, packet.Header.Sequence);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Interlocked.Exchange(ref ringFailureLogged, 1) == 0)
+                    log.Error($"[{session.LoggingIdentifier}] outbound ring sequence note failed; the packet was still sent. Further failures on this session are not logged.", ex);
             }
         }
 
@@ -372,7 +591,29 @@ namespace ACE.Server.Network
                 }
             }
 
-            FlushPackets();
+            // Pacing tunables are read once per Update, never per packet. The numeric ones only when pacing is on.
+            var pacingEnabled = PropertyManager.GetBool("network_pacing_enabled").Item;
+            pacingEnabledLastFlush = pacingEnabled;
+
+            if (!pacingEnabled && pacer == null)
+                FlushPackets(); // never paced: the original path, unchanged
+            else
+            {
+                var config = default(SendPacerConfig);
+                if (pacingEnabled)
+                {
+                    config.RateBytesPerSecond = PropertyManager.GetLong("network_send_rate_bytes_per_sec").Item;
+                    config.BurstBytes = PropertyManager.GetLong("network_send_burst_bytes").Item;
+                    config.MaxInflightPackets = PropertyManager.GetLong("network_max_unacked_packets").Item;
+                    config.TrickleMs = PropertyManager.GetLong("network_pacing_trickle_ms").Item;
+                }
+
+                // a session being torn down releases everything it holds, so boot/logoff messages are not stuck
+                // behind the pacer during the termination window
+                FlushPacketsPaced(pacingEnabled && session.PendingTermination == null, config);
+            }
+
+            SampleInflightPeak();
         }
 
         /// <summary>
@@ -442,12 +683,21 @@ namespace ACE.Server.Network
             Interlocked.Add(ref totalBytesReceived, dataSize);
             Interlocked.Increment(ref totalPacketsReceived);
             Interlocked.Exchange(ref lastPacketReceivedTicks, DateTime.UtcNow.Ticks);
+            if (OutboundRingSettings.Enabled)
+                outboundRing.NoteInbound(System.Diagnostics.Stopwatch.GetTimestamp());
 
             if (!packet.VerifyCRC(ConnectionData.CryptoClient))
             {
                 Interlocked.Increment(ref crcFailures);
+
+                if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum))
+                    NoteKeyFailure();
+
                 return;
             }
+
+            if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum))
+                gapTracker.OnKeyVerified();
 
             // If the client sent a NAK with a cleartext CRC then process it
             if ((packet.Header.Flags & PacketHeaderFlags.RequestRetransmit) == PacketHeaderFlags.RequestRetransmit
@@ -528,11 +778,18 @@ namespace ACE.Server.Network
             {
                 packetLog.DebugFormat("[{0}] Packet {1} received out of order", session.LoggingIdentifier, packet.Header.Sequence);
 
+                var queueWasEmpty = outOfOrderPackets.IsEmpty;
+
                 if (!outOfOrderPackets.ContainsKey(packet.Header.Sequence))
                     outOfOrderPackets.TryAdd(packet.Header.Sequence, packet);
 
-                if (desiredSeq + 2 <= packet.Header.Sequence && DateTime.UtcNow - LastRequestForRetransmitTime > new TimeSpan(0, 0, 1))
+                var now = DateTime.UtcNow;
+                gapTracker.OnQueued(lastReceivedPacketSequence, packet.Header.Sequence, now, queueWasEmpty);
+
+                if (desiredSeq + 2 <= packet.Header.Sequence && now - LastRequestForRetransmitTime > new TimeSpan(0, 0, 1))
                     DoRequestForRetransmission(packet.Header.Sequence);
+
+                CheckInboundGap(now);
 
                 return;
             }
@@ -541,16 +798,100 @@ namespace ACE.Server.Network
 
             #region Final processing stage
 
+            var sequenceBefore = lastReceivedPacketSequence;
+
             // Processing stage
             // If we reach here, this is a packet we should proceed with processing.
             HandleOrderedPacket(packet);
-        
+
             // Process data now in sequence
             // Finally check if we have any out of order packets or fragments we need to process;
             CheckOutOfOrderPackets();
             CheckOutOfOrderFragments();
 
+            if (lastReceivedPacketSequence != sequenceBefore)
+                NoteSequenceAdvanced();
+            else if (gapTracker.InGap && outOfOrderPackets.IsEmpty)
+                gapTracker.OnDrainedWithoutAdvance(); // only a queued ack-only packet was drained: close, never leave it stale
+
             #endregion
+        }
+
+        // Inbound loss recovery (InboundGapTracker, network_inbound_stall_seconds). Touched only on this session's
+        // connection-listener receive path, like the reorder state above.
+        private readonly InboundGapTracker gapTracker = new InboundGapTracker();
+
+        /// <summary>
+        /// The in-order sequence moved. Closes the gap once nothing is left queued, and logs the recovery of one wider
+        /// than the legacy 256 limit (rate-limited per session), so the larger window can be confirmed on a live server.
+        /// </summary>
+        private void NoteSequenceAdvanced()
+        {
+            // only consult the queue while a gap is open: Count/IsEmpty are never paid on a session with no loss
+            if (!gapTracker.InGap)
+            {
+                gapTracker.OnAdvanced(true, DateTime.UtcNow);
+                return;
+            }
+
+            var startSeq = gapTracker.GapStartSequence;
+            var highSeq = gapTracker.GapHighSequence;
+
+            var recovery = gapTracker.OnAdvanced(outOfOrderPackets.IsEmpty, DateTime.UtcNow);
+
+            if (recovery is InboundGapRecovery r && r.Log)
+                log.Info($"[INBOUND_GAP_RECOVERED] [{session.LoggingIdentifier}] span={r.Span} seq={startSeq}->{highSeq} ms={(long)r.Elapsed.TotalMilliseconds} naks={r.Naks} window={ConnectionData.CryptoClient.EffortLevel} suppressed={r.Suppressed}");
+        }
+
+        /// <summary>
+        /// Ends the session when an open gap can no longer recover: the in-order sequence has not moved for
+        /// network_inbound_stall_seconds while packets wait behind it (the missing ones are never coming), or more
+        /// packets are queued than any gap inside the crypto window can produce. One INFO line says which.
+        /// </summary>
+        private void CheckInboundGap(DateTime now)
+        {
+            if (session.PendingTermination != null)
+                return;
+
+            var window = ConnectionData.CryptoClient.EffortLevel;
+            var queued = outOfOrderPackets.Count;
+            var stallSeconds = InboundRecoverySettings.StallSeconds;
+
+            var verdict = gapTracker.Check(queued, InboundGapTracker.QueueCap(window), now, TimeSpan.FromSeconds(stallSeconds));
+            if (verdict == InboundGapVerdict.None)
+                return;
+
+            var what = verdict == InboundGapVerdict.Stalled ? "stalled" : "queue_overflow";
+
+            log.Info($"[INBOUND_GAP_ENDED] [{session.LoggingIdentifier}] cause={what} span={gapTracker.GapSpan} seq={gapTracker.GapStartSequence}->{gapTracker.GapHighSequence} last_seq={lastReceivedPacketSequence} queued={queued} naks={gapTracker.GapNaks} stalled_s={(long)(now - gapTracker.StallSinceUtc).TotalSeconds} open_s={(long)(now - gapTracker.GapOpenedUtc).TotalSeconds} window={window} stall_limit_s={stallSeconds}");
+
+            session.Terminate(SessionTerminationReason.AbnormalSequenceReceived, null, null, verdict == InboundGapVerdict.Stalled
+                ? "inbound sequence stalled: missing packets were never retransmitted"
+                : "inbound out-of-order queue over its cap");
+        }
+
+        /// <summary>
+        /// An encrypted-checksum packet failed to verify. When they have all failed for network_inbound_stall_seconds,
+        /// the client's key stream is beyond the window and nothing it sends will verify again; cleartext acks would
+        /// otherwise keep the session alive indefinitely, so it is ended with one INFO line.
+        /// </summary>
+        private void NoteKeyFailure()
+        {
+            var now = DateTime.UtcNow;
+            gapTracker.OnKeyFailure(now);
+
+            if (session.PendingTermination != null)
+                return;
+
+            var stallSeconds = InboundRecoverySettings.StallSeconds;
+            if (!gapTracker.KeyStreamLost(now, TimeSpan.FromSeconds(stallSeconds)))
+                return;
+
+            var crypto = ConnectionData.CryptoClient;
+
+            log.Info($"[INBOUND_KEYSTREAM_LOST] [{session.LoggingIdentifier}] failures_in_row={gapTracker.KeyFailuresInRow} since_s={(long)(now - gapTracker.FirstKeyFailureUtc).TotalSeconds} last_seq={lastReceivedPacketSequence} window={crypto.EffortLevel} outstanding_keys={crypto.OutstandingKeys} stall_limit_s={stallSeconds}");
+
+            session.Terminate(SessionTerminationReason.ClientConnectionFailure, null, null, "checksum key stream lost: no encrypted packet verified");
         }
 
         const uint MaxNumNakSeqIds = 115; //464 + header = 484;  (464 - 4) / 4
@@ -565,7 +906,8 @@ namespace ACE.Server.Network
             List<uint> needSeq = new List<uint>();
             needSeq.Add(desiredSeq);
             uint bottom = desiredSeq + 1;
-            if (rcvdSeq < bottom || rcvdSeq - bottom > CryptoSystem.MaximumEffortLevel)
+            // the bound is this session's crypto window: a gap the checksum layer can accept is not ended here
+            if (InboundGapTracker.ExceedsReorderBound(rcvdSeq, lastReceivedPacketSequence, ConnectionData.CryptoClient.EffortLevel))
             {
                 session.Terminate(SessionTerminationReason.AbnormalSequenceReceived);
                 return;
@@ -599,6 +941,7 @@ namespace ACE.Server.Network
                 packetLog.DebugFormat("[{0}] Requested retransmit of {1}", session.LoggingIdentifier, needSeq.Select(k => k.ToString()).Aggregate((a, b) => a + ", " + b));
             NetworkStatistics.S2C_RequestsForRetransmit_Aggregate_Increment();
             Interlocked.Increment(ref serverRetransmitRequests);
+            gapTracker.OnNak();
         }
 
         private DateTime LastRequestForRetransmitTime = DateTime.MinValue;
@@ -892,25 +1235,118 @@ namespace ACE.Server.Network
             {
                 packetLog.DebugFormat("[{0}] Flushing packets, count {1}", session.LoggingIdentifier, packetQueue.Count);
 
-                if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum) && ConnectionData.PacketSequence.CurrentValue == 0)
-                    ConnectionData.PacketSequence = new Sequence.UIntSequence(1);
-
-                bool isNak = packet.Header.Flags.HasFlag(PacketHeaderFlags.RequestRetransmit);
-
-                // If we are only ACKing, then we don't seem to have to increment the sequence
-                if (packet.Header.Flags == PacketHeaderFlags.AckSequence || isNak)
-                    packet.Header.Sequence = ConnectionData.PacketSequence.CurrentValue;
-                else
-                    packet.Header.Sequence = ConnectionData.PacketSequence.NextValue;
-                packet.Header.Id = ServerId;
-                packet.Header.Iteration = 0x01;
-                packet.Header.Time = (ushort)Timers.PortalYearTicks;
-
-                if (packet.Header.Sequence >= 2u && !isNak)
-                    cachedPackets.TryAdd(packet.Header.Sequence, packet);
-
-                SendPacket(packet);
+                StampAndSend(packet);
             }
+        }
+
+        /// <summary>
+        /// Gives a packet its protocol state (sequence, id, time, retransmit cache entry) and sends it, which applies the
+        /// checksum key. The one place that happens, for both flush paths: a packet held by the pacer has none of this
+        /// until it is released here, so holding it never leaves a gap in the sequence or the ISAAC stream.
+        /// </summary>
+        private void StampAndSend(ServerPacket packet)
+        {
+            if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum) && ConnectionData.PacketSequence.CurrentValue == 0)
+                ConnectionData.PacketSequence = new Sequence.UIntSequence(1);
+
+            bool isNak = packet.Header.Flags.HasFlag(PacketHeaderFlags.RequestRetransmit);
+
+            // If we are only ACKing, then we don't seem to have to increment the sequence
+            if (packet.Header.Flags == PacketHeaderFlags.AckSequence || isNak)
+                packet.Header.Sequence = ConnectionData.PacketSequence.CurrentValue;
+            else
+                packet.Header.Sequence = ConnectionData.PacketSequence.NextValue;
+            packet.Header.Id = ServerId;
+            packet.Header.Iteration = 0x01;
+            packet.Header.Time = (ushort)Timers.PortalYearTicks;
+
+            if (packet.Header.Sequence >= 2u && !isNak)
+                cachedPackets.TryAdd(packet.Header.Sequence, packet);
+
+            if (packet.Fragments.Count > 0)
+                NoteStampedRingEntries(packet);
+
+            SendPacket(packet);
+        }
+
+        /// <summary>
+        /// Packets that never wait behind the pacer:
+        /// <para>- everything without an encrypted checksum: a bare ack, a NAK, a RejectRetransmit, the cleartext login
+        /// handshake;</para>
+        /// <para>- every packet with no fragments: optional-header-only packets such as a standalone TimeSync or
+        /// EchoResponse, which carry Timers.PortalYearTicks in their payload and would report a stale time if
+        /// held.</para>
+        /// Overtaking held data is safe for all of them because a held packet has no protocol state: the sequence
+        /// (NextValue or CurrentValue) and the ISAAC key (IssacServer.Next in SendPacket) are both taken inside
+        /// StampAndSend, in call order, under pacerLock, so a bypass packet simply takes the next value and the held
+        /// packets take the ones after it. No gap and no reuse. An echo or time sync that rides in the first packet of
+        /// a bundle that also carries message fragments is still paced with that packet.
+        /// </summary>
+        internal static bool BypassesPacer(ServerPacket packet) =>
+            !packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum) || packet.Fragments.Count == 0;
+
+        /// <summary>Bytes the packet puts on the wire: header + optional-header data + every fragment.</summary>
+        internal static int WireSize(ServerPacket packet)
+        {
+            var size = PacketHeader.HeaderSize + (int)(packet.Data?.Length ?? 0);
+
+            foreach (var fragment in packet.Fragments)
+                size += fragment.Length;
+
+            return size;
+        }
+
+        /// <summary>
+        /// The paced flush. New packets enter the pacer's FIFO with no protocol state; the pacer releases them (into
+        /// StampAndSend) as the byte bucket and the in-flight cap allow. With <paramref name="paced"/> false (pacing
+        /// switched off on a session that was paced earlier, or the session terminating) everything held is released
+        /// at once, in order, before anything newer.
+        /// </summary>
+        private void FlushPacketsPaced(bool paced, SendPacerConfig config)
+        {
+            lock (pacerLock)
+            {
+                if (isReleased)
+                    return;
+
+                var p = pacer;
+                if (p == null)
+                    pacer = p = new SendPacer<ServerPacket>(() => pacerClock.ElapsedMilliseconds);
+
+                FlushThroughPacer(packetQueue, p, paced, config, CurrentInflight, StampAndSend);
+
+                // publish the depths for the lock-free diagnostic readers
+                Volatile.Write(ref pacerHeldMirror, p.HeldCount);
+                Interlocked.Exchange(ref pacerHeldBytesMirror, p.HeldBytes);
+
+                var peak = p.TakePeak();
+                int current;
+                while (peak > (current = Volatile.Read(ref pacerPeakHeldSinceReset)))
+                {
+                    if (Interlocked.CompareExchange(ref pacerPeakHeldSinceReset, peak, current) == current)
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The paced flush's core, static so it can be tested without a session: every queued packet is offered to the
+        /// pacer (bypass packets are sent at once), then the pacer releases what the rules allow, or, with
+        /// <paramref name="paced"/> false, everything it holds, oldest first.
+        /// </summary>
+        internal static void FlushThroughPacer(ConcurrentQueue<ServerPacket> queue, SendPacer<ServerPacket> pacer, bool paced, SendPacerConfig config,
+            Func<long> inflight, Action<ServerPacket> stampAndSend)
+        {
+            while (queue.TryDequeue(out var packet))
+            {
+                if (pacer.Offer(packet, WireSize(packet), BypassesPacer(packet)))
+                    stampAndSend(packet);
+            }
+
+            if (paced)
+                pacer.Drain(config, inflight, stampAndSend);
+            else
+                pacer.DrainAll(stampAndSend);
         }
 
         private void SendPacket(ServerPacket packet)
@@ -998,12 +1434,18 @@ namespace ACE.Server.Network
 
             List<MessageFragment> fragments = new List<MessageFragment>();
 
+            // Outbound ring: one timestamp per bundle, never per message
+            var ringOn = OutboundRingSettings.Enabled;
+            var ringStamp = ringOn ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
             // Pull all messages out and create MessageFragment objects
             while (bundle.HasMoreMessages)
             {
                 var message = bundle.Dequeue();
 
                 var fragment = new MessageFragment(message, ConnectionData.FragmentSequence++);
+                if (ringOn)
+                    fragment.RingIndex = RecordOutbound(message, ringStamp);
                 fragments.Add(fragment);
             }
 
@@ -1035,6 +1477,7 @@ namespace ACE.Server.Network
                         if (NetCapture.AnyFlagged)
                             CaptureFragment(firstMessage, spf);
                         packet.Fragments.Add(spf);
+                        TagFinalPiece(firstMessage, spf);
                         availableSpace -= spf.Length;
                         if (firstMessage.DataRemaining <= 0)
                             fragments.Remove(firstMessage);
@@ -1065,6 +1508,7 @@ namespace ACE.Server.Network
                                 if (NetCapture.AnyFlagged)
                                     CaptureFragment(fragment, spf);
                                 packet.Fragments.Add(spf);
+                                TagFinalPiece(fragment, spf);
                                 availableSpace -= spf.Length;
                             }
                             // Otherwise will this message fit in the remaining space?
@@ -1075,6 +1519,7 @@ namespace ACE.Server.Network
                                 if (NetCapture.AnyFlagged)
                                     CaptureFragment(fragment, spf);
                                 packet.Fragments.Add(spf);
+                                TagFinalPiece(fragment, spf);
                                 availableSpace -= spf.Length;
                             }
                             else
@@ -1160,6 +1605,14 @@ namespace ACE.Server.Network
             cachedPackets.Clear();
 
             packetQueue.Clear();
+
+            // held packets have no sequence or cache entry, so discarding them leaves no protocol state behind
+            lock (pacerLock)
+            {
+                pacer?.Clear();
+                Volatile.Write(ref pacerHeldMirror, 0);
+                Interlocked.Exchange(ref pacerHeldBytesMirror, 0);
+            }
 
             ConnectionData.CryptoClient.ReleaseResources();
         }

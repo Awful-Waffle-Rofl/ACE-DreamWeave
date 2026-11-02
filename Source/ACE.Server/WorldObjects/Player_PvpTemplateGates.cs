@@ -72,13 +72,10 @@ namespace ACE.Server.WorldObjects
             newStack.SetProperty(PropertyInt.Bonded, (int)BondedStatus.Bonded);
             newStack.Value = 0;
 
-            // Built fresh from the weenie, so SetStackSize has already priced the new stack at the weenie's burden. An issued
-            // ammunition or spell component stack is weightless (PvpTemplateKit.BuildIssuedBiota), and so is its child.
-            if (PvpTemplateKit.IsWeightlessIssuedType(newStack.WeenieType))
-            {
-                newStack.StackUnitEncumbrance = 0;
-                newStack.EncumbranceVal = 0;
-            }
+            // Built fresh from the weenie, so SetStackSize has already priced the new stack at the weenie's burden. Every issued
+            // item is weightless (PvpTemplateKit.BuildIssuedBiota), and so is its child.
+            newStack.StackUnitEncumbrance = 0;
+            newStack.EncumbranceVal = 0;
         }
 
         /// <summary>

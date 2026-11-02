@@ -523,7 +523,7 @@ namespace ACE.Server.Tests.ThreadDungeons
                 ThreadDungeonManager.ClearCounter = originalCounter;
             }
 
-            CollectionAssert.AreEqual(new[] { "gem", "survey", "guide", "count" }, order);
+            CollectionAssert.AreEqual(new[] { "survey", "guide", "count" }, order, "owner ruling 2026-10-10: the solo gem survives the clear");
         }
 
         [TestMethod]

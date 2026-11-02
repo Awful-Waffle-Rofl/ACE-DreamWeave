@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 using ACE.Server.Pvp.Battlegrounds;
@@ -60,9 +62,30 @@ namespace ACE.Server.Pvp
         public const string JoinedDuo = "[Arena] You and {partner} joined the 2v2 queue as a pair. Players waiting: {count}.";
         public const string Left = "[Arena] You left the {mode} queue.";
         public const string StatusQueued = "[Arena] You are in the {mode} queue ({waited} waited). Players waiting: {count}.";
-        public const string StatusIdle = "[Arena] You are not queued. Join with /arena join 1v1, /arena join 2v2, /arena join 2v2 duo or /arena join tugak.";
+        public const string StatusIdle = "[Arena] You are not queued. Join with /arena join 1v1, /arena join 2v2, /arena join 2v2 duo or /arena join tugak. To refuse unrewarded rematches, use /arena norematch on.";
         public const string StatusInMatch = "[Arena] You are in a {mode} match on {map}. {remaining} remaining.";
         public const string FfaLobbyProgress = "[Arena] Tugak Brawl lobby: {count} of {needed} players.";
+
+        // ---------------- multi-queue (pvp_arena_multi_queue_enabled; Docs/Pvp/DESIGN.md "Joining the queue") ----------------
+        // {modes} is always mode display names (ModeLabel) joined with ", " (ModeList).
+
+        public const string AlreadyQueuedSameMode = "[Arena] You are already in the {mode} queue. Type /arena status to see your queues.";
+        public const string JoinedMulti = "[Arena] You are now in {count} queues: {modes}. Entering a match from any of them removes you from the others.";
+        public const string RemovedOnPlacement = "[Arena] You entered a {mode} match, so you left your other queues: {modes}.";
+        public const string RemovedOnDecline = "[Arena] You declined, so you left all your arena queues: {modes}.";
+        public const string RemovedOnTimeout = "[Arena] You did not answer in time, so you left all your arena queues: {modes}.";
+        public const string PartnerWithdrawn = "[Arena] {name} entered another match and left your {mode} group. You are still in the {mode} queue.";
+        public const string PartnerLeftGroup = "[Arena] {name} left your {mode} group. You are still in the {mode} queue.";
+        public const string PartnerOffline = "[Arena] {name} went offline and left your {mode} group. You are still in the {mode} queue.";
+        public const string LeftAll = "[Arena] You left all your arena queues: {modes}.";
+        public const string NotInMode = "[Arena] You are not in the {mode} queue.";
+        public const string StatusQueuesHeader = "[Arena] Your queues:";
+        public const string StatusQueueLine = "  {mode}: waiting {waited}, {count} queued.";
+        public const string StatusQueueLineTemplate = "  {mode} on the {template} template: waiting {waited}, {count} queued.";
+        public const string StatusQueueHeld = "  {mode}: paused while your {matchMode} match is pending.";
+
+        /// <summary>Mode display names (<see cref="ModeLabel"/>) joined with ", ", for every {modes} placeholder above.</summary>
+        public static string ModeList(IEnumerable<string> modeKeys) => modeKeys == null ? "" : string.Join(", ", modeKeys.Select(ModeLabel));
 
         // ---------------- refusals ----------------
 
@@ -74,12 +97,11 @@ namespace ACE.Server.Pvp
 
         public const string Denylisted = "[Arena] You cannot join the arena right now.";
 
-        public const string NotOnPkFacet = "[Arena] You must be on your PK facet to join the arena. Use /facet pk, then try again.";
-
         /// <summary>Both the respite and the active PK timer refusals.</summary>
         public const string RecentPvp = "[Arena] You have been in combat with another player too recently. Try again shortly.";
 
-        public const string TooLow = "[Arena] You must be at least level {level} to enter the arena.";
+        /// <summary>Owner ruling 2026-10-15: one Thread clear replaces the level and PK facet requirements.</summary>
+        public const string NoThreadCleared = "[Arena] You must complete at least one Thread before you can join PvP Arenas or Battlegrounds. The Thread-Guide's first Thread counts.";
         public const string Olthoi = "[Arena] Olthoi cannot enter the arena.";
         public const string Mule = "[Arena] This character cannot enter the arena.";
 
@@ -87,6 +109,67 @@ namespace ACE.Server.Pvp
         public const string CannotJoinNow = "[Arena] You cannot join the arena right now.";
 
         public const string DeclineLockout = "[Arena] You declined a match recently. You can queue again in {seconds} seconds.";
+
+        /// <summary>Deserter lockout (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): told at the strike, {duration} from <see cref="LockoutDurationPhrase"/>.</summary>
+        public const string DeserterStruck = "[Arena] You left the match early. You cannot queue for battlegrounds or Tugak Brawl for {duration}.";
+
+        /// <summary>Deserter lockout: the join refusal, {remaining} from <see cref="DeserterRemainingPhrase"/>.</summary>
+        public const string DeserterLockout = "[Arena] You left a recent match early. You can queue for battlegrounds or Tugak Brawl again in {remaining}.";
+
+        /// <summary>
+        /// A lockout length in words, for the deserter lines: under a minute in seconds ("1 second", "45 seconds"), under an hour in whole
+        /// minutes ("15 minutes"), otherwise hours and any leftover minutes ("1 hour", "24 hours", "1 hour 30 minutes"). Seconds past a whole
+        /// minute are dropped from a minute or longer, so callers that must not under-promise round up first (<see cref="DeserterRemainingPhrase"/>).
+        /// A sibling of <see cref="DurationPhrase"/>, which the overtime announcement keeps using unchanged. Pure.
+        /// </summary>
+        public static string LockoutDurationPhrase(long seconds)
+        {
+            if (seconds < 60)
+                return seconds == 1 ? "1 second" : $"{Math.Max(0, seconds)} seconds";
+
+            var minutes = seconds / 60;
+
+            if (minutes < 60)
+                return MinutesWord(minutes);
+
+            var hours = minutes / 60;
+            var rest = minutes % 60;
+            var hourWords = hours == 1 ? "1 hour" : $"{hours} hours";
+
+            return rest == 0 ? hourWords : $"{hourWords} {MinutesWord(rest)}";
+        }
+
+        private static string MinutesWord(long minutes) => minutes == 1 ? "1 minute" : $"{minutes} minutes";
+
+        /// <summary>
+        /// The deserter refusal's time left: under a minute in seconds, otherwise rounded UP to whole minutes, so "14 minutes 2 seconds"
+        /// reads "15 minutes" and never promises an earlier queue than the lockout allows. Through <see cref="LockoutDurationPhrase"/>. Pure.
+        /// </summary>
+        public static string DeserterRemainingPhrase(long seconds)
+        {
+            if (seconds < 60)
+                return LockoutDurationPhrase(Math.Max(1, seconds));
+
+            var minutes = (seconds + 59) / 60;
+
+            return LockoutDurationPhrase(minutes * 60);
+        }
+
+        // ---- /arenaadmin deserter (Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout") ----
+
+        public const string AdminDeserterUsage = "[ArenaAdmin] Usage: /arenaadmin deserter <character> [clear]";
+
+        public const string AdminDeserterNotFound = "[ArenaAdmin] No character named '{name}'.";
+
+        public const string AdminDeserterUnavailable = "[ArenaAdmin] The arena is not running.";
+
+        /// <summary>One status line. {last} and {until} are UTC timestamps or "none"; {remaining} is "none" or a <see cref="DeserterRemainingPhrase"/>.</summary>
+        public const string AdminDeserterStatus = "[ArenaAdmin] {name} deserter: strikes {strikes} (now {current} after decay), last strike {last}, locked until {until}, remaining {remaining}.";
+
+        public const string AdminDeserterCleared = "[ArenaAdmin] Cleared {name}'s deserter strikes and lockout ({where}).";
+
+        /// <summary>The clear when the player gateway has no conduct seam: nothing was stored, so a restart brings the stored lockout back.</summary>
+        public const string AdminDeserterClearedMemoryOnly = "[ArenaAdmin] Cleared {name}'s deserter strikes and lockout in memory only ({where}): nothing was stored, so a restart restores the stored lockout.";
         public const string DuoNeedsPair = "[Arena] To queue as a pair you must be in a fellowship of exactly two players, and both of you must be eligible.";
         public const string DuoPartnerIneligible = "[Arena] {partner} cannot enter the arena right now.";
 
@@ -99,7 +182,7 @@ namespace ACE.Server.Pvp
         /// <summary>Player.CheckFacetGates refuses a facet switch while the player is in a match.</summary>
         public const string FacetSwitchRefused = "[Arena] You cannot change facets during an arena match.";
 
-        /// <summary>Player.CheckFacetGates refuses a switch away from the PK facet while queued for the arena.</summary>
+        /// <summary>Player.CheckFacetGates refuses any facet switch while queued for or entering an arena match (it protects the template apply; no PK facet is required to queue, owner ruling 2026-10-15).</summary>
         public const string QueuedFacetSwitchRefused = "[Arena] You cannot change facets while queued for or entering an arena match. Use /arena leave first.";
 
         // ---------------- PvP Template Facets (Docs/Pvp/TEMPLATES.md): every match is templated ----------------
@@ -132,6 +215,28 @@ namespace ACE.Server.Pvp
         /// <summary>The arena announcement when the match goes Live: each fighter with their template.</summary>
         public const string Lineup = "[Arena] {mode}: {lineup}.";
 
+        /// <summary>One side of a two-team lineup: "Red team: Alpha (Duelist) and Charlie (War Mage)". No tag leaves the members alone.</summary>
+        public static string LineupTeam(string teamTag, string members) => string.IsNullOrEmpty(teamTag) ? members : $"{teamTag}: {members}";
+
+        /// <summary>A side named by its colour alone (1v1, 2v2, King of the Hill): "Red team".</summary>
+        public static string LineupColourTeamTag(PvpTeamColour colour) => $"{PvpTeamColours.Name(colour)} team";
+
+        /// <summary>A side whose mode names it (Attack/Defend), with its colour: "Attackers (Red)".</summary>
+        public static string LineupModeTeamTag(string teamName, PvpTeamColour colour) => $"{teamName} ({PvpTeamColours.Name(colour)})";
+
+        /// <summary>Appended to the lineup line when any seat is on an unrewarded rematch (the repeat-pairing cap).</summary>
+        public const string UnpaidRematchTag = " - unrewarded rematch";
+
+        /// <summary>Sent once to a queued unit whose /arena norematch choice just skipped an unrewarded pairing.</summary>
+        public const string WaitingForFreshOpponent = "[Arena] Waiting for a fresh opponent. Use /arena norematch off to accept an unrewarded rematch.";
+
+        public const string NoRematchOn = "[Arena] Unrewarded rematches are refused: you will wait for a fresh opponent instead of being matched into one. Use /arena norematch off to accept them again.";
+        public const string NoRematchOff = "[Arena] Unrewarded rematches are accepted: you may be matched against an opponent whose match earns no Marks of the Hopeslayer or daily quest progress today. Use /arena norematch on to refuse them.";
+        public const string NoRematchUsage = "[Arena] Usage: /arena norematch [on|off]";
+
+        /// <summary>Sent to each seat whose pairing is at the cap when the match goes Live.</summary>
+        public const string UnpaidRematchNotice = "[Arena] You have already played this opponent the maximum number of rewarded matches today. This match still counts for rating, but not for Marks or daily quests.";
+
         public const string TemplatesHeader = "[Arena] Arena templates:";
         public const string TemplatesRow = "  {key} - {name} ({modes})";
         public const string TemplatesNone = "[Arena] No arena templates are offered right now.";
@@ -139,6 +244,8 @@ namespace ACE.Server.Pvp
         public const string TemplatesCurrent = " Your template: {template}.";
         public const string TemplateSet = "[Arena] Your arena template is now {template}. Join with /arena join <mode>.";
         public const string TemplateUnknown = "[Arena] There is no offered arena template called {template}. Type /arena templates to see them.";
+
+
         public const string JoinedWithTemplate = "[Arena] You joined the {mode} queue on the {template} template. Players waiting: {count}. Type /arena leave to leave the queue.";
 
         /// <summary>Sent once to each queued unit while pvp_arena_max_concurrent_matches holds the queue.</summary>
@@ -157,6 +264,15 @@ namespace ACE.Server.Pvp
 
         // ---------------- match flow ----------------
 
+        /// <summary>Sent when an equip of a weapon into the off-hand is refused in a match (pvp_match_block_dual_wield). ASCII only.</summary>
+        public const string DualWieldDisabled = "Dual wielding is disabled in PvP matches.";
+
+        /// <summary>Sent when a PvE-only item (PropertyBool.PveOnly) is refused or removed in a match. ASCII only.</summary>
+        public static string PveOnlyWillNotBeRaised(string itemName) => $"The {itemName ?? "item"} will not be raised against another player.";
+
+        /// <summary>Sent to the attacker, at most once per 10 seconds, when a PvE-only item's hit on a player is dropped. ASCII only.</summary>
+        public static string PveOnlyWillNotHarm(string itemName) => $"Your {itemName ?? "item"} will not harm another player.";
+
         /// <summary>Sent by Player.EnterPvpMatch once the masks are on.</summary>
         public const string Entering = "[Arena] Entering the arena. Class abilities, equipment mods, weapon mods and speed bonuses are off for the match.";
 
@@ -166,6 +282,23 @@ namespace ACE.Server.Pvp
         public const string EliminationNoKiller = "[Arena] {victim} has been eliminated.";
         public const string Forfeit = "[Arena] {name} forfeited.";
         public const string LeftTheArena = "[Arena] You left the arena and forfeited the match.";
+
+        // ---------------- conduct (Docs/Pvp/BATTLEGROUNDS.md "Conduct") ----------------
+
+        /// <summary>The one idle warning per idle stretch; {seconds} is what is left before removal, from the pvp_conduct_idle_* dials.</summary>
+        public const string IdleWarning = "[Arena] You are idle. Fight, heal, or hold the objective within {seconds} seconds or you will be removed from the match.";
+
+        /// <summary>To the player removed for inactivity.</summary>
+        public const string RemovedInactiveYou = "[Arena] You were removed from the match for inactivity. It counts as a forfeit.";
+
+        /// <summary>To the player removed for feeding.</summary>
+        public const string RemovedFeedingYou = "[Arena] You were removed from the match for feeding: repeated deaths with almost no contribution. It counts as a forfeit.";
+
+        /// <summary>To everyone in the match, in place of the plain forfeit line.</summary>
+        public const string RemovedInactive = "[Arena] {name} was removed from the match for inactivity.";
+
+        /// <summary>To everyone in the match, in place of the plain forfeit line.</summary>
+        public const string RemovedFeeding = "[Arena] {name} was removed from the match for feeding.";
 
         /// <summary>The leave-while-in-a-match confirmation popup (PR D). No "[Arena] " prefix: it is a dialog.</summary>
         public const string LeaveConfirmPopup = "Leave the match? You will forfeit and it counts as a loss.";
@@ -200,11 +333,11 @@ namespace ACE.Server.Pvp
         /// The overtime announcement, sent to everyone still in the match when overtime starts. Built from the
         /// values snapshotted onto the match: the duration, the healing factor (already sanitized: 0 = no healing,
         /// under 1 = reduced, otherwise not mentioned), the damage ramp (mentioned only when it is on) and the mode
-        /// (a 1v1/2v2 ends in a draw, FFA survivors share first). With the shipped defaults (180 s, healing 0, ramp
+        /// (a 1v1/2v2 ends in a draw, Tugak Brawl ranks its survivors by damage dealt). With the shipped defaults (180 s, healing 0, ramp
         /// off) a 1v1 reads "[Arena] Overtime! No healing for the final 3 minutes. If no one wins, the match is a
         /// draw." Plain ASCII. Pure.
         /// </summary>
-        public static string OvertimeAnnouncement(int seconds, double healingFactor, double rampPerMinute, bool survivorsShareFirst)
+        public static string OvertimeAnnouncement(int seconds, double healingFactor, double rampPerMinute, bool rankSurvivors)
         {
             var duration = DurationPhrase(seconds);
             var sb = new StringBuilder("[Arena] Overtime! ");
@@ -219,8 +352,8 @@ namespace ACE.Server.Pvp
             if (rampPerMinute > 0 && !double.IsInfinity(rampPerMinute))
                 sb.Append($" Damage rises by {(rampPerMinute * 100).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}% each minute.");
 
-            sb.Append(survivorsShareFirst
-                ? " If time runs out, the survivors share first place."
+            sb.Append(rankSurvivors
+                ? " If time runs out, the survivors are ranked by damage dealt to other players."
                 : " If no one wins, the match is a draw.");
 
             return sb.ToString();
@@ -234,17 +367,27 @@ namespace ACE.Server.Pvp
 
         /// <summary>An admin canceled a match that had already reached Countdown or Live.</summary>
         public const string AdminCanceled = "[Arena] An administrator ended the match. It will not be rated.";
-        public const string TimeUpFfa = "[Arena] Time is up. The survivors share first place.";
+        public const string TimeUpFfa = "[Arena] Time is up. The survivors are ranked by damage dealt to other players.";
         public const string Win = "[Arena] Victory!";
         public const string Loss = "[Arena] Defeat.";
         public const string FfaPlacement = "[Arena] You placed {placement} of {total}.";
         public const string RatingChange = "[Arena] {ladder} rating: {before} -> {after} ({delta}).";
+
+        /// <summary>
+        /// The battleground rating line when the performance modifier moved the change (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance"):
+        /// {perf} is the applied modifier as a signed whole percent. Never sent when it rounds to 0; the plain <see cref="RatingChange"/> is.
+        /// </summary>
+        public const string RatingChangePerformance = "[Arena] {ladder} rating: {before} -> {after} ({delta}) (performance {perf}%).";
         public const string Unrated = "[Arena] This match was not rated.";
+        public const string ContributionFloorWithheld = "[Arena] No reward: your contribution this match was below the minimum.";
         public const string Returning = "[Arena] Returning you to where you were.";
         public const string Canceled = "[Arena] The match was canceled.";
 
         /// <summary>Player.CheckPKStatusVsTarget refused harm to a teammate (friendly fire off). Sent to the attacker.</summary>
         public const string FriendlyFireAttacker = "[Arena] You cannot harm your teammate.";
+
+        /// <summary>Sent (throttled) to a player whose melee or missile attack was refused in a Tugak Brawl while pvp_arena_ffa_spell_only is on.</summary>
+        public const string FfaSpellOnlyAttacker = "[Arena] Only Curse of Raven Fury can hurt in a Tugak Brawl.";
 
         // ---------------- Mark of the Hopeslayer payout (Docs/Pvp/DESIGN.md "Rewards"; the currency was named Blood before 2026-10-06) ----------------
 
@@ -262,6 +405,9 @@ namespace ACE.Server.Pvp
 
         /// <summary>Battleground counterpart of <see cref="BloodReceived"/>: the arena line with "battleground" in place of "arena".</summary>
         public const string BgMarksReceived = "[Battleground] You receive {amount} {marks}.";
+
+        /// <summary><see cref="BgMarksReceived"/> for a match paid inside a Double Marks window (Docs/Pvp/BATTLEGROUNDS.md "Double Marks windows"); the suffix sits before the full stop.</summary>
+        public const string BgMarksReceivedDouble = "[Battleground] You receive {amount} {marks} (Double Marks).";
 
         /// <summary>Battleground counterpart of <see cref="BloodDailyLimit"/> (the battleground daily cap).</summary>
         public const string BgMarksDailyLimit = "[Battleground] You have reached today's Mark of the Hopeslayer limit. This match paid no Marks of the Hopeslayer.";

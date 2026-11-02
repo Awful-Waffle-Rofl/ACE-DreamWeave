@@ -588,6 +588,17 @@ namespace ACE.Server.WorldObjects
                 return false;
             }
 
+            // PvP prestige items (PropertyBool.PvpPrestigeGated): refuse the WHOLE basket, before pricing, when it holds a gated item the
+            // buyer has not earned (PvpPrestigeGate: a peak rating or a battleground win count). A basket with no gated item is untouched.
+            var prestigeRefusal = ACE.Server.Pvp.PvpPrestigeGate.Refusal(purchaseItems, player);
+
+            if (prestigeRefusal != null)
+            {
+                player.SendTransientError(prestigeRefusal);
+                CleanupCreatedItems(defaultItems);
+                return false;
+            }
+
             // calculate price
             // Accumulate in a ulong so a large purchase set can't roll a uint total over into a
             // small number (which would let the player be charged far less than the true cost).
@@ -611,9 +622,9 @@ namespace ACE.Server.WorldObjects
             uint totalPrice = (uint)totalPriceAccum;
 
             // verify player has enough currency
-            // Banking shop hook (always on): banked pyreals back a coin purchase, and banked promissory
-            // notes back their alternate-currency vendor (Absalom Sarraf). Currencies we don't bank
-            // contribute 0, so those vendors stay inventory-only.
+            // Banking shop hook (always on): banked pyreals back a coin purchase, and the bank-backed alternate
+            // currencies back their vendors: promissory notes (Absalom Sarraf), Marks of the Hopeslayer, Class
+            // Ability Points and MMDs. Currencies we don't bank contribute 0, so those vendors stay inventory-only.
             if (AlternateCurrency == null)
             {
                 if ((player.CoinValue ?? 0) + player.BankedPyreals < totalPrice)

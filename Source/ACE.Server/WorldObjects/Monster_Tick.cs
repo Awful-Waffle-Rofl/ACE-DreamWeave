@@ -62,7 +62,7 @@ namespace ACE.Server.WorldObjects
             // IsMonster true and lets an attack wake it, but it must never think: no target search, no movement,
             // no attack, no emote-driven turn. TargetingTactic None does NOT achieve that (Monster_Awareness
             // substitutes Random|TopDamager for None), so this is the single place the rule is enforced.
-            if (WorldEventObjectiveRules.SkipsMonsterTick(WorldEventObjective)) return;
+            if (WorldEventHooks.SkipsMonsterTick(this)) return;
 
             // World events sky-drop (WaffleACE, WP-17): a creature still falling in from a world-event sky
             // spawn does nothing at all - no target search, no movement, no attack. Returning HERE rather
@@ -72,20 +72,49 @@ namespace ACE.Server.WorldObjects
             //
             // A dropping creature is normally still ASLEEP and has already returned at the !IsAwake block
             // above; this covers the case where a player woke it by attacking it in the air.
-            if (WorldEventSkyDrop) return;
+            if (WorldEventHooks.IsSkyDropping(this)) return;
 
             // WP-17: the first tick after a landing. The physics tick that landed it woke it and raised
             // this flag but deliberately did NOT acquire a target there - see Creature.CompleteSkyDropAcquire
             // for why that call cannot be made from inside UpdateObjectPhysics. From here on this creature
             // is an ordinary monster.
-            if (WorldEventSkyDropPendingAcquire)
-                CompleteSkyDropAcquire();
+            WorldEventHooks.CompleteSkyDropAcquire(this);
 
             if (EmoteManager.IsBusy) return;
+
+            // Elemental Proficiency Bludgeon stun (Creature_ClassAbilityStun): a stunned monster does no normal
+            // AI at all this tick - no target search, no movement, no turn, no attack start. Placed AFTER every
+            // non-AI step above (the slow restore, faction checks, world-event hooks) so none of those stop,
+            // and scripted abilities are not driven from here at all. One double compare when not stunned.
+            if (IsClassAbilityStunned) return;
 
             HandleFindTarget();
 
             CheckMissHome();    // tickrate?
+
+            // Custom Summons caster pet: its own branch, taken whether or not it holds a target (it heals and buffs
+            // its owner with no enemy in sight). It never reaches the attack branch below, so it never melees and
+            // never takes GetNextAttackType's melee fallback, and it skips PetCombatTick (casters wake nothing and
+            // have no taunt pulse).
+            if (this is CombatPet casterPet && casterPet.IsCasterPet && MonsterState != State.Return)
+            {
+                if (firstUpdate)
+                {
+                    if (CurrentMotionState.Stance == MotionStance.NonCombat)
+                        DoAttackStance();
+
+                    if (IsAnimating)
+                    {
+                        PhysicsObj.update_object(Location.Instance);
+                        return;
+                    }
+
+                    firstUpdate = false;
+                }
+
+                casterPet.TickCaster();
+                return;
+            }
 
             if (AttackTarget == null && MonsterState != State.Return)
             {
@@ -162,6 +191,11 @@ namespace ACE.Server.WorldObjects
 
             // get distance to target
             var targetDist = GetDistanceToTarget();
+
+            // World Events Hold: a ranged wave monster keeps its hold distance and attacks from there. One field read for
+            // every other creature.
+            if (ACE.Server.WorldEvents.WorldEventHooks.TickHoldRangedKeepDistance(this, targetDist))
+                return;
             //Console.WriteLine($"{Name} ({Guid}) - Dist: {targetDist}");
 
             if (CurrentAttack != CombatType.Missile)
@@ -220,9 +254,9 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
-            // pets drawing aggro
+            // pets drawing aggro (skipped by a never-initiates pet), and a Tank pet's taunt pulse
             if (combatPet != null)
-                combatPet.PetCheckMonsters();
+                combatPet.PetCombatTick();
         }
     }
 }

@@ -94,7 +94,7 @@ namespace ACE.Database.Models.Shard
 
         public int Team { get; set; }
 
-        /// <summary>1 = winner. FFA survivors share 1.</summary>
+        /// <summary>1 = winner. Tied placements share a value (a same-tick batch, or Tugak Brawl timeout survivors with equal damage).</summary>
         public int Placement { get; set; }
 
         public string Result { get; set; }

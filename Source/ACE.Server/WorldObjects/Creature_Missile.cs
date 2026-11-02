@@ -9,10 +9,12 @@ using ACE.DatLoader.FileTypes;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.ClassAbilities;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
+using ACE.Server.MonsterEffects;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Physics;
 using ACE.Server.Physics.Extensions;
@@ -182,6 +184,12 @@ namespace ACE.Server.WorldObjects
                 if (creature is CombatPet && (player != null || this is CombatPet))
                     continue;
 
+                // the shooter's own extra-target rule: a no-op for every creature except a combat pet, which
+                // holds its extra arrows to its own target filter (and, for a never-initiates pet, to monsters
+                // already engaged with its owner - CombatPet.AcceptsMultiShotExtraTarget)
+                if (!AcceptsMultiShotExtraTarget(creature))
+                    continue;
+
                 var candidateAimPoint = creature.Location.Pos;
                 candidateAimPoint.Z += creature.Height / GetAimHeight(creature);
 
@@ -211,16 +219,226 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
-        /// Launches a projectile from player to target
+        /// Whether <paramref name="creature"/> may take one of this shooter's multi-shot EXTRA arrows, on top of
+        /// GetMultiShotTargets' shared filters. True for every creature (so the player path is unchanged);
+        /// CombatPet overrides it.
         /// </summary>
-        public WorldObject LaunchProjectile(WorldObject weapon, WorldObject ammo, WorldObject target, Vector3 origin, Quaternion orientation, Vector3 velocity)
+        public virtual bool AcceptsMultiShotExtraTarget(Creature creature) => true;
+
+        /// <summary>
+        /// One damage multiplier per extra arrow the weapon itself grants: MultiShotCount entries at the
+        /// weapon's MultiShotDamageMultiplier, none without the MultiShot flag (MultiShotCount is 0 then).
+        /// A player adds its class-ability arrows to this list (Player.AddClassAbilityMissileShots); a pet
+        /// fires exactly this.
+        /// </summary>
+        public static List<float> WeaponMultiShotMultipliers(WorldObject weapon)
+        {
+            var shotMultipliers = new List<float>();
+
+            if (weapon == null)
+                return shotMultipliers;
+
+            for (var i = 0; i < weapon.MultiShotCount; i++)
+                shotMultipliers.Add(weapon.MultiShotDamageMultiplier);
+
+            return shotMultipliers;
+        }
+
+        /// <summary>
+        /// Fires a volley's extra arrows - the shared half of a multi-shot, used by Player.LaunchMissile and
+        /// by a combat pet's FireWeaponMultiShot. Acquires up to one secondary target per arrow
+        /// (GetMultiShotTargets), then executes MultiShotOverflow's plan: an arrow with a secondary target
+        /// flies at it, an arrow with none overflows onto the primary at a third of its multiplier, and every
+        /// overflow arrow is dropped when the primary is out of sight (<paramref name="primaryInSight"/>, lazy
+        /// so an ordinary shot with no cleave arrows never pays for the sight test).
+        ///
+        /// Returns the arrows fired, (target, multiplier, isPrimary), so a Double Volley re-fire can repeat
+        /// the exact same spread. Fires nothing for an empty multiplier list.
+        /// </summary>
+        internal List<(Creature target, float mult, bool isPrimary)> FireMultiShotVolley(WorldObject launcher, WorldObject ammo, WorldObject weapon, Creature primary, float projectileSpeed, List<float> shotMultipliers, Func<bool> primaryInSight, bool? volleyPinRoll = null)
+        {
+            var volleyExtraShots = new List<(Creature target, float mult, bool isPrimary)>();
+
+            if (shotMultipliers == null || shotMultipliers.Count == 0)
+                return volleyExtraShots;
+
+            var multiShotTargets = GetMultiShotTargets(primary, weapon, shotMultipliers.Count);
+
+            // An arrow with no secondary target left overflows onto the PRIMARY at one third of its
+            // own multiplier, as its own hit (owner ruling; see MultiShotOverflow) - unless the
+            // primary is out of sight, when the overflow arrows are dropped.
+            foreach (var shot in MultiShotOverflow.Plan(shotMultipliers, multiShotTargets.Count, multiShotTargets.Count >= shotMultipliers.Count || primaryInSight()))
+            {
+                if (shot.IsOverflow)
+                {
+                    // the overflow arrow is aimed at the shooter's real target, so it records normally
+                    FireMultiShotArrow(launcher, ammo, primary, projectileSpeed, shot.DamageMultiplier, primaryTarget: true, volleyPinRoll: volleyPinRoll);
+                    volleyExtraShots.Add((primary, shot.DamageMultiplier, true));
+                }
+                else
+                {
+                    var extraTarget = multiShotTargets[shot.ExtraTargetIndex];
+
+                    // extra-target spread is secondary - the shooter aimed at primary, not extraTarget,
+                    // so it must not steal the pet's assist target off the real shot target.
+                    FireMultiShotArrow(launcher, ammo, extraTarget, projectileSpeed, shot.DamageMultiplier, primaryTarget: false, volleyPinRoll: volleyPinRoll);
+                    volleyExtraShots.Add((extraTarget, shot.DamageMultiplier, false));
+                }
+            }
+
+            return volleyExtraShots;
+        }
+
+        /// <summary>
+        /// Custom Summons: a combat pet's weapon multi-shot, called from Monster_Missile.LaunchMissile right
+        /// after its real arrow. The extra arrows come from the weapon alone (WeaponMultiShotMultipliers - a pet
+        /// has no class abilities) and follow the player's overflow rule through FireMultiShotVolley. Never at a
+        /// player primary (the same PvP exclusion Player.LaunchMissile applies). No Pinning Shot roll: that is a
+        /// player class ability.
+        /// </summary>
+        internal void FireWeaponMultiShot(WorldObject launcher, WorldObject ammo, WorldObject weapon, Creature primary, float projectileSpeed)
+        {
+            if (primary == null || primary is Player || !primary.IsAlive)
+                return;
+
+            var shotMultipliers = WeaponMultiShotMultipliers(weapon);
+
+            if (shotMultipliers.Count == 0)
+                return;
+
+            bool? primaryInSightCache = null;
+            bool PrimaryInSight() => primaryInSightCache ??= IsDirectVisible(primary);
+
+            FireMultiShotVolley(launcher, ammo, weapon, primary, projectileSpeed, shotMultipliers, PrimaryInSight);
+        }
+
+        /// <summary>
+        /// Fires one cleave-style multi-shot arrow at a target: spawns the cosmetic projectile and schedules
+        /// its delayed DamageTarget so damage lands when the (visual) arrow arrives. Shared by the normal
+        /// multi-shot spread and the Double Volley class-ability re-fire. No-op if the projectile can't spawn.
+        /// Lifted from Player_Missile (Custom Summons) so a combat pet fires the same arrows; how the arrow's
+        /// damage resolves on arrival is ResolveMultiShotArrowImpact, which Player overrides.
+        /// </summary>
+        protected void FireMultiShotArrow(WorldObject launcher, WorldObject ammo, Creature target, float projectileSpeed, float damageMultiplier, bool primaryTarget = true, bool? volleyPinRoll = null)
+        {
+            // The cosmetic projectile must be spawned BEFORE damage is calculated, and used as the
+            // damageSource - DamageEvent.CalculateDamage classifies CombatType.Missile (and resolves
+            // Weapon) purely from damageSource.ProjectileSource/ProjectileLauncher being set, which only
+            // a real (even if visual-only) projectile object carries.
+            var cosmeticProjectile = LaunchCosmeticMultiShotProjectile(launcher, ammo, target, projectileSpeed, out var flightTime, volleyPinRoll);
+
+            if (cosmeticProjectile == null)
+                return;
+
+            var impactChain = new ActionChain();
+            impactChain.AddDelaySeconds(flightTime);
+            // DamageTarget scales the procs by damageMultiplier too: an extra-target arrow carries its own
+            // fraction, while the Double Volley re-fire at the primary target passes 1.0 and so is unscaled.
+            impactChain.AddAction(this, () => ResolveMultiShotArrowImpact(target, cosmeticProjectile, damageMultiplier, primaryTarget));
+            impactChain.EnqueueChain();
+        }
+
+        /// <summary>
+        /// PROTOTYPE: spawns a purely visual arrow flying at an extra multi-shot target, and returns it so the
+        /// caller can also use it as the damageSource for DamageTarget (it carries ProjectileSource/ProjectileLauncher/
+        /// ProjectileAmmo from LaunchProjectile, which DamageEvent.CalculateDamage requires to correctly resolve
+        /// missile combat/weapon - see the call site in LaunchMissile). Damage is NOT resolved by this projectile
+        /// colliding - ProjectileTarget is cleared (and IsCosmeticProjectile set) right after creation so
+        /// ProjectileCollisionHelper never applies a second, redundant hit or a hit/miss message for it, no matter
+        /// what it physically collides with (or fails to). Instead the caller delays its own DamageTarget call by
+        /// flightTime, so the extra target takes damage when the (visual) arrow actually arrives, not the instant
+        /// it's fired. The physics engine's own homing/target tracking (set inside LaunchProjectile, independent of
+        /// the WorldObject-level ProjectileTarget field) still points at the real extraTarget, so the flight itself
+        /// looks correct.
+        /// </summary>
+        private WorldObject LaunchCosmeticMultiShotProjectile(WorldObject launcher, WorldObject ammo, WorldObject extraTarget, float projectileSpeed, out float flightTime, bool? volleyPinRoll = null)
+        {
+            var aimVelocity = GetAimVelocity(extraTarget, projectileSpeed);
+            var aimLevel = GetAimLevel(aimVelocity);
+
+            var localOrigin = GetProjectileSpawnOrigin(ammo.WeenieClassId, aimLevel);
+
+            var velocity = CalculateProjectileVelocity(localOrigin, extraTarget, projectileSpeed, out Vector3 origin, out Quaternion orientation, out flightTime);
+
+            if (velocity == Vector3.Zero)
+                return null;
+
+            // volleyPinRoll is this arrow's share of the volley's single Pinning Shot roll; it is passed INTO
+            // LaunchProjectile so it is stamped before AddObject, and read at DamageTarget time from
+            // DamageEvent.DamageSource (this projectile)
+            var cosmeticProjectile = LaunchProjectile(launcher, ammo, extraTarget, origin, orientation, velocity, volleyPinRoll: volleyPinRoll);
+
+            if (cosmeticProjectile == null)
+                return null;
+
+            cosmeticProjectile.IsCosmeticProjectile = true;
+            cosmeticProjectile.ProjectileTarget = null;
+
+            return cosmeticProjectile;
+        }
+
+        /// <summary>
+        /// Resolves one multi-shot arrow when its cosmetic projectile arrives. Player overrides this with its
+        /// own DamageTarget (PK checks, class abilities, equipment and weapon mods), so the player path is the
+        /// call it always was. This default is the non-player shooter - a combat pet - and mirrors what a pet's
+        /// real arrow does on collision (ProjectileCollisionHelper's creature-source branch): the damage roll
+        /// against the struck creature, scaled by the arrow's fraction (procs take the same fraction, as on the
+        /// player path), Dirty Fighting, the faction/foe retaliation hook, and the projectile's on-hit procs.
+        ///
+        /// THREADING: runs from this shooter's own action queue. The target is written (TakeDamage, procs), so
+        /// a target that has moved to another landblock group since the arrow left is skipped - the same guard
+        /// ProjectileCollisionHelper applies to procs, applied here to the whole hit.
+        /// </summary>
+        protected virtual void ResolveMultiShotArrowImpact(Creature target, WorldObject cosmeticProjectile, float damageMultiplier, bool primaryTarget)
+        {
+            if (IsDead || target == null || !target.IsAlive)
+                return;
+
+            if (CurrentLandblock == null || target.CurrentLandblock == null || CurrentLandblock.CurrentLandblockGroup != target.CurrentLandblock.CurrentLandblockGroup)
+                return;
+
+            var damageEvent = DamageEvent.CalculateDamage(this, target, cosmeticProjectile);
+
+            if (damageEvent.HasDamage && damageMultiplier != 1.0f)
+                damageEvent.Damage *= damageMultiplier;
+
+            damageEvent.StrikeFractionProcMultiplier = damageMultiplier;
+
+            if (damageEvent.HasDamage)
+            {
+                target.TakeDamage(this, damageEvent.DamageType, damageEvent.Damage, false, IncomingDamageOrigin.DirectHit);
+
+                if (GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
+                    FightDirty(target, damageEvent.Weapon);
+
+                cosmeticProjectile.TryProcEquippedItems(this, target, false, cosmeticProjectile.ProjectileLauncher);
+            }
+
+            if (!(target is CombatPet))
+                MonsterOnAttackMonster(target);
+        }
+
+        /// <summary>
+        /// Launches a projectile from player to target
+        ///
+        /// <paramref name="cosmetic"/>: a purely visual projectile (a Reflect return arrow). It is flagged
+        /// IsCosmeticProjectile and given no ProjectileTarget BEFORE it is added to the world - a spawn that
+        /// overlaps something collides during AddObject itself, so flagging it afterwards leaves a window in
+        /// which it is a live, damaging projectile. The physics homing still points at
+        /// <paramref name="target"/>, so the flight looks right. The misfire and hit-the-environment chat is
+        /// suppressed: the player never fired it.
+        /// </summary>
+        public WorldObject LaunchProjectile(WorldObject weapon, WorldObject ammo, WorldObject target, Vector3 origin, Quaternion orientation, Vector3 velocity, bool cosmetic = false, bool? volleyPinRoll = null)
         {
             var player = this as Player;
 
+            // who hears about a misfire or an environment hit: nobody, for a projectile they did not fire
+            var chatPlayer = cosmetic ? null : player;
+
             if (!velocity.IsValid())
             {
-                if (player != null)
-                    player.SendWeenieError(WeenieError.YourAttackMisfired);
+                if (chatPlayer != null)
+                    chatPlayer.SendWeenieError(WeenieError.YourAttackMisfired);
 
                 return null;
             }
@@ -228,7 +446,12 @@ namespace ACE.Server.WorldObjects
             var proj = WorldObjectFactory.CreateNewWorldObject(ammo.WeenieClassId);
 
             proj.ProjectileSource = this;
-            proj.ProjectileTarget = target;
+            proj.IsCosmeticProjectile = cosmetic;
+            proj.ProjectileTarget = cosmetic ? null : target;
+
+            // stamped before AddObject, for the same reason as the flags above: a spawn that overlaps its
+            // target can resolve during the add itself
+            proj.ClassAbilityVolleyPinRoll = volleyPinRoll;
 
             proj.ProjectileLauncher = weapon;
             proj.ProjectileAmmo = ammo;
@@ -245,8 +468,8 @@ namespace ACE.Server.WorldObjects
             {
                 if (!proj.HitMsg)
                 {
-                    if (player != null)
-                        player.Session.Network.EnqueueSend(new GameMessageSystemChat("Your missile attack hit the environment.", ChatMessageType.Broadcast));
+                    if (chatPlayer != null)
+                        chatPlayer.Session.Network.EnqueueSend(new GameMessageSystemChat("Your missile attack hit the environment.", ChatMessageType.Broadcast));
                 }
 
                 proj.Destroy();

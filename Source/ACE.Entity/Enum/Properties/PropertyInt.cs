@@ -1091,7 +1091,86 @@ namespace ACE.Entity.Enum.Properties
         /// <see cref="PvpBgMarksPaidCount"/> belongs to. Owed Marks stay in the shared <see cref="PvpArenaBloodOwed"/>.
         /// </summary>
         PvpBgMarksPaidDay                         = 9084,
-        // (next free id is 9085)
+
+        /// <summary>
+        /// Knots (Docs/Knots/KNOTS-DESIGN.md): what kind of Knot-system item this is - 1 Fiber, 2 Knot, 3 Pattern,
+        /// 4 Knotting Pouch (ACE.Server.Knots.KnotItemKind). Seeded on the weenie row; every Knot predicate reads
+        /// this property and never compares a wcid.
+        /// </summary>
+        KnotItemKind                              = 9085,
+
+        /// <summary>
+        /// Knots: the level stamped on a Fiber (the run's planned average monster level, rounded down) and on a
+        /// Knot (floor of the average of its ten Fibers' levels). Per-instance data, which is why the carriers
+        /// are not stackable.
+        /// </summary>
+        KnotLevel                                 = 9086,
+
+        /// <summary>
+        /// Knots: on a character, the count of consecutive Thread clears that rolled no Fiber (the bad-luck
+        /// protection counter). Resets to zero when a Fiber drops. Persists across sessions.
+        /// </summary>
+        KnotFiberMisses                           = 9087,
+
+        /// <summary>
+        /// Knots: on a Knot, the index of the furthest boss phase reached in its pinnacle encounter. Written
+        /// upward only; a re-entry starts the boss at the start of this phase.
+        /// </summary>
+        KnotPhase                                 = 9088,
+
+        /// <summary>
+        /// Knots: on a Pattern, the Fibers taken into it so far (0 to 10). At 10 the Pattern turns into a Knot
+        /// bound to the Pattern's pinnacle.
+        /// </summary>
+        KnotFiberCount                            = 9098,
+
+        /// <summary>
+        /// Knots: on a Pattern, the sum of the levels of the Fibers taken into it. The Pattern's
+        /// <see cref="KnotLevel"/> is the floor of this sum over <see cref="KnotFiberCount"/>.
+        /// </summary>
+        KnotFiberLevelSum                         = 9099,
+
+        /// <summary>
+        /// PvP deserter lockout (WaffleACE, Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): this character's current deserter strike count,
+        /// 0 to 3, as of <see cref="PropertyInt64.PvpDeserterLastStrikeAt"/>. Written as an ABSOLUTE value (with the two Int64 siblings) on
+        /// the player's own action chain, or on the stored character when offline. Decay is applied when the next strike is computed.
+        /// </summary>
+        PvpDeserterStrikes                        = 9089,
+
+        /// <summary>
+        /// PvP match facts (WaffleACE, Pvp/PvpMatchFacts.cs): lifetime battleground WINS (King of the Hill and Attack/Defend) from matches
+        /// the character was eligible for (PvpRewardEligibility). Kept for a later vendor purchase gate. Written only on the player's own
+        /// action chain by Player.ApplyPvpDailyFacts. Absent reads as 0.
+        /// </summary>
+        PvpLifetimeBattlegroundWins               = 9090,
+
+        /// <summary>
+        /// PvP match facts: the highest rating Peak this character has reached on ANY ladder, as read from the rating store at the end of an
+        /// eligible match; only ever raised. Kept for a later vendor purchase gate. Written only on the player's own action chain by
+        /// Player.ApplyPvpDailyFacts. Absent reads as 0.
+        /// </summary>
+        PvpPeakRating                             = 9091,
+
+        /// <summary>
+        /// Class Ability reprice wave (Blood Mage buff pass, Player.ApplyClassAbilityRepricing): on a player, the highest
+        /// reprice wave number already applied to this character's learned abilities. Absent reads as 0 (no wave applied).
+        /// </summary>
+        ClassAbilityRepriceWave                   = 9092,
+
+        // Knot treasure tables (ACE.Server.KnotLoot): the Fiber level a Knot treasure item was rolled at.
+        KnotLootLevel                             = 9093,
+        // Knot clear leaderboard (/top knot): the Knot level of the character's best clear. Written with PropertyInt64.BestKnotClearTimeCenti and PropertyString.BestKnotClearPinnacleKey.
+        BestKnotClearLevel                        = 9094,
+        // Salvage allow-list (ACE.Server.Entity.TinkerLock): on an item, opts it out of all normal tinkering and allows only the fork-mod
+        // salvage named by its bits (1 Tourmaline, 2 Amethyst, 4 Obsidian). Any value, including 0, activates the rule; absent = unrestricted.
+        ModSalvageAllowMask                       = 9095,
+        // Upgraded Knot cloak (ACE.Server.KnotLoot.UpgradedCloak): on a CloakWeaveProc 2 cloak, the flat damage its proc
+        // removes before the PvP and player-source adjustments. Absent = Cloak.DamageReductionAmount (200, retail).
+        CloakDamageReductionAmount                = 9096,
+        // Upgraded Knot cloak: on a set item, the summed set level up to which the set's top dat tier keeps scaling past the
+        // dat's HighestTier (StatModValue x level / HighestTier). Absent or at most HighestTier = retail.
+        SetBonusMaxLevel                          = 9097,
+        // (next free id is 9100)
     }
 
     public static class PropertyIntExtensions

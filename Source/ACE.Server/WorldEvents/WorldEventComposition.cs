@@ -68,14 +68,23 @@ namespace ACE.Server.WorldEvents
         /// <summary>
         /// The anchor definition. For the "--here" path this is synthesized from the request position with
         /// id "here" and displayName taken from the request's anchor label.
+        /// A start-spot rule that moves the spot replaces it (internal set) with a renamed copy, under the manager's lock and before the run is built; the store's own anchor is never written.
         /// </summary>
-        public AnchorDef Anchor { get; }
+        public AnchorDef Anchor { get; internal set; }
 
         /// <summary>
         /// The resolved anchor position, including its landblock instance. AnchorDef carries no instance
         /// field, so a "--here" anchor would otherwise lose the realm/instance it was invoked in.
         /// </summary>
         public Position AnchorPosition { get; }
+
+        /// <summary>
+        /// The clear-area plan a goal's start-spot rule (IWorldEventStartSpotRule) left for the run - where its spawn portals
+        /// stand once moved or skipped around obstacles. Null when the goal's rule made none. Written only by the rule, under
+        /// the manager's lock and before the run is built; read by the objective factory. The one settable member here,
+        /// because the rule runs after the composition exists.
+        /// </summary>
+        public WorldEventAreaPlan AreaPlan { get; set; }
 
         public WorldEventAxisStore StoreSnapshot { get; }
 

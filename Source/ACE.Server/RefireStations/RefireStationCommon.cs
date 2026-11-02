@@ -69,7 +69,7 @@ namespace ACE.Server.RefireStations
             // check against cook_book, so a locked item is refused outright.
             if (TinkerLock.IsRefusedByStation(item))
             {
-                SendCraftMessage(player, TinkerLock.RefusalMessage(item));
+                SendCraftMessage(player, TinkerLock.RefusalMessage(null, item));
                 return;
             }
 

@@ -67,6 +67,7 @@ namespace ACE.Server.Tests
             Assert.AreEqual("admin_correct", CapLedgerReason.AdminCorrect.ToCode());
             Assert.AreEqual("grant_item", CapLedgerReason.GrantItem.ToCode());
             Assert.AreEqual("overhaul_respec", CapLedgerReason.OverhaulRespec.ToCode());
+            Assert.AreEqual("reprice", CapLedgerReason.Reprice.ToCode());
         }
 
         [TestMethod]
@@ -88,10 +89,11 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
-        public void CapLedgerReason_HasExactlyEighteenMembers()
+        public void CapLedgerReason_HasExactlyNineteenMembers()
         {
-            // Guards against a member being added without a corresponding ToCode branch: a 19th
+            // Guards against a member being added without a corresponding ToCode branch: a 20th
             // member fails this assertion even if ToCode silently returns something for it.
+            // The NINETEENTH is CapLedgerReason.Reprice, the Blood Mage reprice wave's per-ability row.
             //
             // Was 16 through round 1. Round 2's funnel found a SEVENTEENTH write site the round 1
             // survey missed - Gem.cs's ClassAbilityPointValue consumable, a live player-facing
@@ -100,19 +102,20 @@ namespace ACE.Server.Tests
             // Ability overhaul deployment migration's single absolute credit. Each was appended at the
             // END deliberately: every existing member keeps its ordinal, and the column stores
             // ToCode's string anyway, so no already-written row moves.
-            Assert.AreEqual(18, Enum.GetValues(typeof(CapLedgerReason)).Length);
+            Assert.AreEqual(19, Enum.GetValues(typeof(CapLedgerReason)).Length);
         }
 
         [TestMethod]
-        public void IsSinkReason_TrueForExactlyTwoMembers()
+        public void IsSinkReason_ThePurchasesAndTheRefundsThatUndoThem()
         {
             var sinkReasons = Enum.GetValues(typeof(CapLedgerReason))
                 .Cast<CapLedgerReason>()
                 .Where(CapLedger.IsSinkReason)
                 .ToList();
 
+            // the refunds must be here, or a refunded voucher stays counted as spent while Available rises
             CollectionAssert.AreEquivalent(
-                new[] { CapLedgerReason.VoucherBuy, CapLedgerReason.VendorDebit },
+                new[] { CapLedgerReason.VoucherBuy, CapLedgerReason.VendorDebit, CapLedgerReason.VoucherRefund, CapLedgerReason.VoucherRefundRetired },
                 sinkReasons);
         }
 

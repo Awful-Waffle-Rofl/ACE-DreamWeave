@@ -189,8 +189,22 @@ namespace ACE.Server.Managers.Market.Suit
                 HeritageSpecificArmor = p.Int(PropertyInt.HeritageSpecificArmor),
                 AllowedWielder = p.Iid(PropertyInstanceId.AllowedWielder),
                 Encumbrance = p.Int(PropertyInt.EncumbranceVal),
+                GearDamage = NonZero(p.Int(PropertyInt.GearDamage)),
+                GearDamageResist = NonZero(p.Int(PropertyInt.GearDamageResist)),
+                GearCritDamage = NonZero(p.Int(PropertyInt.GearCritDamage)),
+                GearCritDamageResist = NonZero(p.Int(PropertyInt.GearCritDamageResist)),
+                GearHealingBoost = NonZero(p.Int(PropertyInt.GearHealingBoost)),
+                GearMaxHealth = NonZero(p.Int(PropertyInt.GearMaxHealth)),
+                Attuned = OnlyIfSet(p.Int(PropertyInt.Attuned)),
+                Bonded = OnlyIfSet(p.Int(PropertyInt.Bonded)),
             };
         }
+
+        /// <summary>A flag property is reported only when set (>= 1): true, else null so the JSON omits it.</summary>
+        private static bool? OnlyIfSet(int? flag) => flag >= 1 ? true : null;
+
+        /// <summary>A gear rating of 0 carries no information, so it is projected as null (omitted from the JSON), like an absent one.</summary>
+        private static int? NonZero(int? rating) => rating == 0 ? null : rating;
 
         /// <summary>
         /// All four slots, because a level requirement can sit in slot 2 when slot 1 is occupied

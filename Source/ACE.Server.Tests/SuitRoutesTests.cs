@@ -52,6 +52,7 @@ namespace ACE.Server.Tests
         private FakeCharacterSheetService sheets;
         private HttpClient client;
         private bool suitEnabled;
+        private bool characterMoves;
 
         private IClothingIconSource savedClothingIcons;
         private Func<uint, Weenie> savedWeenieLookup;
@@ -68,6 +69,7 @@ namespace ACE.Server.Tests
             wallet = new FakeMarketWallet();
             sheets = new FakeCharacterSheetService();
             suitEnabled = true;
+            characterMoves = true;
 
             MarketManagerTests.SeedMarketTunables();
 
@@ -96,6 +98,7 @@ namespace ACE.Server.Tests
                     ? new List<(uint, string)> { (CharacterGuid, "Suitwearer") }
                     : new List<(uint, string)>(),
                 SuitBuilderEnabled = () => suitEnabled,
+                SuitCharacterMovesEnabled = () => characterMoves,
             });
 
             client = new HttpClient { BaseAddress = new Uri(MarketApiHost.ListeningUrl) };
@@ -184,6 +187,24 @@ namespace ACE.Server.Tests
             => json.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("name").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
         // ---- GET /v1/accounts/me/suit/inventory ----
+
+        /// <summary>character_moves mirrors the suit_character_moves_enabled switch, so the client knows whether it may send holder_guid.</summary>
+        [TestMethod]
+        public async Task Inventory_ReportsCharacterMoves_FromTheKillSwitch()
+        {
+            store.SeedItem(AccountId, Armor());
+
+            var (onStatus, on) = await Inventory();
+            Assert.AreEqual(HttpStatusCode.OK, onStatus);
+            Assert.IsTrue(on.GetProperty("character_moves").GetBoolean());
+
+            characterMoves = false;
+
+            var (offStatus, off) = await Inventory();
+            Assert.AreEqual(HttpStatusCode.OK, offStatus);
+            Assert.IsFalse(off.GetProperty("character_moves").GetBoolean(), "present and false, never omitted");
+            Assert.AreEqual(1, off.GetProperty("items").GetArrayLength(), "the vault listing itself is unaffected");
+        }
 
         [TestMethod]
         public async Task Inventory_NoKey_Is401Empty()
@@ -438,6 +459,398 @@ namespace ACE.Server.Tests
             Assert.AreEqual("suit_builder_disabled", json.GetProperty("error").GetString());
         }
 
+        // ---- GET /v1/accounts/me/characters/{guid}/suit/shared-inventory ----
+
+        private const uint OwnerA = 9311;
+        private const uint OwnerB = 9312;
+        private const uint GranterA = 0x50000511;
+        private const uint OwnerAOtherCharacter = 0x50000512;
+        private const uint AltCharacter = 0x50000503;   // another character on the caller's own account
+
+        private static uint nextGrantId = 600;
+
+        private ACE.Database.Models.Shard.AccountVaultGrant Grant(uint owner, uint grantee = CharacterGuid, bool canWithdraw = true,
+                                                                   uint? granterGuid = GranterA, string granterName = "Granter")
+        {
+            var g = new ACE.Database.Models.Shard.AccountVaultGrant
+            {
+                Id = nextGrantId++,
+                OwnerAccountId = owner,
+                GranteeCharacterGuid = grantee,
+                CanWithdraw = canWithdraw,
+                GrantedByCharacterGuid = granterGuid,
+                GrantedByCharacterName = granterName,
+            };
+
+            store.Grants.Add(g);
+            return g;
+        }
+
+        private async Task<(HttpStatusCode status, JsonElement json)> Shared(uint guid)
+            => await Send(Get($"/v1/accounts/me/characters/{guid}/suit/shared-inventory", bearer: await LoginAsync()));
+
+        private static List<JsonElement> Vaults(JsonElement json) => json.GetProperty("vaults").EnumerateArray().ToList();
+
+        private static List<JsonElement> Items(JsonElement json) => json.GetProperty("items").EnumerateArray().ToList();
+
+        [TestMethod]
+        public async Task Shared_ACharacterNotOnTheAccount_IsNotOwner()
+        {
+            Grant(OwnerA, grantee: StrangerCharacter);
+            store.SeedItem(OwnerA, Armor());
+
+            foreach (var guid in new[] { StrangerCharacter, AltCharacter })
+            {
+                var (status, json) = await Shared(guid);
+
+                Assert.AreEqual(HttpStatusCode.Forbidden, status, $"0x{guid:X8}");
+                Assert.AreEqual("not_owner", json.GetProperty("error").GetString());
+            }
+        }
+
+        [TestMethod]
+        public async Task Shared_ADepositWithdrawGrant_ListsTheMule_AndStampsItsItems()
+        {
+            var g = Grant(OwnerA);
+            var armor = Armor("Shared Breastplate");
+            store.SeedItem(OwnerA, armor);
+            store.SeedItem(AccountId, Armor("My Own Breastplate"));
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            var vault = Vaults(json).Single();
+            Assert.AreEqual($"s:{g.Id}", vault.GetProperty("vault_key").GetString());
+            Assert.AreEqual("Granter", vault.GetProperty("label").GetString());
+            Assert.AreEqual("ready", vault.GetProperty("state").GetString());
+
+            var item = Items(json).Single();
+            Assert.AreEqual("Shared Breastplate", item.GetProperty("name").GetString(), "only the shared mule's items, never the caller's own");
+            Assert.AreEqual("vault", item.GetProperty("source").GetString());
+            Assert.AreEqual($"s:{g.Id}", item.GetProperty("vault_key").GetString());
+            Assert.AreEqual("Granter", item.GetProperty("vault_label").GetString());
+            Assert.AreEqual(armor.Guid.Full, item.GetProperty("item_guid").GetUInt32());
+
+            // The own-vault route is unchanged: no vault_key, no vault_label.
+            var (_, own) = await Inventory();
+            var mine = own.GetProperty("items").EnumerateArray().Single();
+            Assert.IsFalse(mine.TryGetProperty("vault_key", out _));
+            Assert.IsFalse(mine.TryGetProperty("vault_label", out _));
+        }
+
+        /// <summary>
+        /// Owner ruling: a bonded (or sticky, or attuned) item is left out of a shared mule, while the very same item in
+        /// the caller's own vault is still listed there.
+        /// </summary>
+        [TestMethod]
+        public async Task Shared_ABondedItem_IsLeftOut_ButTheSameItemStaysInTheOwnVault()
+        {
+            Grant(OwnerA);
+
+            var bonded = Armor("Bonded Breastplate");
+            bonded.Bonded = BondedStatus.Bonded;
+            var sticky = Armor("Sticky Breastplate");
+            sticky.Bonded = BondedStatus.Sticky;
+            var attuned = Armor("Attuned Breastplate");
+            attuned.Attuned = AttunedStatus.Attuned;
+
+            store.SeedItem(OwnerA, bonded);
+            store.SeedItem(OwnerA, sticky);
+            store.SeedItem(OwnerA, attuned);
+            store.SeedItem(OwnerA, Armor("Free Breastplate"));
+            store.SeedItem(AccountId, bonded);
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            CollectionAssert.AreEqual(new[] { "Free Breastplate" }, Items(json).Select(i => i.GetProperty("name").GetString()).ToArray(), "bonded, sticky and attuned items never leave a shared mule");
+
+            var (ownStatus, own) = await Inventory();
+
+            Assert.AreEqual(HttpStatusCode.OK, ownStatus);
+            CollectionAssert.Contains(Names(own), "Bonded Breastplate", "the caller's own vault keeps its bonded items");
+        }
+
+        /// <summary>
+        /// A ledger row whose TEMPLATE weenie is bonded (or attuned) is left out of a shared mule, while the caller's own
+        /// row of the same wcid is still listed.
+        /// </summary>
+        [TestMethod]
+        public async Task Shared_ALedgerRowWithABondedTemplate_IsLeftOut_ButTheOwnRowStays()
+        {
+            var prior = MarketManager.WeenieLookup;
+
+            MarketManager.WeenieLookup = wcid =>
+            {
+                var w = prior(wcid);
+
+                if (w != null && wcid == RingWcid)
+                    w.PropertiesInt[PropertyInt.Bonded] = (int)BondedStatus.Bonded;
+
+                if (w != null && wcid == ClassRingWcid)
+                    w.PropertiesInt[PropertyInt.Attuned] = (int)AttunedStatus.Attuned;
+
+                return w;
+            };
+
+            Grant(OwnerA);
+            store.SeedLedger(OwnerA, RingWcid, 4);
+            store.SeedLedger(OwnerA, ClassRingWcid, 2);
+            store.SeedItem(OwnerA, Armor("Free Breastplate"));
+            store.SeedLedger(AccountId, RingWcid, 4);
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            CollectionAssert.AreEqual(new[] { "Free Breastplate" }, Items(json).Select(i => i.GetProperty("name").GetString()).ToArray(), "a bonded or attuned template keeps the row in the mule");
+
+            var (ownStatus, own) = await Inventory();
+
+            Assert.AreEqual(HttpStatusCode.OK, ownStatus);
+            CollectionAssert.Contains(Names(own), "Ledger Ring", "the caller's own vault keeps its bonded-template row");
+        }
+
+        [TestMethod]
+        public async Task Shared_DepositOnlyShares_AreLeftOut()
+        {
+            Grant(OwnerA, canWithdraw: false);
+            store.SeedItem(OwnerA, Armor());
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            Assert.AreEqual(0, Vaults(json).Count);
+            Assert.AreEqual(0, Items(json).Count);
+        }
+
+        /// <summary>The grant read still returns a grant that has since been revoked: the access re-check drops it.</summary>
+        [TestMethod]
+        public async Task Shared_ARevokedGrant_IsLeftOut()
+        {
+            var stale = Grant(OwnerA);
+            store.SeedItem(OwnerA, Armor());
+            store.Grants.Remove(stale);
+            store.GranteeReadOverride = _ => new List<ACE.Database.Models.Shard.AccountVaultGrant> { stale };
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            Assert.AreEqual(0, Vaults(json).Count);
+            Assert.AreEqual(0, Items(json).Count);
+        }
+
+        /// <summary>
+        /// A mule shared with the caller's ALT is not shared with this character, even when the grant read hands
+        /// every row back unfiltered; and a grant owned by the caller's own account is never a shared mule.
+        /// </summary>
+        [TestMethod]
+        public async Task Shared_AGrantToTheCallersAlt_IsNotCounted_NorOneOwnedByTheCallersAccount()
+        {
+            Grant(OwnerA, grantee: AltCharacter);
+            Grant(AccountId);
+            store.SeedItem(OwnerA, Armor());
+            store.SeedItem(AccountId, Armor("Own"));
+            store.GranteeReadOverride = _ => store.Grants.ToList();
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            Assert.AreEqual(0, Vaults(json).Count);
+            Assert.AreEqual(0, Items(json).Count);
+        }
+
+        [TestMethod]
+        public async Task Shared_AFailedGrantRead_IsVaultUnavailable_NotAnEmptyList()
+        {
+            Grant(OwnerA);
+            store.SeedItem(OwnerA, Armor());
+            store.FailGranteeRead = true;
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, status);
+            Assert.AreEqual("vault_unavailable", json.GetProperty("error").GetString());
+            Assert.IsFalse(json.TryGetProperty("items", out _));
+            Assert.IsFalse(json.TryGetProperty("vaults", out _));
+        }
+
+        [TestMethod]
+        public async Task Shared_ListedParts_AreLeftOut_APartlyListedRowSendsItsFreeRemainder()
+        {
+            Grant(OwnerA);
+            var listedArmor = Armor("Listed Breastplate");
+            store.SeedItem(OwnerA, listedArmor);
+            store.SeedItem(OwnerA, Item(ArmorWcid, "Unlisted Helm", ItemType.Armor, EquipMask.HeadWear));
+            store.SeedLedger(OwnerA, RingWcid, 4);
+
+            var owner = new MarketActor(OwnerA, GranterA, "Granter");
+            Assert.IsTrue(MarketManager.List(owner, listedArmor.Guid.Full, ArmorWcid, 1, 500, MarketChannel.Web).Ok);
+            Assert.IsTrue(MarketManager.List(owner, null, RingWcid, 3, 500, MarketChannel.Web).Ok);
+
+            var (status, json) = await Shared(CharacterGuid);
+            var items = Items(json);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            CollectionAssert.AreEquivalent(new[] { "Ledger Ring", "Unlisted Helm" }, items.Select(i => i.GetProperty("name").GetString()).ToArray());
+            Assert.AreEqual(1, items.Single(i => i.GetProperty("name").GetString() == "Ledger Ring").GetProperty("count").GetInt32(), "4 held, 3 listed: the free 1 only");
+            Assert.IsTrue(items.All(i => !i.GetProperty("listed").GetBoolean()));
+        }
+
+        [TestMethod]
+        public async Task Shared_ACompletelyListedRow_ContributesNothing()
+        {
+            Grant(OwnerA);
+            store.SeedLedger(OwnerA, RingWcid, 4);
+            Assert.IsTrue(MarketManager.List(new MarketActor(OwnerA, GranterA, "Granter"), null, RingWcid, 4, 500, MarketChannel.Web).Ok);
+
+            var (_, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual("ready", Vaults(json).Single().GetProperty("state").GetString());
+            Assert.AreEqual(0, Items(json).Count);
+        }
+
+        [TestMethod]
+        public async Task Shared_AtMostTenMules_InOwnerOrder()
+        {
+            for (uint owner = 9400; owner < 9412; owner++)
+            {
+                Grant(owner, granterName: $"Granter{owner}", granterGuid: null);
+                store.SeedItem(owner, Armor($"Armor {owner}"));
+            }
+
+            var (_, json) = await Shared(CharacterGuid);
+            var vaults = Vaults(json);
+
+            Assert.AreEqual(10, vaults.Count);
+            CollectionAssert.AreEqual(Enumerable.Range(9400, 10).Select(o => $"Granter{o}").ToArray(), vaults.Select(v => v.GetProperty("label").GetString()).ToArray());
+            Assert.AreEqual(10, Items(json).Count);
+            Assert.IsFalse(Items(json).Any(i => i.GetProperty("name").GetString() == "Armor 9410"), "the 11th owner is not read");
+        }
+
+        [TestMethod]
+        public async Task Shared_AColdStore_IsLoading_AndTheOthersStillServe()
+        {
+            Grant(OwnerA);
+            Grant(OwnerB, granterGuid: null, granterName: "Bee");
+            store.SeedItem(OwnerA, Armor("Cold Armor"));
+            store.SeedItem(OwnerB, Armor("Warm Armor"));
+            store.NotReadyAccounts.Add(OwnerA);
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            var vaults = Vaults(json);
+            Assert.AreEqual("loading", vaults.Single(v => v.GetProperty("label").GetString() == "Granter").GetProperty("state").GetString());
+            Assert.AreEqual("ready", vaults.Single(v => v.GetProperty("label").GetString() == "Bee").GetProperty("state").GetString());
+            CollectionAssert.AreEqual(new[] { "Warm Armor" }, Items(json).Select(i => i.GetProperty("name").GetString()).ToArray());
+
+            // Never a cold load from the request thread: the cold mule is queued for warming, and IsReady (which is
+            // TryCheckReady, the call that loads) is never asked about it.
+            CollectionAssert.AreEqual(new[] { OwnerA }, store.WarmRequests.ToArray());
+            CollectionAssert.DoesNotContain(store.IsReadyAccounts, OwnerA);
+        }
+
+        /// <summary>
+        /// Through the REAL VaultMarketItemStore: a cold owner whose store is not live is never built (GetStore builds
+        /// one and refreshes its capacity bonuses) - it is queued for warming and listed as loading.
+        /// </summary>
+        [TestMethod]
+        public void Shared_RealItemStore_AColdOwner_BuildsNoStore_AndQueuesAWarmUp()
+        {
+            var constructions = 0;
+            var warmed = new List<uint>();
+            var grant = new ACE.Database.Models.Shard.AccountVaultGrant { Id = 4242, OwnerAccountId = OwnerA, GranteeCharacterGuid = CharacterGuid, CanWithdraw = true, GrantedByCharacterName = "Granter" };
+
+            var real = new VaultMarketItemStore(
+                storeResolver: id => { constructions++; return null; },
+                grantsResolver: _ => new List<ACE.Database.Models.Shard.AccountVaultGrant> { grant },
+                existingStoreResolver: _ => null,
+                requestWarm: id => { warmed.Add(id); return true; });
+
+            MarketManager.Shutdown();
+            MarketManager.Initialize(real, wallet, repo);
+
+            SuitCharacterResolver roster = (uint account, uint character, out string name) =>
+            {
+                name = "Suitwearer";
+                return account == AccountId && character == CharacterGuid;
+            };
+
+            Assert.IsTrue(MarketManager.TryGetSharedSuitInventory(AccountId, CharacterGuid, roster, out var vaults, out var items, out var error), error.ToString());
+
+            Assert.AreEqual(SharedSuitVault.StateLoading, vaults.Single().State);
+            Assert.AreEqual("s:4242", vaults.Single().VaultKey);
+            Assert.AreEqual(0, items.Count);
+            Assert.AreEqual(0, constructions, "no shared lookup builds a store");
+            CollectionAssert.AreEqual(new[] { OwnerA }, warmed);
+        }
+
+        /// <summary>Deposit-only shares must not use up the ten-mule cap ahead of a withdraw share.</summary>
+        [TestMethod]
+        public async Task Shared_TenDepositOnlyOwners_DoNotCrowdOutAWithdrawOwner()
+        {
+            for (uint owner = 9400; owner < 9410; owner++)
+                Grant(owner, canWithdraw: false, granterGuid: null, granterName: $"Deposit{owner}");
+
+            Grant(9420, granterGuid: null, granterName: "Withdrawer");
+            store.SeedItem(9420, Armor("Withdrawable Armor"));
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            Assert.AreEqual("Withdrawer", Vaults(json).Single().GetProperty("label").GetString());
+            CollectionAssert.AreEqual(new[] { "Withdrawable Armor" }, Items(json).Select(i => i.GetProperty("name").GetString()).ToArray());
+        }
+
+        [TestMethod]
+        public async Task Shared_AnAccessReadFailure_IsLoading_NeverDropped()
+        {
+            Grant(OwnerA);
+            store.SeedItem(OwnerA, Armor());
+            store.FailAccessOwners.Add(OwnerA);
+
+            var (_, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual("loading", Vaults(json).Single().GetProperty("state").GetString());
+            Assert.AreEqual(0, Items(json).Count);
+        }
+
+        /// <summary>
+        /// The label is the GRANTING character's current name (else its stored name, else the numbered fallback),
+        /// and nothing in the response names another character on the owner's account or the owner account.
+        /// </summary>
+        [TestMethod]
+        public async Task Shared_TheLabel_NeverNamesANonGranterCharacter()
+        {
+            var a = Grant(OwnerA, granterGuid: GranterA, granterName: "OldName");
+            Grant(OwnerB, granterGuid: null, granterName: null);
+            Grant(9313, granterGuid: null, granterName: "<unknown>");
+            store.CurrentNames[GranterA] = "NewName";
+            store.CurrentNames[OwnerAOtherCharacter] = "OwnersOtherAlt";
+            store.SeedItem(OwnerA, Armor());
+
+            var (status, json) = await Shared(CharacterGuid);
+            var text = json.GetRawText();
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            CollectionAssert.AreEqual(new[] { "NewName", "A shared mule", "A shared mule (2)" }, Vaults(json).Select(v => v.GetProperty("label").GetString()).ToArray());
+            Assert.IsFalse(text.Contains("OwnersOtherAlt"), text);
+            Assert.IsFalse(text.Contains("OldName"), "the current name wins over the stored one");
+            Assert.IsFalse(Vaults(json).Any(v => v.GetRawText().Contains(OwnerA.ToString())), "the owner account id is never on a vault entry");
+            Assert.AreEqual($"s:{a.Id}", Vaults(json)[0].GetProperty("vault_key").GetString());
+        }
+
+        [TestMethod]
+        public async Task Shared_SuitBuilderOff_IsRefused()
+        {
+            Grant(OwnerA);
+            suitEnabled = false;
+
+            var (status, json) = await Shared(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, status);
+            Assert.AreEqual("suit_builder_disabled", json.GetProperty("error").GetString());
+        }
         // ---- GET /v1/accounts/me/characters/{guid}/suit-profile ----
 
         [TestMethod]
@@ -716,6 +1129,294 @@ namespace ACE.Server.Tests
 
             CollectionAssert.AreEquivalent(new[] { "Breastplate", "Cloak", "Ring", "Shirt" }, equipped.Select(e => e.Name).ToArray());
             Assert.IsTrue(equipped.All(e => e.Source == "equipped"));
+        }
+
+        // ---- pack projection ----
+
+        private static Container SidePack(params WorldObject[] contents)
+        {
+            var weenie = new Weenie
+            {
+                WeenieClassId = 93100,
+                WeenieType = WeenieType.Container,
+                PropertiesString = new Dictionary<PropertyString, string> { { PropertyString.Name, "Side Pack" } },
+                PropertiesInt = new Dictionary<PropertyInt, int>
+                {
+                    { PropertyInt.ItemsCapacity, 24 },
+                    { PropertyInt.ContainersCapacity, 4 },
+                },
+            };
+
+            var pack = new Container(weenie, new ObjectGuid((uint)nextGuid++));
+
+            foreach (var item in contents)
+                Assert.IsTrue(pack.TryAddToInventory(item), "could not seed a side-pack item");
+
+            return pack;
+        }
+
+        private static HashSet<uint> Guids(params WorldObject[] items) => new HashSet<uint>(items.Select(i => i.Guid.Full));
+
+        [TestMethod]
+        public void PackForSuit_ExcludesAWornItem_EvenWhenItAlsoSitsInTheInventoryCollection()
+        {
+            var worn = Armor("Worn Breastplate");
+            var carried = Armor("Spare Breastplate");
+
+            // corrupt-data shape: the worn item is ALSO listed in the pack; the equipped guid set must win
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new[] { worn, carried }, Guids(worn), CharacterGuid, "Tester");
+
+            CollectionAssert.AreEqual(new[] { "Spare Breastplate" }, pack.Select(p => p.Name).ToArray());
+        }
+
+        [TestMethod]
+        public void PackForSuit_IncludesASidePackItem_FoundOnlyByWalkingTheSideContainer()
+        {
+            var inMain = Armor("Main Pack Plate");
+            var inSide = Item(RingWcid, "Side Pack Ring", ItemType.Jewelry, EquipMask.FingerWearLeft | EquipMask.FingerWearRight);
+            var side = SidePack(inSide);
+
+            // the ring is reachable ONLY through the side container
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new WorldObject[] { inMain, side }, new HashSet<uint>(), CharacterGuid, "Tester");
+
+            CollectionAssert.AreEquivalent(new[] { "Main Pack Plate", "Side Pack Ring" }, pack.Select(p => p.Name).ToArray());
+        }
+
+        [TestMethod]
+        public void PackForSuit_ListsAnItemOnceEvenWhenTwoCollectionsHoldIt()
+        {
+            var ring = Item(RingWcid, "Twice Listed Ring", ItemType.Jewelry, EquipMask.FingerWearLeft | EquipMask.FingerWearRight);
+            var side = SidePack(ring);
+
+            // deliberately corrupt: the ring is in the main list AND inside the side pack
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new WorldObject[] { side, ring }, new HashSet<uint>(), CharacterGuid, "Tester");
+
+            Assert.AreEqual(1, pack.Count);
+            Assert.AreEqual("Twice Listed Ring", pack[0].Name);
+        }
+
+        [TestMethod]
+        public void PackForSuit_IsDepthOne_ANestedContainersContentsAreNotProjected()
+        {
+            var deep = Armor("Deep Plate");
+            var nested = SidePack(deep);
+            var side = SidePack();
+            Assert.IsTrue(side.TryAddToInventory(nested), "fixture: nested container accepted");
+            var shallow = Armor("Shallow Plate");
+            Assert.IsTrue(side.TryAddToInventory(shallow));
+
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new WorldObject[] { side }, new HashSet<uint>(), CharacterGuid, "Tester");
+
+            CollectionAssert.AreEqual(new[] { "Shallow Plate" }, pack.Select(p => p.Name).ToArray());
+        }
+
+        [TestMethod]
+        public void PackForSuit_Cap_KeepsTheLowestGuidsInAFixedOrder_NotTheInputOrder()
+        {
+            var plates = Enumerable.Range(0, 12).Select(i => Armor($"Plate {i}")).ToList();   // guids ascend with i
+            var expected = plates.Take(5).Select(p => p.Name).ToArray();
+
+            var forward = CharacterSheetProjector.ProjectPackForSuit(plates, new HashSet<uint>(), CharacterGuid, "Tester", 5, out var truncatedForward);
+            var shuffled = CharacterSheetProjector.ProjectPackForSuit(plates.AsEnumerable().Reverse().OrderBy(p => p.Guid.Full % 3).ToList(), new HashSet<uint>(), CharacterGuid, "Tester", 5, out var truncatedShuffled);
+
+            CollectionAssert.AreEqual(expected, forward.Select(p => p.Name).ToArray());
+            CollectionAssert.AreEqual(expected, shuffled.Select(p => p.Name).ToArray());
+            Assert.IsTrue(truncatedForward);
+            Assert.IsTrue(truncatedShuffled);
+        }
+
+        [TestMethod]
+        public void PackForSuit_Cap_TakesMainPackBeforeSidePacks_AndSidePacksByPlacementThenGuid()
+        {
+            var mainPlate = Armor("Main");
+            var lateSideItem = Armor("Late Side");
+            var earlySideItem = Armor("Early Side");
+            var lateSide = SidePack(lateSideItem);
+            var earlySide = SidePack(earlySideItem);
+            lateSide.PlacementPosition = 2;
+            earlySide.PlacementPosition = 1;
+
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new WorldObject[] { lateSide, earlySide, mainPlate }, new HashSet<uint>(), CharacterGuid, "Tester", 2, out var truncated);
+
+            CollectionAssert.AreEqual(new[] { "Main", "Early Side" }, pack.Select(p => p.Name).ToArray());
+            Assert.IsTrue(truncated);
+        }
+
+        [TestMethod]
+        public void PackForSuit_NotTruncated_WhenEverythingFits()
+        {
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new[] { Armor("A"), Armor("B") }, new HashSet<uint>(), CharacterGuid, "Tester", 2, out var truncated);
+
+            Assert.AreEqual(2, pack.Count);
+            Assert.IsFalse(truncated, "exactly at the cap is not truncation");
+        }
+
+        [TestMethod]
+        public async Task Profile_PackTruncated_IsEmittedOnlyWhenTrue()
+        {
+            sheets.NextOwnerProfile = new OwnerProfileResult(SheetOutcome.Ok, new OwnerProfile { CharacterGuid = CharacterGuid, Name = "x" });
+            var (_, plain) = await Profile(CharacterGuid);
+            Assert.IsFalse(plain.TryGetProperty("pack_truncated", out _), "omitted when false");
+
+            sheets.NextOwnerProfile = new OwnerProfileResult(SheetOutcome.Ok, new OwnerProfile { CharacterGuid = CharacterGuid, Name = "x", PackTruncated = true });
+            var (_, cut) = await Profile(CharacterGuid);
+            Assert.IsTrue(cut.GetProperty("pack_truncated").GetBoolean());
+        }
+
+        [TestMethod]
+        public void OwnerGear_PackComesFromInventory_NotEquippedObjects_AndHolderGuidPassesThrough()
+        {
+            var worn = Armor("Worn Plate");
+            var carried = Armor("Carried Plate");
+            var sheet = new List<SheetItem> { new SheetItem { ItemGuid = worn.Guid.Full, Name = "Worn Plate", Slot = "x" } };
+
+            // the worn item is in the inventory collection too (corrupt shape): worn wins, so it must not be in pack
+            var gear = CharacterSheetProjector.ProjectOwnerGear(new[] { worn }, new[] { carried, worn }, "Tester", sheet, CharacterGuid);
+
+            CollectionAssert.AreEqual(new[] { "Worn Plate" }, gear.Equipped.Select(e => e.Name).ToArray());
+            CollectionAssert.AreEqual(new[] { "Carried Plate" }, gear.Pack.Select(e => e.Name).ToArray());
+            Assert.AreEqual(CharacterGuid, gear.Equipped.Single().HolderGuid);
+            Assert.AreEqual(CharacterGuid, gear.Pack.Single().HolderGuid);
+            Assert.IsFalse(gear.PackTruncated);
+        }
+
+        [TestMethod]
+        public void AttunedBonded_FlagsAgreeWithIsBoundForSharing_ForEveryCombination()
+        {
+            foreach (var attuned in new int?[] { null, -1, 0, 1, 2 })
+            {
+                foreach (var bonded in new int?[] { null, -2, -1, 0, 1, 2 })
+                {
+                    var item = Armor("Flagged");
+                    if (attuned.HasValue) item.SetProperty(PropertyInt.Attuned, attuned.Value);
+                    if (bonded.HasValue) item.SetProperty(PropertyInt.Bonded, bonded.Value);
+
+                    var vaultRow = SuitItemProjector.FromItem(item, SuitItem.SourceVault);
+                    var flagged = vaultRow.Attuned == true || vaultRow.Bonded == true;
+
+                    Assert.AreEqual(MarketManager.IsBoundForSharing(item), flagged, $"attuned={attuned} bonded={bonded}: the shared route's exclusion and the wire flags must agree");
+
+                    var weenie = NewWeenie(ArmorWcid, "Flagged", ItemType.Armor, EquipMask.ChestArmor);
+                    if (attuned.HasValue) weenie.PropertiesInt[PropertyInt.Attuned] = attuned.Value;
+                    if (bonded.HasValue) weenie.PropertiesInt[PropertyInt.Bonded] = bonded.Value;
+
+                    var ledgerRow = SuitItemProjector.FromWeenie(weenie);
+                    Assert.AreEqual(MarketManager.IsBoundForSharing(weenie), ledgerRow.Attuned == true || ledgerRow.Bonded == true, $"weenie attuned={attuned} bonded={bonded}");
+                }
+            }
+        }
+        [TestMethod]
+        public void PackForSuit_DropsNonSuitItems_AndTheSidePackItself()
+        {
+            var sword = Item(SwordWcid, "Sword", ItemType.MeleeWeapon, EquipMask.MeleeWeapon);
+            var shield = Item(ShieldWcid, "Shield", ItemType.Armor, EquipMask.Shield);
+            var salvage = Item(SalvageWcid, "Salvage", ItemType.TinkeringMaterial, EquipMask.None);
+            var keep = Armor("Keeper");
+            var side = SidePack(sword, shield, salvage);
+
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new WorldObject[] { side, keep }, new HashSet<uint>(), CharacterGuid, "Tester");
+
+            CollectionAssert.AreEqual(new[] { "Keeper" }, pack.Select(p => p.Name).ToArray());
+        }
+
+        [TestMethod]
+        public void HolderGuid_IsSetOnPackAndEquippedRows_AndSourcesAreRight()
+        {
+            var worn = Armor("Worn");
+            var carried = Armor("Carried");
+
+            var equipped = CharacterSheetProjector.ProjectEquippedForSuit(new[] { worn }, "Tester", CharacterGuid).Single();
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new[] { carried }, Guids(worn), CharacterGuid, "Tester").Single();
+
+            Assert.AreEqual(CharacterGuid, equipped.HolderGuid);
+            Assert.AreEqual(CharacterGuid, pack.HolderGuid);
+            Assert.AreEqual("equipped", equipped.Source);
+            Assert.AreEqual("pack", pack.Source);
+            Assert.IsNull(SuitItemProjector.FromItem(carried).HolderGuid, "a vault projection has no holder");
+        }
+
+        [TestMethod]
+        [DataRow(0, false)]
+        [DataRow(1, true)]
+        [DataRow(2, true)]
+        public void AttunedAndBonded_AreTrueOnlyWhenAtLeastOne_OnEverySource(int value, bool expectedSet)
+        {
+            foreach (var property in new[] { PropertyInt.Attuned, PropertyInt.Bonded })
+            {
+                var item = Armor("Flagged");
+                item.SetProperty(property, value);
+
+                var projections = new[]
+                {
+                    SuitItemProjector.FromItem(item, SuitItem.SourceVault),
+                    CharacterSheetProjector.ProjectEquippedForSuit(new[] { item }, "Tester").Single(),
+                    CharacterSheetProjector.ProjectPackForSuit(new[] { item }, new HashSet<uint>(), CharacterGuid, "Tester").Single(),
+                };
+
+                foreach (var s in projections)
+                {
+                    var flag = property == PropertyInt.Attuned ? s.Attuned : s.Bonded;
+                    var wireName = property == PropertyInt.Attuned ? "attuned" : "bonded";
+                    var root = JsonDocument.Parse(JsonSerializer.Serialize(s, MarketApiHost.Json)).RootElement;
+
+                    if (expectedSet)
+                    {
+                        Assert.AreEqual(true, flag, $"{property} {value} on {s.Source}");
+                        Assert.IsTrue(root.GetProperty(wireName).GetBoolean());
+                    }
+                    else
+                    {
+                        Assert.IsNull(flag, $"{property} {value} on {s.Source}");
+                        Assert.IsFalse(root.TryGetProperty(wireName, out _), "omitted, not false");
+                    }
+                }
+            }
+        }
+
+        [TestMethod]
+        public void AttunedAndBonded_AbsentProperty_IsOmitted()
+        {
+            var s = SuitItemProjector.FromItem(Armor("Plain"));
+
+            Assert.IsNull(s.Attuned);
+            Assert.IsNull(s.Bonded);
+        }
+
+        [TestMethod]
+        public void PackForSuit_WireNames_AreHolderGuidAttunedBondedAndPackSource()
+        {
+            var item = Armor("Wire");
+            item.SetProperty(PropertyInt.Attuned, 1);
+            item.SetProperty(PropertyInt.Bonded, 1);
+
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new[] { item }, new HashSet<uint>(), CharacterGuid, "Tester");
+            var root = JsonDocument.Parse(JsonSerializer.Serialize(pack, MarketApiHost.Json)).RootElement[0];
+
+            Assert.AreEqual("pack", root.GetProperty("source").GetString());
+            Assert.AreEqual(CharacterGuid, root.GetProperty("holder_guid").GetUInt32());
+            Assert.IsTrue(root.GetProperty("attuned").GetBoolean());
+            Assert.IsTrue(root.GetProperty("bonded").GetBoolean());
+        }
+
+        [TestMethod]
+        public async Task Profile_EmitsPackBesideEquipped()
+        {
+            var carried = Armor("Carried Plate");
+            var pack = CharacterSheetProjector.ProjectPackForSuit(new[] { carried }, new HashSet<uint>(), CharacterGuid, "Tester");
+
+            sheets.NextOwnerProfile = new OwnerProfileResult(SheetOutcome.Ok, new OwnerProfile
+            {
+                CharacterGuid = CharacterGuid,
+                Name = "Suitwearer",
+                Pack = pack,
+            });
+
+            var (status, json) = await Profile(CharacterGuid);
+
+            Assert.AreEqual(HttpStatusCode.OK, status);
+            Assert.AreEqual(1, json.GetProperty("pack").GetArrayLength());
+            Assert.AreEqual("pack", json.GetProperty("pack")[0].GetProperty("source").GetString());
+            Assert.AreEqual(CharacterGuid, json.GetProperty("pack")[0].GetProperty("holder_guid").GetUInt32());
         }
 
         // ---- the owner view through the service ----

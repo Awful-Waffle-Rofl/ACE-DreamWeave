@@ -60,6 +60,20 @@ namespace ACE.Server.Pvp.Templates
 
         public static bool IsVitae(PropertiesEnchantmentRegistry e) => e.SpellId == VitaeSpellId;
 
+        /// <summary>
+        /// Spells every template carries whatever its source character's spellbook held. Curse of Raven Fury is the only thing
+        /// that does damage in a Tugak Brawl (pvp_arena_ffa_spell_only), so a template snapshotted from a character that never
+        /// learned it could deal no damage there (playtest 2026-10-16: the 2h template on prod and stage lacked it).
+        /// </summary>
+        public static readonly int[] AlwaysGrantedSpells = { (int)SpellId.CurseRavenFury };
+
+        /// <summary>
+        /// The template's spellbook as the overlay uses it: the definition's own spells plus <see cref="AlwaysGrantedSpells"/>.
+        /// The single source for both the spells added at apply and the record's cast-gate allow list, so a spell added here is
+        /// also castable and is removed again at exit when the player did not already know it.
+        /// </summary>
+        public static List<int> EffectiveSpells(PvpTemplateDefinition definition) => definition.Spells.Concat(AlwaysGrantedSpells).Distinct().ToList();
+
         // ======================================================================================
         // capture
         // ======================================================================================
@@ -81,7 +95,7 @@ namespace ACE.Server.Pvp.Templates
                 AppliedAtUtc = appliedAtUtc,
                 ReturnOwnBuffs = returnOwnBuffs,
                 OwnEquip = ownEquip ?? new List<FacetEquipEntry>(),
-                TemplateSpells = definition.Spells.Distinct().ToList(),
+                TemplateSpells = EffectiveSpells(definition),
             };
 
             rwLock.EnterReadLock();
@@ -215,7 +229,7 @@ namespace ACE.Server.Pvp.Templates
                         biota.PropertiesInt.Remove(property);
                 }
 
-                foreach (var spell in definition.Spells)
+                foreach (var spell in EffectiveSpells(definition))
                 {
                     biota.PropertiesSpellBook ??= new Dictionary<int, float>();
 

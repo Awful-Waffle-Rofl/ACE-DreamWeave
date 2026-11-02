@@ -333,13 +333,13 @@ namespace ACE.Server.Command.Handlers
 
             if (!confirmed)
             {
-                if ((player.AvailableLuminance ?? 0) + player.BankedLuminance < fee)
+                if (fee > 0 && (player.AvailableLuminance ?? 0) + player.BankedLuminance < fee)
                 {
                     Reply(session, $"Unlearning a class ability costs {fee:N0} Luminance; you have {(player.AvailableLuminance ?? 0) + player.BankedLuminance:N0}.");
                     return;
                 }
 
-                var msg = $"Unlearn {skill.DisplayName} rank {rank}?\n\nThis refunds {skill.CumulativeCost(rank):N0} class ability points and costs {fee:N0} Luminance.";
+                var msg = $"Unlearn {skill.DisplayName} rank {rank}?\n\nThis refunds {skill.CumulativeCost(rank):N0} class ability points" + (fee > 0 ? $" and costs {fee:N0} Luminance." : ".");
 
                 if (!player.ConfirmationManager.EnqueueSend(new Confirmation_Custom(player.Guid, () => HandleUnlearn(session, true, name)), msg))
                     player.SendWeenieError(WeenieError.ConfirmationInProgress);

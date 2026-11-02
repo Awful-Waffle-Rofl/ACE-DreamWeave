@@ -26,13 +26,16 @@ namespace ACE.Server.Entity
         /// <param name="currentTargetValid">the pet's current target is non-null, alive and visible to it -
         /// the same test HandleFindTarget has always used to decide whether to retarget</param>
         /// <param name="attackAnimating">the pet is mid swing or cast</param>
-        public static PetTargetAction Decide(bool assistOn, bool assistTargetValid, bool assistTargetIsCurrent, bool currentTargetValid, bool attackAnimating)
+        /// <param name="casterHoldsCurrent">Custom Summons: a caster pet's brain last chose the current target over
+        /// the assist target (CombatPet.CasterHoldsTarget). Kept like a playing animation, so the two picks do not
+        /// swap the target back and forth on alternate ticks. False for every other pet.</param>
+        public static PetTargetAction Decide(bool assistOn, bool assistTargetValid, bool assistTargetIsCurrent, bool currentTargetValid, bool attackAnimating, bool casterHoldsCurrent = false)
         {
             if (assistOn && assistTargetValid && !assistTargetIsCurrent)
             {
                 // let a swing or cast already playing finish on the target it started against; the switch
                 // happens on the first tick after it. A dead or invalid current target is abandoned at once.
-                if (currentTargetValid && attackAnimating)
+                if (currentTargetValid && (attackAnimating || casterHoldsCurrent))
                     return PetTargetAction.Keep;
 
                 return PetTargetAction.SwitchToAssist;

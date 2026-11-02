@@ -10,13 +10,9 @@ namespace ACE.Server.Network.GameAction.Actions
         [GameAction(GameActionType.LoginComplete)]
         public static void Handle(ClientMessage message, Session session)
         {
-            session.Player.OnTeleportComplete();
-
-            if (!session.Player.FirstEnterWorldDone)
-            {
-                session.Player.FirstEnterWorldDone = true;
-                session.Player.SendPropertyUpdatesAndOverrides();
-            }
+            // the same entry point the server-side fallback uses (Player_TeleportArrival): runs OnTeleportComplete once per
+            // window, then the once-only FirstEnterWorldDone block that used to live here
+            session.Player.CompleteArrival(ACE.Server.Entity.TeleportCompletionSource.Client);
         }
     }
 }

@@ -136,10 +136,62 @@ namespace ACE.Server.Network
             snapshot.Available = true;
         }
 
+        /// <summary>Zeroes the network's "since teleport start" peaks (see NetworkSession.ResetArrivalPeaks).</summary>
+        public void ResetArrivalPeaks()
+        {
+            Network?.ResetArrivalPeaks();
+        }
+
+        /// <summary>When this session object was created (the client's first packet). Logging only.</summary>
+        public DateTime CreatedUtc { get; } = DateTime.UtcNow;
+
         public Session(ConnectionListener connectionListener, IPEndPoint endPoint, ushort clientId, ushort serverId)
         {
             EndPointC2S = endPoint;
             Network = new NetworkSession(this, connectionListener, clientId, serverId);
+        }
+
+        /// <summary>
+        /// The dropped-session line's appended tail. APPEND ONLY: external log parsers read the leading fields, so
+        /// nothing before " | " may move. Never throws.
+        /// </summary>
+        private string DropDiagnostics()
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                var player = Player;
+                var location = player?.Location;
+
+                var lastInboundTicks = Network?.LastPacketReceivedTicks ?? 0;
+                var sinceInbound = lastInboundTicks == 0 ? "na" : TimeSpan.FromTicks(now.Ticks - lastInboundTicks).TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                var connAge = ((long)(now - CreatedUtc).TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+                var pendingDeletes = 0;
+                long ledgerEvictions = 0;
+                player?.GetClientObjectBookDiagnostics(out pendingDeletes, out ledgerEvictions);
+
+                return $" | cell=0x{location?.Cell ?? 0:X8} inst=0x{location?.Instance ?? 0:X8} sinceInboundS={sinceInbound} connAgeS={connAge} " +
+                       $"creates={Network?.CreateObjectsEnqueued ?? 0} distinctCreated={Network?.DistinctCreated ?? 0}{((Network?.DistinctCreatedCapped ?? false) ? "+" : "")} " +
+                       $"pendingDeletes={pendingDeletes} teleporting={((player?.Teleporting ?? false) ? 1 : 0)} ledgerEvictions={ledgerEvictions}{dropRingTail}";
+            }
+            catch (Exception)
+            {
+                return " | diagnostics-unavailable" + dropRingTail;
+            }
+        }
+
+        // " ring=<rid>" when DropSession took an outbound ring dump, else empty. Appended last on the dropped line.
+        private string dropRingTail = "";
+
+        /// <summary>
+        /// Takes the outbound ring dump for this drop, if the reason calls for one (OutboundRingMonitor.OnDrop), and
+        /// returns the tail that links the dropped line to it. Never throws.
+        /// </summary>
+        private string TakeOutboundRingDump(SessionTerminationReason reason)
+        {
+            var rid = OutboundRingMonitor.OnDrop(this, reason);
+            return rid == null ? "" : " ring=" + rid;
         }
 
 
@@ -375,10 +427,12 @@ namespace ACE.Server.Network
                 {
                     reas = reas + ", " + PendingTermination.ExtraReason;
                 }
+                // snapshot the outbound ring before the line, so the line can name the dump; resources are released below
+                dropRingTail = TakeOutboundRingDump(reason);
                 if (WorldManager.WorldStatus == WorldManager.WorldStatusState.Open)
-                    log.Info($"Session {Network?.ClientId}\\{EndPointC2S} dropped. Account: {Account}, Player: {Player?.Name}{reas}");
+                    log.Info($"Session {Network?.ClientId}\\{EndPointC2S} dropped. Account: {Account}, Player: {Player?.Name}{reas}{DropDiagnostics()}");
                 else
-                    log.DebugFormat("Session {0}\\{1} dropped. Account: {2}, Player: {3}{4}", Network?.ClientId, EndPointC2S, Account, Player?.Name, reas);
+                    log.DebugFormat("Session {0}\\{1} dropped. Account: {2}, Player: {3}{4}{5}", Network?.ClientId, EndPointC2S, Account, Player?.Name, reas, DropDiagnostics());
             }
 
             if (Player != null)

@@ -7,7 +7,8 @@ namespace ACE.Server.ClassAbilities
     /// ONE LINE PER WARD LIFETIME, not one per hit - the per-hit absorb line this ability shipped with was
     /// the loudest complaint in beta feedback, so the pool's whole story (how much it ate, in total) is told
     /// exactly once, at the moment the lifetime ends: <see cref="ShatterMessage"/> when an absorb empties it,
-    /// <see cref="FadeMessage"/> when it lapses unused, or the unchanged discharge line when it is spent. The
+    /// or <see cref="FadeMessage"/> when it lapses (the war-spell discharge line went with the spend path,
+    /// removed 2026-10-24). The
     /// "fully inscribed" notice is the one exception still fired mid-lifetime, and even that is capped at
     /// once - see <see cref="ShouldAnnounceFullyInscribed"/>.
     /// </summary>
@@ -29,10 +30,6 @@ namespace ACE.Server.ClassAbilities
             totalAbsorbed > 0
                 ? $"Your runic ward fades after absorbing {totalAbsorbed:N0} points of damage."
                 : "Your runic ward fades.";
-
-        /// <summary>Unchanged from the ward's original notice.</summary>
-        public static string DischargeMessage(uint spent, string spellName) =>
-            $"Your runic ward discharges {spent:N0} points of damage into {spellName}!";
 
         /// <summary>
         /// TRUE only on the hit that first takes the pool from below cap to at-or-above it, and only if

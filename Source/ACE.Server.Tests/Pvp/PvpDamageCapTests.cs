@@ -395,7 +395,7 @@ namespace ACE.Server.Tests.Pvp
 
             AssertSite(root, "ACE.Server/WorldObjects/WorldObject_Magic.cs",
                 "srcVitalChange = PvpRules.ApplyOvertimeRamp(PvpChokePoint.OT4, this, transferSource, srcVitalChange);",
-                "srcVitalChange = mitigationTarget.ApplyPreWriteDamageClassAbilities(this, DamageType.Health, srcVitalChange);");
+                "srcVitalChange = mitigationTarget.ApplyPreWriteDamageClassAbilities(this, DamageType.Health, srcVitalChange, isSpell: true);");
 
             AssertSite(root, "ACE.Server/WorldObjects/WorldObject_Magic.cs",
                 "srcVitalChange = PvpRules.ApplyOvertimeRamp(PvpChokePoint.OT4, this, transferSource, srcVitalChange);",

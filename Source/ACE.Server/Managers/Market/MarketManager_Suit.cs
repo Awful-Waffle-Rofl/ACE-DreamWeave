@@ -48,6 +48,20 @@ namespace ACE.Server.Managers.Market
                 return false;
             }
 
+            ProjectSuitVault(store, accountId, result);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Every suit-relevant entry of <paramref name="accountId"/>'s vault, projected into <paramref name="result"/>
+        /// with its <c>listed</c> split (the remarks on <see cref="TryGetSuitInventory"/>). The one projection loop,
+        /// shared by the own-vault and the shared-mule inventories; the caller has already checked readiness.
+        /// <paramref name="excludeBound"/> (shared mules only) leaves out bonded and attuned stored items, and ledger
+        /// rows and class lines whose template weenie is bonded or attuned (the IsBoundForSharing overloads).
+        /// </summary>
+        private static void ProjectSuitVault(IMarketItemStore store, uint accountId, List<SuitItem> result, bool excludeBound = false)
+        {
             var active = GetActiveListingsForAccount(accountId);
 
             foreach (var entry in store.GetEntries(accountId, 0, -1))
@@ -57,12 +71,12 @@ namespace ACE.Server.Managers.Market
                     switch (entry.Kind)
                     {
                         case VaultEntryKind.StoredItem:
-                            AddStored(result, entry, active);
+                            AddStored(result, entry, active, excludeBound);
                             break;
 
                         case VaultEntryKind.Ledger:
                         case VaultEntryKind.Class:
-                            AddBiotaless(result, accountId, entry, active);
+                            AddBiotaless(result, accountId, entry, active, excludeBound);
                             break;
                     }
                 }
@@ -72,8 +86,6 @@ namespace ACE.Server.Managers.Market
                     log.Error($"[MARKET] could not project vault wcid {entry.Wcid} for the suit builder; skipping it: {ex.GetFullMessage()}");
                 }
             }
-
-            return true;
         }
 
         /// <summary>
@@ -92,7 +104,7 @@ namespace ACE.Server.Managers.Market
             return listing == null ? (int?)null : Math.Max(1, listing.Count);
         }
 
-        private static void AddStored(List<SuitItem> result, VaultEntry entry, IReadOnlyList<MarketListing> active)
+        private static void AddStored(List<SuitItem> result, VaultEntry entry, IReadOnlyList<MarketListing> active, bool excludeBound)
         {
             var members = entry.Members != null && entry.Members.Count > 0
                 ? entry.Members
@@ -108,17 +120,23 @@ namespace ACE.Server.Managers.Market
                 if (!SuitItemProjector.IsSuitRelevant(member))
                     continue;
 
+                if (excludeBound && IsBoundForSharing(member))
+                    continue;
+
                 var projected = SuitItemProjector.FromItem(member, SuitItem.SourceVault, null, member.StackSize ?? 1);
 
                 result.Add(listed ? projected with { Listed = true } : projected);
             }
         }
 
-        private static void AddBiotaless(List<SuitItem> result, uint accountId, VaultEntry entry, IReadOnlyList<MarketListing> active)
+        private static void AddBiotaless(List<SuitItem> result, uint accountId, VaultEntry entry, IReadOnlyList<MarketListing> active, bool excludeBound)
         {
             var weenie = WeenieLookup?.Invoke(entry.Wcid);
 
             if (weenie == null || !SuitItemProjector.IsSuitRelevant(weenie))
+                return;
+
+            if (excludeBound && IsBoundForSharing(weenie))
                 return;
 
             var isClass = entry.Kind == VaultEntryKind.Class;

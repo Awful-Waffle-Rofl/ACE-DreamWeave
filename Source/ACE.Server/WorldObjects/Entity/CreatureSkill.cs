@@ -170,6 +170,9 @@ namespace ACE.Server.WorldObjects.Entity
                     // creature != null because WeaponImbueTests builds a CreatureSkill with no creature at all
                     // to test the pure base-skill-cap arithmetic.
                     total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetDefenseSkillCeiling(Skill));
+
+                    // Threads magic attack ceiling (owner ruling 2026-10-30), same pre-enchantment point.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMagicAttackSkillCeiling(Skill));
                 }
 
                 return total;
@@ -196,6 +199,10 @@ namespace ACE.Server.WorldObjects.Entity
                     // is applied below - so a debuff still lands on top of the capped value exactly as it would
                     // on an authored one. Guarded on creature != null for the same reason as the Base getter.
                     total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetDefenseSkillCeiling(Skill));
+
+                    // Threads magic attack ceiling (owner ruling 2026-10-30), same pre-enchantment point: a player debuff
+                    // on the monster still lands on top of the capped value.
+                    total = DungeonCombatNormalizer.ClampToDefenseCeiling(total, creature.GetMagicAttackSkillCeiling(Skill));
                 }
 
                 // base gets scaled by vitae

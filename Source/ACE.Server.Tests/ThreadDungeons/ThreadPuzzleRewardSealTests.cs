@@ -140,7 +140,7 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             Assert.AreEqual(ThreadDungeonRunState.Cleared, run.State);
             Assert.AreEqual(1, c.Surveys, "the clear announced once");
-            Assert.AreEqual(1, c.Gems, "solo: the gem dies at the clear");
+            Assert.AreEqual(0, c.Gems, "solo: the gem survives the clear (owner ruling 2026-10-10)");
             Assert.AreEqual(1, c.Loot, "pooled loot asked for");
             Assert.AreEqual(0, c.Posted, "a solve is already on the run landblock (HandleActivation): the follow-up runs inline");
 
@@ -152,7 +152,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             ThreadDungeonManager.OnRewardUnsealed(run);
 
             Assert.AreEqual(1, c.Surveys, "still once");
-            Assert.AreEqual(1, c.Gems);
+            Assert.AreEqual(0, c.Gems);
         }
 
         [TestMethod]

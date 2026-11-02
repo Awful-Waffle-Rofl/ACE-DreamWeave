@@ -21,7 +21,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
     /// fakes implement only the arena halves and are untouched.
     /// </summary>
     [TestClass]
-    public class BattlegroundCoordinatorTests
+    public partial class BattlegroundCoordinatorTests
     {
         [ClassInitialize]
         public static void ClassSetup(TestContext context)
@@ -62,10 +62,21 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             public bool Dying;
             public Position Location;
             public (double X, double Y, double Z) At = (0, 0, 0);
+
+            /// <summary>The player's conduct activity stamp, carried on the zone sample like the live gateway's.</summary>
+            public PvpActivityStamp Activity;
         }
 
         private sealed class FakeGateway : IPvpPlayerGateway, IBattlegroundPlayerGateway
         {
+            /// <summary>Team hue (IPvpPlayerGateway.ClothingPalettes / ClothingPaletteIcon): null answers, like the interface default, dress nothing.</summary>
+            public Func<uint, IReadOnlyCollection<uint>> PaletteLookup;
+
+            public Func<uint, uint, uint> IconLookup;
+
+            public IReadOnlyCollection<uint> ClothingPalettes(uint clothingBase) => PaletteLookup?.Invoke(clothingBase);
+
+            public uint ClothingPaletteIcon(uint clothingBase, uint palette) => IconLookup?.Invoke(clothingBase, palette) ?? 0;
             public readonly Dictionary<uint, FakePlayer> Players = new();
             public readonly List<(uint Id, string Text)> Messages = new();
             public readonly List<(uint Id, PvpPlayerBinding Binding, Position Exit, Position Spawn)> Entered = new();
@@ -81,7 +92,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             {
                 var p = new FakePlayer
                 {
-                    Facts = new PvpPlayerFacts(id, name, 100, ip ?? $"10.0.0.{id & 0xFF}", false, false, false, false, false, false, false, true, fellowship, monarch, PreferredTemplateKey: DefaultTemplateKey),
+                    Facts = new PvpPlayerFacts(id, name, ip ?? $"10.0.0.{id & 0xFF}", false, false, false, false, false, false, false, fellowship, monarch, PreferredTemplateKey: DefaultTemplateKey, HasClearedThread: true),
                     Location = new Position(0xA9B40019, 84f, 7f, 94f, 0f, 0f, 0f, 1f, 0),
                 };
 
@@ -118,9 +129,15 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public void ExitMatch(uint id, string context) => Exited.Add(id);
 
+            /// <summary>When set, ReturnToExit records the call and then throws (a failing seam part-way through an exit).</summary>
+            public bool ReturnThrows;
+
             public void ReturnToExit(uint id, Position exitTo, uint matchInstance)
             {
                 Returned.Add(id);
+
+                if (ReturnThrows)
+                    throw new InvalidOperationException("scripted ReturnToExit throw");
 
                 if (Players.TryGetValue(id, out var p) && p.Online && p.Instance == matchInstance)
                     p.Instance = 0;
@@ -138,6 +155,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public void GrantArenaBlood(uint id, int amount, PvpBloodGrant grant) => BloodGrants.Add((id, amount, grant));
 
+            /// <summary>PvP dailies: every facts record the coordinator dispatched, in order.</summary>
+            public readonly List<PvpMatchFacts> DailyFacts = new();
+
+            public void ApplyDailyFacts(PvpMatchFacts facts) => DailyFacts.Add(facts);
+
             // ---- battleground half ----
 
             public BattlegroundZoneSample SampleZone(uint id, uint matchInstance)
@@ -146,7 +168,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
                     return null;
 
                 var p = Players[id];
-                return new BattlegroundZoneSample(id, 0, null, p.Instance == matchInstance, p.Dying, p.Teleporting, p.At.X, p.At.Y, p.At.Z);
+                return new BattlegroundZoneSample(id, 0, null, p.Instance == matchInstance, p.Dying, p.Teleporting, p.At.X, p.At.Y, p.At.Z, p.Activity?.AtUtc, p.Activity?.MatchId);
             }
 
             public void DrainVitals(uint id, Guid matchId, uint matchInstance, int health, int stamina, int mana, bool lethal) => Drains.Add((id, health, lethal));
@@ -368,7 +390,21 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             public readonly FakeSink Sink = new();
             public readonly ConcurrentQueue<PvpIntent> Intents = new();
             public PvpArenaDials Dials = PvpTunables.Defaults with { BloodEnabled = true, CrierEnabled = false };
-            public BattlegroundDials Bg = BattlegroundTunables.Defaults with { FillWindowSeconds = 0 };
+            // GroupJoinEnabled is on so the group-join tests exercise the queueing path; the shipped default is off (owner ruling 2026-10-15).
+            public BattlegroundDials Bg = BattlegroundTunables.Defaults with { FillWindowSeconds = 0, GroupJoinEnabled = true };
+
+            /// <summary>
+            /// The pvp_conduct_* dials, as shipped (a clock jump adds at most PvpConductSampler.MaxIdleSecondsPerSample of idle time), except
+            /// that the contribution floor is OFF so the pre-floor payout tests (which credit no stats) keep paying; the floor tests turn it on.
+            /// </summary>
+            public PvpConductDials Conduct = PvpConductTunables.Defaults with { FloorEnabled = false };
+
+            /// <summary>The team-colour coin every match of this rig draws (TeamColourCoin): true makes team 0 Red (and Tugak all Red).</summary>
+            public bool ColourCoin = true;
+
+            /// <summary>The team hue dials the coordinator takes at dispatch; null keeps the coordinator's own (the shipped defaults).</summary>
+            public Func<PvpTeamHueDials> HueDials;
+
             public PvpMatchCoordinator Coordinator;
 
             /// <summary>When set, the coordinator finds battleground layouts here instead of the shipped catalog.</summary>
@@ -376,7 +412,11 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
 
             public Rig Build()
             {
-                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Now, () => Dials, Intents, Crier, () => Bg);
+                Coordinator = new PvpMatchCoordinator(Gateway, Spaces, Sink, () => Now, () => Dials, Intents, Crier, () => Bg, conductDialSource: () => Conduct);
+                // Team colours: team 0 Red, team 1 Blue, so the King of the Hill lines are fixed (Docs/Pvp/TEMPLATES.md "Team hue").
+                Coordinator.TeamColourCoin = () => ColourCoin;
+                if (HueDials != null)
+                    Coordinator.TeamHueDials = HueDials;
                 Spaces.Gateway = Gateway;
 
                 if (Layouts != null)
@@ -824,6 +864,1077 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsTrue(rig.Gateway.LastBinding(victim).Respawning);
         }
 
+        // ================= performance stats (Docs/Pvp/BATTLEGROUNDS.md "Performance stats") =================
+
+        /// <summary>A position in the match's own copy of 0x016C, landblock frame.</summary>
+        private static Position InMatch(Rig rig, PvpMatch match, float x, float y, float z = 0.005f) =>
+            new Position(0x016C0000u | BattlegroundMapCatalog.Bg016c.ZoneCellLow, x, y, z, 0f, 0f, 0f, 1f, rig.Coordinator.SpaceOf(match.MatchId).Instance);
+
+        private static void KillAt(Rig rig, PvpMatch match, uint victim, uint killer, Position where)
+        {
+            rig.Gateway.Players[victim].Dying = true;
+            rig.Intents.Enqueue(PvpMatchManager.Death(victim, match.MatchId, rig.Now, killer, where));
+            rig.Tick();
+        }
+
+        private static SeatPerformanceSnapshot Perf(PvpMatch match, uint id) => match.Performance.Snapshot().Single(s => s.CharacterId == id);
+
+        [TestMethod]
+        public void Formation_BuildsTheLedgerWithEverySeat()
+        {
+            var rig = LiveKoth(out var match);
+
+            Assert.IsNotNull(match.Performance, "a battleground match carries the ledger");
+            CollectionAssert.AreEquivalent(match.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId).ToArray(), match.Performance.Snapshot().Select(s => s.CharacterId).ToArray());
+
+            foreach (var team in match.Teams)
+                foreach (var p in team.Members)
+                    Assert.AreEqual(team.TeamIndex, Perf(match, p.CharacterId).TeamIndex);
+
+            Assert.IsNull(match.Performance.Crystals, "King of the Hill binds no crystals");
+        }
+
+        /// <summary>
+        /// Killshots are counted only across teams, at the same point as the team kill; a King of the Hill killshot is near the hill when the
+        /// victim died inside the scored zone (radius 6 at the defaults) widened by pvp_bg_perf_koth_near_margin (6): 11 m out is near, 20 m is not.
+        /// </summary>
+        [TestMethod]
+        public void Koth_Killshots_CrossTeamOnly_NearHillByTheDeathPosition()
+        {
+            var rig = LiveKoth(out var match);
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var layout = BattlegroundMapCatalog.Bg016c;
+
+            KillAt(rig, match, west[0], east[0], InMatch(rig, match, layout.ZoneX + 11f, layout.ZoneY));
+            KillAt(rig, match, west[1], east[0], InMatch(rig, match, layout.ZoneX + 20f, layout.ZoneY));
+            KillAt(rig, match, east[1], east[0], InMatch(rig, match, layout.ZoneX, layout.ZoneY));
+
+            var s = Perf(match, east[0]);
+            Assert.AreEqual(2, s.Killshots, "two enemy kills; the teamkill is not a killshot");
+            Assert.AreEqual(1, s.KillshotsNearHill, "11 m from the centre is inside 6 + 6; 20 m is not; the teamkill on the hill does not count");
+            Assert.AreEqual(0, s.KillshotsNearCrystal + s.KillshotsFarCrystal, "no crystals in King of the Hill");
+            Assert.AreEqual(2, match.TeamKills[1], "fixture: the team kills agree");
+        }
+
+        /// <summary>The margin is the formation snapshot: 0 makes the 11 m death far.</summary>
+        [TestMethod]
+        public void Koth_NearHillMargin_IsTheFormationSnapshot()
+        {
+            var rig = LiveKoth(out var match, r => r.Bg = r.Bg with { KothPerfNearMargin = 0.0 });
+            rig.Bg = rig.Bg with { KothPerfNearMargin = 50.0 }; // changed after formation: ignored by this match
+            var layout = BattlegroundMapCatalog.Bg016c;
+
+            KillAt(rig, match, rig.Team(match, 0)[0], rig.Team(match, 1)[0], InMatch(rig, match, layout.ZoneX + 11f, layout.ZoneY));
+            KillAt(rig, match, rig.Team(match, 0)[1], rig.Team(match, 1)[0], InMatch(rig, match, layout.ZoneX + 3f, layout.ZoneY));
+
+            Assert.AreEqual(1, Perf(match, rig.Team(match, 1)[0]).KillshotsNearHill, "only the death inside the bare zone");
+        }
+
+        /// <summary>
+        /// The Kills fix: a teamkill used to raise the killer's saved kill count (killer.Kills++ ran before the cross-team check). Now only
+        /// an enemy kill does; the control kill in the same match proves the count still moves.
+        /// </summary>
+        [TestMethod]
+        public void TeamKill_DoesNotRaiseTheKillersSavedKills()
+        {
+            var rig = LiveKoth(out var match);
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Kill(rig, east[0], match, east[1]);    // teamkill
+            Kill(rig, east[1], match, west[0]);    // control: an enemy kill
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var save = rig.Sink.Saves.Single();
+            Assert.AreEqual(0, save.Parts.Single(p => p.CharacterId == east[1]).Kills, "a teamkill is not a kill");
+            Assert.AreEqual(1, save.Parts.Single(p => p.CharacterId == west[0]).Kills, "control: an enemy kill is");
+            Assert.AreEqual(1, save.Parts.Single(p => p.CharacterId == east[0]).Deaths, "the teamkilled player's death still counts");
+        }
+
+        /// <summary>Hill seconds reach the ledger through the coordinator's IBattlegroundMatchContext.CreditObjectiveTime.</summary>
+        [TestMethod]
+        public void Koth_HillSeconds_ReachTheLedger()
+        {
+            var rig = LiveKoth(out var match);
+            var holder = rig.Team(match, 0)[0];
+            var layout = BattlegroundMapCatalog.Bg016c;
+
+            rig.Gateway.Players[holder].At = (layout.ZoneX, layout.ZoneY, layout.ZoneZ);
+
+            rig.Advance(rig.Bg.KothTickSeconds);
+            rig.Tick();
+            rig.Advance(rig.Bg.KothTickSeconds);
+            rig.Tick();
+
+            Assert.AreEqual(2L * rig.Bg.KothTickSeconds, Perf(match, holder).HillSeconds);
+            Assert.AreEqual(0, Perf(match, rig.Team(match, 1)[0]).HillSeconds, "off the point: none");
+            Assert.IsTrue(match.ScoreBoard[0] > 0, "fixture: the holder scored");
+        }
+
+        /// <summary>
+        /// Drives: a King of the Hill match with the colour coin false (team 0 Blue), team 0 holding the hill until the score announce.
+        /// DISCRIMINATES the coordinator binding the match's colours into the handler: the hold line names the holder by its colour
+        /// ("Blue", not "West"), and the score line puts Red first although Red is team 1.
+        /// </summary>
+        [TestMethod]
+        public void Koth_CoinFalse_Team0IsBlue_HoldAndScoreLinesNameColours_RedFirst()
+        {
+            var rig = LiveKoth(out var match, r => r.ColourCoin = false);
+            var holder = rig.Team(match, 0)[0];
+            var layout = BattlegroundMapCatalog.Bg016c;
+
+            rig.Gateway.Players[holder].At = (layout.ZoneX, layout.ZoneY, layout.ZoneZ);
+
+            rig.Advance(rig.Bg.KothTickSeconds);
+            rig.Tick();
+
+            Assert.IsTrue(rig.Gateway.Got(holder, "[Battleground] Blue holds the hill!"), "team 0 is Blue: " + string.Join(" | ", rig.Gateway.Messages.Where(m => m.Id == holder).Select(m => m.Text)));
+
+            var limit = rig.Bg.KothScoreAnnounceSeconds / Math.Max(1, rig.Bg.KothTickSeconds) + 2;
+
+            for (var i = 0; i < limit && !rig.Gateway.Messages.Any(m => m.Id == holder && m.Text.StartsWith("[Battleground] Score: ")); i++)
+            {
+                rig.Advance(rig.Bg.KothTickSeconds);
+                rig.Tick();
+            }
+
+            var score = rig.Gateway.Messages.Last(m => m.Id == holder && m.Text.StartsWith("[Battleground] Score: ")).Text;
+            Assert.AreEqual($"[Battleground] Score: Red {match.ScoreBoard[1]}, Blue {match.ScoreBoard[0]}.", score, "Red first, each score with its own team");
+            Assert.IsTrue(match.ScoreBoard[0] > 0, "fixture: the Blue holder scored");
+        }
+
+        /// <summary>
+        /// Drives: a King of the Hill match to Live under both coin outcomes with a hue-able kit. DISCRIMINATES the two-team hue: both
+        /// teams are dressed, in opposite colours, and which team is Red follows the coin (true: team 0 Red).
+        /// </summary>
+        [TestMethod]
+        public void TeamHue_Koth_BothTeamsDressed_InOppositeColours_FollowingTheCoin()
+        {
+            // The second pair runs with the Tugak palette pool set: King of the Hill must ignore it.
+            foreach (var (coin, withPool) in new[] { (true, false), (false, false), (true, true), (false, true) })
+            {
+                var rig = LiveKoth(out var match, r =>
+                {
+                    r.ColourCoin = coin;
+                    r.Sink.TemplateRows = new List<PvpTemplateRecord> { PvpHueFixtures.Row(DefaultTemplateKey, "1v1,2v2,ffa,bg_koth") };
+                    r.Gateway.PaletteLookup = PvpHueFixtures.Palettes;
+                    r.Gateway.IconLookup = PvpHueFixtures.Icon;
+                    r.HueDials = withPool ? PvpHueFixtures.DialsWithFfaPool : PvpHueFixtures.Dials;
+                });
+
+                PvpTemplateDefinition Worn(uint id) => rig.Gateway.Entered.First(e => e.Id == id).Binding.Template;
+
+                var team0 = rig.Team(match, 0);
+                var team1 = rig.Team(match, 1);
+
+                foreach (var id in team0)
+                    Assert.AreEqual(coin ? 85 : 88, PvpHueFixtures.ChestPalette(Worn(id)), $"coin {coin}: team 0 seat 0x{id:X8}");
+
+                foreach (var id in team1)
+                    Assert.AreEqual(coin ? 88 : 85, PvpHueFixtures.ChestPalette(Worn(id)), $"coin {coin}: team 1 seat 0x{id:X8}");
+
+                Assert.AreNotEqual(PvpHueFixtures.Json(Worn(team0[0])), PvpHueFixtures.Json(Worn(team1[0])), $"coin {coin}: the teams differ");
+                Assert.AreEqual(1, team0.Select(id => PvpHueFixtures.Json(Worn(id))).Distinct().Count(), $"coin {coin}: one team, one look");
+                Assert.AreEqual(1, team1.Select(id => PvpHueFixtures.Json(Worn(id))).Distinct().Count(), $"coin {coin}: one team, one look");
+            }
+        }
+
+        // ================= conduct signals (Docs/Pvp/BATTLEGROUNDS.md "Conduct signals") =================
+
+        /// <summary>Ticks the rig one second at a time, <paramref name="seconds"/> times.</summary>
+        private static void RunSeconds(Rig rig, int seconds)
+        {
+            for (var i = 0; i < seconds; i++)
+            {
+                rig.Advance(1);
+                rig.Tick();
+            }
+        }
+
+        /// <summary>
+        /// The sampler credits EngagedSeconds to the pair standing 10 m apart on opposite teams, one per second, and nothing to the pair whose
+        /// nearest enemy is far beyond the 30 m radius. Everyone stands well off the hill.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_EngagedSeconds_NearAnEnemyOnly()
+        {
+            var rig = LiveKoth(out var match);
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var zone = BattlegroundMapCatalog.Bg016c;
+
+            rig.Gateway.Players[west[0]].At = (zone.ZoneX + 100, zone.ZoneY, zone.ZoneZ);
+            rig.Gateway.Players[east[0]].At = (zone.ZoneX + 110, zone.ZoneY, zone.ZoneZ);
+            rig.Gateway.Players[west[1]].At = (zone.ZoneX - 100, zone.ZoneY + 300, zone.ZoneZ);
+            rig.Gateway.Players[east[1]].At = (zone.ZoneX - 100, zone.ZoneY - 300, zone.ZoneZ);
+
+            RunSeconds(rig, 5);
+
+            Assert.AreEqual(5, Perf(match, west[0]).EngagedSeconds, "10 m from an enemy: engaged every second");
+            Assert.AreEqual(5, Perf(match, east[0]).EngagedSeconds);
+            Assert.AreEqual(0, Perf(match, west[1]).EngagedSeconds, "600 m from the nearest enemy");
+            Assert.AreEqual(0, Perf(match, east[1]).EngagedSeconds);
+        }
+
+        /// <summary>Standing on the hill is engaged time and keeps the seat active, with no enemy anywhere near.</summary>
+        [TestMethod]
+        public void Conduct_OnTheHill_IsEngagedAndActive()
+        {
+            var rig = LiveKoth(out var match);
+            var holder = rig.Team(match, 0)[0];
+            var zone = BattlegroundMapCatalog.Bg016c;
+
+            foreach (var id in match.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId))
+                rig.Gateway.Players[id].At = (zone.ZoneX + 150, zone.ZoneY + 150, zone.ZoneZ);
+
+            rig.Gateway.Players[holder].At = (zone.ZoneX, zone.ZoneY, zone.ZoneZ);
+
+            RunSeconds(rig, 4);
+
+            Assert.AreEqual(4, Perf(match, holder).EngagedSeconds);
+            Assert.AreEqual(rig.Now, rig.Coordinator.ConductLastActiveUtc(holder), "on the objective: active now");
+
+            var idler = rig.Team(match, 1)[0];
+            Assert.AreEqual(match.LiveSinceUtc, rig.Coordinator.ConductLastActiveUtc(idler), "the idle enemy's clock has not moved since Live");
+        }
+
+        /// <summary>
+        /// Movement is not activity; a stamp from the player side is. A player who runs about for 10 seconds stays idle since Live; once the
+        /// player-side stamp (carried on the zone sample) says they hit someone, the seat's last-active time is that stamp.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_MovementIsNotActivity_TheStampIs()
+        {
+            var rig = LiveKoth(out var match);
+            var runner = rig.Team(match, 0)[0];
+            var zone = BattlegroundMapCatalog.Bg016c;
+
+            for (var i = 0; i < 10; i++)
+            {
+                rig.Gateway.Players[runner].At = (zone.ZoneX + 40 + i * 7, zone.ZoneY + 40, zone.ZoneZ);
+                RunSeconds(rig, 1);
+            }
+
+            Assert.AreEqual(match.LiveSinceUtc, rig.Coordinator.ConductLastActiveUtc(runner), "ten seconds of running: still idle since Live");
+
+            var hitAt = rig.Now;
+            rig.Gateway.Players[runner].Activity = new PvpActivityStamp(match.MatchId, hitAt);
+            RunSeconds(rig, 2);
+
+            Assert.AreEqual(hitAt, rig.Coordinator.ConductLastActiveUtc(runner), "the stamp is the last activity");
+
+            rig.Gateway.Players[runner].Activity = new PvpActivityStamp(Guid.NewGuid(), rig.Now);
+            RunSeconds(rig, 2);
+
+            Assert.AreEqual(hitAt, rig.Coordinator.ConductLastActiveUtc(runner), "a stamp from another match does not count");
+        }
+
+        /// <summary>
+        /// The pen freezes the idle clock and a confirmed respawn resets it: idle time is the same leaving the pen as entering it (no growth over
+        /// the 30 s respawn), and the confirm sets last-active to the confirm time.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_PenFreezes_RespawnResets()
+        {
+            var rig = LiveKoth(out var match);
+            var victim = rig.Team(match, 0)[0];
+            var killer = rig.Team(match, 1)[0];
+            var zone = BattlegroundMapCatalog.Bg016c;
+
+            foreach (var id in match.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId))
+                rig.Gateway.Players[id].At = (zone.ZoneX + 150, zone.ZoneY + 150, zone.ZoneZ);
+
+            RunSeconds(rig, 10);
+
+            var idleAtDeath = (rig.Now - rig.Coordinator.ConductLastActiveUtc(victim).Value).TotalSeconds;
+            Assert.IsTrue(idleAtDeath >= 9, $"fixture: idle about 10 s before the death ({idleAtDeath})");
+
+            Kill(rig, victim, match, killer);
+            ArriveInPen(rig, victim);
+
+            var idleInPen = (rig.Now - rig.Coordinator.ConductLastActiveUtc(victim).Value).TotalSeconds;
+
+            RunSeconds(rig, rig.Bg.RespawnSeconds - 5);
+
+            Assert.AreEqual(idleInPen, (rig.Now - rig.Coordinator.ConductLastActiveUtc(victim).Value).TotalSeconds, 1.0, "the pen does not add idle time");
+
+            var other = rig.Team(match, 0)[1];
+            Assert.IsTrue((rig.Now - rig.Coordinator.ConductLastActiveUtc(other).Value).TotalSeconds > idleInPen + 20, "control: an idle teammate out of the pen keeps accruing");
+
+            DateTime? confirmedAt = null;
+
+            for (var i = 0; i < 20 && confirmedAt == null; i++)
+            {
+                RunSeconds(rig, 1);
+
+                if (rig.Gateway.LastBinding(victim)?.Respawning == false && rig.Gateway.Respawns.Any(r => r.Id == victim))
+                    confirmedAt = rig.Now;
+            }
+
+            Assert.IsNotNull(confirmedAt, "fixture: the respawn was confirmed");
+            Assert.AreEqual(confirmedAt, rig.Coordinator.ConductLastActiveUtc(victim), "a confirmed respawn restarts the idle clock");
+        }
+
+        // ================= conduct enforcement: idle and feeding removal (Docs/Pvp/BATTLEGROUNDS.md "Conduct") =================
+
+        /// <summary>
+        /// Ticks the rig one second at a time, <paramref name="seconds"/> times, stamping fresh PvP activity on every id in
+        /// <paramref name="active"/> before each tick (as a hit or a heal would), so only the others idle.
+        /// </summary>
+        private static void RunActive(Rig rig, PvpMatch match, int seconds, params uint[] active)
+        {
+            for (var i = 0; i < seconds; i++)
+            {
+                rig.Advance(1);
+
+                foreach (var id in active)
+                    rig.Gateway.Players[id].Activity = new PvpActivityStamp(match.MatchId, rig.Now);
+
+                rig.Tick();
+            }
+        }
+
+        private static PvpParticipant Participant(PvpMatch match, uint id) => match.Teams.SelectMany(t => t.Members).Single(p => p.CharacterId == id);
+
+        private static int IdleWarnings(Rig rig, uint id) => rig.Gateway.Messages.Count(m => m.Id == id && m.Text.StartsWith("[Arena] You are idle."));
+
+        /// <summary>Everyone well off the hill (no objective presence), standing together.</summary>
+        private static void OffTheHill(Rig rig, PvpMatch match)
+        {
+            var zone = BattlegroundMapCatalog.Bg016c;
+
+            foreach (var id in match.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId))
+                rig.Gateway.Players[id].At = (zone.ZoneX + 150, zone.ZoneY + 150, zone.ZoneZ);
+        }
+
+        /// <summary>
+        /// A death that goes through the whole pen cycle: the kill, the arrival in the pen, then one-second ticks (the active ids stamped)
+        /// until the respawn is confirmed. Returns at once when the death took the seat out of the match.
+        /// </summary>
+        private static void DieAndRespawn(Rig rig, PvpMatch match, uint victim, uint killer, params uint[] active)
+        {
+            var respawnsBefore = rig.Gateway.Respawns.Count(r => r.Id == victim);
+
+            Kill(rig, victim, match, killer);
+
+            if (Participant(match, victim).ExitReason.HasValue)
+                return;
+
+            ArriveInPen(rig, victim);
+
+            for (var i = 0; i < 600; i++)
+            {
+                RunActive(rig, match, 1, active);
+
+                if (rig.Gateway.Respawns.Count(r => r.Id == victim) > respawnsBefore && rig.Gateway.LastBinding(victim)?.Respawning == false)
+                    return;
+            }
+
+            Assert.Fail("fixture: the respawn was never confirmed");
+        }
+
+        /// <summary>
+        /// THE IDLE RULE. With the three others active every second, the idler is warned exactly once at 60 s idle (the shipped dials), with the
+        /// seconds left computed from the dials (90 - 60 = 30), and removed at 90 s: ForfeitInactive, exited AND returned like /arena leave,
+        /// told why, everyone told who and why, the hook fired once. The saved row carries forfeit reason "inactive". Ticking on removes
+        /// nothing twice.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_WarnsOnceAt60_RemovesAt90_AsInactive()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults);
+            var removals = new List<(uint Id, ParticipantExit How)>();
+            rig.Coordinator.ConductRemoved += (id, how) => removals.Add((id, how));
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            RunActive(rig, match, 59, active);
+            Assert.AreEqual(0, IdleWarnings(rig, idler), "59 s idle: no warning yet");
+
+            RunActive(rig, match, 1, active);
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "60 s idle: warned");
+            Assert.IsTrue(rig.Gateway.Got(idler, "[Arena] You are idle. Fight, heal, or hold the objective within 30 seconds or you will be removed from the match."));
+            Assert.IsTrue(active.All(id => IdleWarnings(rig, id) == 0), "the active seats are never warned");
+
+            RunActive(rig, match, 29, active);
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "exactly ONE warning per idle stretch");
+            Assert.IsNull(Participant(match, idler).ExitReason, "89 s idle: still in");
+
+            RunActive(rig, match, 1, active);
+
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, idler).ExitReason, "90 s idle: removed");
+            CollectionAssert.Contains(rig.Gateway.Exited, idler);
+            CollectionAssert.Contains(rig.Gateway.Returned, idler, "returned to the stamped exit, like /arena leave");
+            Assert.IsTrue(rig.Gateway.Got(idler, PvpArenaText.RemovedInactiveYou));
+            Assert.IsTrue(rig.Gateway.Got(west[1], $"[Arena] {NameOf(rig, idler)} was removed from the match for inactivity."), "the team hears it");
+            Assert.IsTrue(east.All(id => rig.Gateway.Got(id, $"[Arena] {NameOf(rig, idler)} was removed from the match for inactivity.")), "the whole match hears it");
+            CollectionAssert.AreEqual(new[] { (idler, ParticipantExit.ForfeitInactive) }, removals);
+            Assert.AreEqual(PvpMatchState.Live, match.State, "the match carries on");
+
+            RunActive(rig, match, 30, active);
+            Assert.AreEqual(1, removals.Count, "never removed twice");
+            Assert.AreEqual(1, rig.Gateway.Messages.Count(m => m.Id == idler && m.Text == PvpArenaText.RemovedInactiveYou));
+            Assert.AreEqual(1, rig.Gateway.Returned.Count(id => id == idler), "one return trip");
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var parts = rig.Sink.Saves.Single().Parts;
+            Assert.AreEqual("inactive", parts.Single(p => p.CharacterId == idler).ForfeitReason);
+            Assert.IsTrue(parts.Where(p => p.CharacterId != idler).All(p => p.ForfeitReason == null), "nobody else forfeited");
+        }
+
+        private static string NameOf(Rig rig, uint id) => rig.Gateway.Players[id].Facts.Name;
+
+        /// <summary>
+        /// Activity resets the idle stretch and re-arms the warning: warned at 60, active again at 75, so the next warning is at 75 + 60 = 135
+        /// and the removal at 75 + 90 = 165, not at 90.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_ActivityAt75_ResetsAndRearmsTheWarning()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults);
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            RunActive(rig, match, 74, active);
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "fixture: warned once by 74 s");
+
+            // One tick with the idler active too: a hit at 75 s.
+            RunActive(rig, match, 1, active.Append(idler).ToArray());
+            Assert.AreEqual(rig.Now, rig.Coordinator.ConductLastActiveUtc(idler), "fixture: active at 75 s");
+
+            RunActive(rig, match, 59, active);
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "59 s into the new stretch: no second warning yet");
+            Assert.IsNull(Participant(match, idler).ExitReason, "well past 90 s since Live, but active at 75 s: still in");
+
+            RunActive(rig, match, 1, active);
+            Assert.AreEqual(2, IdleWarnings(rig, idler), "the warning re-armed and fired at 60 s into the new stretch");
+
+            RunActive(rig, match, 29, active);
+            Assert.IsNull(Participant(match, idler).ExitReason, "89 s into the new stretch: still in");
+
+            RunActive(rig, match, 1, active);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, idler).ExitReason, "90 s into the new stretch: removed");
+        }
+
+        /// <summary>
+        /// HARD INVARIANT: a respawn never causes removal, even with a 120 s respawn timer (longer than the 90 s removal). The victim idles
+        /// 50 s, dies, waits out the whole 120 s pen and respawns; nobody warns or removes them, and their next idle stretch starts at the
+        /// confirm. Disabling BOTH the sampler's pen freeze and the enforcement's pen skip fails this.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_RespawnTimerOf120s_NeverRemoves()
+        {
+            var rig = LiveKoth(out var match, r =>
+            {
+                r.Conduct = PvpConductTunables.Defaults;
+                r.Bg = r.Bg with { RespawnSeconds = 120 };
+            });
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var victim = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            RunActive(rig, match, 50, active);
+
+            var diedAt = rig.Now;
+            DieAndRespawn(rig, match, victim, east[0], active);
+
+            Assert.IsTrue((rig.Now - diedAt).TotalSeconds >= 120, $"fixture: the pen lasted the whole 120 s timer ({(rig.Now - diedAt).TotalSeconds} s)");
+            Assert.IsNull(Participant(match, victim).ExitReason, "the respawn did not remove them");
+            Assert.AreEqual(0, IdleWarnings(rig, victim), "nor warn them");
+
+            RunActive(rig, match, 59, active);
+            Assert.AreEqual(0, IdleWarnings(rig, victim), "the idle stretch restarted at the confirmed respawn");
+            Assert.IsNull(Participant(match, victim).ExitReason);
+        }
+
+        /// <summary>
+        /// HARD INVARIANT: teleporting (portal space) never accrues idle time. 50 s idle, 120 s in portal space, 39 s idle again: 89 s of idle
+        /// time, still in; the 40th second makes 90 and removes them. Counting the teleport would have removed them inside it.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_TeleportingNeverAccrues()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults);
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            RunActive(rig, match, 50, active);
+
+            rig.Gateway.Players[idler].Teleporting = true;
+            RunActive(rig, match, 120, active);
+            rig.Gateway.Players[idler].Teleporting = false;
+
+            Assert.IsNull(Participant(match, idler).ExitReason, "120 s in portal space added no idle time");
+
+            RunActive(rig, match, 39, active);
+            Assert.IsNull(Participant(match, idler).ExitReason, "89 s of idle time outside portal space: still in");
+
+            RunActive(rig, match, 1, active);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, idler).ExitReason, "90 s: removed");
+        }
+
+        /// <summary>
+        /// A stalled coordinator (one 120 s clock jump, one tick) is not idleness: with the shipped dials nobody is warned or removed, and
+        /// the jump added at most PvpConductSampler.MaxIdleSecondsPerSample of idle time. Removing the cap fails this.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_A120sClockJump_RemovesNobody()
+        {
+            var rig = LiveKoth(out var match);
+            OffTheHill(rig, match);
+
+            var everyone = match.Teams.SelectMany(t => t.Members).Select(p => p.CharacterId).ToArray();
+
+            rig.Advance(120);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.Live, match.State, "fixture: still Live");
+            Assert.IsTrue(everyone.All(id => Participant(match, id).ExitReason == null), "nobody removed by the jump");
+            Assert.IsTrue(everyone.All(id => IdleWarnings(rig, id) == 0), "nobody warned by the jump");
+            Assert.IsTrue(everyone.All(id => (rig.Now - rig.Coordinator.ConductLastActiveUtc(id).Value).TotalSeconds <= PvpConductSampler.MaxIdleSecondsPerSample),
+                "the jump added at most the per-sample cap of idle time");
+        }
+
+        /// <summary>
+        /// Puts <paramref name="idler"/> at exactly 89.5 s idle on a sample tick (Live + 90 s), off the sampler's whole-second phase: a hit
+        /// half a second after Live, then whole-second ticks with the others active. Warned, not removed.
+        /// </summary>
+        private static void IdleTo89Point5(Rig rig, PvpMatch match, uint idler, uint[] active)
+        {
+            rig.Advance(0.5);
+            rig.Gateway.Players[idler].Activity = new PvpActivityStamp(match.MatchId, rig.Now);
+            rig.Advance(0.5);
+
+            foreach (var id in active)
+                rig.Gateway.Players[id].Activity = new PvpActivityStamp(match.MatchId, rig.Now);
+
+            rig.Tick();
+            RunActive(rig, match, 89, active);
+
+            Assert.AreEqual(89.5, (rig.Now - rig.Coordinator.ConductLastActiveUtc(idler).Value).TotalSeconds, 1e-9, "fixture: 89.5 s idle");
+            Assert.IsNull(Participant(match, idler).ExitReason, "fixture: still in");
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "fixture: warned");
+        }
+
+        /// <summary>
+        /// F1(a): a frozen seat is never judged. At 89.5 s idle the player starts teleporting (or dies); the clock then steps 0.9, 0.9,
+        /// 1.1 and 1.1 s. The freeze pushes last-active by whole due seconds while now moves by the real fraction, so the computed idle
+        /// time reaches 90.3 s on the second step; judging only STANDING seats keeps them in. Judging every seat fails this.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(false)]
+        [DataRow(true)]
+        public void Conduct_Idle_FrozenSeat_IsNotJudged_OnPhaseDrift(bool dead)
+        {
+            var rig = LiveKoth(out var match);
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            IdleTo89Point5(rig, match, idler, active);
+
+            if (dead)
+                rig.Gateway.Players[idler].Dying = true;
+            else
+                rig.Gateway.Players[idler].Teleporting = true;
+
+            foreach (var step in new[] { 0.9, 0.9, 1.1, 1.1 })
+            {
+                rig.Advance(step);
+
+                foreach (var id in active)
+                    rig.Gateway.Players[id].Activity = new PvpActivityStamp(match.MatchId, rig.Now);
+
+                rig.Tick();
+
+                Assert.IsNull(Participant(match, idler).ExitReason, $"{(dead ? "dead" : "teleporting")}: not judged after a {step} s step");
+            }
+
+            Assert.AreEqual(1, IdleWarnings(rig, idler), "the warning is not re-sent while frozen");
+        }
+
+        /// <summary>
+        /// F1(b): a seat that left the instance belongs to the walkout poll. At 89.5 s idle the player recalls out; the next second would
+        /// make 90.5 s idle, but the seat was not standing, so it ends as ForfeitLeft (no teleport), never ForfeitInactive with a return.
+        /// Judging every seat fails this.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_SeatThatLeftTheInstance_IsAWalkoutNotAnIdleRemoval()
+        {
+            var rig = LiveKoth(out var match);
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            IdleTo89Point5(rig, match, idler, active);
+
+            rig.Gateway.Players[idler].Instance = 0;
+            RunActive(rig, match, 1, active);
+
+            Assert.AreEqual(ParticipantExit.ForfeitLeft, Participant(match, idler).ExitReason);
+            CollectionAssert.DoesNotContain(rig.Gateway.Returned, idler, "a walkout is never teleported");
+            Assert.IsFalse(rig.Gateway.Got(idler, PvpArenaText.RemovedInactiveYou));
+        }
+
+        /// <summary>
+        /// F2: a seam that throws part-way through a removal (ReturnToExit) neither stops the next due seat nor swallows the hook. Two seats
+        /// reach 90 s on the same pass; both are removed and the hook fires once for each.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_ThrowingReturn_StillRemovesTheNextSeat_AndFiresTheHook()
+        {
+            var rig = LiveKoth(out var match);
+            var removals = new List<(uint Id, ParticipantExit How)>();
+            rig.Coordinator.ConductRemoved += (id, how) => removals.Add((id, how));
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var active = new[] { west[1], east[1] };
+
+            rig.Gateway.ReturnThrows = true;
+            RunActive(rig, match, 90, active);
+
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, west[0]).ExitReason);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, east[0]).ExitReason);
+            CollectionAssert.AreEquivalent(new[] { (west[0], ParticipantExit.ForfeitInactive), (east[0], ParticipantExit.ForfeitInactive) }, removals);
+            Assert.AreEqual(2, rig.Gateway.Returned.Count, "both returns were attempted (each threw)");
+        }
+
+        /// <summary>
+        /// F3: the only active member of a team idles out (the teammate already left with /arena leave). The team is eliminated, and the
+        /// match resolves exactly once on that tick: one save, the other team wins, both seats of the empty team carry their forfeit codes.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Idle_LastActiveMemberIdlesOut_ResolvesExactlyOnce()
+        {
+            var rig = LiveKoth(out var match);
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Assert.AreEqual(PvpForfeitOutcome.Forfeited, rig.Coordinator.Forfeit(west[1]).Outcome);
+
+            RunActive(rig, match, 89, east);
+            Assert.AreEqual(PvpMatchState.Live, match.State, "fixture: still Live at 89 s");
+            Assert.AreEqual(0, rig.Sink.Saves.Count);
+
+            RunActive(rig, match, 1, east);
+
+            Assert.AreNotEqual(PvpMatchState.Live, match.State, "the idle removal ended the match");
+            RunActive(rig, match, 5, east);
+
+            var save = rig.Sink.Saves.Single();
+            Assert.AreEqual("inactive", save.Parts.Single(p => p.CharacterId == west[0]).ForfeitReason);
+            Assert.AreEqual("command", save.Parts.Single(p => p.CharacterId == west[1]).ForfeitReason);
+            Assert.IsTrue(east.All(id => save.Parts.Single(p => p.CharacterId == id).Result == "win"), string.Join(",", save.Parts.Select(p => p.Result)));
+            Assert.IsTrue(west.All(id => save.Parts.Single(p => p.CharacterId == id).Result == "loss"));
+        }
+
+        /// <summary>F3: the warning's seconds come from the dials: warn 20 / remove 25 says "within 5 seconds", and removes at 25.</summary>
+        [TestMethod]
+        public void Conduct_Idle_WarningSeconds_ComeFromTheDials()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults with { IdleWarnSeconds = 20, IdleRemoveSeconds = 25 });
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var idler = west[0];
+            var active = new[] { west[1], east[0], east[1] };
+
+            RunActive(rig, match, 20, active);
+            Assert.IsTrue(rig.Gateway.Got(idler, "[Arena] You are idle. Fight, heal, or hold the objective within 5 seconds or you will be removed from the match."));
+
+            RunActive(rig, match, 4, active);
+            Assert.IsNull(Participant(match, idler).ExitReason);
+
+            RunActive(rig, match, 1, active);
+            Assert.AreEqual(ParticipantExit.ForfeitInactive, Participant(match, idler).ExitReason);
+        }
+
+        /// <summary>Idle enforcement off (pvp_conduct_idle_enabled false): a seat idle for 200 s is neither warned nor removed.</summary>
+        [TestMethod]
+        public void Conduct_Idle_Off_NeverWarnsOrRemoves()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults with { IdleEnabled = false });
+            OffTheHill(rig, match);
+
+            var idler = rig.Team(match, 0)[0];
+
+            RunActive(rig, match, 200);
+
+            Assert.AreEqual(0, IdleWarnings(rig, idler));
+            Assert.IsNull(Participant(match, idler).ExitReason);
+        }
+
+        /// <summary>
+        /// THE FEEDING RULE. A seat that dies again and again while its teammate carries the team (C = 0 against the team average) is removed
+        /// on its 4th death (pvp_conduct_feed_min_deaths) and not before: ForfeitFeeding, exited from the pen with NO coordinator teleport (the
+        /// death return takes them home), the hook fired. At the end the removed seat pays 0, takes the perf -cap (forfeit: -20 x 1.25) and its
+        /// row says "feeding". Disabling the C check (always below the share) is caught by the healer test below; removing the death count is
+        /// caught here.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Feeding_RemovesOnTheFourthDeath_PaysNothing_TakesMinusCap()
+        {
+            var rig = LiveKoth(out var match, r =>
+            {
+                BgMarksDials(r);
+                r.Conduct = PvpConductTunables.Defaults with { IdleEnabled = false, EngageRadius = 0 };
+            });
+            var removals = new List<(uint Id, ParticipantExit How)>();
+            rig.Coordinator.ConductRemoved += (id, how) => removals.Add((id, how));
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var feeder = west[0];
+            var carry = west[1];
+
+            match.Performance.CreditKillshot(carry, null, false);
+            match.Performance.CreditPlayerDamage(carry, 400, null);
+
+            for (var death = 1; death <= 3; death++)
+            {
+                DieAndRespawn(rig, match, feeder, east[0]);
+                Assert.IsNull(Participant(match, feeder).ExitReason, $"death {death}: below the death count, never judged");
+            }
+
+            Assert.AreEqual(0, Perf(match, feeder).EngagedSeconds, "fixture: the feeder contributed nothing");
+
+            Kill(rig, feeder, match, east[0]);
+
+            Assert.AreEqual(ParticipantExit.ForfeitFeeding, Participant(match, feeder).ExitReason, "the 4th death removes them");
+            CollectionAssert.Contains(rig.Gateway.ExitedFromPen, feeder, "exited on the way to the pen");
+            CollectionAssert.DoesNotContain(rig.Gateway.Returned, feeder, "never teleported by the coordinator while dying");
+            Assert.IsTrue(rig.Gateway.Got(feeder, PvpArenaText.RemovedFeedingYou));
+            Assert.IsTrue(east.All(id => rig.Gateway.Got(id, $"[Arena] {NameOf(rig, feeder)} was removed from the match for feeding.")));
+            CollectionAssert.AreEqual(new[] { (feeder, ParticipantExit.ForfeitFeeding) }, removals);
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var save = rig.Sink.Saves.Single();
+            Assert.AreEqual("feeding", save.Parts.Single(p => p.CharacterId == feeder).ForfeitReason);
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == feeder), "the removed seat is paid nothing");
+            Assert.IsTrue(rig.Gateway.BloodGrants.Any(g => g.Id == carry), "control: the teammate who stayed is paid");
+            Assert.AreEqual(1475, save.Ratings.Single(r => r.CharacterId == feeder).Rating, "forfeit on the winning team: S = 0, B = -20, x 1.25 (the -cap)");
+        }
+
+        /// <summary>
+        /// A healer who dies a lot is NOT a feeder: six deaths, but C comes from HealingDone (the team's only healing), well above the share.
+        /// Making the C check always pass (C treated as 0) fails this.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_Feeding_HealerWithManyDeaths_IsNotRemoved()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults with { IdleEnabled = false, EngageRadius = 0 });
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            var healer = west[0];
+            var carry = west[1];
+
+            match.Performance.CreditKillshot(carry, null, false);
+            match.Performance.CreditPlayerDamage(carry, 400, null);
+            match.Performance.CreditHealing(healer, 900);
+
+            for (var death = 1; death <= 6; death++)
+            {
+                DieAndRespawn(rig, match, healer, east[0]);
+                Assert.IsNull(Participant(match, healer).ExitReason, $"death {death}: healing keeps C above the share");
+            }
+
+            Assert.IsTrue(Participant(match, healer).ExitReason == null && !rig.Gateway.Got(healer, PvpArenaText.RemovedFeedingYou));
+        }
+
+        /// <summary>Feeding off (pvp_conduct_feed_enabled false): the same zero-contribution seat survives its 4th death.</summary>
+        [TestMethod]
+        public void Conduct_Feeding_Off_NeverRemoves()
+        {
+            var rig = LiveKoth(out var match, r => r.Conduct = PvpConductTunables.Defaults with { IdleEnabled = false, FeedEnabled = false, EngageRadius = 0 });
+            OffTheHill(rig, match);
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            match.Performance.CreditKillshot(west[1], null, false);
+
+            for (var death = 1; death <= 4; death++)
+                DieAndRespawn(rig, match, west[0], east[0]);
+
+            Assert.IsNull(Participant(match, west[0]).ExitReason);
+        }
+
+        /// <summary>
+        /// The new exits are appended (no existing ordinal moves), and EVERY forfeit exit maps to a forfeit_Reason code that fits the
+        /// varchar(32) column; Died maps to none.
+        /// </summary>
+        [TestMethod]
+        public void Conduct_NewExits_AreAppended_AndEveryForfeitHasACode()
+        {
+            Assert.AreEqual(0, (int)ParticipantExit.Died);
+            Assert.AreEqual(3, (int)ParticipantExit.ForfeitCommand);
+            Assert.AreEqual(4, (int)ParticipantExit.ForfeitInactive);
+            Assert.AreEqual(5, (int)ParticipantExit.ForfeitFeeding);
+
+            var code = typeof(PvpMatchCoordinator).GetMethod("ForfeitCode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.IsNotNull(code, "fixture: ForfeitCode found");
+
+            foreach (ParticipantExit exit in Enum.GetValues(typeof(ParticipantExit)))
+            {
+                var s = (string)code.Invoke(null, new object[] { (ParticipantExit?)exit });
+
+                if (exit == ParticipantExit.Died)
+                    Assert.IsNull(s);
+                else
+                {
+                    Assert.IsFalse(string.IsNullOrEmpty(s), $"{exit} has a forfeit code");
+                    Assert.IsTrue(s.Length <= 32, $"{exit}: {s}");
+                }
+            }
+        }
+
+        /// <summary>Resolve writes one perf line per seat, in the documented format, and the stats change no rating or result.</summary>
+        [TestMethod]
+        public void Resolve_WritesOnePerfLinePerSeat()
+        {
+            var rig = LiveKoth(out var match);
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var killer = rig.Team(match, 1)[0];
+
+            Kill(rig, rig.Team(match, 0)[0], match, killer);
+
+            match.ScoreBoard[1] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            // Since the rating modifier (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance") a perf_mod: line per seat follows the four perf lines.
+            var perfLines = lines.Where(l => l.StartsWith($"[PVP] match {match.MatchId} perf: ")).ToList();
+            Assert.AreEqual(4, perfLines.Count, string.Join(" | ", lines));
+            Assert.AreEqual(4, lines.Count(l => l.StartsWith($"[PVP] match {match.MatchId} perf_mod: ")), string.Join(" | ", lines));
+            Assert.IsTrue(lines.Take(4).SequenceEqual(perfLines), "the stats come first, before the rating is computed");
+            StringAssert.Contains(perfLines.Single(l => l.Contains($"(0x{killer:X8})")), ", kills 1,");
+            Assert.AreEqual(4, rig.Sink.Saves.Single().Ratings.Count, "control: the match was still rated as before");
+        }
+
+        // ================= rating and performance (Docs/Pvp/BATTLEGROUNDS.md "Rating and performance") =================
+
+        /// <summary>One top and one bottom performer per team: the top seat of each team does everything the ledger counts, the other nothing.</summary>
+        private static (uint WestTop, uint WestBottom, uint EastTop, uint EastBottom) CreditTopAndBottom(Rig rig, PvpMatch match)
+        {
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            foreach (var top in new[] { west[0], east[0] })
+            {
+                match.Performance.CreditHillSeconds(top, 100);
+                match.Performance.CreditPlayerDamage(top, 500, null);
+                match.Performance.CreditKillshot(top, null, false);
+            }
+
+            return (west[0], west[1], east[0], east[1]);
+        }
+
+        private static string RatingLine(uint id, Rig rig) => rig.Gateway.Messages.Single(m => m.Id == id && m.Text.Contains(" rating: ")).Text;
+
+        /// <summary>
+        /// THE WIRING: Resolve builds the modifiers from the ledger and the battleground ladder applies them. Fresh players (K 40, even teams,
+        /// base 20): the owner's example exactly, on the saved rows and in the rating line, which carries the performance suffix. The perf log
+        /// lines carry P and m. Removing the PerformanceModifier argument in Resolve turns every delta back into +/-20 and fails this.
+        /// </summary>
+        [TestMethod]
+        public void Resolve_AppliesThePerformanceModifier_OwnersExample()
+        {
+            var rig = LiveKoth(out var match);
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var (westTop, westBottom, eastTop, eastBottom) = CreditTopAndBottom(rig, match);
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+            Assert.AreEqual(1525, ratings[westTop], "winning top performer: +25");
+            Assert.AreEqual(1515, ratings[westBottom], "winning bottom performer: +15");
+            Assert.AreEqual(1485, ratings[eastTop], "losing top performer: -15");
+            Assert.AreEqual(1475, ratings[eastBottom], "losing bottom performer: -25");
+
+            var label = BattlegroundText.ModeLabelBattleground;
+            Assert.AreEqual($"[Arena] {label} rating: 1500 -> 1525 (+25) (performance +25%).", RatingLine(westTop, rig));
+            Assert.AreEqual($"[Arena] {label} rating: 1500 -> 1515 (+15) (performance -25%).", RatingLine(westBottom, rig));
+            Assert.AreEqual($"[Arena] {label} rating: 1500 -> 1485 (-15) (performance +25%).", RatingLine(eastTop, rig));
+            Assert.AreEqual($"[Arena] {label} rating: 1500 -> 1475 (-25) (performance -25%).", RatingLine(eastBottom, rig));
+
+            StringAssert.EndsWith(ModLine(lines, westTop), $"(0x{westTop:X8}) team 0: perf_score 2.000, perf_mod +0.250, perf_applied +0.250");
+            StringAssert.EndsWith(ModLine(lines, eastBottom), $"(0x{eastBottom:X8}) team 1: perf_score 0.000, perf_mod -0.250, perf_applied -0.250");
+        }
+
+        /// <summary>
+        /// pvp_bg_perf_enabled off, turned off AFTER the match formed (the setting is read when the match resolves): the same match rates exactly
+        /// team Elo (+/-20), the line has no suffix and the perf lines carry no rating fields.
+        /// </summary>
+        [TestMethod]
+        public void Resolve_PerformanceOff_IsExactlyTeamElo()
+        {
+            var rig = LiveKoth(out var match);
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var (westTop, westBottom, eastTop, eastBottom) = CreditTopAndBottom(rig, match);
+            rig.Bg = rig.Bg with { PerfEnabled = false };
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+            Assert.AreEqual(1520, ratings[westTop]);
+            Assert.AreEqual(1520, ratings[westBottom]);
+            Assert.AreEqual(1480, ratings[eastTop]);
+            Assert.AreEqual(1480, ratings[eastBottom]);
+            Assert.AreEqual($"[Arena] {BattlegroundText.ModeLabelBattleground} rating: 1500 -> 1520 (+20).", RatingLine(westTop, rig));
+            Assert.IsFalse(lines.Any(l => l.Contains("perf_mod")), string.Join(" | ", lines));
+            Assert.AreEqual(4, lines.Count, "control: the stats lines are still written");
+        }
+
+        private static string ModLine(List<string> lines, uint id) => lines.Single(l => l.Contains(" perf_mod: ") && l.Contains($"(0x{id:X8})"));
+
+        /// <summary>Six solos, formed into 3 v 3, accepted and driven to Live.</summary>
+        private static Rig LiveKoth6(out PvpMatch match)
+        {
+            var rig = new Rig().Build();
+
+            foreach (var (id, name) in new[] { (A, "Alpha"), (B, "Bravo"), (C, "Charlie"), (D, "Delta"), (E, "Echo"), (F, "Foxtrot") })
+                rig.Gateway.Add(id, name);
+
+            rig.JoinAll(A, B, C, D, E, F);
+            rig.Tick();
+
+            Assert.AreEqual(PvpMatchState.AwaitingAccept, rig.MatchOf(A).State, "the six solos formed a match");
+            Assert.AreEqual(3, rig.MatchOf(A).Teams[0].Members.Count, "fixture: 3 v 3");
+
+            rig.AcceptAll(A, B, C, D, E, F);
+            match = rig.DriveAcceptedToLive(A);
+            return rig;
+        }
+
+        /// <summary>
+        /// A 3 v 3 with one leaver on the winning team: the leaver takes -cap (-20 x 1.25 = -25) whatever it did, and the two who stayed
+        /// are compared only with each other (+25 / +15). The leaver's big numbers would otherwise pull the average up. Making the leaver
+        /// eligible in BuildPerformanceModifiers (IsForfeit forced false) fails this.
+        /// </summary>
+        [TestMethod]
+        public void Resolve_Leaver_TakesMinusCap_SurvivorsComparedWithEachOther()
+        {
+            var rig = LiveKoth6(out var match);
+            var west = rig.Team(match, 0);
+            var (top, idle, leaver) = (west[0], west[1], west[2]);
+
+            match.Performance.CreditHillSeconds(top, 100);
+            match.Performance.CreditPlayerDamage(top, 500, null);
+            match.Performance.CreditKillshot(top, null, false);
+            match.Performance.CreditHillSeconds(leaver, 5000);
+            match.Performance.CreditPlayerDamage(leaver, 90000, null);
+
+            Assert.AreEqual(PvpForfeitOutcome.Forfeited, rig.Coordinator.Forfeit(leaver).Outcome);
+            rig.Tick();
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+            Assert.AreEqual(1475, ratings[leaver], "forfeit: S = 0, B = -20, x 1.25");
+            Assert.AreEqual(1525, ratings[top], "compared only with the idle survivor: P = 2");
+            Assert.AreEqual(1515, ratings[idle]);
+        }
+
+        /// <summary>
+        /// An unrated battleground (opposing teams on one IP, with the same-IP block off): no rating moves, and the perf_mod: lines say
+        /// "perf_applied -".
+        /// </summary>
+        [TestMethod]
+        public void Resolve_Unrated_LogsNoAppliedModifier()
+        {
+            var rig = LiveKoth(out var match, r => r.Dials = r.Dials with { BlockSameIp = false }, sharedIp: "10.9.9.9");
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            Assert.IsFalse(rig.Sink.Saves.Single().Match.Rated, "fixture: unrated");
+            var modLines = lines.Where(l => l.Contains(" perf_mod: ")).ToList();
+            Assert.AreEqual(4, modLines.Count, string.Join(" | ", lines));
+            Assert.IsTrue(modLines.All(l => l.EndsWith(", perf_applied -")), string.Join(" | ", modLines));
+        }
+
+        /// <summary>
+        /// Building the modifiers throws: the match still rates, on team Elo alone (+/-20, no suffix), and the stats lines are still written
+        /// because they come before the rating.
+        /// </summary>
+        [TestMethod]
+        public void Resolve_ModifierThrows_FallsBackToTeamElo()
+        {
+            var rig = LiveKoth(out var match);
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            rig.Coordinator.PerformanceModifierFaultForTest = _ => throw new InvalidOperationException("scripted modifier fault");
+            var (westTop, westBottom, eastTop, eastBottom) = CreditTopAndBottom(rig, match);
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var ratings = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+            Assert.AreEqual(1520, ratings[westTop]);
+            Assert.AreEqual(1520, ratings[westBottom]);
+            Assert.AreEqual(1480, ratings[eastTop]);
+            Assert.AreEqual(1480, ratings[eastBottom]);
+            Assert.AreEqual($"[Arena] {BattlegroundText.ModeLabelBattleground} rating: 1500 -> 1520 (+20).", RatingLine(westTop, rig));
+            Assert.AreEqual(4, lines.Count(l => l.Contains(" perf: ")), "the stats survive");
+            Assert.IsFalse(lines.Any(l => l.Contains(" perf_mod: ")));
+        }
+
+        /// <summary>Even stats: every modifier is 0, so the deltas are team Elo's and the rating line shows no suffix.</summary>
+        [TestMethod]
+        public void Resolve_EvenPerformance_ShowsNoSuffix()
+        {
+            var rig = LiveKoth(out var match);
+
+            match.ScoreBoard[1] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            foreach (var id in rig.Team(match, 1))
+                Assert.AreEqual($"[Arena] {BattlegroundText.ModeLabelBattleground} rating: 1500 -> 1520 (+20).", RatingLine(id, rig));
+        }
+
         /// <summary>
         /// THE RISK ROW: a republish while a seat respawns must keep Respawning. Reached through Resolve's Publish
         /// (Resolving) with one seat dying and one in the pen: both bindings carry Respawning = true and the pen.
@@ -995,7 +2106,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.AreEqual(nameof(EndReason.Timeout), save.Match.EndReason);
             Assert.AreEqual("win", save.Match.Outcome);
             Assert.AreEqual("win", save.Parts.Single(p => p.CharacterId == rig.Team(match, 0)[0]).Result);
-            Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Text == BattlegroundText.TimeUpWin(0, 40, 10)), "the battleground timeout line, not the FFA one");
+            Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Text == "[Battleground] Time is up. Red wins, Red 40, Blue 10."), "the battleground timeout line, not the FFA one, naming team 0 by its colour");
             Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text == PvpArenaText.TimeUpFfa));
         }
 
@@ -1033,7 +2144,7 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             Assert.IsTrue(save.Match.Rated, "a timeout draw is rated (ruling 11)");
             Assert.AreEqual(4, save.Ratings.Count);
             Assert.IsTrue(save.Ratings.All(r => r.Draws == 1 && r.Games == 1));
-            Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Text == BattlegroundText.TimeUpDraw(0, 0)));
+            Assert.IsTrue(rig.Gateway.Messages.Any(m => m.Text == "[Battleground] Time is up. The match is a draw, Red 0, Blue 0."));
         }
 
         /// <summary>The rating line names the shared battleground ladder ("Battleground rating"), never the mode ("King of the Hill rating").</summary>
@@ -1060,6 +2171,330 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
             r.Bg = r.Bg with { MarksWin = 7, MarksLoss = 3, MarksDraw = 5, MarksDailyCap = 4 };
         }
 
+        // ================= contribution floor on the Marks payout (Docs/Pvp/BATTLEGROUNDS.md "Contribution floor") =================
+
+        private static void Credit(PvpMatch match, uint id, int dmg = 0, int hill = 0, int engaged = 0, int healing = 0)
+        {
+            if (dmg > 0)
+                match.Performance.CreditPlayerDamage(id, (uint)dmg, null);
+
+            if (hill > 0)
+                match.Performance.CreditHillSeconds(id, hill);
+
+            if (engaged > 0)
+                match.Performance.CreditEngagedSeconds(id, engaged);
+
+            if (healing > 0)
+                match.Performance.CreditHealing(id, (uint)healing);
+        }
+
+        /// <summary>West wins. West seat 0 works; west seat 1 does nothing; both east seats do some. Returns the rig, the match and the lines.</summary>
+        private static (Rig Rig, PvpMatch Match, List<string> Lines) FloorScenario(bool floorEnabled, Action<Rig, PvpMatch> credit = null)
+        {
+            var rig = LiveKoth(out var match, r => { BgMarksDials(r); r.Conduct = r.Conduct with { FloorEnabled = floorEnabled }; });
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            if (credit != null)
+                credit(rig, match);
+            else
+            {
+                Credit(match, west[0], dmg: 500, hill: 100, engaged: 100);
+                Credit(match, east[0], dmg: 100, engaged: 100);
+                Credit(match, east[1], dmg: 100, engaged: 100);
+            }
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+            return (rig, match, lines);
+        }
+
+        /// <summary>
+        /// THE WIRING. A seat that did nothing gets 0 Marks AND no grant call at all (so the daily cap is never consumed), hears the one line,
+        /// and its decision is logged. Its teammate's and the opponents' Marks are exactly what they were. Making BgMarksFor ignore
+        /// <c>withheld</c>, or skipping the floor evaluation in PayBattlegroundMarks, fails this.
+        /// </summary>
+        [TestMethod]
+        public void Floor_Marks_BelowFloorSeatGetsNoGrant_TeammatesUnchanged()
+        {
+            var (rig, match, lines) = FloorScenario(floorEnabled: true);
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == west[1]), "no grant call for the withheld seat");
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Count);
+            Assert.AreEqual(7, rig.Gateway.BloodGrants.Single(g => g.Id == west[0]).Amount, "the working teammate is paid as before");
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Single(g => g.Id == east[0]).Amount);
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Single(g => g.Id == east[1]).Amount);
+
+            Assert.AreEqual(1, rig.Gateway.Messages.Count(m => m.Id == west[1] && m.Text == "[Arena] No reward: your contribution this match was below the minimum."));
+            Assert.AreEqual(0, rig.Gateway.Messages.Count(m => m.Id != west[1] && m.Text.Contains("No reward")), "nobody else hears it");
+
+            var line = lines.Single(l => l.Contains(" conduct_floor: ") && l.Contains($"(0x{west[1]:X8})"));
+            StringAssert.Contains(line, "WITHHELD");
+            StringAssert.Contains(line, "engaged_s=0");
+            Assert.AreEqual(4, lines.Count(l => l.Contains(" conduct_floor: ")), "one decision line per seat");
+        }
+
+        /// <summary>
+        /// Drives: a King of the Hill match to Live, team 0 reaches the score target, Tick. Exactly one result line goes to /lfg from the
+        /// Crier (the periodic Crier is off), naming each side's team label and characters.
+        /// </summary>
+        [TestMethod]
+        public void CrierResult_BattlegroundMatch_SendsOneLfgLine()
+        {
+            var crier = new RecordingCrier();
+            var rig = LiveKoth(out var match, r => r.Crier = crier);
+            Assert.IsFalse(rig.Dials.CrierEnabled, "control: the periodic Crier is off");
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            Assert.AreEqual(1, crier.Lines.Count, string.Join(" | ", crier.Lines));
+            var line = crier.Lines[0];
+            StringAssert.StartsWith(line, "King of the Hill: Red team (");
+            StringAssert.Contains(line, ") defeated Blue team (");
+            Assert.IsTrue(line.EndsWith(")."), line);
+            foreach (var name in new[] { "Alpha", "Bravo", "Charlie", "Delta" })
+                StringAssert.Contains(line, name);
+        }
+
+        /// <summary>
+        /// Same scenario with every Marks amount 0: the floor is STILL evaluated (the dailies engine reads below-floor), but nothing is owed, so
+        /// the log says "below floor" and never "WITHHELD", no grant is made and no "No reward" line is sent. The positive control is the test above.
+        /// </summary>
+        [TestMethod]
+        public void Floor_ZeroAmounts_LogsBelowFloorNotWithheld_AndSendsNothing()
+        {
+            var rig = LiveKoth(out var match, r =>
+            {
+                BgMarksDials(r);
+                r.Bg = r.Bg with { MarksWin = 0, MarksLoss = 0, MarksDraw = 0 };
+                r.Conduct = r.Conduct with { FloorEnabled = true };
+            });
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Credit(match, west[0], dmg: 500, hill: 100, engaged: 100);
+            Credit(match, east[0], dmg: 100, engaged: 100);
+            Credit(match, east[1], dmg: 100, engaged: 100);
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var line = lines.Single(l => l.Contains(" conduct_floor: ") && l.Contains($"(0x{west[1]:X8})"));
+            StringAssert.Contains(line, "below floor");
+            Assert.IsFalse(line.Contains("WITHHELD"), "nothing is owed, so nothing is withheld");
+            Assert.AreEqual(0, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")), "the player message stays suppressed");
+            Assert.AreEqual(1, lines.Count(l => l.Contains(" conduct_floor: ") && l.Contains($"(0x{west[1]:X8})")), "the decision is logged once, though the payout and the daily facts both read it");
+            Assert.IsFalse(rig.Gateway.DailyFacts.Any(f => f.CharacterId == west[1]), "below the floor still means no daily-quest progress at 0 amounts");
+            Assert.IsTrue(rig.Gateway.DailyFacts.Any(f => f.CharacterId == west[0]), "control: the working teammate gets its facts");
+        }
+
+        /// <summary>
+        /// The master switch off: the payout returns before it reaches the floor, so the PvP daily facts evaluate it first. No Marks are owed
+        /// to anyone, so the below-floor seat is logged "below floor", never "WITHHELD", once; it still gets no daily facts while its working
+        /// teammate does. Positive control for the "WITHHELD" wording: Floor_Marks_BelowFloorSeatGetsNoGrant_TeammatesUnchanged.
+        /// </summary>
+        [TestMethod]
+        public void Floor_BloodSwitchOff_FactsEvaluateFirst_LogBelowFloorNotWithheld()
+        {
+            var rig = LiveKoth(out var match, r =>
+            {
+                BgMarksDials(r, enabled: false);
+                r.Conduct = r.Conduct with { FloorEnabled = true };
+            });
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Credit(match, west[0], dmg: 500, hill: 100, engaged: 100);
+            Credit(match, east[0], dmg: 100, engaged: 100);
+            Credit(match, east[1], dmg: 100, engaged: 100);
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            var floorLines = lines.Where(l => l.Contains(" conduct_floor: ") && l.Contains($"(0x{west[1]:X8})")).ToList();
+            Assert.AreEqual(1, floorLines.Count, "the floor was evaluated (by the daily facts) and logged once");
+            StringAssert.Contains(floorLines[0], "below floor");
+            Assert.IsFalse(floorLines[0].Contains("WITHHELD"), "the switch is off, so no Marks were owed to withhold");
+            Assert.AreEqual(0, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.DailyFacts.Any(f => f.CharacterId == west[1]), "below the floor: no daily facts");
+            Assert.IsTrue(rig.Gateway.DailyFacts.Any(f => f.CharacterId == west[0]), "control: the switch does not gate the daily facts");
+        }
+
+        /// <summary>
+        /// One seat's amount computation throws (the SeatPayoutFaultForTest seam, standing in for e.g. a team index missing from Placements).
+        /// That seat alone is paid nothing; the floor still runs for everyone else, so the idle below-floor seat is STILL withheld (no grant,
+        /// the "No reward" line, WITHHELD in the log) and the other two seats are paid as usual. Fails if the fault can reach the floor's
+        /// try block, whose catch returns "nobody withheld" for the whole match.
+        /// </summary>
+        [TestMethod]
+        public void Floor_OneSeatsAmountThrows_OtherBelowFloorSeatsAreStillWithheld()
+        {
+            var rig = LiveKoth(out var match, r => { BgMarksDials(r); r.Conduct = r.Conduct with { FloorEnabled = true }; });
+            var lines = new List<string>();
+            rig.Coordinator.PerformanceLogSink = lines.Add;
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+            rig.Coordinator.SeatPayoutFaultForTest = id =>
+            {
+                if (id == east[0])
+                    throw new InvalidOperationException("test fault");
+            };
+
+            Credit(match, west[0], dmg: 500, hill: 100, engaged: 100);
+            Credit(match, east[0], dmg: 100, engaged: 100);
+            Credit(match, east[1], dmg: 100, engaged: 100);
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == west[1]), "the below-floor seat is still withheld");
+            Assert.AreEqual(1, rig.Gateway.Messages.Count(m => m.Id == west[1] && m.Text == "[Arena] No reward: your contribution this match was below the minimum."));
+            StringAssert.Contains(lines.Single(l => l.Contains(" conduct_floor: ") && l.Contains($"(0x{west[1]:X8})")), "WITHHELD");
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == east[0]), "the faulted seat is paid nothing");
+            Assert.AreEqual(7, rig.Gateway.BloodGrants.Single(g => g.Id == west[0]).Amount, "control: the working winner is paid");
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Single(g => g.Id == east[1]).Amount, "control: the other loser is paid");
+            Assert.AreEqual(2, rig.Gateway.BloodGrants.Count);
+        }
+
+        /// <summary>The floor costs nobody rating: the saved rows are identical with the floor on and off.</summary>
+        [TestMethod]
+        public void Floor_RatingIsUnchanged_VersusFloorDisabled()
+        {
+            var on = FloorScenario(floorEnabled: true);
+            var off = FloorScenario(floorEnabled: false);
+
+            // The matchmaker seats the four players differently each run, so compare by ROLE (team, seat), not by character id.
+            static List<int> ByRole(Rig rig, PvpMatch match)
+            {
+                var byId = rig.Sink.Saves.Single().Ratings.ToDictionary(r => r.CharacterId, r => r.Rating);
+                return new[] { rig.Team(match, 0)[0], rig.Team(match, 0)[1], rig.Team(match, 1)[0], rig.Team(match, 1)[1] }.Select(id => byId[id]).ToList();
+            }
+
+            var onRows = ByRole(on.Rig, on.Match);
+            var offRows = ByRole(off.Rig, off.Match);
+
+            Assert.AreEqual(4, onRows.Count);
+            CollectionAssert.AreEqual(offRows, onRows);
+            Assert.AreEqual(4, off.Rig.Gateway.BloodGrants.Count, "control: with the floor off the slacker is paid");
+        }
+
+        /// <summary>A whole team that did nothing is withheld by the absolute test (every average is 0, so there is no C); the other team is paid.</summary>
+        [TestMethod]
+        public void Floor_Marks_AllAfkTeamIsWithheld_OtherTeamPaid()
+        {
+            var (rig, match, _) = FloorScenario(true, (r, m) =>
+            {
+                foreach (var id in r.Team(m, 1))
+                    Credit(m, id, dmg: 100, engaged: 100);
+
+                r.Advance(120); // long enough that the scaled absolute threshold is the full 30 s dial
+            });
+
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => west.Contains(g.Id)), "the winning but idle team is paid nothing");
+            Assert.AreEqual(2, rig.Gateway.BloodGrants.Count);
+            Assert.IsTrue(east.All(id => rig.Gateway.BloodGrants.Single(g => g.Id == id).Amount == 3));
+        }
+
+        /// <summary>A healer with no damage and no engaged seconds is a contributor: paid.</summary>
+        [TestMethod]
+        public void Floor_Marks_HealerOnlySeatIsPaid()
+        {
+            var (rig, match, _) = FloorScenario(true, (r, m) =>
+            {
+                var w = r.Team(m, 0);
+                Credit(m, w[0], dmg: 500, hill: 100, engaged: 100);
+                Credit(m, w[1], healing: 900);
+                foreach (var id in r.Team(m, 1))
+                    Credit(m, id, dmg: 100, engaged: 100);
+            });
+
+            Assert.AreEqual(4, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+        }
+        /// <summary>The floor fails OPEN: if evaluating it throws, nobody is withheld and the Marks are paid as if it were off.</summary>
+        [TestMethod]
+        public void Floor_FailsOpen_WhenEvaluationThrows()
+        {
+            var (rig, match, _) = FloorScenario(true, (r, m) =>
+            {
+                r.Coordinator.ContributionFloorFaultForTest = _ => throw new InvalidOperationException("injected");
+                var west = r.Team(m, 0);
+                Credit(m, west[0], dmg: 500, hill: 100, engaged: 100);
+                Credit(m, r.Team(m, 1)[0], dmg: 100, engaged: 100);
+                Credit(m, r.Team(m, 1)[1], dmg: 100, engaged: 100);
+            });
+
+            Assert.AreEqual(4, rig.Gateway.BloodGrants.Count, "the slacker is paid because the evaluation faulted");
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+            Assert.AreEqual(1, rig.Sink.Saves.Count, "and the match still resolved and saved");
+        }
+
+        /// <summary>A forfeiter with the floor on is paid nothing as before and is NOT told it was withheld (it was never owed anything).</summary>
+        [TestMethod]
+        public void Floor_Forfeiter_GetsNoWithheldMessage()
+        {
+            var rig = LiveKoth(out var match, r => { BgMarksDials(r); r.Conduct = r.Conduct with { FloorEnabled = true }; });
+            var forfeiter = rig.Team(match, 1)[0];
+
+            foreach (var id in rig.Team(match, 0).Concat(new[] { rig.Team(match, 1)[1] }))
+                Credit(match, id, dmg: 100, engaged: 100);
+
+            Assert.AreEqual(PvpForfeitOutcome.Forfeited, rig.Coordinator.Forfeit(forfeiter).Outcome);
+            rig.Tick();
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == forfeiter));
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")), "nobody is told they were withheld");
+        }
+
+        /// <summary>A battleground timeout draw with the floor on: the active seats are paid the draw amount, the idle one is withheld.</summary>
+        [TestMethod]
+        public void Floor_Draw_PaysTheActive_WithholdsTheIdle()
+        {
+            var rig = LiveKoth(out var match, r => { BgMarksDials(r); r.Conduct = r.Conduct with { FloorEnabled = true }; });
+            var west = rig.Team(match, 0);
+            var east = rig.Team(match, 1);
+
+            Credit(match, west[0], dmg: 100, engaged: 100);
+            Credit(match, east[0], dmg: 100, engaged: 100);
+            Credit(match, east[1], dmg: 100, engaged: 100);
+
+            rig.Advance(rig.Bg.TimeLimitSecondsKoth);
+            rig.Tick();
+
+            Assert.AreEqual("draw", rig.Sink.Saves.Single().Match.Outcome);
+            Assert.IsFalse(rig.Gateway.BloodGrants.Any(g => g.Id == west[1]), "the idle seat is withheld");
+            Assert.AreEqual(3, rig.Gateway.BloodGrants.Count);
+            Assert.IsTrue(rig.Gateway.BloodGrants.All(g => g.Amount == 5), "the others are paid the draw amount");
+            Assert.AreEqual(1, rig.Gateway.Messages.Count(m => m.Id == west[1] && m.Text.Contains("No reward")));
+        }
+
+        /// <summary>
+        /// The absolute threshold scales with the Live duration: a match that resolves the moment it goes Live (an early forfeit by the
+        /// opponents) has no time to be engaged in, so zero-stat winners are not withheld. With the unscaled 30 s dial this fails.
+        /// </summary>
+        [TestMethod]
+        public void Floor_Marks_ImmediateResolve_WithZeroStats_WithholdsNobody()
+        {
+            var rig = LiveKoth(out var match, r => { BgMarksDials(r); r.Conduct = r.Conduct with { FloorEnabled = true }; });
+
+            match.ScoreBoard[0] = rig.Bg.KothScoreTarget;
+            rig.Tick();
+
+            Assert.AreEqual(4, rig.Gateway.BloodGrants.Count);
+            Assert.IsFalse(rig.Gateway.Messages.Any(m => m.Text.Contains("No reward")));
+        }
         /// <summary>Drives: the switch off (the shipped default), a KOTH score win. No grants. DISCRIMINATES the shared master switch.</summary>
         [TestMethod]
         public void Marks_PayNothing_WhenTheSharedSwitchIsOff()
@@ -1392,6 +2827,107 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
                 rig.Gateway.Add(id, name, fellowship: three);
 
             Assert.IsTrue(rig.Coordinator.Join(E, "bg", false, group: true).Joined, "control: a group at the max joins");
+        }
+
+        // ================= pvp_bg_group_join_enabled (owner ruling 2026-10-15) =================
+
+        private static Rig GroupToggleRig(bool enabled)
+        {
+            var rig = new Rig();
+            rig.Bg = rig.Bg with { GroupJoinEnabled = enabled };
+            rig.Build();
+
+            var fellowship = new[] { A, B, C };
+            rig.Gateway.Add(A, "Alpha", fellowship: fellowship);
+            rig.Gateway.Add(B, "Bravo", fellowship: fellowship);
+            rig.Gateway.Add(C, "Charlie", fellowship: fellowship);
+            rig.Gateway.Add(D, "Delta");
+            rig.Gateway.Add(E, "Echo", fellowship: new[] { E, F });
+            rig.Gateway.Add(F, "Foxtrot", fellowship: new[] { E, F });
+            return rig;
+        }
+
+        /// <summary>The shipped default is OFF, and a disabled toggle refuses for every member, in either token order, queueing nobody.</summary>
+        [TestMethod]
+        public void GroupJoinToggle_Off_RefusesGroupJoinForEveryMember_AndQueuesNobody()
+        {
+            Assert.IsFalse(BattlegroundTunables.Defaults.GroupJoinEnabled, "ships disabled");
+
+            var rig = GroupToggleRig(enabled: false);
+
+            foreach (var issuer in new[] { A, B, C })
+            {
+                var r = rig.Coordinator.Join(issuer, "bg", false, group: true);
+                Assert.AreEqual(PvpJoinRefusal.GroupJoinDisabled, r.Refusal, $"issuer {issuer}");
+                Assert.IsFalse(r.Joined);
+                Assert.AreEqual(BattlegroundText.GroupJoinDisabled, PvpMatchCoordinator.RefusalText(r));
+            }
+
+            // A template key on the line, in either order with "group", reaches the same gate.
+            foreach (var args in new[] { new[] { "bg", "group", "mage" }, new[] { "bg", "mage", "group" } })
+            {
+                var parsed = ACE.Server.Command.Handlers.PvpArenaCommands.ParseJoinArena(args);
+                Assert.IsTrue(parsed.Group, string.Join(" ", args));
+                Assert.AreEqual(PvpJoinRefusal.GroupJoinDisabled, rig.Coordinator.Join(A, parsed.ModeKey, parsed.Duo, parsed.TemplateKey, parsed.Group).Refusal, string.Join(" ", args));
+            }
+
+            Assert.AreEqual(0, rig.Coordinator.QueuedIds(BattlegroundModes.RoomKey).Count());
+        }
+
+        [TestMethod]
+        public void GroupJoinToggle_On_AllowsGroupJoin_AsOnMaster()
+        {
+            var rig = GroupToggleRig(enabled: true);
+
+            var r = rig.Coordinator.Join(B, "bg", false, group: true);
+            Assert.IsTrue(r.Joined);
+            CollectionAssert.AreEquivalent(new[] { A, B, C }, rig.Coordinator.QueuedIds(BattlegroundModes.RoomKey).ToArray());
+        }
+
+        [TestMethod]
+        public void GroupJoinToggle_Off_SoloBgAndTwoVTwoDuoAreUnaffected()
+        {
+            var rig = GroupToggleRig(enabled: false);
+
+            Assert.IsTrue(rig.Coordinator.Join(D, "bg", false).Joined, "solo bg");
+            Assert.IsTrue(rig.Coordinator.Join(E, "2v2", true).Joined, "2v2 duo");
+            Assert.AreEqual(PvpJoinRefusal.GroupJoinDisabled, rig.Coordinator.Join(A, "2v2", false, group: true).Refusal, "toggle off: the disabled line wins, so the wrong-mode line never advertises bg group");
+        }
+
+        /// <summary>Turning the toggle off does not evict a premade that queued while it was on.</summary>
+        [TestMethod]
+        public void GroupJoinToggle_FlippedOff_LeavesAnAlreadyQueuedPremadeAlone()
+        {
+            var rig = GroupToggleRig(enabled: true);
+            Assert.IsTrue(rig.Coordinator.Join(E, "bg", false, group: true).Joined);
+
+            rig.Bg = rig.Bg with { GroupJoinEnabled = false };
+            rig.Tick();
+
+            CollectionAssert.AreEquivalent(new[] { E, F }, rig.Coordinator.QueuedIds(BattlegroundModes.RoomKey).ToArray());
+
+            // Two solos queue behind it; the 2v2 forms with the premade seated (a premade of 2 is inside the imbalance tolerance).
+            Assert.IsTrue(rig.Coordinator.Join(A, "bg", false).Joined);
+            Assert.IsTrue(rig.Coordinator.Join(B, "bg", false).Joined);
+            rig.Tick();
+            Assert.IsNotNull(rig.MatchOf(E), "the premade is matched after the flip");
+            Assert.IsNotNull(rig.MatchOf(F));
+            Assert.AreEqual(PvpJoinRefusal.GroupJoinDisabled, rig.Coordinator.Join(C, "bg", false, group: true).Refusal, "new group joins are refused");
+        }
+
+        /// <summary>The live read of the key in ReadFromProperties is the registered key (a typo there would silently read the default).</summary>
+        [TestMethod]
+        public void GroupJoinToggle_LiveRead_NamesTheRegisteredKey()
+        {
+            var tun = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.Read("Source/ACE.Server/Pvp/Battlegrounds/BattlegroundTunables.cs");
+            var body = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.MethodBody(tun, "private static BattlegroundDials ReadFromProperties()");
+            StringAssert.Contains(body, "GroupJoinEnabled: PropertyManager.GetBool(\"pvp_bg_group_join_enabled\", d.GroupJoinEnabled).Item");
+
+            var pm = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.Read("Source/ACE.Server/Managers/PropertyManager.cs");
+            StringAssert.Contains(pm, "(\"pvp_bg_group_join_enabled\", new Property<bool>(false,");
+
+            var tsv = ACE.Server.Tests.ThreadDungeons.PooledLootSourceText.Read("Source/config-defaults.tsv");
+            StringAssert.Contains(tsv, "pvp_bg_group_join_enabled\tbool\tfalse\tfalse\t");
         }
 
         // ================= pen seals =================
@@ -2108,24 +3644,66 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         }
 
         /// <summary>
-        /// Drives: four players with NO PK facet join, accept and go Live. DISCRIMINATES "the PK facet is not required on
-        /// a templated mode" at both admission (RequiresPkFacet) and accept (the untemplated-only facet re-check).
+        /// Drives: four players join, accept and go Live. Control for the Thread-clear admission (owner ruling 2026-10-15: one
+        /// Thread clear replaces the level and PK facet requirements): the only fact a battleground join reads about a
+        /// character here is HasClearedThread, and the rig sets it true.
         /// </summary>
         [TestMethod]
-        public void Koth_PkFacet_IsNotRequired()
+        public void Koth_ThreadClearedPlayers_GoLive()
         {
-            var noFacet = new Rig().Build();
+            var rig = new Rig().Build();
 
             foreach (var (id, name) in new[] { (E, "Echo"), (F, "Foxtrot"), (G, "Golf"), (H, "Hotel") })
-            {
-                var p = noFacet.Gateway.Add(id, name);
-                p.Facts = p.Facts with { OnPkFacet = false };
-            }
+                rig.Gateway.Add(id, name);
 
-            noFacet.JoinAll(E, F, G, H);
-            noFacet.Tick();
-            noFacet.AcceptAll(E, F, G, H);
-            Assert.AreEqual(PvpMatchState.Live, noFacet.DriveAcceptedToLive(E).State);
+            rig.JoinAll(E, F, G, H);
+            rig.Tick();
+            rig.AcceptAll(E, F, G, H);
+            Assert.AreEqual(PvpMatchState.Live, rig.DriveAcceptedToLive(E).State);
+        }
+
+        /// <summary>
+        /// Drives: a solo battleground join by a player who has not cleared a Thread. Refused with NoThreadCleared and not
+        /// queued (owner ruling 2026-10-15); the control joins once the fact flips.
+        /// </summary>
+        [TestMethod]
+        public void SoloJoin_WithoutAThreadClear_IsRefused()
+        {
+            var rig = new Rig().Build();
+            var p = rig.Gateway.Add(E, "Echo");
+            p.Facts = p.Facts with { HasClearedThread = false };
+
+            var refused = rig.Coordinator.Join(E, "bg", false);
+            Assert.AreEqual(PvpJoinRefusal.NoThreadCleared, refused.Refusal);
+            Assert.AreEqual(PvpArenaText.NoThreadCleared, PvpMatchCoordinator.RefusalText(refused));
+            Assert.AreEqual(0, rig.Coordinator.QueuedIds(BattlegroundModes.RoomKey).Count());
+
+            p.Facts = p.Facts with { HasClearedThread = true };
+            Assert.IsTrue(rig.Coordinator.Join(E, "bg", false).Joined, "control");
+        }
+
+        /// <summary>
+        /// Drives: /arena join bg group where ONE member (not the issuer) has not cleared a Thread. Every member is admitted
+        /// through Admit, so the whole group is refused as GroupMemberIneligible naming that member and nobody is queued.
+        /// </summary>
+        [TestMethod]
+        public void GroupJoin_MemberWithoutAThreadClear_IsRefused()
+        {
+            var rig = new Rig().Build();
+            var trio = new[] { E, F, G };
+
+            foreach (var (id, name) in new[] { (E, "Echo"), (F, "Foxtrot"), (G, "Golf") })
+                rig.Gateway.Add(id, name, fellowship: trio);
+
+            rig.Gateway.Players[G].Facts = rig.Gateway.Players[G].Facts with { HasClearedThread = false };
+
+            var r = rig.Coordinator.Join(E, "bg", false, group: true);
+            Assert.AreEqual(PvpJoinRefusal.GroupMemberIneligible, r.Refusal);
+            Assert.AreEqual("Golf", r.PartnerName);
+            Assert.AreEqual(0, rig.Coordinator.QueuedIds(BattlegroundModes.RoomKey).Count());
+
+            rig.Gateway.Players[G].Facts = rig.Gateway.Players[G].Facts with { HasClearedThread = true };
+            Assert.IsTrue(rig.Coordinator.Join(E, "bg", false, group: true).Joined, "control");
         }
 
         /// <summary>

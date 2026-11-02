@@ -50,6 +50,37 @@ namespace ACE.Server.Tests
             // death save stays literally last in the bucket - see DamageMitigationOrder.Observe.
             Assert.IsTrue(DamageMitigationOrder.Observe < DamageMitigationOrder.AbsorbPool,
                 "an observer that mitigates nothing must never sit between two mitigations");
+
+            // The Immunity band (Reflect's creature-spell window) sits after the observers and ahead of every
+            // pool, so a blocked hit still counts as having reached the defender and never drains a ward.
+            Assert.IsTrue(DamageMitigationOrder.Observe < DamageMitigationOrder.Immunity,
+                "observers must see a hit the immunity window then blocks");
+            Assert.IsTrue(DamageMitigationOrder.Immunity < DamageMitigationOrder.AbsorbPool,
+                "a hit the window cancels must never drain a finite pool");
+        }
+
+        /// <summary>
+        /// Reflect's immunity window on the actual registered bucket: after every observer, before every
+        /// absorb pool, divert and death save.
+        /// </summary>
+        [TestMethod]
+        public void Reflect_RunsAfterTheObservers_AndBeforeEveryAbsorbPool()
+        {
+            var bucket = ClassAbilityRegistry.PreWriteDamageAbilities.ToList();
+
+            var reflect = (IPreWriteDamageAbility)ClassAbilityRegistry.GetHandler(ClassAbilityId.ReflectMagic);
+
+            Assert.AreEqual(DamageMitigationOrder.Immunity, reflect.MitigationOrder);
+
+            var index = bucket.IndexOf(reflect);
+            Assert.IsTrue(index >= 0, "Reflect must be in the pre-write bucket");
+
+            var lastObserver = bucket.FindLastIndex(h => h.MitigationOrder == DamageMitigationOrder.Observe);
+            var firstPool = bucket.FindIndex(h => h.MitigationOrder >= DamageMitigationOrder.AbsorbPool);
+
+            Assert.IsTrue(lastObserver >= 0 && firstPool >= 0, "control: the bucket carries observers and pools");
+            Assert.IsTrue(lastObserver < index, "Reflect must run after every observer");
+            Assert.IsTrue(index < firstPool, "Reflect must run before every absorb pool, divert and death save");
         }
 
         /// <summary>
@@ -102,30 +133,55 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// THE ORDERING RULE SOUL JUMP EXISTS TO EXERCISE: a death save must be the LAST handler in the
-        /// bucket, not merely the last mitigation. Anything running after it - including a handler that only
-        /// means to observe - would be acting on a decision that has already been made and paid for.
+        /// THE ORDERING RULE SOUL JUMP EXISTS TO EXERCISE: a death save must run after every mitigation and
+        /// every observer - anything running after it would be acting on a decision that has already been made
+        /// and paid for. The ONE thing allowed after it is a LAST-RESORT death save (Berserk Rage, 2026-10-24,
+        /// owner ruling "if Soul Jump saves, Rage must not fire"): Rage decides on Soul Jump's output, so a Soul
+        /// Jump save leaves nothing lethal for it to react to.
         /// </summary>
         [TestMethod]
-        public void SoulJump_RunsLastOfEveryHandlerInTheBucket()
+        public void SoulJump_RunsAfterEveryHandlerExceptTheLastResortDeathSave()
         {
             var bucket = ClassAbilityRegistry.PreWriteDamageAbilities.ToList();
 
             var soulJump = (IPreWriteDamageAbility)ClassAbilityRegistry.GetHandler(ClassAbilityId.SoulJump);
+            var rage = (IPreWriteDamageAbility)ClassAbilityRegistry.GetHandler(ClassAbilityId.BerserkRage);
 
             Assert.AreEqual(DamageMitigationOrder.DeathSave, soulJump.MitigationOrder);
+            Assert.AreEqual(DamageMitigationOrder.LastResortDeathSave, rage.MitigationOrder);
+            Assert.IsTrue(DamageMitigationOrder.LastResortDeathSave > DamageMitigationOrder.DeathSave);
 
-            Assert.AreEqual(bucket.Count - 1, bucket.IndexOf(soulJump),
-                "a death save reacts to the final figure, so nothing may run after it");
+            Assert.AreEqual(bucket.Count - 1, bucket.IndexOf(rage), "the last-resort death save is the very last handler");
+            Assert.AreEqual(bucket.Count - 2, bucket.IndexOf(soulJump), "Soul Jump runs right before it");
 
             foreach (var handler in bucket)
             {
-                if (ReferenceEquals(handler, soulJump))
+                if (ReferenceEquals(handler, soulJump) || ReferenceEquals(handler, rage))
                     continue;
 
                 Assert.IsTrue(handler.MitigationOrder < soulJump.MitigationOrder,
                     $"{handler.Definition.Id} is ordered at or after the death save");
             }
+        }
+
+        /// <summary>
+        /// Berserk Rage's immunity window is a companion handler sharing the ability's Definition, appended to
+        /// the pre-write bucket only: it must sit in the Immunity band (after the observers, ahead of every
+        /// absorb pool) and must NOT be in Handlers, whose id-keyed maps reject a duplicate id.
+        /// </summary>
+        [TestMethod]
+        public void BerserkRageImmunity_SitsInTheImmunityBand_AndIsNotARegisteredHandler()
+        {
+            var bucket = ClassAbilityRegistry.PreWriteDamageAbilities.ToList();
+            var immunity = BerserkRageAbility.Immunity;
+
+            Assert.IsTrue(bucket.Contains(immunity), "the companion is dispatched");
+            Assert.AreEqual(DamageMitigationOrder.Immunity, immunity.MitigationOrder);
+            Assert.AreEqual(ClassAbilityId.BerserkRage, immunity.Definition.Id, "filtered on the Berserk Rage rank");
+            Assert.IsFalse(ClassAbilityRegistry.Handlers.Contains(immunity), "not a registered handler");
+
+            var sanguineWard = (IPreWriteDamageAbility)ClassAbilityRegistry.GetHandler(ClassAbilityId.SanguineWard);
+            Assert.IsTrue(bucket.IndexOf(immunity) < bucket.IndexOf(sanguineWard), "a blocked hit never drains a pool");
         }
 
         /// <summary>
@@ -294,7 +350,7 @@ namespace ACE.Server.Tests
             Assert.IsTrue(DamageMitigationOrder.ShouldDispatchPreWriteHandler(DamageMitigationOrder.Observe, 5),
                 "Observe must also see ordinary non-zero hits, unchanged from before");
 
-            var otherBands = new[] { DamageMitigationOrder.AbsorbPool, DamageMitigationOrder.Divert, DamageMitigationOrder.DeathSave };
+            var otherBands = new[] { DamageMitigationOrder.Immunity, DamageMitigationOrder.AbsorbPool, DamageMitigationOrder.Divert, DamageMitigationOrder.DeathSave };
 
             foreach (var band in otherBands)
             {
@@ -315,7 +371,7 @@ namespace ACE.Server.Tests
         public void ShouldDispatchPreWriteHandler_MatchesTheRegisteredHandlersAtZeroDamage()
         {
             var dispatchesAtZero = new[] { ClassAbilityId.KineticCharge, ClassAbilityId.Adrenaline };
-            var skipsAtZero = new[] { ClassAbilityId.SanguineWard, ClassAbilityId.RunicWard, ClassAbilityId.ManaBarrier, ClassAbilityId.SoulJump };
+            var skipsAtZero = new[] { ClassAbilityId.ReflectMagic, ClassAbilityId.SanguineWard, ClassAbilityId.RunicWard, ClassAbilityId.ManaBarrier, ClassAbilityId.SoulJump };
 
             foreach (var id in dispatchesAtZero)
             {

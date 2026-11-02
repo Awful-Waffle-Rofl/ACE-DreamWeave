@@ -475,5 +475,239 @@ namespace ACE.Server.Tests
             Assert.AreEqual(0, snapshot.CheckpointKills);
             Assert.IsFalse(snapshot.BossKilled);
         }
+
+        // ---- vanished wave creatures (destroyed without dying) ---------------------------------------------
+
+        [TestMethod]
+        public void PruneVanishedWaveCreatures_drops_a_destroyed_creature_and_reports_the_emptied_wave_without_crediting_it()
+        {
+            var encounter = NewEncounter();
+            var creature = TestCreatures.CreateEffectCarrier();
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow);
+            encounter.TrackWaveCreature(creature);
+
+            Assert.AreEqual(1, encounter.LiveWaveCount);
+
+            creature.Destroy();
+
+            var vanished = encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var waveNowEmpty, out _);
+
+            Assert.AreEqual(1, vanished.Count);
+            Assert.AreSame(creature, vanished[0]);
+            Assert.IsTrue(waveNowEmpty);
+            Assert.AreEqual(0, encounter.LiveWaveCount);
+            Assert.AreEqual(0, encounter.HighestWaveCleared, "a vanished wave is skipped, never credited as cleared");
+        }
+
+        [TestMethod]
+        public void PruneVanishedWaveCreatures_leaves_the_wave_open_while_a_live_creature_remains()
+        {
+            var encounter = NewEncounter();
+            var gone = TestCreatures.CreateEffectCarrier();
+            var standing = TestCreatures.CreateEffectCarrier();
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow);
+            encounter.TrackWaveCreature(gone);
+            encounter.TrackWaveCreature(standing);
+
+            gone.Destroy();
+
+            var vanished = encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var waveNowEmpty, out _);
+
+            Assert.AreEqual(1, vanished.Count);
+            Assert.IsFalse(waveNowEmpty);
+            Assert.AreEqual(1, encounter.LiveWaveCount);
+            Assert.AreEqual(0, encounter.HighestWaveCleared);
+        }
+
+        [TestMethod]
+        public void PruneVanishedWaveCreatures_is_a_no_op_for_an_intact_or_ended_encounter()
+        {
+            var encounter = NewEncounter();
+            var creature = TestCreatures.CreateEffectCarrier();
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow);
+            encounter.TrackWaveCreature(creature);
+
+            Assert.AreEqual(0, encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var emptied, out _).Count);
+            Assert.IsFalse(emptied);
+            Assert.AreEqual(1, encounter.LiveWaveCount);
+
+            creature.Destroy();
+            Assert.IsTrue(encounter.MarkEnded(MlDigsiteRules.EndReasons.Bailed, out _));
+
+            Assert.AreEqual(0, encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out emptied, out _).Count);
+            Assert.IsFalse(emptied);
+            Assert.AreEqual(0, encounter.HighestWaveCleared);
+        }
+
+        [TestMethod]
+        public void PruneVanishedWaveCreatures_leaves_a_destroyed_AND_dead_creature_to_its_death_hook()
+        {
+            var encounter = NewEncounter();
+            var creature = TestCreatures.CreateEffectCarrier();
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow);
+            encounter.TrackWaveCreature(creature);
+
+            creature.Health.Current = 0;
+            creature.Destroy();
+
+            Assert.IsTrue(creature.IsDead);
+            Assert.IsTrue(creature.IsDestroyed);
+
+            Assert.AreEqual(0, encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var emptied, out _).Count);
+            Assert.IsFalse(emptied);
+            Assert.AreEqual(1, encounter.LiveWaveCount, "a dead creature is removed by NoteCreatureDeath, with its credit, not by the prune");
+        }
+
+        [TestMethod]
+        public void PruneVanishedCheckpoint_clears_a_destroyed_checkpoint_but_not_a_dead_or_intact_one()
+        {
+            var encounter = NewEncounter();
+            var intact = TestCreatures.CreateEffectCarrier();
+
+            encounter.TrackCheckpoint(intact);
+            Assert.IsNull(encounter.PruneVanishedCheckpoint());
+            Assert.IsTrue(encounter.CheckpointAlive);
+
+            var dead = TestCreatures.CreateEffectCarrier();
+            encounter.TrackCheckpoint(dead);
+            dead.Health.Current = 0;
+            dead.Destroy();
+            Assert.IsNull(encounter.PruneVanishedCheckpoint());
+            Assert.IsTrue(encounter.CheckpointAlive);
+
+            var gone = TestCreatures.CreateEffectCarrier();
+            encounter.TrackCheckpoint(gone);
+            gone.Destroy();
+            Assert.AreSame(gone, encounter.PruneVanishedCheckpoint());
+            Assert.IsFalse(encounter.CheckpointAlive);
+            Assert.AreEqual(0, encounter.PayoutSnapshot(MlDigsiteResult.Scored).CheckpointKills, "no kill credit");
+        }
+
+        [TestMethod]
+        public void TryClaimLastWaveRespawn_is_granted_once_per_run_and_pends_for_one_spawn()
+        {
+            var encounter = NewEncounter();
+
+            Assert.IsFalse(encounter.LastWaveRespawnUsed);
+            Assert.IsFalse(encounter.TakeLastWaveRespawnPending());
+
+            Assert.IsTrue(encounter.TryClaimLastWaveRespawn());
+            Assert.IsTrue(encounter.LastWaveRespawnUsed);
+            Assert.IsFalse(encounter.TryClaimLastWaveRespawn(), "bounded: a second claim is refused");
+
+            Assert.IsTrue(encounter.TakeLastWaveRespawnPending());
+            Assert.IsFalse(encounter.TakeLastWaveRespawnPending(), "read once");
+        }
+
+        [TestMethod]
+        public void NoteWaveRespawned_restarts_the_clocks_without_advancing_the_wave_count()
+        {
+            var encounter = NewEncounter();
+            var t0 = DateTime.UtcNow;
+
+            encounter.NoteWaveSpawned(t0);
+            encounter.ScheduleNextWave(t0.AddSeconds(5));
+            encounter.NoteWaveRespawned(t0.AddSeconds(9));
+
+            Assert.AreEqual(1, encounter.WavesSpawned);
+            Assert.AreEqual(t0.AddSeconds(9), encounter.WaveStartedUtc);
+            Assert.IsNull(encounter.NextWaveDueUtc);
+        }
+
+        // ---- half-killed vanish = clear; vanish skip caps the tier ----------------------------------------
+
+        private static MlDigsiteEncounter WaveOf(int count, out System.Collections.Generic.List<ACE.Server.WorldObjects.Creature> creatures)
+        {
+            var encounter = NewEncounter();
+
+            creatures = new System.Collections.Generic.List<ACE.Server.WorldObjects.Creature>();
+
+            for (var i = 0; i < count; i++)
+            {
+                var c = TestCreatures.CreateEffectCarrier();
+                creatures.Add(c);
+                encounter.TrackWaveCreature(c);
+            }
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow, count);
+
+            return encounter;
+        }
+
+        [TestMethod]
+        public void Prune_credits_a_vanish_emptied_wave_when_at_least_half_was_killed()
+        {
+            var encounter = WaveOf(4, out var wave);
+
+            encounter.NoteCreatureDeath(wave[0].Guid.Full, DateTime.UtcNow, wave[0], null, out _);
+            encounter.NoteCreatureDeath(wave[1].Guid.Full, DateTime.UtcNow, wave[1], null, out _);
+
+            wave[2].Destroy();
+            wave[3].Destroy();
+
+            encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var emptied, out var realClear);
+
+            Assert.IsTrue(emptied);
+            Assert.IsTrue(realClear, "2 of 4 killed meets ceil(4 / 2)");
+            Assert.AreEqual(1, encounter.HighestWaveCleared);
+            Assert.AreEqual(1, encounter.RealClears);
+            Assert.AreEqual(0, encounter.VanishSkips);
+        }
+
+        [TestMethod]
+        public void Prune_skips_a_vanish_emptied_wave_when_under_half_was_killed()
+        {
+            var encounter = WaveOf(8, out var wave);
+
+            encounter.NoteCreatureDeath(wave[0].Guid.Full, DateTime.UtcNow, wave[0], null, out _);
+
+            for (var i = 1; i < 8; i++)
+                wave[i].Destroy();
+
+            encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out var emptied, out var realClear);
+
+            Assert.IsTrue(emptied);
+            Assert.IsFalse(realClear, "1 of 8 killed is under ceil(8 / 2)");
+            Assert.AreEqual(0, encounter.HighestWaveCleared);
+            Assert.AreEqual(0, encounter.RealClears);
+            Assert.AreEqual(1, encounter.VanishSkips);
+        }
+
+        [TestMethod]
+        public void A_vanish_skip_caps_the_paid_tier_at_the_waves_actually_cleared_by_kills()
+        {
+            var encounter = WaveOf(1, out var first);
+
+            first[0].Destroy();
+            encounter.PruneVanishedWaveCreatures(DateTime.UtcNow, out _, out _);   // wave 1 skipped
+
+            var second = TestCreatures.CreateEffectCarrier();
+            encounter.NoteWaveSpawned(DateTime.UtcNow, 1);
+            encounter.TrackWaveCreature(second);
+            encounter.NoteCreatureDeath(second.Guid.Full, DateTime.UtcNow, second, null, out _);   // wave 2 killed
+
+            Assert.AreEqual(2, encounter.HighestWaveCleared, "the raw record still says wave 2");
+            Assert.AreEqual(1, encounter.PayoutSnapshot(MlDigsiteResult.Scored).HighestWaveCleared, "but only one wave was cleared by kills");
+        }
+
+        [TestMethod]
+        public void Without_a_vanish_skip_the_tier_is_not_capped_so_placed_zero_skips_are_unaffected()
+        {
+            var encounter = NewEncounter();
+
+            encounter.NoteWaveSpawned(DateTime.UtcNow, 0);   // wave 1: placed nothing, skipped by the manager
+
+            var second = TestCreatures.CreateEffectCarrier();
+            encounter.NoteWaveSpawned(DateTime.UtcNow, 1);
+            encounter.TrackWaveCreature(second);
+            encounter.NoteCreatureDeath(second.Guid.Full, DateTime.UtcNow, second, null, out _);
+
+            Assert.AreEqual(0, encounter.VanishSkips);
+            Assert.AreEqual(2, encounter.PayoutSnapshot(MlDigsiteResult.Scored).HighestWaveCleared);
+        }
     }
 }

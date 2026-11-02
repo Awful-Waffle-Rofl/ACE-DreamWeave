@@ -162,11 +162,7 @@ namespace ACE.Server.WorldObjects
                 return spells;
 
             // apply maximum level cap here?
-            uint level = 0;
-            if (itemXpStyle > 0)
-                level = (uint)(setItems.Sum(i => i.ItemLevel ?? 0) + levelDiff);
-            else
-                level = (uint)setItems.Count;
+            var level = (uint)SetLevel(setItems, levelDiff);
 
             var highestTier = spellSet.HighestTier;
 
@@ -180,6 +176,111 @@ namespace ACE.Server.WorldObjects
                 spells.Add(new Spell(spellId, false));
 
             return spells;
+        }
+
+        /// <summary>
+        /// The summed set level GetSpellSet picks its tier from, before the dat's HighestTier clamp: the sum of the
+        /// items' ItemLevel (plus <paramref name="levelDiff"/>) when the first item levels, otherwise the item count.
+        /// </summary>
+        public static int SetLevel(List<WorldObject> setItems, int levelDiff = 0)
+        {
+            var firstSetItem = setItems.FirstOrDefault();
+
+            if (firstSetItem is null)
+                return 0;
+
+            var itemXpStyle = firstSetItem.ItemXpStyle ?? 0;
+
+            if (itemXpStyle > 0)
+                return setItems.Sum(i => i.ItemLevel ?? 0) + levelDiff;
+            else
+                return setItems.Count;
+        }
+
+        /// <summary>
+        /// The highest PropertyInt.SetBonusMaxLevel among the set items, or 0 when none carries it (retail).
+        /// </summary>
+        public static int SetBonusMaxLevelOf(List<WorldObject> setItems)
+        {
+            var cap = 0;
+
+            foreach (var item in setItems)
+                cap = Math.Max(cap, item.GetProperty(PropertyInt.SetBonusMaxLevel) ?? 0);
+
+            return cap;
+        }
+
+        /// <summary>
+        /// Pure: the factor applied to the StatModValue of a set spell. Past the dat's top tier the top tier's spell
+        /// is still the one applied (GetSpellSet clamps), and when a set item carries SetBonusMaxLevel its value keeps
+        /// growing linearly: value x min(level, cap) / highestTier. Exactly 1.0 when the cap is absent or not above
+        /// the top tier, or the level has not passed it - so every retail set is untouched.
+        /// </summary>
+        public static double SetSpellScale(int setLevel, int setBonusMaxLevel, uint highestTier)
+        {
+            if (highestTier == 0 || setBonusMaxLevel <= highestTier || setLevel <= highestTier)
+                return 1.0;
+
+            return (double)Math.Min(setLevel, setBonusMaxLevel) / highestTier;
+        }
+
+        /// <summary>
+        /// Pure: a set spell's StatModValue under <paramref name="setScale"/>. A scale of exactly 1.0 returns the value
+        /// untouched (no float round trip), which is every retail set.
+        /// </summary>
+        public static float ApplySetSpellScale(float statModValue, double setScale)
+        {
+            if (setScale == 1.0)
+                return statModValue;
+
+            return (float)(statModValue * setScale);
+        }
+
+        /// <summary>
+        /// The set-spell scale for an item set: <see cref="SetSpellScale"/> over the set's level, cap and dat HighestTier.
+        /// 1.0 for an empty list, an unknown set, or a set no item of which carries SetBonusMaxLevel (no dat read then).
+        /// </summary>
+        public static double GetSpellSetScale(List<WorldObject> setItems, int levelDiff = 0)
+        {
+            var firstSetItem = setItems.FirstOrDefault();
+
+            if (firstSetItem?.EquipmentSetId == null)
+                return 1.0;
+
+            var cap = SetBonusMaxLevelOf(setItems);
+
+            if (cap <= 0)
+                return 1.0;
+
+            if (!DatManager.PortalDat.SpellTable.SpellSet.TryGetValue((uint)firstSetItem.EquipmentSetId, out var spellSet))
+                return 1.0;
+
+            return SetSpellScale(SetLevel(setItems, levelDiff), cap, spellSet.HighestTier);
+        }
+
+        /// <summary>
+        /// The set-spell scale for an enchantment being built by set item <paramref name="setItem"/> on
+        /// <paramref name="target"/>: the set is the items of that set equipped by the wearer (the target when it is a
+        /// creature, otherwise the set item's wielder). 1.0 when there is no wearer.
+        /// </summary>
+        public static double GetSpellSetScale(WorldObject setItem, WorldObject target)
+        {
+            if (setItem?.EquipmentSetId == null)
+                return 1.0;
+
+            // The caster may be a surrogate set item (DequipItemFromSet), so the cap is read across the whole
+            // equipped set, never from the caster alone.
+            var wearer = target as Creature ?? setItem.Wielder as Creature;
+
+            if (wearer == null)
+                return 1.0;
+
+            var setItems = wearer.EquippedObjects.Values.Where(i => i.HasItemSet && i.EquipmentSetId == setItem.EquipmentSetId).ToList();
+
+            if (setItems.Count == 0)
+                return 1.0;
+
+            return GetSpellSetScale(setItems);
         }
 
         /// <summary>

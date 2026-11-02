@@ -499,7 +499,7 @@ namespace ACE.Server.ThreadDungeons
         {
             graph = null;
 
-            if (run?.Dungeon == null || run.Dungeon.Landblock == 0)
+            if (run?.Dungeon == null || run.Dungeon.Landblock == 0 || run.Dungeon.IsOutdoor)
             {
                 why = "no-dungeon";
                 return false;

@@ -1,47 +1,32 @@
 using System;
 using System.Collections.Generic;
 
-using ACE.Common;
 using ACE.Entity.Enum;
-using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
-using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Archmage T3: a landed damaging spell projectile has a 10/18/26% chance (by rank) to inflict the
-    /// matching element's Life-Magic Vulnerability on the struck target, at a level equivalent to the spell
-    /// that landed (a level-8 fire bolt applies the level-8 "Incantation of Fire Vulnerability Other").
+    /// ELEMENTAL PROFICIENCY (Archmage T3, ranks 1-3). The class keeps its old name, ClassAbilityId.ElementalRend
+    /// and Name "elementalrend" because that Name is the quest-key suffix that stores owned ranks; only the
+    /// DisplayName and the behaviour changed. ELEMENTAL-PROFICIENCY-DESIGN.md is the authority.
     ///
-    /// THE SCHOOL GATE CAME OFF ON 2026-09-13 BUT THE DAMAGE-TYPE GATE DID NOT, and the second one is what
-    /// actually bounds this entry. The shared spell-hit dispatch no longer tests School, so void and life
-    /// projectiles now reach OnSpellHit - but GetVulnerabilitySpell is keyed on the spell's DAMAGE TYPE and
-    /// VulnByElement covers only the seven elemental types (Slash, Pierce, Bludgeon, Cold, Fire, Acid,
-    /// Electric). A void bolt is DamageType.Nether and a life projectile is DamageType.Health, so both
-    /// return null and OnSpellHit returns without proccing. The widening is therefore close to inert for
-    /// this ability in practice; it is not a promise of void or life coverage, and the player-facing text
-    /// must not make one. Adding Nether/Health rows here would require vulnerability spells that do not
-    /// exist in the client's tables.
+    /// Every damaging spell the Archmage lands on a MONSTER applies an effect chosen by the spell's damage
+    /// type, with no roll. Fire, Pierce and Slash act INSIDE SpellProjectile.CalculateDamage (see
+    /// Player_ElementalProficiency.cs) because they change the damage being dealt; this hook runs AFTER the hit
+    /// and so owns only the timed effects: Lightning (target takes more damage), Frost (slow), Acid (a burn
+    /// sized off SpellProjectile.LastAppliedDamage) and Bludgeon (a stun with an immunity window). The work is
+    /// done by Player.ApplyElementalProficiencySpellHit; this handler is the dispatch seam and the readout.
     ///
-    /// The proc chance scales with Arcane Lore - the one scaling source living outside every Training
-    /// bundle, and the scaling is Trained-gated (an untrained Arcane Lore contributes no rider, but the
-    /// base chance still applies).
+    /// No IsClassAbilitySpawned filter: the effects spawn no projectile, so they carry no cascade risk and
+    /// Spell AOE / Cascade / Echo Cast children apply them too. Nether, Health and combo damage types carry
+    /// no effect. Players, pets and game pieces never take one (ElementalProficiencyMath.IsEligibleTarget),
+    /// which also keeps PvP out.
     ///
-    /// Applied through the normal enchantment registry (WorldObject.CreateEnchantment), so it obeys the
-    /// standard stacking rules - it won't stack past a stronger cast Vulnerability and refreshes an
-    /// equal/weaker one. Because it spawns no projectile it carries no cascade risk, so unlike Spell AOE
-    /// and Echo Cast it deliberately fires even on class-ability-spawned copies: a Spell AOE radiated copy
-    /// or an Echo Cast recast can proc it.
-    ///
-    /// AffinitySkill moved from Life Magic to ARCANE LORE in the 2026-09-12 overhaul (the other spell-damage
-    /// affinity abilities read Arcane Lore, not the school itself). The proc-chance rider is now
-    /// MULTIPLICATIVE on this ability's own rank bonus rather than an additive Life-Magic-scaled quotient;
-    /// RendChance's fraction parameter stays additive in its own units, so the rider fed to it is the
-    /// AMOUNT the multiplier adds (rankBonus * affinity - rankBonus), still bounded by
-    /// class_ability_affinity_chance_cap.
+    /// GetVulnerabilitySpell and its table below are KEPT UNCHANGED from the Elemental Rend days: Sundermark
+    /// and DebuffEffect read the vulnerability ids from here, and a test pins those call texts.
     /// </summary>
     public class ElementalRendAbility : ISpellHitAbility, IAbilityReadout
     {
@@ -51,17 +36,21 @@ namespace ACE.Server.ClassAbilities.Abilities
             AbilityClass = ClassAbilityClass.Archmage,
             Tier = 3,
             Name = "elementalrend",
-            DisplayName = "Elemental Rend",
-            Description = "Your damaging spell projectiles have a 10/18/26% chance (by rank) to inflict " +
-                          "the matching element's Vulnerability on the target at the spell's level. Only " +
-                          "elemental damage types have a matching Vulnerability. Higher Arcane Lore " +
-                          "increases the chance.",
+            DisplayName = "Elemental Proficiency",
+            Description = "Your damaging spells apply an effect by element when they land on a monster. " +
+                          "Fire: +10/20/30% damage. " +
+                          "Lightning: the target takes 10/20/30% more damage from all sources for 10 seconds. " +
+                          "Frost: the target is slowed by 20/40/60% for 10 seconds. " +
+                          "Acid: the target burns for 20/40/60% of the hit over 6 seconds; a new acid hit refreshes the burn. " +
+                          "Bludgeon: the target is stunned for 2/3/4 seconds, then cannot be stunned again for 8 seconds. " +
+                          "Pierce: ignores 10/20/30% of the target's resistance or deals 10/20/30% more damage, whichever is greater. " +
+                          "Slash: +5/10/15 percentage points of critical chance. " +
+                          "Higher War Magic strengthens the Fire, Lightning, Acid and Pierce effects.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
-            AffinitySkill = Skill.ArcaneLore,
+            AffinitySkill = Skill.WarMagic,
         };
-
         // Per-element Life-Magic Vulnerability progressions (the "...Other" line). The SpellId enum values
         // are not contiguous per family, so the levels are listed explicitly rather than computed.
         //
@@ -133,125 +122,84 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// The proc chance at a given rank: base + step*(rank-1) + the Life Magic rider + the equipment-mod
-        /// term. Pure for testability. Returns 0 for rank &lt;= 0.
-        ///
-        /// <paramref name="gearModChance"/> is the Elemental Rend equipment mod, a MACHINERY mod: it
-        /// amplifies the ability's own roll and stays behind the same rank check. Defaults to 0, which
-        /// reproduces the pre-equipment-mod behavior exactly.
+        /// Dispatch seam for the timed effects. The shared spell-hit dispatch already guarantees a landed
+        /// damaging projectile on a non-player creature; Player.ApplyElementalProficiencySpellHit re-checks
+        /// eligibility and owns every rule (see its summary).
         /// </summary>
-        public static float RendChance(int rank, double chanceBase, double chanceStep, double lifeMagicFraction, double gearModChance = 0.0, double affinityCap = 0.0)
-        {
-            if (rank <= 0)
-                return 0.0f;
-
-            var rider = Math.Max(0.0, lifeMagicFraction);
-
-            // THE AFFINITY RIDER IS CAPPED (class_ability_affinity_chance_cap, added 2026-08-04).
-            // GetClassAbilityScaling returns a raw quotient (skill / divisor) with no bound of its own, so
-            // this rider is linear in a skill value the server does not constrain. Measured live on a
-            // character with Life Magic 5226: the rider came to +209 percentage points and the proc fired
-            // on literally every landed war spell. The bug surfaced on the Spellsword procs, which share
-            // this shape; this ability had it too.
-            //
-            // The GEAR MOD is deliberately NOT capped by this - it is a bounded equipment roll rather than
-            // an unbounded skill quotient. A cap of 0 means uncapped, preserving pre-2026-08-04 behavior.
-            if (affinityCap > 0.0)
-                rider = Math.Min(rider, affinityCap);
-
-            return (float)Math.Max(0.0, chanceBase + (rank - 1) * chanceStep + rider + Math.Max(0.0, gearModChance));
-        }
-
         public void OnSpellHit(Player caster, int rank, Creature primaryTarget, SpellProjectile projectile)
         {
-            // Applies no projectile, so it may fire on AOE copies / echoes; but a dead target can't be
-            // debuffed meaningfully.
-            if (primaryTarget.IsDead)
+            if (caster == null || primaryTarget == null || projectile?.Spell == null)
                 return;
 
-            var vuln = GetVulnerabilitySpell(projectile.Spell.DamageType, projectile.Spell.Level);
-            if (vuln == null)
-                return;
-
-            var chanceBase = PropertyManager.GetDouble("class_ability_elementalrend_chance_base").Item;
-            var chanceStep = PropertyManager.GetDouble("class_ability_elementalrend_chance_step").Item;
-
-            var rankBonus = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
-
-            // Arcane Lore (MULTIPLICATIVE, no-arg overload = the shared 0.12/0.17 rate pair). The AMOUNT
-            // the multiplier adds is what feeds the additive-shaped RendChance() below, and it is still
-            // bounded by class_ability_affinity_chance_cap the same way the old rider was.
-            var affinity = caster.GetClassAbilityAffinityMultiplier(Skill.ArcaneLore);
-            var arcaneLore = rankBonus * affinity - rankBonus;
-
-            // Elemental Rend equipment mod (MACHINERY): +pp on this ability's own vulnerability-proc roll.
-            // Read inside the handler, which only runs for a caster who owns Elemental Rend.
-            var chance = RendChance(rank, chanceBase, chanceStep, arcaneLore,
-                caster.GetEquippedModValue(EquipmentModId.ElementalRend),
-                PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
-
-            if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
-                return;
-
-            // Apply the vuln through the normal enchantment registry (standard stacking/refresh rules).
-            var vulnSpell = new Spell(vuln.Value);
-            caster.CreateEnchantment(primaryTarget, caster, projectile.ProjectileLauncher, vulnSpell);
-
-            // AND PLAY THE SPELL'S OWN VISUAL, because CreateEnchantment does not - it calls
-            // EnchantmentManager.Add and nothing else. A normal cast gets its visual from DoSpellEffects at
-            // the end of HandleCastSpell; a proc that writes the registry directly never reaches that path,
-            // so without this the debuff lands completely silently. Reported live on Spellsword's Sundermark
-            // 2026-08-04 ("the vuln proc doesn't seem to show a visual"); this ability had the identical gap
-            // and is fixed alongside it.
-            //
-            // spell.TargetEffect comes from portal.dat via SpellBase, exactly as DoSpellEffects reads it, so
-            // this plays whatever the client already plays for a cast Vulnerability rather than a hardcoded
-            // guess. Broadcast so nearby players see it too.
-            primaryTarget.EnqueueBroadcast(new GameMessageScript(primaryTarget.Guid, vulnSpell.TargetEffect, vulnSpell.Formula.Scale));
+            caster.ApplyElementalProficiencySpellHit(primaryTarget, projectile);
         }
 
         /// <summary>
-        /// Mirrors the proc-chance terms fed into RendChance() in OnSpellHit above - the two must stay in
-        /// step. Skill/Affinity/Gear are percentage POINTS. Affinity is a MULTIPLIER on the rank term, but
-        /// it is reported as the CAPPED AMOUNT that multiplier adds (rankBonus * affinity - rankBonus, then
-        /// clamped by class_ability_affinity_chance_cap the same way RendChance() clamps it), so the three
-        /// displayed terms still sum to Effective; CapNote is set only when the raw (unclamped) rider
-        /// actually exceeds the cap this call.
+        /// PRIMARY is the Fire damage bonus; the other six elements are Secondary lines. Each line's Skill is
+        /// the rank value, Affinity the amount the (capped) War Magic multiplier adds, Gear the amount the
+        /// Elemental Rend gear amplifier adds on top of that, so Skill + Affinity + Gear == Effective exactly.
+        /// Frost, Bludgeon and Slash are never scaled (Affinity and Gear 0). Null-Player-safe.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
-            var chanceBase = PropertyManager.GetDouble("class_ability_elementalrend_chance_base").Item;
-            var chanceStep = PropertyManager.GetDouble("class_ability_elementalrend_chance_step").Item;
-            var affinityCap = PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item;
+            return BuildReadout(rank,
+                player?.GetClassAbilityAffinityMultiplier(Skill.WarMagic) ?? 1.0,
+                player?.GetEquippedModValue(EquipmentModId.ElementalRend) ?? 0.0);
+        }
 
-            var rankBonus = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
+        /// <summary>The pure core of <see cref="GetReadout"/>, taking the live affinity multiplier and gear amplifier.</summary>
+        public static ClassAbilityReadout BuildReadout(int rank, double affinityMultiplier, double gearAmplifier)
+        {
+            List<ClassAbilityReadout> secondaries = null;
 
-            var multiplier = player.GetClassAbilityAffinityMultiplier(Skill.ArcaneLore);
+            if (rank > 0)
+            {
+                secondaries = new List<ClassAbilityReadout>
+                {
+                    Term(DamageType.Electric, "dmg taken", rank, affinityMultiplier, gearAmplifier),
+                    Term(DamageType.Cold, "slow", rank, affinityMultiplier, gearAmplifier),
+                    Term(DamageType.Acid, "burn of hit", rank, affinityMultiplier, gearAmplifier),
+                    Term(DamageType.Pierce, "resist ignored", rank, affinityMultiplier, gearAmplifier),
+                    Term(DamageType.Slash, "crit chance", rank, affinityMultiplier, gearAmplifier),
+                    new ClassAbilityReadout
+                    {
+                        HasValue = true,
+                        Skill = ElementalProficiencyMath.StunSeconds(rank),
+                        Affinity = 0.0,
+                        Gear = 0.0,
+                        Effective = ElementalProficiencyMath.StunSeconds(rank),
+                        Unit = "s",
+                        Label = "stun",
+                        Per = null,
+                        CapNote = null,
+                    },
+                };
+            }
 
-            var rawRider = Math.Max(0.0, rankBonus * multiplier - rankBonus);
+            return Term(DamageType.Fire, "fire dmg", rank, affinityMultiplier, gearAmplifier, secondaries);
+        }
+        private static ClassAbilityReadout Term(DamageType type, string label, int rank, double affinityMultiplier, double gearAmplifier, List<ClassAbilityReadout> secondary = null)
+        {
+            var perRank = PropertyManager.GetDouble(ElementalProficiencyMath.PerRankKey(type)).Item;
+            var cap = Math.Max(0.0, PropertyManager.GetDouble(ElementalProficiencyMath.KeyPrefix + "affinity_cap").Item);
 
-            var clampedRider = affinityCap > 0.0 ? Math.Min(rawRider, affinityCap) : rawRider;
-            var capBit = affinityCap > 0.0 && rawRider > affinityCap;
-
-            var gearChance = Math.Max(0.0, player.GetEquippedModValue(EquipmentModId.ElementalRend));
-
-            var skill = rankBonus * 100.0;
-            var affinity = clampedRider * 100.0;
-            var gear = gearChance * 100.0;
-
-            var effective = skill + clampedRider * 100.0 + gear;
+            var scaled = ElementalProficiencyMath.IsAffinityScaled(type);
+            var value = rank <= 0 ? 0.0 : perRank * rank;
+            var affinity = scaled ? Math.Min(affinityMultiplier, 1.0 + cap) : 1.0;
+            var gear = scaled ? Math.Max(0.0, gearAmplifier) : 0.0;
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
-                Skill = skill,
-                Affinity = affinity,
-                Gear = gear,
-                Effective = effective,
+                Skill = value * 100.0,
+                Affinity = value * (affinity - 1.0) * 100.0,
+                Gear = value * affinity * gear * 100.0,
+                Effective = ElementalProficiencyMath.Magnitude(type, rank, affinityMultiplier, gearAmplifier) * 100.0,
                 Unit = "%",
-                Label = "proc",
+                Label = label,
                 Per = null,
-                CapNote = capBit ? "affinity cap" : null,
+                CapNote = scaled && affinityMultiplier > 1.0 + cap ? "affinity cap" : null,
+                Secondary = secondary,
             };
         }
     }

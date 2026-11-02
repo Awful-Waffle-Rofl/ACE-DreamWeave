@@ -133,7 +133,13 @@ namespace ACE.Server.WorldObjects
             if (BoosterEnum == PropertyAttribute2nd.Health)
             {
                 if (BoostValue >= 0)
+                {
                     player.DamageHistory.OnHeal(vitalChange);
+
+                    // class ability: Hemomancy - the APPLIED health a food or potion restored
+                    if (vitalChange > 0)
+                        player.OnHealthRestored(vitalChange, false);
+                }
                 else
                     player.DamageHistory.Add(this, DamageType.Health, vitalChange);
             }

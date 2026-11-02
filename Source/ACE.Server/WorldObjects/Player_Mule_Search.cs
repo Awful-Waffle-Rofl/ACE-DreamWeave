@@ -27,7 +27,7 @@ namespace ACE.Server.WorldObjects
     partial class Player
     {
         /// <summary>Shared mules /mule search all reads, beyond the caller's own. A constant, not a tunable (owner ruling).</summary>
-        internal const int SearchAllMaxSharedMules = 10;
+        internal const int SearchAllMaxSharedMules = VaultGranterName.MaxSharedMules;
 
         /// <summary>Hit lines printed per mule before "+N more".</summary>
         internal const int SearchAllMaxHitsPerMule = 5;
@@ -43,7 +43,7 @@ namespace ACE.Server.WorldObjects
         internal static readonly TimeSpan SearchAllRegexBudget = TimeSpan.FromMilliseconds(250);
 
         internal const string SearchAllOwnLabel = "Your mule";
-        internal const string SearchAllFallbackLabel = "A shared mule";
+        internal const string SearchAllFallbackLabel = VaultGranterName.FallbackLabel;
 
         /// <summary>
         /// /mule search all &lt;text&gt;: the caller's own mule plus every mule shared with THIS
@@ -100,7 +100,7 @@ namespace ACE.Server.WorldObjects
                 if (store == null || !store.TryGetAccess(actor, out var access, out _) || access == VaultAccess.None)
                     continue;
 
-                var entry = new MuleSearchReportEntry { GranterName = ResolveGranterName(grant) };
+                var entry = new MuleSearchReportEntry { GranterName = VaultGranterName.Resolve(grant) };
 
                 ScanOrWarm(grant.OwnerAccountId, store.IsWarm ? store : null, regex, budget, entry, ref budgetHit);
                 mules.Add(entry);
@@ -134,34 +134,6 @@ namespace ACE.Server.WorldObjects
 
             if (entry.Scan.BudgetHit)
                 budgetHit = true;
-        }
-
-        /// <summary>
-        /// The granting character's CURRENT name when the guid still resolves, else the name stored at
-        /// grant time, else null (the report then uses the neutral fallback label). Only ever the
-        /// character the owner granted FROM - never some other character on the owner's account.
-        /// </summary>
-        private static string ResolveGranterName(ACE.Database.Models.Shard.AccountVaultGrant grant)
-        {
-            string current = null;
-
-            if (grant.GrantedByCharacterGuid is uint granterGuid && granterGuid != 0)
-                current = PlayerManager.FindByGuid(granterGuid)?.Name;
-
-            return ChooseGranterName(current, grant.GrantedByCharacterName);
-        }
-
-        /// <summary>Pure half of <see cref="ResolveGranterName"/>, so the fallback order is testable.</summary>
-        internal static string ChooseGranterName(string currentName, string storedName)
-        {
-            if (!string.IsNullOrWhiteSpace(currentName))
-                return currentName;
-
-            // WriteLog snapshots an unnamed actor as "<unknown>", and the backfill copies that value.
-            if (!string.IsNullOrWhiteSpace(storedName) && storedName != "<unknown>")
-                return storedName;
-
-            return null;
         }
 
         /// <summary>
@@ -430,7 +402,7 @@ namespace ACE.Server.WorldObjects
                 }
 
                 fallbackCount++;
-                labelled.Add((mule, fallbackCount == 1 ? SearchAllFallbackLabel : $"{SearchAllFallbackLabel} ({fallbackCount})", null));
+                labelled.Add((mule, VaultGranterName.FallbackFor(fallbackCount), null));
             }
 
             var ordered = labelled.Where(l => l.Mule.IsOwn)

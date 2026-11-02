@@ -97,7 +97,7 @@ namespace ACE.Server.Tests
             var enumValues = Enum.GetValues(typeof(WeaponModId)).Cast<WeaponModId>().ToList();
 
             Assert.AreEqual(22, enumValues.Count,
-                "the catalog is 4 Tier A plus 18 Tier B. Tier A is 4 v1 rows only (came down from 11 in the 2026-07-30 pool cut - Warding, Crit Ward, Resolute, Vigor and Mending were removed as defensive/sustain rows, and Armor Cleaving was cut before that - down to 5 on 2026-08-07 when Cleave was removed, and down again to 4 on 2026-08-17 when Swift Flight was retired in the catalog v4 pass). Tier B is 3 surviving v2 rows (Life Leech, Mana Leech, Stamina Leech and Overload were retired 2026-08-17 alongside Swift Flight; Sunder and Rampage are phase 2 and deliberately have no enum member) plus 6 v3-expansion rows added 2026-08-06 (Heft, Tension, Leverage, Attunement, Focus, Execution - all six were reworked from an original Tier A/native-writing draft the same day, see WeaponModRegistry.cs's Tier B v3 remarks) plus 9 v4-expansion rows added 2026-08-17, currently inert (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender, Panic Reload)");
+                "the catalog is 4 Tier A plus 18 Tier B. Tier A is 4 v1 rows only (came down from 11 in the 2026-07-30 pool cut - Warding, Crit Ward, Resolute, Vigor and Mending were removed as defensive/sustain rows, and Armor Cleaving was cut before that - down to 5 on 2026-08-07 when Cleave was removed, and down again to 4 on 2026-08-17 when Swift Flight was retired in the catalog v4 pass). Tier B is 3 surviving v2 rows (Life Leech, Mana Leech, Stamina Leech and Overload were retired 2026-08-17 alongside Swift Flight; Sunder and Rampage are phase 2 and deliberately have no enum member) plus 6 v3-expansion rows added 2026-08-06 (Heft, Tension, Leverage, Attunement, Focus, Execution - all six were reworked from an original Tier A/native-writing draft the same day, see WeaponModRegistry.cs's Tier B v3 remarks) plus 9 v4-expansion rows added 2026-08-17, currently inert (Efficiency, Recovery, Mana Well, Cleanse, Longevity, Siphon, Quick Refresh, Arcane Defender - renamed Defensive Weapon 2026-10-25 - and Panic Reload)");
             Assert.AreEqual(22, WeaponModRegistry.AllMods.Count, "every WeaponModId needs exactly one registry row");
 
             Assert.AreEqual(4, WeaponModRegistry.TierAMods.Count, "the Tier A half (v1 survivors only)");
@@ -202,7 +202,7 @@ namespace ACE.Server.Tests
         /// <summary>
         /// Pool depth is the arithmetic the design's power assessment rests on, so it is asserted rather than
         /// left to inspection, in BOTH states of the system's ONE gate: specials melee 4 / missile 4 / caster 3
-        /// with weapon_mods_enabled off, and melee 16 / missile 17 / caster 16 with it on. Tinkers are melee 4,
+        /// with weapon_mods_enabled off, and melee 17 / missile 18 / caster 16 with it on. Tinkers are melee 4,
         /// missile 3, caster 4 either way - Tier B does not touch layer 1.
         ///
         /// UPDATED 2026-07-30 from melee 10 / missile 10 / caster 8, when Warding, Crit Ward, Resolute, Vigor
@@ -227,8 +227,12 @@ namespace ACE.Server.Tests
         /// Quickening, Second Wind) instead of 7: melee/missile lose 4 each (leeches+Overload minus Quickening
         /// which stays, i.e. the three leeches), caster loses 4 (the three leeches plus Overload). Nine new
         /// Tier B v4 rows were added, currently INERT: Efficiency/Recovery/ManaWell/Cleanse/Siphon (All, so all
-        /// three classes), Longevity/QuickRefresh/ArcaneDefender (Caster only), Panic Reload (Missile only) -
+        /// three classes), Longevity/QuickRefresh/ArcaneDefender (Caster only; ArcaneDefender became DefensiveWeapon on every class 2026-10-25, see below), Panic Reload (Missile only) -
         /// melee +5, missile +6, caster +8.
+        ///
+        /// UPDATED AGAIN 2026-10-25 (owner ruling): Arcane Defender was renamed Defensive Weapon and widened
+        /// from caster-only to every class, so melee and missile each gained one gate-ON row (16 -> 17,
+        /// 17 -> 18) and caster is unchanged. It is Tier B, so the gate-OFF depths did not move.
         /// </summary>
         [TestMethod]
         public void Registry_PoolDepthMatchesTheDesign()
@@ -255,8 +259,8 @@ namespace ACE.Server.Tests
             Assert.AreEqual(4, WeaponModRegistry.Pool(WeaponClass.Missile, false).Count, "missile special pool, gate off");
             Assert.AreEqual(3, WeaponModRegistry.Pool(WeaponClass.Caster, false).Count, "caster special pool, gate off");
 
-            Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Melee, true).Count, "melee special pool, gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 5 Tier B v4");
-            Assert.AreEqual(17, WeaponModRegistry.Pool(WeaponClass.Missile, true).Count, "missile special pool, gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 6 Tier B v4");
+            Assert.AreEqual(17, WeaponModRegistry.Pool(WeaponClass.Melee, true).Count, "melee special pool, gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 6 Tier B v4");
+            Assert.AreEqual(18, WeaponModRegistry.Pool(WeaponClass.Missile, true).Count, "missile special pool, gate on: 4 Tier A + 3 Tier B v2 + 4 Tier B v3 + 7 Tier B v4");
             Assert.AreEqual(16, WeaponModRegistry.Pool(WeaponClass.Caster, true).Count, "caster special pool, gate on: 3 Tier A + 2 Tier B v2 + 3 Tier B v3 + 8 Tier B v4");
 
             Assert.AreEqual(4, WeaponTinkerTable.Pool(WeaponClass.Melee).Count, "melee tinker pool");
@@ -723,7 +727,7 @@ namespace ACE.Server.Tests
                 WeaponModId.ShieldBypass,
                 WeaponModId.SecondWind,
                 WeaponModId.Efficiency, WeaponModId.Recovery, WeaponModId.ManaWell, WeaponModId.Cleanse,
-                WeaponModId.Longevity, WeaponModId.Siphon, WeaponModId.QuickRefresh, WeaponModId.ArcaneDefender,
+                WeaponModId.Longevity, WeaponModId.Siphon, WeaponModId.QuickRefresh, WeaponModId.DefensiveWeapon,
             };
 
             Assert.AreEqual(WeaponModRegistry.AllMods.Count, damage.Count + utility.Count,
@@ -766,8 +770,10 @@ namespace ACE.Server.Tests
                 { (false, WeaponClass.Melee),   (4, 3) },
                 { (false, WeaponClass.Missile), (4, 3) },
                 { (false, WeaponClass.Caster),  (3, 3) },   // the one case where the subset covers the pool
-                { (true,  WeaponClass.Melee),   (16, 9) },
-                { (true,  WeaponClass.Missile), (17, 10) },
+                // UPDATED AGAIN 2026-10-25: Defensive Weapon (utility) widened to every class, so the melee and
+                // missile gate-ON pools grew by one and the damage subset did not move.
+                { (true,  WeaponClass.Melee),   (17, 9) },
+                { (true,  WeaponClass.Missile), (18, 10) },
                 { (true,  WeaponClass.Caster),  (16, 7) },
             };
 
@@ -1108,7 +1114,7 @@ namespace ACE.Server.Tests
 
                 var before = definition.ReadNative(weapon);
                 var scale = WeaponModValue.MagnitudeScale();
-                var magnitude = WeaponModValue.Resolve(definition, 1.0, 10.0, scale);
+                var magnitude = WeaponModValue.Resolve(definition, 1.0, 10.0, scale, weapon);
 
                 WeaponModTinkerSet.ApplySpecial(weapon, definition, magnitude);
 
@@ -1119,7 +1125,7 @@ namespace ACE.Server.Tests
                 // native to restore, so it has nothing to get wrong here.
                 if (definition.Tier == WeaponModTier.B)
                 {
-                    Assert.AreEqual(WeaponModValue.FractionFor(definition, magnitude, scale), weapon.GetProperty(definition.Record).Value, 1e-12,
+                    Assert.AreEqual(WeaponModValue.FractionFor(definition, magnitude, scale, weapon), weapon.GetProperty(definition.Record).Value, 1e-12,
                         $"{definition.Id}: a Tier B record must hold the ROLL FRACTION, not the magnitude");
 
                     Assert.AreEqual(magnitude, WeaponModTinkerSet.ReadMagnitude(weapon, definition, scale), 1e-12,

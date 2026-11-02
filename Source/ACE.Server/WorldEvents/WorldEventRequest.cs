@@ -87,6 +87,12 @@ namespace ACE.Server.WorldEvents
         /// <summary>Who asked for this run, for the audit and log lines.</summary>
         public string Invoker { get; set; }
 
+        /// <summary>
+        /// The hazard for this run: null = the source default; "random" = any kind; "none" = no hazard; or one of
+        /// "wisps" | "balls" | "rain". Validated where the request is accepted, not here.
+        /// </summary>
+        public string Hazard { get; set; }
+
         /// <summary>Compose and report, stage nothing.</summary>
         public bool DryRun { get; set; }
 

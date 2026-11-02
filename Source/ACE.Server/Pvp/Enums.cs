@@ -20,13 +20,21 @@ namespace ACE.Server.Pvp
     /// How a participant left a match before it otherwise concluded for them. Died is a normal
     /// elimination; the three Forfeit* values are the ways design's H3/commands sections identify a
     /// dodge (Logout via LogOut, Left via leaving the match instance/recall, Command via /arena leave).
+    /// ForfeitInactive and ForfeitFeeding are conduct removals by the coordinator (Docs/Pvp/BATTLEGROUNDS.md "Conduct"): every
+    /// value other than Died is a forfeit wherever a forfeiter is checked. Appended last, so no existing ordinal moves.
     /// </summary>
     public enum ParticipantExit
     {
         Died,
         ForfeitLogout,
         ForfeitLeft,
-        ForfeitCommand
+        ForfeitCommand,
+
+        /// <summary>Removed by the coordinator for idling past pvp_conduct_idle_remove_seconds (battlegrounds and Tugak Brawl).</summary>
+        ForfeitInactive,
+
+        /// <summary>Removed by the coordinator for feeding: pvp_conduct_feed_min_deaths deaths with contribution below pvp_conduct_feed_max_share (battlegrounds).</summary>
+        ForfeitFeeding
     }
 
     /// <summary>
@@ -93,7 +101,14 @@ namespace ACE.Server.Pvp
         /// Battlegrounds: a protected player's spawn protection ended early because they attacked or cast a harmful spell
         /// (Docs/Pvp/BATTLEGROUNDS.md "Spawn protection"). CharacterId is the player; ExitReason is unused. Appended last.
         /// </summary>
-        SpawnProtectionEnded
+        SpawnProtectionEnded,
+
+        /// <summary>
+        /// Battlegrounds: a participant whose seat is held in its rejoin grace logged back in (Docs/Pvp/BATTLEGROUNDS.md "Disconnect and
+        /// rejoin"). Reported by the login path once the new Player object is in the world. CharacterId is the player; ExitReason is
+        /// unused. Appended last, so every existing value stays stable.
+        /// </summary>
+        Reconnected
     }
 
     /// <summary>Outcome of <see cref="PvpArenaGate"/> - the pure PvP damage-permission decision.</summary>
@@ -115,7 +130,6 @@ namespace ACE.Server.Pvp
         ArenaDisabled,
         ModeDisabled,
         AlreadyInInstance,
-        NotOnPkFacet,
         InRespite,
         ActivePkTimer,
         IsOlthoi,
@@ -124,7 +138,7 @@ namespace ACE.Server.Pvp
         IsTeleporting,
         AlreadyQueued,
         AlreadyInMatch,
-        BelowMinLevel,
+        NoThreadCleared,
         Denylisted,
 
         /// <summary>PvP Template Facets: a character on the template account (pvp_template_account) never fights.</summary>

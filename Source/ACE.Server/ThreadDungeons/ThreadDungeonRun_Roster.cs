@@ -50,13 +50,22 @@ namespace ACE.Server.ThreadDungeons
     /// <summary>One materialised item waiting in a member's held pile, tagged with the deal round that put it there.</summary>
     public sealed class HeldPileItem
     {
-        public HeldPileItem(WorldObject item, string rareFinderName, int round, IReadOnlyList<int> mergedRounds = null)
+        public HeldPileItem(WorldObject item, string rareFinderName, int round, IReadOnlyList<int> mergedRounds = null, int? fixedOrder = null)
         {
             Item = item;
             RareFinderName = rareFinderName;
             Round = round;
             MergedRounds = mergedRounds;
+            FixedOrder = fixedOrder;
         }
+
+        /// <summary>
+        /// Non-null for an item of the player's FIXED boss bonus (the Trade Note stack, the Durable Legendary Key, the
+        /// salvage bags): its 0-based index in the fixed list. ThreadLootStacking.SortPileForPlacement puts these right
+        /// after any Knot-family item (Fiber, Pattern, Knot), ascending, ahead of stackables and the rest, so they land
+        /// in the first slots of the player's first cache whatever their Value or stackability (owner rulings 2026-10-30). Null for everything else.
+        /// </summary>
+        public int? FixedOrder { get; }
 
         public WorldObject Item { get; }
         public string RareFinderName { get; }
@@ -118,9 +127,15 @@ namespace ACE.Server.ThreadDungeons
             public int SecondsInside;
             public long Xp;
             public long Lum;
+
+            /// <summary>Contribution counters (ThreadDungeonRun_Contribution.cs). Interlocked, outside stateLock, like Xp and Lum.</summary>
+            public long Dealt;
+            public long Taken;
+
             public int LevelEnd;
             public bool SurveyFiled;
             public bool FellowshipWarned;
+            public bool ShareWaitsNoticeSent;
             public bool DeliveryWanted;
             public readonly List<HeldPileItem> HeldPile = new List<HeldPileItem>();
             public readonly HashSet<int> RoundsReceived = new HashSet<int>();
@@ -194,12 +209,13 @@ namespace ACE.Server.ThreadDungeons
 
         /// <summary>
         /// Is this gem one of the run's: the owner's gem or any member's key (invariant 6)? A key guid of 0 means
-        /// "no key" and never matches.
+        /// "no key" and never matches. The owner's gem stops matching once it is retired (<see cref="RetireOwnerGem"/>,
+        /// a solo owner's willing exit from the cleared copy), so every dead-gem path treats it as dead.
         /// </summary>
         public bool IsRunGem(uint gemGuid)
         {
             if (gemGuid == GemGuid)
-                return true;
+                return !IsOwnerGemRetired;
 
             if (gemGuid == 0)
                 return false;
@@ -377,6 +393,26 @@ namespace ACE.Server.ThreadDungeons
                     return false;
 
                 ms.FellowshipWarned = true;
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// True exactly once per member: the caller that gets true sends the deal-time "your share waits inside" line
+        /// (GroupRosterRules.ShareWaitsInsideText), so a pile dealt over many delivery steps tells its member once. The
+        /// death line sends regardless and calls this only to latch it, so a death is never followed by a second line.
+        /// </summary>
+        public bool TryMarkShareWaitsNotice(uint guid)
+        {
+            if (!members.TryGetValue(guid, out var ms))
+                return false;
+
+            lock (stateLock)
+            {
+                if (ms.ShareWaitsNoticeSent)
+                    return false;
+
+                ms.ShareWaitsNoticeSent = true;
                 return true;
             }
         }

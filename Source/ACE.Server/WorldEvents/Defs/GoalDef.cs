@@ -3,8 +3,10 @@ using System.Text.Json.Serialization;
 namespace ACE.Server.WorldEvents.Defs
 {
     /// <summary>
-    /// Objective kind. Parsed case-insensitively from GoalDef.Type. No Hold entry ships in v1 (C6 defers
-    /// Hold to P2), but the enum value exists so WP-12 can add it without a rename.
+    /// Objective kind. Parsed case-insensitively from GoalDef.Type. Hold is the "protect the targets" goal:
+    /// it spawns the friendly targets in its <see cref="GoalDef.Protect"/> block and succeeds when enough of
+    /// them are still alive after <see cref="GoalDef.HoldSeconds"/>. The objective itself is a later slice;
+    /// WorldEventObjectiveFactory refuses Hold until then.
     /// </summary>
     public enum GoalType
     {
@@ -41,8 +43,20 @@ namespace ACE.Server.WorldEvents.Defs
         [JsonPropertyName("count")]
         public ScaledCount Count { get; set; }
 
+        /// <summary>Hold only: seconds from the run going Active until the hold succeeds.</summary>
         [JsonPropertyName("holdSeconds")]
         public int HoldSeconds { get; set; }
+
+        /// <summary>Hold only: the targets to protect. Required for a Hold goal, ignored by every other type.</summary>
+        [JsonPropertyName("protect")]
+        public ProtectDef Protect { get; set; }
+
+        /// <summary>
+        /// Optional (any goal type): the run must stand a short walk from a Town Network portal drop, else its start is
+        /// re-rolled near the nearest towns. Read by the goal's start-spot rule; null = no check.
+        /// </summary>
+        [JsonPropertyName("townReach")]
+        public TownReachDef TownReach { get; set; }
 
         [JsonPropertyName("mvpRule")]
         public string MvpRule { get; set; }

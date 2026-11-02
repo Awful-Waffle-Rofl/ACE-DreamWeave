@@ -6,6 +6,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 using ACE.Database.Models.Auth;
 using ACE.Entity;
+using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.WorldObjects;
@@ -23,7 +24,7 @@ namespace ACE.Server.Tests
         /// SAME lambdas LeaderboardRanking.Boards wires up for "wave", not a hand-copied formula, so a wiring
         /// bug in the real board (wrong property, wrong sign, wrong null-handling) fails these tests.
         /// </summary>
-        private sealed class WaveBoardFakePlayer : IPlayer
+        internal sealed class WaveBoardFakePlayer : IPlayer
         {
             private readonly Dictionary<PropertyInt64, long> int64Props = new Dictionary<PropertyInt64, long>();
 
@@ -64,31 +65,89 @@ namespace ACE.Server.Tests
             public double? GetProperty(PropertyFloat property) => null;
             public uint? GetProperty(PropertyInstanceId property) => null;
             public Dictionary<PropertyInt, int> IntProps { get; } = new Dictionary<PropertyInt, int>();
+            public Dictionary<PropertyInt64, long> Int64Props => int64Props;
             public int? GetProperty(PropertyInt property) => IntProps.TryGetValue(property, out var v) ? v : (int?)null;
             public long? GetProperty(PropertyInt64 property) => int64Props.TryGetValue(property, out var v) ? v : (long?)null;
-            public string GetProperty(PropertyString property) => null;
+            public Dictionary<PropertyString, string> StringProps { get; } = new Dictionary<PropertyString, string>();
+            public string GetProperty(PropertyString property) => StringProps.TryGetValue(property, out var v) ? v : null;
 
             public void SetProperty(PropertyBool property, bool value) { }
             public void SetProperty(PropertyDataId property, uint value) { }
             public void SetProperty(PropertyFloat property, double value) { }
             public void SetProperty(PropertyInstanceId property, uint value) { }
-            public void SetProperty(PropertyInt property, int value) { }
+            public void SetProperty(PropertyInt property, int value) => IntProps[property] = value;
             public void SetProperty(PropertyInt64 property, long value) => int64Props[property] = value;
-            public void SetProperty(PropertyString property, string value) { }
+            public void SetProperty(PropertyString property, string value) => StringProps[property] = value;
 
             public void RemoveProperty(PropertyBool property) { }
             public void RemoveProperty(PropertyDataId property) { }
             public void RemoveProperty(PropertyFloat property) { }
             public void RemoveProperty(PropertyInstanceId property) { }
-            public void RemoveProperty(PropertyInt property) { }
+            public void RemoveProperty(PropertyInt property) => IntProps.Remove(property);
             public void RemoveProperty(PropertyInt64 property) => int64Props.Remove(property);
-            public void RemoveProperty(PropertyString property) { }
+            public void RemoveProperty(PropertyString property) => StringProps.Remove(property);
 
             public uint GetCurrentLoyalty() => 0;
             public uint GetCurrentLeadership() => 0;
 
             public void SaveBiotaToDatabase(bool enqueueSave = true) { }
             public void UpdateProperty(PropertyInstanceId prop, uint? value, bool broadcast = false) { }
+        }
+
+        private static WaveBoardFakePlayer KnotPlayer(string name, uint guid, int? level, long? centi, string key)
+        {
+            var p = new WaveBoardFakePlayer(name, guid, 0, null);
+            if (level.HasValue) p.IntProps[PropertyInt.BestKnotClearLevel] = level.Value;
+            if (centi.HasValue) p.Int64Props[PropertyInt64.BestKnotClearTimeCenti] = centi.Value;
+            if (key != null) p.StringProps[PropertyString.BestKnotClearPinnacleKey] = key;
+            return p;
+        }
+
+        private static List<string> RankKnot(params WaveBoardFakePlayer[] players)
+        {
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "knot");
+            return LeaderboardRanking.Rank(
+                players.Cast<IPlayer>(),
+                _ => false,
+                board.Score,
+                board.TieBreaker,
+                null,
+                p => p.Level ?? 0,
+                p => 0L,
+                p => p.Guid.Full).Select(p => p.Name).ToList();
+        }
+
+        [TestMethod]
+        public void KnotBoard_HigherLevelBeatsFasterLowerLevel()
+        {
+            var r = RankKnot(
+                KnotPlayer("FastLow", 1, 300, 1000, "grael"),
+                KnotPlayer("SlowHigh", 2, 312, 90000, "grael"));
+
+            CollectionAssert.AreEqual(new[] { "SlowHigh", "FastLow" }, r);
+        }
+
+        [TestMethod]
+        public void KnotBoard_AtTheSameLevel_FasterComesFirst_AndNoRecordIsOffTheBoard()
+        {
+            var r = RankKnot(
+                KnotPlayer("Slow", 1, 312, 27720, "grael"),
+                KnotPlayer("Fast", 2, 312, 20000, "grael"),
+                KnotPlayer("NoTime", 3, 312, null, "grael"),
+                KnotPlayer("Never", 4, null, null, null));
+
+            CollectionAssert.AreEqual(new[] { "Fast", "Slow", "NoTime" }, r);
+        }
+
+        [TestMethod]
+        public void KnotBoard_Detail_RendersNameAndTime_AndNullWithoutATime()
+        {
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "knot");
+
+            // 27720 cs = 4:37.20; an unknown key has no store entry (loaded or not), so the name falls back to the key
+            Assert.AreEqual(" - zz_unknown_knot - 4:37.20", board.Detail(KnotPlayer("A", 1, 312, 27720, "zz_unknown_knot")));
+            Assert.AreEqual(" - Knot - 4:37.20", board.Detail(KnotPlayer("B", 2, 312, 27720, null)));
+            Assert.IsNull(board.Detail(KnotPlayer("C", 3, 312, null, "grael")));
         }
 
         [TestMethod]
@@ -162,6 +221,145 @@ namespace ACE.Server.Tests
                 p => p.Level ?? 0,
                 p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
                 p => p.Guid.Full);
+        }
+
+        private static WaveBoardFakePlayer TitlePlayer(string name, uint guid, int titles, long xp)
+        {
+            var p = new WaveBoardFakePlayer(name, guid, 0, null);
+            if (titles != 0) p.IntProps[PropertyInt.NumCharacterTitles] = titles;
+            p.SetProperty(PropertyInt64.TotalExperience, xp);
+            return p;
+        }
+
+        [TestMethod]
+        public void TitleBoard_RealDelegates_OrdersByTitlesThenXpAndDropsNone()
+        {
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "title");
+
+            var cs = new IPlayer[]
+            {
+                TitlePlayer("FiveLowXp", 1, 5, 100),
+                TitlePlayer("FiveHighXp", 2, 5, 900),
+                TitlePlayer("Nine", 3, 9, 1),
+                TitlePlayer("NoTitles", 4, 0, 5000),
+            };
+
+            var r = LeaderboardRanking.Rank(
+                cs,
+                _ => false,
+                board.Score,
+                board.TieBreaker,
+                null,
+                p => p.Level ?? 0,
+                p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
+                p => p.Guid.Full);
+
+            CollectionAssert.AreEqual(new[] { "Nine", "FiveHighXp", "FiveLowXp" }, r.Select(p => p.Name).ToArray());
+            Assert.AreEqual(9, board.Score(cs[2]));
+        }
+
+        private static WaveBoardFakePlayer DeathsPlayer(string name, uint guid, int deaths, long xp)
+        {
+            var p = new WaveBoardFakePlayer(name, guid, 0, null);
+            if (deaths != 0) p.IntProps[PropertyInt.NumDeaths] = deaths;
+            p.SetProperty(PropertyInt64.TotalExperience, xp);
+            return p;
+        }
+
+        [TestMethod]
+        public void DeathsBoard_RealDelegates_OrdersByDeathsThenXpAndDropsZeroAndHidden()
+        {
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "deaths");
+            var hidden = new HashSet<uint> { 5 };
+
+            var cs = new IPlayer[]
+            {
+                DeathsPlayer("FiveLowXp", 1, 5, 100),
+                DeathsPlayer("FiveHighXp", 2, 5, 900),
+                DeathsPlayer("Nine", 3, 9, 1),
+                DeathsPlayer("NoDeaths", 4, 0, 5000),
+                DeathsPlayer("HiddenOption", 5, 50, 5000),
+            };
+
+            var r = LeaderboardRanking.Rank(
+                cs,
+                _ => false,
+                p => LeaderboardRanking.DeathsBoardScore(p, q => !hidden.Contains(q.Guid.Full)),
+                board.TieBreaker,
+                null,
+                p => p.Level ?? 0,
+                p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
+                p => p.Guid.Full);
+
+            CollectionAssert.AreEqual(new[] { "Nine", "FiveHighXp", "FiveLowXp" }, r.Select(p => p.Name).ToArray());
+        }
+
+        [TestMethod]
+        public void DeathsBoard_UndeterminedOption_IsExcluded()
+        {
+            var p = DeathsPlayer("Unknown", 1, 7, 1);
+            Assert.AreEqual(0, LeaderboardRanking.DeathsBoardScore(p, _ => null), "unknown option: privacy-safe exclusion");
+            Assert.AreEqual(7, LeaderboardRanking.DeathsBoardScore(p, _ => true));
+            Assert.AreEqual(0, LeaderboardRanking.DeathsBoardScore(p, _ => false));
+
+            // The real board's Score reads the option through ReadDeathsVisible, which cannot resolve a test double.
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "deaths");
+            Assert.AreEqual(0, board.Score(p));
+        }
+
+        [TestMethod]
+        public void DeathsBoard_IsExcludedFromTheSheetSnapshot_OthersAreNot()
+        {
+            Assert.IsTrue(LeaderboardRanking.Boards.First(b => b.Key == "deaths").ExcludeFromSheet);
+            CollectionAssert.AreEqual(new[] { "deaths" }, LeaderboardRanking.Boards.Where(b => b.ExcludeFromSheet).Select(b => b.Key).ToArray());
+
+            var sheet = LeaderboardRanking.SheetBoards().Select(b => b.Key).ToArray();
+            CollectionAssert.DoesNotContain(sheet, "deaths");
+            Assert.AreEqual(LeaderboardRanking.Boards.Count - 1, sheet.Length, "every other board stays on the sheet");
+        }
+
+        private const int DeathsOptionBit = (int)CharacterOptions2.DisplayNumberDeaths;
+
+        private static void SetField(object target, string name, object value)
+        {
+            var f = target.GetType().GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+            Assert.IsNotNull(f, name);
+            f.SetValue(target, value);
+        }
+
+        private static OfflinePlayer OfflineWithDeaths(int deaths, int options1, int options2, bool hasOptions = true)
+        {
+            var o = (OfflinePlayer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(OfflinePlayer));
+            var biota = new ACE.Entity.Models.Biota { Id = 0x50000123 };
+            biota.PropertiesInt = new Dictionary<PropertyInt, int> { [PropertyInt.NumDeaths] = deaths };
+            SetField(o, "<Biota>k__BackingField", biota);
+            SetField(o, "BiotaDatabaseLock", new System.Threading.ReaderWriterLockSlim());
+            o.CharacterOptions1 = options1;
+            o.CharacterOptions2 = options2;
+            o.HasCharacterOptions = hasOptions;
+            return o;
+        }
+
+        [TestMethod]
+        public void DeathsBoard_OfflineBranch_ReadsTheCarriedOptionBits_NoDatabase()
+        {
+            var board = LeaderboardRanking.Boards.First(b => b.Key == "deaths");
+
+            Assert.AreEqual(7, board.Score(OfflineWithDeaths(7, 0, DeathsOptionBit)), "option on: visible");
+            Assert.AreEqual(0, board.Score(OfflineWithDeaths(7, 0, ~DeathsOptionBit)), "option off: hidden");
+            Assert.AreEqual(0, board.Score(OfflineWithDeaths(7, -1, -1, hasOptions: false)), "options unknown: excluded");
+            Assert.AreEqual(0, board.Score(OfflineWithDeaths(0, 0, DeathsOptionBit)), "no deaths: dropped");
+        }
+
+        [TestMethod]
+        public void DeathsOption_SharedMapping_UsedByPlayerAndOfflineReads()
+        {
+            // Player's static initializer opens a database context, so a Player cannot be built in this harness. Player.GetCharacterOption
+            // and the offline read both go through CharacterOption.IsSet, which is what is pinned here.
+            var opt = CharacterOption.AllowOthersToSeeYourNumberOfDeaths;
+            Assert.IsTrue(opt.IsSet(0, DeathsOptionBit));
+            Assert.IsFalse(opt.IsSet(-1, ~DeathsOptionBit));
+            Assert.IsFalse(opt.IsSet(-1, 0));
         }
 
         [TestMethod]
@@ -293,10 +491,20 @@ namespace ACE.Server.Tests
         public void Boards_PinTheTopTitlesKeysAndGates()
         {
             var b = LeaderboardRanking.Boards.ToDictionary(x => x.Key);
-            CollectionAssert.AreEquivalent(new[] { "dps", "defense", "wave", "level", "cap", "stamp", "thread" }, b.Keys.ToArray());
+            CollectionAssert.AreEquivalent(new[] { "dps", "defense", "wave", "knot", "level", "cap", "stamp", "thread", "title", "deaths" }, b.Keys.ToArray());
+            Assert.AreEqual("Titles", b["title"].Title);
+            Assert.IsNull(b["title"].FeatureGate);
+            Assert.IsNotNull(b["title"].TieBreaker);
+            Assert.AreEqual("Deaths", b["deaths"].Title);
+            Assert.IsNull(b["deaths"].FeatureGate);
+            Assert.IsNotNull(b["deaths"].TieBreaker);
             Assert.AreEqual("DPS Challenge", b["dps"].Title);
             Assert.AreEqual("Defense Challenge", b["defense"].Title);
             Assert.AreEqual("Wave Challenge", b["wave"].Title);
+            Assert.AreEqual("Knot Clears", b["knot"].Title);
+            Assert.IsNull(b["knot"].FeatureGate);
+            Assert.IsNotNull(b["knot"].TieBreaker);
+            Assert.IsNotNull(b["knot"].Detail);
             Assert.AreEqual("Level", b["level"].Title);
             Assert.AreEqual("Class Ability Points", b["cap"].Title);
             Assert.AreEqual("Quest Stamps", b["stamp"].Title);
@@ -317,8 +525,14 @@ namespace ACE.Server.Tests
                 Assert.AreEqual("6,000 damage (100 DPS)", b["dps"].Format(6000));
                 Assert.AreEqual("42s", b["defense"].Format(42));
                 Assert.AreEqual("Level 275", b["level"].Format(275));
+                Assert.AreEqual("Level 312", b["knot"].Format(312));
+                Assert.AreEqual("Level 1,204", b["knot"].Format(1204));
                 Assert.AreEqual("12 earned", b["cap"].Format(12));
                 Assert.AreEqual("3 stamps", b["stamp"].Format(3));
+                Assert.AreEqual("1 title", b["title"].Format(1));
+                Assert.AreEqual("1,204 titles", b["title"].Format(1204));
+                Assert.AreEqual("1 death", b["deaths"].Format(1));
+                Assert.AreEqual("1,204 deaths", b["deaths"].Format(1204));
             }
             finally { CultureInfo.CurrentCulture = prior; }
         }

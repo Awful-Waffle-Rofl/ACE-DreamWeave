@@ -471,13 +471,14 @@ namespace ACE.Server.Tests.ThreadDungeons
         {
             var body = PooledLootSourceText.MethodBody(Src(), "private static Container TryPlaceEmpty(");
 
-            var landblock = body.IndexOf("run.Dungeon.Landblock", StringComparison.Ordinal);
+            // The run-landblock rule is the one footprint-aware helper (Open World Threads R23), before and after landing.
+            var landblock = body.IndexOf("!ThreadRunGeometry.IsOnRunLandblock(run, position)", StringComparison.Ordinal);
             var los = body.IndexOf("owner.IsDirectVisible(position)", StringComparison.Ordinal);
-            var create = body.IndexOf("ThreadDungeonRewardSpawner.CreateCacheChest(run, \"pooled cache\")", StringComparison.Ordinal);
+            var create = body.IndexOf("ThreadDungeonRewardSpawner.CreateCacheChest(run, \"pooled cache\", owner.Guid.Full, wcid)", StringComparison.Ordinal);
             var ethereal = body.IndexOf("chest.Ethereal = true;", StringComparison.Ordinal);
             var suppress = body.IndexOf("SuppressGenerateEffect = true", StringComparison.Ordinal);
             var enter = body.IndexOf("chest.EnterWorld()", StringComparison.Ordinal);
-            var landedBlock = body.IndexOf("landed.LandblockId.Landblock != run.Dungeon.Landblock", StringComparison.Ordinal);
+            var landedBlock = body.IndexOf("!ThreadRunGeometry.IsOnRunLandblock(run, landed)", StringComparison.Ordinal);
             var height = body.IndexOf("ThreadCachePlacement.MaxZDelta", StringComparison.Ordinal);
             var register = body.IndexOf("run.TryRegisterCache(chest)", StringComparison.Ordinal);
             var effect = body.IndexOf("ApplyVisualEffects(PlayScript.Create)", StringComparison.Ordinal);
@@ -493,9 +494,10 @@ namespace ACE.Server.Tests.ThreadDungeons
         [TestMethod]
         public void Move_places_the_new_cache_before_touching_the_old_one()
         {
-            var body = PooledLootSourceText.MethodBody(Src(), "private static void MoveCaches(");
+            var body = PooledLootSourceText.MethodBody(Src(), "private static CacheMoveResult MoveCaches(");
 
-            var place = body.IndexOf("PlaceNewCache(run, scan, owner)", StringComparison.Ordinal);
+            // Knots (2026-10-12): the fresh cache keeps the old one's weenie, so a Knotted Thread Cache stays Knotted.
+            var place = body.IndexOf("PlaceNewCache(run, scan, owner, old.WeenieClassId)", StringComparison.Ordinal);
             var bail = body.IndexOf("if (fresh == null)", StringComparison.Ordinal);
             var transfer = body.IndexOf("ThreadCacheFiller.TransferContents(run, old, fresh)", StringComparison.Ordinal);
             var destroy = body.IndexOf("old.Destroy()", StringComparison.Ordinal);
@@ -503,7 +505,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(place >= 0 && place < bail && bail < transfer && transfer < destroy);
 
             // A moved cache is a fresh chest placed through the same attempt, so it is ethereal too.
-            StringAssert.Contains(PooledLootSourceText.MethodBody(Src(), "private static Chest PlaceNewCache("), "TryPlaceEmpty(run, owner, c, exclusions)");
+            StringAssert.Contains(PooledLootSourceText.MethodBody(Src(), "private static Chest PlaceNewCache("), "TryPlaceEmpty(run, owner, c, exclusions, wcid)");
         }
 
         [TestMethod]
@@ -565,7 +567,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             Assert.IsTrue(branch >= 0 && branchEnd > branch, "Move branch anchors moved in Execute; re-read the method");
 
             var move = execute.Substring(branch, branchEnd - branch);
-            var moved = move.IndexOf("MoveCaches(run, landblock, owner)", StringComparison.Ordinal);
+            var moved = move.IndexOf("MoveCaches(run, landblock, owner, quiet: false)", StringComparison.Ordinal);
             var unclaimed = moved < 0 ? -1 : move.IndexOf("run.HasUnclaimedLoot", moved, StringComparison.Ordinal);
             var wanted = unclaimed < 0 ? -1 : move.IndexOf("run.MarkPlacementWanted()", unclaimed, StringComparison.Ordinal);
             var returns = wanted < 0 ? -1 : move.IndexOf("return;", wanted, StringComparison.Ordinal);

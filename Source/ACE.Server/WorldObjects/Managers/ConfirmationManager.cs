@@ -23,6 +23,8 @@ namespace ACE.Server.WorldObjects.Managers
 
         private UIntSequence contextSequence = new UIntSequence();
 
+        private readonly CancelledConfirmationIds cancelled = new CancelledConfirmationIds();
+
         public ConfirmationManager(Player player)
         {
             Player = player;
@@ -62,6 +64,27 @@ namespace ACE.Server.WorldObjects.Managers
             => confirmations.TryGetValue(confirmationType, out confirmation);
 
         /// <summary>
+        /// Closes ONE specific pending confirmation without running it, and only if that exact instance is still the
+        /// pending one for its type (a reference compare, so a newer dialog of the same type is never closed by
+        /// mistake). Lets a caller withdraw a question that no longer matches the state it asked about, freeing the
+        /// type's single slot for a fresh one. Same close as AbortAll.
+        /// </summary>
+        public bool TryCancel(Confirmation confirmation)
+        {
+            if (confirmation == null)
+                return false;
+
+            if (!confirmations.TryRemove(new System.Collections.Generic.KeyValuePair<ConfirmationType, Confirmation>(confirmation.ConfirmationType, confirmation)))
+                return false;
+
+            // The client answers a closed dialog by itself; remember this one so HandleResponse drops that reply quietly.
+            cancelled.Remember(confirmation.ConfirmationType, confirmation.ContextId);
+
+            Player.Session?.Network?.EnqueueSend(new GameEventConfirmationDone(Player.Session, confirmation.ConfirmationType, confirmation.ContextId));
+            return true;
+        }
+
+        /// <summary>
         /// This only needs to be sent in the rare event the server needs to force close
         /// a confirmation dialog that is still active on the client
         /// </summary>
@@ -99,6 +122,15 @@ namespace ACE.Server.WorldObjects.Managers
         /// </summary>
         public bool HandleResponse(ConfirmationType confirmType, uint contextId, bool response, bool timeout = false)
         {
+            // A reply to a dialog TryCancel closed. Checked BEFORE the TryRemove below: a newer dialog of the same type
+            // may be pending, and that one must not be removed (and re-added with an error) by a reply meant for the
+            // old one. Context ids are unique per player, so only that exact reply matches.
+            if (cancelled.TryConsume(confirmType, contextId))
+            {
+                log.Debug($"{Player.Name}.ConfirmationManager.HandleResponse({confirmType}, {contextId}, {response}, {timeout}) - reply to a cancelled confirmation, ignored");
+                return false;
+            }
+
             if (!confirmations.TryRemove(confirmType, out var confirm))
             {
                 switch (confirmType)

@@ -541,6 +541,26 @@ namespace ACE.Database
         }
 
 
+        /// <summary>
+        /// ObjCellId of every landblock_instance placement whose weenie is a House object (WeenieType.House) or a
+        /// SlumLord. GetHousesAll returns SlumLords only, but a mansion or villa house object often sits on a
+        /// different landblock from its slumlord; callers that need "which landblocks hold a house" (IpLimitManager,
+        /// matching Landblock.Houses used by /mule summon) need the House objects too. Slumlords stay in the union
+        /// so no landblock the slumlord-only query covered is lost.
+        /// </summary>
+        public List<uint> GetHousingObjCellIds()
+        {
+            using (var context = new WorldDbContext())
+            {
+                var query = from weenie in context.Weenie.AsNoTracking()
+                            join winst in context.LandblockInstance.AsNoTracking() on weenie.ClassId equals winst.WeenieClassId
+                            where weenie.Type == (int)WeenieType.House || weenie.Type == (int)WeenieType.SlumLord
+                            select winst.ObjCellId;
+
+                return query.ToList();
+            }
+        }
+
         public List<HouseListResults> GetHousesAll()
         {
             using (var context = new WorldDbContext())

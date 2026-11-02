@@ -125,6 +125,28 @@ namespace ACE.Server.Tests.Pvp.Battlegrounds
         }
 
         [TestMethod]
+        public void GroupJoinToggle_UsageFor_DropsGroupWhileDisabled_AndOnlyThen()
+        {
+            StringAssert.Contains(UsageFor(JoinUsage, true), "bg [group] [template]");
+            StringAssert.Contains(UsageFor(ArenaUsage, true), "join bg [group] [template]");
+
+            var join = UsageFor(JoinUsage, false);
+            var arena = UsageFor(ArenaUsage, false);
+            Assert.IsFalse(join.Contains("group"), join);
+            Assert.IsFalse(arena.Contains("group"), arena);
+            StringAssert.Contains(join, "/arena join bg [template]");
+            StringAssert.Contains(arena, "join bg [template]|templates");
+            StringAssert.Contains(arena, "join <1v1|2v2|tugak> [duo] [template]", "2v2 duo stays advertised");
+        }
+
+        [TestMethod]
+        public void GroupJoinToggle_RefusalText_IsTheArenaStyleLine()
+        {
+            Assert.AreEqual("[Arena] Group queueing for battlegrounds is disabled. Queue on your own with /arena join bg - teams are balanced for you.",
+                JoinResultText(new PvpJoinResult(PvpJoinRefusal.GroupJoinDisabled, "bg")));
+        }
+
+        [TestMethod]
         public void Usage_ListsBg()
         {
             StringAssert.Contains(JoinUsage, "bg [group]");

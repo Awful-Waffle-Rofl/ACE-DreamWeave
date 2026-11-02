@@ -53,7 +53,9 @@ namespace ACE.Server.ThreadDungeons
     /// Opt-in exit gate. Called by each voluntary exit (portals, recall commands, recall spells,
     /// portal gems, /exitinstance) after that exit's own refusals, immediately before its teleport or first
     /// effect, and never from Player.Teleport, so death, logout, EndRun eviction,
-    /// landblock-unload eviction and admin teleports are never held (spec section 7).
+    /// landblock-unload eviction and admin teleports are never held (spec section 7). Because exactly the voluntary
+    /// exits come through here, the not-held path is also where a solo owner's willing exit is armed
+    /// (ThreadWillingExit, owner ruling 2026-10-10); Player.Teleport consumes it.
     ///
     /// Threading. Exit sites run on the player's landblock thread (portal use, spell casts) or the world thread
     /// (GameActions, commands); both only read the run under its lock and the caches of the landblock they are
@@ -126,7 +128,12 @@ namespace ACE.Server.ThreadDungeons
 
             if (!ThreadExitRules.ShouldPromptExit(run.PooledLoot, run.State, isOwner, ThreadCachePlacer.IsOwnerInside(run, player),
                     hasUnclaimed, anyCacheHoldsItems, bypass))
+            {
+                // The exit goes ahead: a solo owner's willing exit is armed here and retires the gem only if the
+                // teleport actually lands out of the cleared copy (ThreadWillingExit, owner ruling 2026-10-10).
+                ThreadWillingExit.ArmIfSoloOwner(run, playerGuid, player.Location.Instance, now);
                 return false;
+            }
 
             var guid = player.Guid;
 

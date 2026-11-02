@@ -141,9 +141,10 @@ namespace ACE.Server.Tests.ThreadDungeons
         }
 
         /// <summary>
-        /// The ONE-key-source invariant: ThreadPuzzleIpKey is the only new caller of NormalizeIpKey, and no new
-        /// caller of IpLimitManager.IsExempt(session) appeared anywhere in ACE.Server. Pinned as exact per-file
-        /// counts over non-comment lines, so a new call site anywhere fails here.
+        /// The ONE-key-source invariant: NormalizeIpKey is called only by IpLimitManager.HouseholdKeyCore (the
+        /// household key for every site that used to normalise an address itself), the puzzle key and the
+        /// /rewardclaim ip subject; and no new caller of IpLimitManager.IsExempt(session) appeared anywhere in
+        /// ACE.Server. Pinned as exact per-file counts over non-comment lines, so a new call site anywhere fails here.
         /// </summary>
         [TestMethod]
         public void NormalizeIpKey_and_IsExempt_have_no_new_call_sites()
@@ -158,11 +159,13 @@ namespace ACE.Server.Tests.ThreadDungeons
                     || (Path.GetFileName(file) == "IpLimitManager.cs" && Regex.IsMatch(line, @"(?<![\w.])IsExempt\("))));
 
             CollectionAssert.AreEquivalent(
-                new[] { "GroupRosterRules.cs=1", "RewardClaimCommands.cs=1", "RewardClaimService.cs=1", "ThreadPuzzleIpKey.cs=1" },
+                new[] { "IpLimitManager.cs=1", "RewardClaimCommands.cs=1", "ThreadPuzzleIpKey.cs=1" },
                 normalize, string.Join(", ", normalize));
 
+            // IpLimitManager.cs=3: the sweep (Tick), GetResidents, and the teleport-arrival check (CheckOnArrival) -
+            // all three enforce the active-player limit itself and must honour the same exemption.
             CollectionAssert.AreEquivalent(
-                new[] { "CharacterHandler.cs=1", "EmoteManager.cs=1", "GroupRosterRules.cs=1", "IpLimitCommands.cs=1", "IpLimitManager.cs=2" },
+                new[] { "CharacterHandler.cs=1", "EmoteManager.cs=1", "GroupRosterRules.cs=1", "IpLimitCommands.cs=1", "IpLimitManager.cs=3" },
                 exempt, string.Join(", ", exempt));
         }
 

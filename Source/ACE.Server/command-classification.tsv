@@ -108,6 +108,7 @@ echoflags	ACE.Server.Command.Handlers.DeveloperCommands.HandleDebugEchoFlags	web
 effect	ACE.Server.Command.Handlers.DeveloperCommands.HandlePlayEffect	in_game_character	requires_world	captured	-	
 enable-aetheria	ACE.Server.Command.Handlers.DeveloperCommands.HandleEnableAetheria	in_game_character	requires_world	captured	-	
 enter-instance	ACE.Server.Command.Handlers.InstanceCommands.HandleEnterInstance	in_game_character	requires_world	captured	-	
+enter-instance-group	ACE.Server.Command.Handlers.InstanceCommands.HandleEnterInstanceGroup	in_game_character	requires_world	captured	-	
 equiptest	ACE.Server.Command.Handlers.DeveloperCommands.EquipTest	in_game_character	requires_world	captured	-	
 event	ACE.Server.Command.Handlers.AdminCommands.HandleEvent	in_game_character	scan_unsafe	captured	-	
 exit	ACE.Server.Command.Handlers.ConsoleCommands.Exit	in_game_only	override	captured	-	O1: a web-triggered shutdown is an outage, the same class of action as a deploy.
@@ -170,6 +171,7 @@ grantitemxp	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantItemXp	in_g
 grantluminance	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantLuminance	in_game_character	requires_world	captured	-	
 grantxp	ACE.Server.Command.Handlers.DeveloperCommands.HandleGrantXp	in_game_character	requires_world	captured	-	
 harmself	ACE.Server.Command.Handlers.DeveloperCommands.HarmSelf	in_game_character	requires_world	captured	-	
+hazard	ACE.Server.Command.Handlers.HazardCommands.HandleHazard	in_game_character	requires_world	captured	-	
 heal	ACE.Server.Command.Handlers.AdminCommands.HandleHeal	in_game_character	requires_world	captured	-	
 healself	ACE.Server.Command.Handlers.AdminCommands.HandleHealSelf	in_game_character	requires_world	captured	-	
 highres-export	ACE.Server.Command.Handlers.ConsoleCommands.ExportHighresDatContents	in_game_only	override	uncaptured	-	O2: writes to arbitrary server filesystem paths and can hold the single web worker for over an hour.
@@ -184,6 +186,8 @@ import-sql-folders	ACE.Server.Command.Handlers.Processors.DeveloperContentComman
 inv	ACE.Server.Command.Handlers.DeveloperCommands.HandleInv	in_game_character	requires_world	captured	-	
 iplimit	ACE.Server.Command.Handlers.IpLimitCommands.HandleIpLimit	web	scan_safe	captured	-	
 iplimitwho	ACE.Server.Command.Handlers.IpLimitCommands.HandleIpLimitWho	web	scan_safe	captured	-	
+knot	ACE.Server.Command.Handlers.KnotCommands.HandleKnot	in_game_character	requires_world	captured	-	
+knotloot	ACE.Server.Command.Handlers.KnotLootCommands.HandleKnotLoot	in_game_character	requires_world	captured	-	
 knownobjs	ACE.Server.Command.Handlers.AdminCommands.Handleknownobjs	in_game_character	requires_world	captured	-	
 knownobjs	ACE.Server.Command.Handlers.DeveloperCommands.HandleKnownObjs	in_game_character	requires_world	uncaptured	-	
 knownplayers	ACE.Server.Command.Handlers.DeveloperCommands.HandleKnownPlayers	in_game_character	requires_world	uncaptured	-	
@@ -250,6 +254,7 @@ objsend	ACE.Server.Command.Handlers.PlayerCommands.HandleObjSend	in_game_charact
 offlinebonus	ACE.Server.Command.Handlers.PlayerCommands.HandleOfflineBonus	in_game_character	requires_world	captured	-	
 passwd	ACE.Server.Command.Handlers.AccountCommands.HandlePasswd	in_game_character	requires_world	captured	-	
 pickupspeed	ACE.Server.Command.Handlers.PlayerCommands.HandlePickupSpeed	in_game_character	requires_world	captured	-	
+pinnacle	ACE.Server.Command.Handlers.PinnacleCommands.HandlePinnacle	in_game_character	requires_world	captured	-	
 pk	ACE.Server.Command.Handlers.AdminCommands.HandlePk	in_game_character	requires_world	captured	-	
 pktimer	ACE.Server.Command.Handlers.DeveloperCommands.HandlePKTimer	in_game_character	requires_world	captured	-	
 playscriptid	ACE.Server.Command.Handlers.DeveloperCommands.HandlePlayScriptId	in_game_character	requires_world	captured	-	
@@ -265,6 +270,7 @@ pscript	ACE.Server.Command.Handlers.DeveloperCommands.HandlePScript	in_game_char
 purchase-house	ACE.Server.Command.Handlers.DeveloperCommands.HandlePurchaseHouse	in_game_character	requires_world	captured	-	
 puzzlegate	ACE.Server.Command.Handlers.PuzzleGateCommands.HandlePuzzleGate	in_game_character	requires_world	captured	-	
 puzzlegate-sweep	ACE.Server.Command.Handlers.PuzzleGateCommands.HandlePuzzleGateSweep	in_game_only	override	captured	-	O2-class: loads throwaway landblocks for minutes and --write-disabled writes server files (puzzle-gates.json); server console only (the handler also refuses a web context).
+pvphue	ACE.Server.Command.Handlers.PvpHueCommands.HandlePvpHue	in_game_character	requires_world	captured	-	
 pvprules	ACE.Server.Command.Handlers.PvpRulesCommands.HandlePvpRules	web	scan_safe	captured	-	
 pvptemplate	ACE.Server.Command.Handlers.PvpTemplateAdminCommands.HandlePvpTemplate	web	scan_safe	captured	-	
 qst	ACE.Server.Command.Handlers.AdminCommands.Handleqst	in_game_character	requires_world	captured	-	

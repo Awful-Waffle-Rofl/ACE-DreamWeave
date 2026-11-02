@@ -146,6 +146,43 @@ namespace ACE.Server.ThreadDungeons
             => ceiling.HasValue && value > ceiling.Value ? ceiling.Value : value;
 
         /// <summary>
+        /// True for the four magic ATTACK schools the Threads magic attack ceiling clamps (War, Life, Void, Creature
+        /// Enchantment). Magic Defense is NOT one of them - it has its own curve and defense ceiling.
+        /// </summary>
+        public static bool IsMagicAttackSkill(Skill skill)
+            => skill == Skill.WarMagic || skill == Skill.LifeMagic || skill == Skill.VoidMagic || skill == Skill.CreatureEnchantment;
+
+        /// <summary>
+        /// Sanitizes dynamic_dungeons_magic_attack_skill_cap (owner ruling 2026-10-30): NaN or Infinity reads as the compiled
+        /// default (508); a negative value reads as 0 (off); 0 is off; anything above <see cref="MaxMagicAttackSkillCap"/>
+        /// reads as that maximum. The value is rounded to a whole skill point.
+        /// </summary>
+        public static double SanitizeMagicAttackSkillCap(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return DungeonPopulationLimits.DefaultMagicAttackSkillCap;
+
+            if (value <= 0)
+                return 0;
+
+            return Math.Min(Math.Round(value), MaxMagicAttackSkillCap);
+        }
+
+        /// <summary>
+        /// True when the configured magic attack cap is out of range and the reader should warn: non-finite, negative, or above
+        /// <see cref="MaxMagicAttackSkillCap"/>. A legal fractional value such as 600.4 is rounded silently.
+        /// </summary>
+        public static bool MagicAttackSkillCapNeedsWarning(double configured)
+            => double.IsNaN(configured) || double.IsInfinity(configured) || configured < 0 || configured > MaxMagicAttackSkillCap;
+
+        /// <summary>Upper bound of the magic attack skill cap dial; far above any reachable skill, so it only stops overflow.</summary>
+        public const double MaxMagicAttackSkillCap = 100000.0;
+
+        /// <summary>The ceiling value a sanitized cap stands for: null (no ceiling) when the cap is 0 or below.</summary>
+        public static uint? MagicAttackCeilingFor(double sanitizedCap)
+            => sanitizedCap >= 1 ? (uint)Math.Min(Math.Round(sanitizedCap), MaxMagicAttackSkillCap) : (uint?)null;
+
+        /// <summary>
         /// SETS every body part's DVal and BaseArmor onto the band standard (two-way), keeping each part's
         /// share of the creature's own maximum, and returns how many parts changed.
         ///

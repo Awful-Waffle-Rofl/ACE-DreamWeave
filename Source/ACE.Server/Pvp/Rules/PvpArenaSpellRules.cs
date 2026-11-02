@@ -56,6 +56,15 @@ namespace ACE.Server.Pvp.Rules
         }
 
         /// <summary>
+        /// TRUE when an attack that carries no spell (melee, missile, cleave, multi-shot, riposte, class-ability strikes: every caller
+        /// that hands the arena gate a null spell) is refused between two players of the same Live match. Owner ruling 2026-10-15: in
+        /// Tugak Brawl (FFA) only Curse of Raven Fury does damage, so with <paramref name="spellOnly"/> (pvp_arena_ffa_spell_only) on, a
+        /// physical attack in an FFA match is refused. Every other mode is untouched. Applies only where the arena gate already decided
+        /// Allow, so it never has to re-check Live.
+        /// </summary>
+        public static bool IsPhysicalRefused(bool isFfa, bool spellOnly) => isFfa && spellOnly;
+
+        /// <summary>
         /// TRUE for the vulnerability spells an arena player may cast on an enemy during the pre-match Countdown, matched by
         /// school AND category from the spell data (never by name):
         ///  - Creature Enchantment, the three defense-lowering categories (Magic/Melee/Missile Defense Lowering): Magic Yield,

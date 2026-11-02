@@ -6,7 +6,9 @@ account_vault_allowlist_name	economy	Account Vault	fork	no
 account_vault_class_storage	economy	Account Vault	fork	no
 account_vault_denylist	economy	Account Vault	fork	no
 account_vault_entry_cap	economy	Account Vault	fork	no
+account_vault_housing_allowed	economy	Account Vault	fork	no
 account_vault_landblock	economy	Account Vault	fork	no
+account_vault_salvage_combine	economy	Account Vault	fork	no
 account_vault_summon_leash	economy	Account Vault	fork	no
 account_vault_summon_rot_seconds	economy	Account Vault	fork	no
 admin_web_commands_enabled	server	Web	fork	no
@@ -112,11 +114,17 @@ class_ability_affinity_bloodlust_rate_per_trained	class_abilities	affinity	fork	
 class_ability_affinity_chance_cap	class_abilities	affinity	fork	no
 class_ability_affinity_rate_per_spec	class_abilities	affinity	fork	no
 class_ability_affinity_rate_per_trained	class_abilities	affinity	fork	no
+class_ability_arcanehollow_ignore_per_rank	class_abilities	arcanehollow	fork	no
 class_ability_attack_speed_ceiling	class_abilities	attack	fork	no
 class_ability_attackspeed_percent_per_rank	class_abilities	attackspeed	fork	no
 class_ability_avoidance_cap	class_abilities	avoidance	fork	no
 class_ability_battlehardened_max_reduction	class_abilities	battlehardened	fork	no
 class_ability_battlehardened_reduction_per_strength	class_abilities	battlehardened	fork	no
+class_ability_berserkrage_cooldown_seconds_r1	class_abilities	berserkrage	fork	no
+class_ability_berserkrage_cooldown_seconds_r2	class_abilities	berserkrage	fork	no
+class_ability_berserkrage_cooldown_seconds_r3	class_abilities	berserkrage	fork	no
+class_ability_berserkrage_damage_multiplier	class_abilities	berserkrage	fork	no
+class_ability_berserkrage_duration_seconds	class_abilities	berserkrage	fork	no
 class_ability_bloodfury_peak_hp_fraction	class_abilities	bloodfury	fork	no
 class_ability_bloodfury_peak_per_rank	class_abilities	bloodfury	fork	no
 class_ability_bloodfury_start_hp_fraction	class_abilities	bloodfury	fork	no
@@ -134,12 +142,19 @@ class_ability_bloodprice_health_cost_r2	class_abilities	bloodprice	fork	no
 class_ability_bloodprice_health_cost_r3	class_abilities	bloodprice	fork	no
 class_ability_bloodprice_min_health_fraction	class_abilities	bloodprice	fork	no
 class_ability_breakarmor_chance	class_abilities	breakarmor	fork	no
-class_ability_cascade_chance	class_abilities	cascade	fork	no
+class_ability_cascade_chance_r1	class_abilities	cascade	fork	no
+class_ability_cascade_chance_r2	class_abilities	cascade	fork	no
+class_ability_cascade_chance_r3	class_abilities	cascade	fork	no
 class_ability_cascade_max_generation	class_abilities	cascade	fork	no
 class_ability_cascade_radius	class_abilities	cascade	fork	no
 class_ability_cloakedinpower_floor	class_abilities	cloakedinpower	fork	no
-class_ability_crimsonharvest_max_targets	class_abilities	crimsonharvest	fork	no
+class_ability_crimsonharvest_extra_targets_r1	class_abilities	crimsonharvest	fork	no
+class_ability_crimsonharvest_extra_targets_r2	class_abilities	crimsonharvest	fork	no
+class_ability_crimsonharvest_extra_targets_r3	class_abilities	crimsonharvest	fork	no
 class_ability_crimsonharvest_radius	class_abilities	crimsonharvest	fork	no
+class_ability_damagerating_critdamage_conversion_r1	class_abilities	damagerating	fork	no
+class_ability_damagerating_critdamage_conversion_r2	class_abilities	damagerating	fork	no
+class_ability_damagerating_critdamage_conversion_r3	class_abilities	damagerating	fork	no
 class_ability_deadeye_percent_per_rank	class_abilities	deadeye	fork	no
 class_ability_dispellingedge_chance_base	class_abilities	dispellingedge	fork	no
 class_ability_dispellingedge_chance_step	class_abilities	dispellingedge	fork	no
@@ -147,8 +162,21 @@ class_ability_doublevolley_chance_base	class_abilities	doublevolley	fork	no
 class_ability_doublevolley_chance_step	class_abilities	doublevolley	fork	no
 class_ability_echocast_chance_base	class_abilities	echocast	fork	no
 class_ability_echocast_chance_step	class_abilities	echocast	fork	no
-class_ability_elementalrend_chance_base	class_abilities	elementalrend	fork	no
-class_ability_elementalrend_chance_step	class_abilities	elementalrend	fork	no
+class_ability_elementalinversion_chance_per_rank	class_abilities	elementalinversion	fork	no
+class_ability_elementalproficiency_acid_fraction_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_acid_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_acid_ticks	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_affinity_cap	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_bludgeon_immunity_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_bludgeon_stun_base_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_bludgeon_stun_step_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_fire_percent_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_frost_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_frost_slow_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_lightning_percent_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_lightning_seconds	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_pierce_ignore_per_rank	class_abilities	elementalproficiency	fork	no
+class_ability_elementalproficiency_slashcrit_points_per_rank	class_abilities	elementalproficiency	fork	no
 class_ability_empoweredsummons_leech_percent_per_rank	class_abilities	empoweredsummons	fork	no
 class_ability_empoweredsummons_loyalty_per_spec	class_abilities	empoweredsummons	fork	no
 class_ability_empoweredsummons_loyalty_per_trained	class_abilities	empoweredsummons	fork	no
@@ -156,24 +184,32 @@ class_ability_empoweredsummons_max_duration_bonus	class_abilities	empoweredsummo
 class_ability_empoweredsummons_percent_per_rank	class_abilities	empoweredsummons	fork	no
 class_ability_executioner_hp_fraction	class_abilities	executioner	fork	no
 class_ability_executioner_percent_per_rank	class_abilities	executioner	fork	no
+class_ability_exsanguinate_charges_kept_r1	class_abilities	exsanguinate	fork	no
+class_ability_exsanguinate_charges_kept_r2	class_abilities	exsanguinate	fork	no
+class_ability_exsanguinate_charges_kept_r3	class_abilities	exsanguinate	fork	no
 class_ability_exsanguinate_multiplier	class_abilities	exsanguinate	fork	no
 class_ability_exsanguinate_resist_ignore	class_abilities	exsanguinate	fork	no
 class_ability_fastaim_low_end_per_rank	class_abilities	fastaim	fork	no
-class_ability_flatcastspeed_percent_per_rank	class_abilities	flatcastspeed	fork	no
 class_ability_frenzy_expire_seconds	class_abilities	frenzy	fork	no
 class_ability_frenzy_percent_per_stack	class_abilities	frenzy	fork	no
 class_ability_full_respec_free_below_level	class_abilities	full	fork	no
 class_ability_full_respec_lum_cost	class_abilities	full	fork	no
+class_ability_healboostrating_damage_conversion_r1	class_abilities	healboostrating	fork	no
+class_ability_healboostrating_damage_conversion_r2	class_abilities	healboostrating	fork	no
+class_ability_healboostrating_damage_conversion_r3	class_abilities	healboostrating	fork	no
+class_ability_heavyblows_stretch_per_rank	class_abilities	heavyblows	fork	no
 class_ability_heavydraw_percent_per_rank	class_abilities	heavydraw	fork	no
 class_ability_heavydraw_run_per_spec	class_abilities	heavydraw	fork	no
 class_ability_heavydraw_run_per_trained	class_abilities	heavydraw	fork	no
 class_ability_heavydraw_run_reduction_cap	class_abilities	heavydraw	fork	no
 class_ability_heavydraw_stamina_cost	class_abilities	heavydraw	fork	no
-class_ability_hemomancy_drain_percent_per_rank	class_abilities	hemomancy	fork	no
-class_ability_hemomancy_heal_fraction	class_abilities	hemomancy	fork	no
-class_ability_hemomancy_tick_percent_per_rank	class_abilities	hemomancy	fork	no
+class_ability_hemomancy_damage_percent_per_rank	class_abilities	hemomancy	fork	no
+class_ability_hemomancy_duration_seconds	class_abilities	hemomancy	fork	no
+class_ability_hemomancy_heal_threshold_fraction	class_abilities	hemomancy	fork	no
+class_ability_hemomancy_leech_window_seconds	class_abilities	hemomancy	fork	no
 class_ability_huntersmark_duration_seconds	class_abilities	huntersmark	fork	no
 class_ability_huntersmark_percent_per_rank	class_abilities	huntersmark	fork	no
+class_ability_intimidate_defense_per_rank	class_abilities	intimidate	fork	no
 class_ability_killerinstinct_critchance_per_stack	class_abilities	killerinstinct	fork	no
 class_ability_killerinstinct_critdamage_base	class_abilities	killerinstinct	fork	no
 class_ability_killerinstinct_critdamage_step	class_abilities	killerinstinct	fork	no
@@ -196,6 +232,7 @@ class_ability_malediction_duration_bonus	class_abilities	malediction	fork	no
 class_ability_malediction_intensity_base	class_abilities	malediction	fork	no
 class_ability_malediction_intensity_step	class_abilities	malediction	fork	no
 class_ability_manabarrier_base	class_abilities	manabarrier	fork	no
+class_ability_manabarrier_mana_floor	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_mana_per_health	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_max_share	class_abilities	manabarrier	fork	no
 class_ability_manabarrier_step	class_abilities	manabarrier	fork	no
@@ -205,6 +242,7 @@ class_ability_netherbloom_duration_retained	class_abilities	netherbloom	fork	no
 class_ability_netherbloom_jumps_per_rank	class_abilities	netherbloom	fork	no
 class_ability_netherbloom_radius	class_abilities	netherbloom	fork	no
 class_ability_netherrush_expire_seconds	class_abilities	netherrush	fork	no
+class_ability_netherrush_max_bonus	class_abilities	netherrush	fork	no
 class_ability_netherrush_percent_per_rank	class_abilities	netherrush	fork	no
 class_ability_opportunist_percent_per_rank	class_abilities	opportunist	fork	no
 class_ability_overchannel_mana_surcharge	class_abilities	overchannel	fork	no
@@ -224,12 +262,14 @@ class_ability_pocketsand_magnitude	class_abilities	pocketsand	fork	no
 class_ability_pocketsand_puff_script	class_abilities	pocketsand	fork	no
 class_ability_poisonweapon_damage_per_rank	class_abilities	poisonweapon	fork	no
 class_ability_poisonweapon_proc_delay	class_abilities	poisonweapon	fork	no
-class_ability_quickenedcasting_percent_per_rank	class_abilities	quickenedcasting	fork	no
 class_ability_rallyingpresence_percent_per_rank	class_abilities	rallyingpresence	fork	no
 class_ability_rallyingpresence_radius	class_abilities	rallyingpresence	fork	no
 class_ability_rallyingpresence_self_share	class_abilities	rallyingpresence	fork	no
 class_ability_reflectmagic_chance_base	class_abilities	reflectmagic	fork	no
 class_ability_reflectmagic_chance_step	class_abilities	reflectmagic	fork	no
+class_ability_reflectmagic_immunity_seconds_base	class_abilities	reflectmagic	fork	no
+class_ability_reflectmagic_immunity_seconds_step	class_abilities	reflectmagic	fork	no
+class_ability_reprice_sweep_enabled	class_abilities	reprice	fork	no
 class_ability_resonance_max_stacks	class_abilities	resonance	fork	no
 class_ability_resonance_per_stack_r1	class_abilities	resonance	fork	no
 class_ability_resonance_per_stack_r2	class_abilities	resonance	fork	no
@@ -239,10 +279,13 @@ class_ability_respec_lum_cost	class_abilities	respec	fork	no
 class_ability_riposte_fraction_base	class_abilities	riposte	fork	no
 class_ability_riposte_fraction_step	class_abilities	riposte	fork	no
 class_ability_runeblade_chance	class_abilities	runeblade	fork	no
-class_ability_runicward_cap_fraction	class_abilities	runicward	fork	no
+class_ability_runicward_cap_fraction_r1	class_abilities	runicward	fork	no
+class_ability_runicward_cap_fraction_r2	class_abilities	runicward	fork	no
+class_ability_runicward_cap_fraction_r3	class_abilities	runicward	fork	no
 class_ability_runicward_duration_seconds	class_abilities	runicward	fork	no
 class_ability_runicward_gain_base	class_abilities	runicward	fork	no
 class_ability_runicward_gain_step	class_abilities	runicward	fork	no
+class_ability_runicward_shield_level	class_abilities	runicward	fork	no
 class_ability_sanguine_ward_absorb_r1	class_abilities	sanguine	fork	no
 class_ability_sanguine_ward_absorb_r2	class_abilities	sanguine	fork	no
 class_ability_sanguine_ward_absorb_r3	class_abilities	sanguine	fork	no
@@ -250,8 +293,7 @@ class_ability_sanguine_ward_duration_seconds	class_abilities	sanguine	fork	no
 class_ability_sanguine_ward_selfcost_r1	class_abilities	sanguine	fork	no
 class_ability_sanguine_ward_selfcost_r2	class_abilities	sanguine	fork	no
 class_ability_sanguine_ward_selfcost_r3	class_abilities	sanguine	fork	no
-class_ability_savageblows_percent_per_rank	class_abilities	savageblows	fork	no
-class_ability_savageblows_stamina_surcharge	class_abilities	savageblows	fork	no
+class_ability_sanguine_ward_shield_level	class_abilities	sanguine	fork	no
 class_ability_shieldblock_base	class_abilities	shieldblock	fork	no
 class_ability_shieldblock_step	class_abilities	shieldblock	fork	no
 class_ability_shieldcheck_strength_base	class_abilities	shieldcheck	fork	no
@@ -269,21 +311,30 @@ class_ability_spellaoe_damage_mult_r3	class_abilities	spellaoe	fork	no
 class_ability_spellaoe_mana_surcharge	class_abilities	spellaoe	fork	no
 class_ability_spellaoe_radius	class_abilities	spellaoe	fork	no
 class_ability_spellblade_chance	class_abilities	spellblade	fork	no
-class_ability_spellstorm_chance	class_abilities	spellstorm	fork	no
+class_ability_spellstorm_chance_r1	class_abilities	spellstorm	fork	no
+class_ability_spellstorm_chance_r2	class_abilities	spellstorm	fork	no
+class_ability_spellstorm_chance_r3	class_abilities	spellstorm	fork	no
 class_ability_spellsurge_max_stacks	class_abilities	spellsurge	fork	no
-class_ability_spellsurge_per_stack	class_abilities	spellsurge	fork	no
+class_ability_spellsurge_per_stack_r1	class_abilities	spellsurge	fork	no
+class_ability_spellsurge_per_stack_r2	class_abilities	spellsurge	fork	no
+class_ability_spellsurge_per_stack_r3	class_abilities	spellsurge	fork	no
 class_ability_spellsurge_window_seconds	class_abilities	spellsurge	fork	no
+class_ability_spellsword_full_power_shape	class_abilities	spellsword	fork	no
 class_ability_spellsword_level_skill_scale	class_abilities	spellsword	fork	no
+class_ability_spellsword_nether_parity	class_abilities	spellsword	fork	no
+class_ability_spellsword_power_proc_scale	class_abilities	spellsword	fork	no
 class_ability_spellweave_percent_per_rank	class_abilities	spellweave	fork	no
 class_ability_sundermark_chance_base	class_abilities	sundermark	fork	no
 class_ability_sundermark_chance_step	class_abilities	sundermark	fork	no
 class_ability_sundermark_max_level	class_abilities	sundermark	fork	no
+class_ability_sundermark_nether_max_level	class_abilities	sundermark	fork	no
 class_ability_surefooted_expire_seconds	class_abilities	surefooted	fork	no
 class_ability_surefooted_percent_per_rank_per_stack	class_abilities	surefooted	fork	no
 class_ability_surefooted_stack_cap	class_abilities	surefooted	fork	no
 class_ability_taunt_duration	class_abilities	taunt	fork	no
-class_ability_taunt_loyalty_bonus_cap_seconds	class_abilities	taunt	fork	no
-class_ability_taunt_radius	class_abilities	taunt	fork	no
+class_ability_taunt_radius_r1	class_abilities	taunt	fork	no
+class_ability_taunt_radius_r2	class_abilities	taunt	fork	no
+class_ability_taunt_radius_r3	class_abilities	taunt	fork	no
 class_ability_thorns_max_range	class_abilities	thorns	fork	no
 class_ability_thorns_percent_per_rank	class_abilities	thorns	fork	no
 class_ability_thorns_shield_per_spec	class_abilities	thorns	fork	no
@@ -297,14 +348,25 @@ class_ability_transfusion_share_r1	class_abilities	transfusion	fork	no
 class_ability_transfusion_share_r2	class_abilities	transfusion	fork	no
 class_ability_transfusion_share_r3	class_abilities	transfusion	fork	no
 class_ability_umbralsiphon_percent_per_rank	class_abilities	umbralsiphon	fork	no
-class_ability_vengeance_percent_per_rank	class_abilities	vengeance	fork	no
-class_ability_vengeance_window_seconds	class_abilities	vengeance	fork	no
 class_ability_voiddamage_percent_per_rank	class_abilities	voiddamage	fork	no
+class_ability_volatileelements_chance_per_rank	class_abilities	volatileelements	fork	no
+class_ability_volatilewall_bonus_r1	class_abilities	volatilewall	fork	no
+class_ability_volatilewall_bonus_r2	class_abilities	volatilewall	fork	no
+class_ability_volatilewall_bonus_r3	class_abilities	volatilewall	fork	no
 class_ability_weakenedblood_duration_seconds	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_proc_chance_r1	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_proc_chance_r2	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_proc_chance_r3	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_resist_r1	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_resist_r2	class_abilities	weakenedblood	fork	no
 class_ability_weakenedblood_resist_r3	class_abilities	weakenedblood	fork	no
-class_ability_whirlwind_stamina_surcharge	class_abilities	whirlwind	fork	no
+class_ability_weakenedblood_slow_floor	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_slow_r1	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_slow_r2	class_abilities	weakenedblood	fork	no
+class_ability_weakenedblood_slow_r3	class_abilities	weakenedblood	fork	no
+class_ability_whirlwind_stamina_surcharge_r1	class_abilities	whirlwind	fork	no
+class_ability_whirlwind_stamina_surcharge_r2	class_abilities	whirlwind	fork	no
+class_ability_whirlwind_stamina_surcharge_r3	class_abilities	whirlwind	fork	no
 class_ability_withering_percent_per_rank	class_abilities	withering	fork	no
 class_ability_xp_base_cost	class_abilities	xp	fork	no
 class_ability_xp_breakpoint_1	class_abilities	xp	fork	no
@@ -340,6 +402,7 @@ discord_webhook_url_events	social	Discord	fork	yes
 discord_webhook_url_general	social	Discord	fork	yes
 discord_webhook_url_pvp	social	Discord	fork	yes
 discord_webhook_url_trade	social	Discord	fork	yes
+dynamic_dungeons_archetype_uplift	threads	uplift	fork	no
 dynamic_dungeons_band_low_floor	threads	band	fork	no
 dynamic_dungeons_banned_spell_ids	threads	banned	fork	no
 dynamic_dungeons_boss_any_all_bands	threads	boss	fork	no
@@ -368,11 +431,33 @@ dynamic_dungeons_category_resist_floor	threads	category	fork	no
 dynamic_dungeons_clear_effect_enabled	threads	clear	fork	no
 dynamic_dungeons_clear_fraction	threads	clear	fork	no
 dynamic_dungeons_clear_portal_enabled	threads	clear	fork	no
+dynamic_dungeons_creature_abilities	threads	creature	fork	no
+dynamic_dungeons_creature_ability_draining	threads	creature	fork	no
+dynamic_dungeons_creature_ability_draining_tier	threads	creature	fork	no
+dynamic_dungeons_creature_ability_execute	threads	creature	fork	no
+dynamic_dungeons_creature_ability_frenzy	threads	creature	fork	no
+dynamic_dungeons_creature_ability_frenzy_cast	threads	creature	fork	no
+dynamic_dungeons_creature_ability_leech	threads	creature	fork	no
+dynamic_dungeons_creature_ability_riposte	threads	creature	fork	no
+dynamic_dungeons_creature_ability_riposte_chance_cap	threads	creature	fork	no
+dynamic_dungeons_creature_ability_scattering	threads	creature	fork	no
+dynamic_dungeons_creature_ability_speed	threads	creature	fork	no
+dynamic_dungeons_creature_ability_speed_cast	threads	creature	fork	no
+dynamic_dungeons_creature_ability_tiers	threads	creature	fork	no
+dynamic_dungeons_damage_ceiling	threads	damage	fork	no
+dynamic_dungeons_damage_ceiling_ratio	threads	damage	fork	no
+dynamic_dungeons_damage_ceiling_reference_ratio	threads	damage	fork	no
+dynamic_dungeons_damage_curve_rate_above_pivot	threads	damage	fork	no
 dynamic_dungeons_data_folder	threads	data	fork	no
 dynamic_dungeons_defense_curve_rate_above_375	threads	defense	fork	no
 dynamic_dungeons_defense_skill_cap_offset	threads	defense	fork	no
 dynamic_dungeons_empty_grace_minutes	threads	empty	fork	no
 dynamic_dungeons_enabled	threads	enabled	fork	no
+dynamic_dungeons_family_archetype_weighting	threads	family	fork	no
+dynamic_dungeons_fiber_chance	threads	fiber	fork	no
+dynamic_dungeons_fiber_enabled	threads	fiber	fork	no
+dynamic_dungeons_fiber_per_seat	threads	fiber	fork	no
+dynamic_dungeons_fiber_pity_step	threads	fiber	fork	no
 dynamic_dungeons_fit_filter	threads	fit	fork	no
 dynamic_dungeons_fit_headroom_margin	threads	fit	fork	no
 dynamic_dungeons_group_count_share	threads	group	fork	no
@@ -399,6 +484,8 @@ dynamic_dungeons_loot_trickle_max_prebuilt	threads	loot	fork	no
 dynamic_dungeons_loot_weenie_warmup	threads	loot	fork	no
 dynamic_dungeons_lum_mult_cap	threads	lum	fork	no
 dynamic_dungeons_lum_scale	threads	lum	fork	no
+dynamic_dungeons_magic_attack_skill_cap	threads	magic	fork	no
+dynamic_dungeons_magic_defense_curve_rate_above_300	threads	defense	fork	no
 dynamic_dungeons_max_concurrent_runs	threads	max	fork	no
 dynamic_dungeons_max_monsters_per_run	threads	max	fork	no
 dynamic_dungeons_max_runs_per_account	threads	max	fork	no
@@ -409,6 +496,23 @@ dynamic_dungeons_min_monsters_per_run	threads	min	fork	no
 dynamic_dungeons_min_player_level	threads	min	fork	no
 dynamic_dungeons_modifier_level_exponent	threads	modifier	fork	no
 dynamic_dungeons_modifier_reward_scale	threads	modifier	fork	no
+dynamic_dungeons_outdoor_backstop_enabled	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_backstop_m	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_containment_margin_m	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_drop_min_inside_m	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_enabled	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_interior_awareness_m	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_lazy_buffer_ring	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_max_concurrent_runs	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_ring_enabled	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_ring_spacing_m	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_unravel_enabled	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_unravel_grace_s	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_unravel_lethal	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_unravel_start_pct	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_unravel_step_pct	threads	outdoor	fork	no
+dynamic_dungeons_outdoor_warning_band_m	threads	outdoor	fork	no
+dynamic_dungeons_pattern_chance	threads	pattern	fork	no
 dynamic_dungeons_placement_fallback_attempts	threads	placement	fork	no
 dynamic_dungeons_plan_cache	threads	plan	fork	no
 dynamic_dungeons_pooled_loot_enabled	threads	pooled	fork	no
@@ -424,6 +528,7 @@ dynamic_dungeons_puzzle_gates_enabled	threads	puzzle	fork	no
 dynamic_dungeons_puzzle_gates_per_run	threads	puzzle	fork	no
 dynamic_dungeons_puzzle_lockout_minutes	threads	puzzle	fork	no
 dynamic_dungeons_puzzle_reward_scene_enabled	threads	puzzle	fork	no
+dynamic_dungeons_pvp_hold_minutes	threads	pvp	fork	no
 dynamic_dungeons_reach_up	threads	reach	fork	no
 dynamic_dungeons_reward_scale_anchor	threads	reward	fork	no
 dynamic_dungeons_reward_scale_cap	threads	reward	fork	no
@@ -447,8 +552,15 @@ dynamic_dungeons_survey_reference_level	threads	survey	fork	no
 dynamic_dungeons_survey_reset_hour	threads	survey	fork	no
 dynamic_dungeons_survey_reset_timezone	threads	survey	fork	no
 dynamic_dungeons_trash_health_floor_ratio	threads	trash	fork	no
+dynamic_dungeons_uplift_archetype_cap	threads	uplift	fork	no
 dynamic_dungeons_uplift_attributes	threads	uplift	fork	no
+dynamic_dungeons_uplift_defense_cap	threads	uplift	fork	no
+dynamic_dungeons_uplift_defense_ratio	threads	uplift	fork	no
+dynamic_dungeons_uplift_offense_ratio	threads	uplift	fork	no
 dynamic_dungeons_uplift_rename	threads	uplift	fork	no
+dynamic_dungeons_uplift_resist_floor	threads	uplift	fork	no
+dynamic_dungeons_weak_point	threads	weak	fork	no
+dynamic_dungeons_weak_point_armor_cut	threads	weak	fork	no
 dynamic_dungeons_xp_mult_cap	threads	xp	fork	no
 dynamic_dungeons_xp_scale	threads	xp	fork	no
 emote_give_preflight	server	General	fork	no
@@ -488,6 +600,12 @@ fellowship_xp_tell_invite_enabled	social	Fellowship	fork	no
 fix_chest_missing_inventory_window	server	General	upstream	no
 gateway_ties_summonable	server	General	upstream	no
 gearknight_core_plating	server	General	upstream	no
+hazard_mech_balls	server	General	fork	no
+hazard_mech_beams	server	General	fork	no
+hazard_mech_enabled	server	General	fork	no
+hazard_mech_memory	server	General	fork	no
+hazard_mech_tick_ms	server	General	fork	no
+hazard_mech_wisps	server	General	fork	no
 house_15day_account	social	Housing	upstream	no
 house_30day_cooldown	social	Housing	upstream	no
 house_hook_limit	social	Housing	upstream	no
@@ -498,11 +616,14 @@ house_rent_enabled	social	Housing	upstream	no
 ignore_magic_armor_pvp_scalar	pvp	Scalars	upstream	no
 ignore_magic_resist_pvp_scalar	pvp	Scalars	upstream	no
 iou_trades	economy	Vendors	upstream	no
+ip_household_clusters	server	General	fork	no
 ip_limit_activity_tail_seconds	server	IP Limit	fork	no
+ip_limit_confine_housing	server	IP Limit	fork	no
 ip_limit_confine_proving_grounds	server	IP Limit	fork	no
 ip_limit_confine_pvp_arena	pvp	Arena	fork	no
 ip_limit_confine_speed_runs	server	IP Limit	fork	no
 ip_limit_enabled	server	IP Limit	fork	no
+ip_limit_enforce_on_arrival	server	IP Limit	fork	no
 ip_limit_exempt_access_level	server	IP Limit	fork	no
 ip_limit_exempt_accounts	server	IP Limit	fork	no
 ip_limit_grace_seconds	server	IP Limit	fork	no
@@ -510,12 +631,68 @@ ip_limit_max_confined	server	IP Limit	fork	no
 ip_limit_max_free	server	IP Limit	fork	no
 ip_limit_sweep_seconds	server	IP Limit	fork	no
 item_dispel	combat	Magic	upstream	no
+knot_loot_grael_enabled	items	Knot Loot	fork	no
+knot_loot_grael_mmd_max	items	Knot Loot	fork	no
+knot_loot_grael_mmd_min	items	Knot Loot	fork	no
+knot_loot_grael_note_max	items	Knot Loot	fork	no
+knot_loot_grael_note_min	items	Knot Loot	fork	no
+knot_loot_grael_weight_armor_infusion	items	Knot Loot	fork	no
+knot_loot_grael_weight_crippling_infusion	items	Knot Loot	fork	no
+knot_loot_grael_weight_elemental_infusion	items	Knot Loot	fork	no
+knot_loot_grael_weight_frugal_gauntlets	items	Knot Loot	fork	no
+knot_loot_grael_weight_glass_turtle_bracelet	items	Knot Loot	fork	no
+knot_loot_grael_weight_mirrorglass_orb	items	Knot Loot	fork	no
+knot_loot_grael_weight_shield_of_the_rose	items	Knot Loot	fork	no
+knot_loot_grael_window_high_level	items	Knot Loot	fork	no
+knot_loot_grael_window_high_start	items	Knot Loot	fork	no
+knot_loot_grael_window_low_level	items	Knot Loot	fork	no
+knot_loot_grael_window_low_start	items	Knot Loot	fork	no
+knot_loot_grael_window_width	items	Knot Loot	fork	no
+knot_loot_matron_chance_spines	items	Knot Loot	fork	no
+knot_loot_matron_enabled	items	Knot Loot	fork	no
+knot_loot_matron_mmd_max	items	Knot Loot	fork	no
+knot_loot_matron_mmd_min	items	Knot Loot	fork	no
+knot_loot_matron_note_max	items	Knot Loot	fork	no
+knot_loot_matron_note_min	items	Knot Loot	fork	no
+knot_loot_matron_weight_armor_infusion	items	Knot Loot	fork	no
+knot_loot_matron_weight_crippling_infusion	items	Knot Loot	fork	no
+knot_loot_matron_weight_elemental_infusion	items	Knot Loot	fork	no
+knot_loot_matron_weight_hive_nether_baton	items	Knot Loot	fork	no
+knot_loot_matron_weight_hive_stinger_baton	items	Knot Loot	fork	no
+knot_loot_matron_weight_spines	items	Knot Loot	fork	no
+knot_loot_matron_weight_torc	items	Knot Loot	fork	no
+knot_loot_matron_weight_voidclaw	items	Knot Loot	fork	no
+knot_loot_matron_window_high_level	items	Knot Loot	fork	no
+knot_loot_matron_window_high_start	items	Knot Loot	fork	no
+knot_loot_matron_window_low_level	items	Knot Loot	fork	no
+knot_loot_matron_window_low_start	items	Knot Loot	fork	no
+knot_loot_matron_window_width	items	Knot Loot	fork	no
+knot_trait_cast_speed_enabled	items	Knot Loot	fork	no
+knot_trait_cast_speed_max	items	Knot Loot	fork	no
+knot_trait_cast_speed_min	items	Knot Loot	fork	no
+knot_trait_frugal_hand_enabled	items	Knot Loot	fork	no
+knot_trait_frugal_hand_max	items	Knot Loot	fork	no
+knot_trait_frugal_hand_min	items	Knot Loot	fork	no
+knot_trait_overpowering_intent_enabled	items	Knot Loot	fork	no
+knot_trait_overpowering_intent_max	items	Knot Loot	fork	no
+knot_trait_overpowering_intent_min	items	Knot Loot	fork	no
+knot_trait_shield_trade_armor_max	items	Knot Loot	fork	no
+knot_trait_shield_trade_armor_min	items	Knot Loot	fork	no
+knot_trait_shield_trade_enabled	items	Knot Loot	fork	no
+knot_trait_shield_trade_health_max	items	Knot Loot	fork	no
+knot_trait_shield_trade_health_min	items	Knot Loot	fork	no
+knot_trait_wrist_trade_cost_max	items	Knot Loot	fork	no
+knot_trait_wrist_trade_cost_min	items	Knot Loot	fork	no
+knot_trait_wrist_trade_enabled	items	Knot Loot	fork	no
+knot_trait_wrist_trade_gain_max	items	Knot Loot	fork	no
+knot_trait_wrist_trade_gain_min	items	Knot Loot	fork	no
 landblock_weenie_prefetch	server	General	fork	no
 legendary_cantrip_drop_rate	items	Loot	upstream	no
 life_drain_resist_floor	combat	Magic	fork	no
 lifestone_broadcast_death	social	Messages	upstream	no
 loot_quality_mod	items	Loot	upstream	no
 luminance_modifier	progression	XP	upstream	no
+magic_damage_per_focus_point	combat	Magic	fork	no
 major_cantrip_drop_rate	items	Loot	upstream	no
 mansion_min_rank	social	Housing	upstream	no
 market_ad_interval_hours	economy	Market	fork	no
@@ -659,6 +836,7 @@ monster_effect_reflect_cooldown	combat	Monsters	fork	no
 monster_effect_reflect_max_range	combat	Monsters	fork	no
 monster_effect_reflect_per_level	combat	Monsters	fork	no
 monster_effect_speed_cap	combat	Monsters	fork	no
+monster_effect_taunt_hold_floor	combat	Monsters	fork	no
 monster_effect_ward_cap	combat	Monsters	fork	no
 monster_effects_enabled	combat	Monsters	fork	no
 motion_stall_autoclear	server	General	fork	no
@@ -675,6 +853,13 @@ mule_strength	economy	Mule	fork	no
 mule_system_enabled	economy	Mule	fork	no
 mule_upgrade_enabled	economy	Mule	fork	no
 mule_upgrade_max_count	economy	Mule	fork	no
+network_crypto_lookahead	server	General	fork	no
+network_inbound_stall_seconds	server	General	fork	no
+network_max_unacked_packets	server	General	fork	no
+network_pacing_enabled	server	General	fork	no
+network_pacing_trickle_ms	server	General	fork	no
+network_send_burst_bytes	server	General	fork	no
+network_send_rate_bytes_per_sec	server	General	fork	no
 npc_hairstyle_fullrange	server	General	upstream	no
 offline_bonus_enabled	progression	Offline Bonus	fork	no
 offline_bonus_idle_accrual_rate	progression	Offline Bonus	fork	no
@@ -683,6 +868,10 @@ offline_bonus_max_seconds	progression	Offline Bonus	fork	no
 offline_bonus_multiplier	progression	Offline Bonus	fork	no
 offline_xp_passup_limit	progression	Offline Bonus	upstream	no
 olthoi_play_disabled	server	General	upstream	no
+outbound_ring_control_seconds	server	General	fork	no
+outbound_ring_dump_entries	server	General	fork	no
+outbound_ring_enabled	server	General	fork	no
+outbound_ring_entries	server	General	fork	no
 override_encounter_spawn_rates	combat	Monsters	upstream	no
 permit_corpse_all	server	General	upstream	no
 persist_movement	server	General	upstream	no
@@ -691,10 +880,26 @@ pet_combat_unreachable_seconds	combat	Pets	fork	no
 pet_follow_max_seconds	combat	Pets	fork	no
 pet_follow_stuck_seconds	combat	Pets	fork	no
 pet_follow_teleport_distance	combat	Pets	fork	no
+pet_speed_floor	combat	Pets	fork	no
 pet_stow_replace	combat	Pets	upstream	no
 pickup_animation_speed	server	General	fork	no
 pickup_animation_speed_max	server	General	fork	no
 pickup_speed_quest_bonus	server	General	fork	no
+pinnacle_encounters_enabled	server	General	fork	no
+pinnacle_grael_p2_wisps	server	General	fork	no
+pinnacle_grael_p3_dispel_count	server	General	fork	no
+pinnacle_grael_p3_memory	server	General	fork	no
+pinnacle_grael_p4_balls	server	General	fork	no
+pinnacle_grael_p4_cast_seconds	server	General	fork	no
+pinnacle_grael_p4_rows	server	General	fork	no
+pinnacle_grael_p4_stream	server	General	fork	no
+pinnacle_grael_p5_cast_seconds	server	General	fork	no
+pinnacle_grael_p5_respawn_seconds	server	General	fork	no
+pinnacle_grael_p5_wisps	server	General	fork	no
+pinnacle_hazard_pct_max	server	General	fork	no
+pinnacle_hazard_pct_min	server	General	fork	no
+pinnacle_hold_seconds	server	General	fork	no
+pinnacle_resume_grace_seconds	server	General	fork	no
 pk_new_character_grace_period	pvp	World Type	upstream	no
 pk_respite_timer	pvp	World Type	upstream	no
 pk_server	pvp	World Type	upstream	no
@@ -738,6 +943,7 @@ pvp_arena_crier_enabled	pvp	Arena Crier	fork	no
 pvp_arena_crier_interval_seconds	pvp	Arena Crier	fork	no
 pvp_arena_crier_last_call_cooldown_seconds	pvp	Arena Crier	fork	no
 pvp_arena_crier_last_call_delay_seconds	pvp	Arena Crier	fork	no
+pvp_arena_crier_results_enabled	pvp	Arena Crier	fork	no
 pvp_arena_crier_sender_name	pvp	Arena Crier	fork	no
 pvp_arena_crossbow_crit_chance	pvp	Arena	fork	no
 pvp_arena_crossbow_crit_dmg	pvp	Arena	fork	no
@@ -758,6 +964,7 @@ pvp_arena_ffa_max_players	pvp	Arena	fork	no
 pvp_arena_ffa_min_decay_seconds	pvp	Arena	fork	no
 pvp_arena_ffa_min_players	pvp	Arena	fork	no
 pvp_arena_ffa_ring_dmg	pvp	Arena	fork	no
+pvp_arena_ffa_spell_only	pvp	Arena	fork	no
 pvp_arena_ffa_target_players	pvp	Arena	fork	no
 pvp_arena_finesse_crit_chance	pvp	Arena	fork	no
 pvp_arena_finesse_crit_dmg	pvp	Arena	fork	no
@@ -785,14 +992,19 @@ pvp_arena_light_hollow_dmg	pvp	Arena	fork	no
 pvp_arena_light_weeping_dmg	pvp	Arena	fork	no
 pvp_arena_magic_absorb	pvp	Arena	fork	no
 pvp_arena_max_concurrent_matches	pvp	Arena	fork	no
-pvp_arena_min_level	pvp	Arena	fork	no
+pvp_arena_mm_recent_opponents	pvp	Arena	fork	no
 pvp_arena_mm_window_growth_per_minute	pvp	Arena	fork	no
 pvp_arena_mm_window_initial	pvp	Arena	fork	no
 pvp_arena_mm_window_max	pvp	Arena	fork	no
+pvp_arena_multi_queue_enabled	pvp	Arena	fork	no
 pvp_arena_overtime_damage_ramp_per_minute	pvp	Arena	fork	no
 pvp_arena_overtime_enabled	pvp	Arena	fork	no
 pvp_arena_overtime_healing_mod	pvp	Arena	fork	no
 pvp_arena_overtime_seconds	pvp	Arena	fork	no
+pvp_arena_pair_audit_enabled	pvp	Arena	fork	no
+pvp_arena_pair_audit_min_swaps	pvp	Arena	fork	no
+pvp_arena_pair_audit_window_hours	pvp	Arena	fork	no
+pvp_arena_pair_paid_cap	pvp	Arena	fork	no
 pvp_arena_post_match_seconds	pvp	Arena	fork	no
 pvp_arena_restrict_spells	pvp	Arena	fork	no
 pvp_arena_retire_combat_pets	pvp	Arena	fork	no
@@ -843,6 +1055,11 @@ pvp_bg_ad_respawn_seconds_attackers	pvp	Arena	fork	no
 pvp_bg_ad_respawn_seconds_defenders	pvp	Arena	fork	no
 pvp_bg_ad_sequential_crystals	pvp	Arena	fork	no
 pvp_bg_ad_status_announce_seconds	pvp	Arena	fork	no
+pvp_bg_bonus_enabled	pvp	Arena	fork	no
+pvp_bg_bonus_multiplier	pvp	Arena	fork	no
+pvp_bg_bonus_timezone	pvp	Arena	fork	no
+pvp_bg_bonus_warn_minutes	pvp	Arena	fork	no
+pvp_bg_bonus_windows	pvp	Arena	fork	no
 pvp_bg_bow_crit_chance	pvp	Arena	fork	no
 pvp_bg_bow_crit_dmg	pvp	Arena	fork	no
 pvp_bg_bow_crit_dmg_hollow_dmg	pvp	Arena	fork	no
@@ -867,6 +1084,7 @@ pvp_bg_finesse_crit_dmg_weeping_dmg	pvp	Arena	fork	no
 pvp_bg_finesse_dmg	pvp	Arena	fork	no
 pvp_bg_finesse_hollow_dmg	pvp	Arena	fork	no
 pvp_bg_finesse_weeping_dmg	pvp	Arena	fork	no
+pvp_bg_group_join_enabled	pvp	Arena	fork	no
 pvp_bg_heavy_crit_chance	pvp	Arena	fork	no
 pvp_bg_heavy_crit_dmg	pvp	Arena	fork	no
 pvp_bg_heavy_crit_dmg_hollow_dmg	pvp	Arena	fork	no
@@ -909,11 +1127,29 @@ pvp_bg_max_concurrent_matches	pvp	Arena	fork	no
 pvp_bg_max_players	pvp	Arena	fork	no
 pvp_bg_max_premade_size	pvp	Arena	fork	no
 pvp_bg_min_players	pvp	Arena	fork	no
+pvp_bg_perf_cap_pct	pvp	Arena	fork	no
+pvp_bg_perf_enabled	pvp	Arena	fork	no
+pvp_bg_perf_gain	pvp	Arena	fork	no
+pvp_bg_perf_koth_near_kill_weight	pvp	Arena	fork	no
+pvp_bg_perf_koth_near_margin	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_atk_crystal_dmg	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_atk_kills	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_atk_player_dmg	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_def_dmg_far	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_def_dmg_near	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_def_kills_far	pvp	Arena	fork	no
+pvp_bg_perf_w_ad_def_kills_near	pvp	Arena	fork	no
+pvp_bg_perf_w_koth_dmg	pvp	Arena	fork	no
+pvp_bg_perf_w_koth_hill_s	pvp	Arena	fork	no
+pvp_bg_perf_w_koth_kills	pvp	Arena	fork	no
 pvp_bg_premade_imbalance_tolerance	pvp	Arena	fork	no
 pvp_bg_premade_vs_solo_after_seconds	pvp	Arena	fork	no
+pvp_bg_rejoin_grace_seconds	pvp	Arena	fork	no
 pvp_bg_respawn_seconds	pvp	Arena	fork	no
+pvp_bg_ring_dmg	pvp	Arena	fork	no
 pvp_bg_snake_draft	pvp	Arena	fork	no
 pvp_bg_spawn_protection_seconds	pvp	Arena	fork	no
+pvp_bg_spawn_refill_cooldown_seconds	pvp	Arena	fork	no
 pvp_bg_split_clanmates	pvp	Arena	fork	no
 pvp_bg_team_fellowship	pvp	Arena	fork	no
 pvp_bg_team_fellowship_restore	pvp	Arena	fork	no
@@ -945,6 +1181,21 @@ pvp_block_airborne_consumables	pvp	Rules	fork	no
 pvp_cb_crit_mod	pvp	Rules	fork	no
 pvp_cleave_enabled	pvp	Rules	fork	no
 pvp_cloak_damage_reduction	pvp	Rules	fork	no
+pvp_conduct_deserter_decay_days	pvp	Rules	fork	no
+pvp_conduct_deserter_enabled	pvp	Rules	fork	no
+pvp_conduct_deserter_lockout_1_minutes	pvp	Rules	fork	no
+pvp_conduct_deserter_lockout_2_minutes	pvp	Rules	fork	no
+pvp_conduct_deserter_lockout_3_minutes	pvp	Rules	fork	no
+pvp_conduct_engage_radius	pvp	Rules	fork	no
+pvp_conduct_feed_enabled	pvp	Rules	fork	no
+pvp_conduct_feed_max_share	pvp	Rules	fork	no
+pvp_conduct_feed_min_deaths	pvp	Rules	fork	no
+pvp_conduct_floor_enabled	pvp	Rules	fork	no
+pvp_conduct_floor_min_engaged_seconds	pvp	Rules	fork	no
+pvp_conduct_floor_share	pvp	Rules	fork	no
+pvp_conduct_idle_enabled	pvp	Rules	fork	no
+pvp_conduct_idle_remove_seconds	pvp	Rules	fork	no
+pvp_conduct_idle_warn_seconds	pvp	Rules	fork	no
 pvp_consumable_min_interval_ms	pvp	Rules	fork	no
 pvp_crit_damage_mod	pvp	Rules	fork	no
 pvp_crit_damage_rating_scale	pvp	Rules	fork	no
@@ -958,10 +1209,15 @@ pvp_health_ceiling	pvp	Rules	fork	no
 pvp_health_floor	pvp	Rules	fork	no
 pvp_magic_absorb_mod	pvp	Rules	fork	no
 pvp_magic_defense_mod	pvp	Rules	fork	no
+pvp_match_block_dual_wield	pvp	Arena	fork	no
+pvp_match_free_components	pvp	Arena	fork	no
+pvp_match_grant_spells	pvp	Arena	fork	no
 pvp_melee_damage_mod	pvp	Rules	fork	no
 pvp_melee_defense_mod	pvp	Rules	fork	no
 pvp_missile_damage_mod	pvp	Rules	fork	no
 pvp_missile_defense_mod	pvp	Rules	fork	no
+pvp_prestige_min_bg_wins	pvp	Rules	fork	no
+pvp_prestige_min_peak_rating	pvp	Rules	fork	no
 pvp_rating_decay_floor	pvp	Arena Rating	fork	no
 pvp_rating_decay_grace_days	pvp	Arena Rating	fork	no
 pvp_rating_decay_points_per_week	pvp	Arena Rating	fork	no
@@ -973,6 +1229,16 @@ pvp_rating_provisional_games	pvp	Arena Rating	fork	no
 pvp_rules_enabled	pvp	Rules	fork	no
 pvp_safe_landblocks	pvp	Safe Zones	fork	no
 pvp_strip_rare_buffs	pvp	Rules	fork	no
+pvp_team_hue_blue_palette	pvp	Arena Templates	fork	no
+pvp_team_hue_blue_shade	pvp	Arena Templates	fork	no
+pvp_team_hue_enabled	pvp	Arena Templates	fork	no
+pvp_team_hue_ffa_palettes	pvp	Arena Templates	fork	no
+pvp_team_hue_ffa_shade	pvp	Arena Templates	fork	no
+pvp_team_hue_neutral_palette	pvp	Arena Templates	fork	no
+pvp_team_hue_neutral_shade	pvp	Arena Templates	fork	no
+pvp_team_hue_overrides	pvp	Arena Templates	fork	no
+pvp_team_hue_red_palette	pvp	Arena Templates	fork	no
+pvp_team_hue_red_shade	pvp	Arena Templates	fork	no
 pvp_template_account	pvp	Arena Templates	fork	no
 pvp_template_backstop_seconds	pvp	Arena Templates	fork	no
 pvp_template_enabled	pvp	Arena Templates	fork	no
@@ -1016,14 +1282,21 @@ spell_projectile_ethereal	combat	Magic	upstream	no
 spell_projectile_ethereal_360	combat	Magic	fork	no
 spellcast_max_angle	combat	Magic	upstream	no
 spellcast_recoil_queue	combat	Magic	upstream	no
+spellcast_turn_timeout_seconds	combat	Magic	fork	no
 stage_self_grants_enabled	server	General	fork	no
 suicide_instant_death	server	General	upstream	no
 suit_builder_enabled	server	Web	fork	no
+suit_character_moves_enabled	server	Web	fork	no
 summoning_killtask_multicredit_cap	combat	Pets	upstream	no
 summoning_mastery_unrestricted	combat	Pets	fork	no
 survival_stall_eject_seconds	server	General	fork	no
 taboo_table	server	General	upstream	no
 tailoring_intermediate_uieffects	items	Crafting	upstream	no
+teleport_flush_delete_pacing	server	General	fork	no
+teleport_flush_delete_rate	server	General	fork	no
+teleport_flush_scope	server	General	fork	no
+teleport_forced_complete_on_movement	server	General	fork	no
+teleport_forced_complete_seconds	server	General	fork	no
 teleport_visibility_fix	server	General	upstream	no
 top_exempt_accounts	social	Leaderboards	fork	no
 trajectory_alt_solver	combat	Combat	upstream	no
@@ -1077,6 +1350,7 @@ world_events_boss_health_milestones_enabled	world_events	boss	fork	no
 world_events_boss_hits_to_kill	world_events	boss	fork	no
 world_events_boss_min_sample_seconds	world_events	boss	fork	no
 world_events_boss_per_player	world_events	boss	fork	no
+world_events_boss_phase_trash_multiplier	world_events	boss	fork	no
 world_events_boss_retarget_margin	world_events	boss	fork	no
 world_events_boss_retarget_seconds	world_events	boss	fork	no
 world_events_boss_scale_multiplier	world_events	boss	fork	no
@@ -1101,6 +1375,153 @@ world_events_elite_band_high	world_events	elite	fork	no
 world_events_elite_band_low	world_events	elite	fork	no
 world_events_enabled	world_events	enabled	fork	no
 world_events_family_floor_level	world_events	family	fork	no
+world_events_hazard_balls	world_events	hazard	fork	no
+world_events_hazard_count_high	world_events	hazard	fork	no
+world_events_hazard_count_low	world_events	hazard	fork	no
+world_events_hazard_pct	world_events	hazard	fork	no
+world_events_hazard_rain	world_events	hazard	fork	no
+world_events_hazard_rain_height	world_events	hazard	fork	no
+world_events_hazard_wisps	world_events	hazard	fork	no
+world_events_hazards_enabled	world_events	hazard	fork	no
+world_events_hold_abandon_seconds	world_events	hold	fork	no
+world_events_hold_admins_count	world_events	hold	fork	no
+world_events_hold_afk_seconds	world_events	hold	fork	no
+world_events_hold_boss_damage_keep_seconds	world_events	hold	fork	no
+world_events_hold_breather_seconds	world_events	hold	fork	no
+world_events_hold_broadcast	world_events	hold	fork	no
+world_events_hold_cap_burst_seconds	world_events	hold	fork	no
+world_events_hold_caster_attack_speed_mult	world_events	hold	fork	no
+world_events_hold_caster_health_mult	world_events	hold	fork	no
+world_events_hold_caster_level_offset	world_events	hold	fork	no
+world_events_hold_caster_npc_damage_mult	world_events	hold	fork	no
+world_events_hold_caster_player_damage_mult	world_events	hold	fork	no
+world_events_hold_caster_share_of_ranged	world_events	hold	fork	no
+world_events_hold_corrupted_assault_count	world_events	hold	fork	no
+world_events_hold_corrupted_assault_every_waves	world_events	hold	fork	no
+world_events_hold_corrupted_assault_from_wave	world_events	hold	fork	no
+world_events_hold_corrupted_attack_speed_mult	world_events	hold	fork	no
+world_events_hold_corrupted_empower_mult	world_events	hold	fork	no
+world_events_hold_corrupted_health_mult	world_events	hold	fork	no
+world_events_hold_corrupted_kill_heal	world_events	hold	fork	no
+world_events_hold_corrupted_level_offset	world_events	hold	fork	no
+world_events_hold_corrupted_npc_damage_mult	world_events	hold	fork	no
+world_events_hold_corrupted_player_damage_mult	world_events	hold	fork	no
+world_events_hold_corrupted_self_mult	world_events	hold	fork	no
+world_events_hold_corrupted_tint	world_events	hold	fork	no
+world_events_hold_defend_pose	world_events	hold	fork	no
+world_events_hold_defend_swing_max_seconds	world_events	hold	fork	no
+world_events_hold_defend_swing_seconds	world_events	hold	fork	no
+world_events_hold_enabled	world_events	hold	fork	no
+world_events_hold_failure_reward	world_events	hold	fork	no
+world_events_hold_final_wave_bonus	world_events	hold	fork	no
+world_events_hold_finale_add_count	world_events	hold	fork	no
+world_events_hold_finale_add_interval_seconds	world_events	hold	fork	no
+world_events_hold_finale_boss_wcid	world_events	hold	fork	no
+world_events_hold_finale_enrage_mult	world_events	hold	fork	no
+world_events_hold_finale_enrage_seconds	world_events	hold	fork	no
+world_events_hold_finale_fallback_scale	world_events	hold	fork	no
+world_events_hold_finale_health	world_events	hold	fork	no
+world_events_hold_finale_health_mult	world_events	hold	fork	no
+world_events_hold_finale_height_scale_max	world_events	hold	fork	no
+world_events_hold_finale_height_scale_min	world_events	hold	fork	no
+world_events_hold_finale_lead_seconds	world_events	hold	fork	no
+world_events_hold_finale_level_offset	world_events	hold	fork	no
+world_events_hold_finale_min_kill_seconds	world_events	hold	fork	no
+world_events_hold_finale_player_damage_mult	world_events	hold	fork	no
+world_events_hold_finale_pull_seconds	world_events	hold	fork	no
+world_events_hold_finale_pull_share	world_events	hold	fork	no
+world_events_hold_finale_pull_window_seconds	world_events	hold	fork	no
+world_events_hold_finale_scale	world_events	hold	fork	no
+world_events_hold_finale_swap_max_seconds	world_events	hold	fork	no
+world_events_hold_finale_swap_seconds	world_events	hold	fork	no
+world_events_hold_finale_target	world_events	hold	fork	no
+world_events_hold_first_wave_delay_seconds	world_events	hold	fork	no
+world_events_hold_heal_between_waves	world_events	hold	fork	no
+world_events_hold_heal_budget_per_wave	world_events	hold	fork	no
+world_events_hold_heal_reduction_after_hit	world_events	hold	fork	no
+world_events_hold_heal_reduction_seconds	world_events	hold	fork	no
+world_events_hold_healer_memory_seconds	world_events	hold	fork	no
+world_events_hold_health_milestones	world_events	hold	fork	no
+world_events_hold_hit_interval_max_seconds	world_events	hold	fork	no
+world_events_hold_hit_interval_seconds	world_events	hold	fork	no
+world_events_hold_hold_seconds	world_events	hold	fork	no
+world_events_hold_knight_count	world_events	hold	fork	no
+world_events_hold_knight_damage_taken_mult	world_events	hold	fork	no
+world_events_hold_knight_max_health	world_events	hold	fork	no
+world_events_hold_knight_max_health_by_wcid	world_events	hold	fork	no
+world_events_hold_max_corrupted	world_events	hold	fork	no
+world_events_hold_max_seconds	world_events	hold	fork	no
+world_events_hold_max_wave_interval_seconds	world_events	hold	fork	no
+world_events_hold_max_waves	world_events	hold	fork	no
+world_events_hold_melee_attack_speed_mult	world_events	hold	fork	no
+world_events_hold_melee_health_mult	world_events	hold	fork	no
+world_events_hold_melee_level_offset	world_events	hold	fork	no
+world_events_hold_melee_npc_damage_mult	world_events	hold	fork	no
+world_events_hold_melee_player_damage_mult	world_events	hold	fork	no
+world_events_hold_milestone_percents	world_events	hold	fork	no
+world_events_hold_min_breach	world_events	hold	fork	no
+world_events_hold_min_contribution	world_events	hold	fork	no
+world_events_hold_min_corrupted	world_events	hold	fork	no
+world_events_hold_min_death_seconds	world_events	hold	fork	no
+world_events_hold_min_presence_seconds	world_events	hold	fork	no
+world_events_hold_min_ranged	world_events	hold	fork	no
+world_events_hold_min_survivors	world_events	hold	fork	no
+world_events_hold_next_wave_alive_share	world_events	hold	fork	no
+world_events_hold_participant_radius	world_events	hold	fork	no
+world_events_hold_participants_per_cache	world_events	hold	fork	no
+world_events_hold_player_heal	world_events	hold	fork	no
+world_events_hold_player_heal_cap	world_events	hold	fork	no
+world_events_hold_player_heal_mult	world_events	hold	fork	no
+world_events_hold_portal_count	world_events	hold	fork	no
+world_events_hold_portal_radius	world_events	hold	fork	no
+world_events_hold_ranged_attack_speed_mult	world_events	hold	fork	no
+world_events_hold_ranged_health_mult	world_events	hold	fork	no
+world_events_hold_ranged_keep_distance	world_events	hold	fork	no
+world_events_hold_ranged_level_offset	world_events	hold	fork	no
+world_events_hold_ranged_npc_damage_mult	world_events	hold	fork	no
+world_events_hold_ranged_player_damage_mult	world_events	hold	fork	no
+world_events_hold_ranged_slack	world_events	hold	fork	no
+world_events_hold_regen_clear_radius	world_events	hold	fork	no
+world_events_hold_regen_interval_seconds	world_events	hold	fork	no
+world_events_hold_regen_per_second	world_events	hold	fork	no
+world_events_hold_rescue_cap_per_wave	world_events	hold	fork	no
+world_events_hold_rescue_heal	world_events	hold	fork	no
+world_events_hold_runner_attack_speed_mult	world_events	hold	fork	no
+world_events_hold_runner_health_mult	world_events	hold	fork	no
+world_events_hold_runner_level_offset	world_events	hold	fork	no
+world_events_hold_runner_npc_damage_mult	world_events	hold	fork	no
+world_events_hold_runner_player_damage_mult	world_events	hold	fork	no
+world_events_hold_runner_speed_mult	world_events	hold	fork	no
+world_events_hold_seek_share	world_events	hold	fork	no
+world_events_hold_share_breach	world_events	hold	fork	no
+world_events_hold_share_corrupted	world_events	hold	fork	no
+world_events_hold_share_hunters	world_events	hold	fork	no
+world_events_hold_share_ranged	world_events	hold	fork	no
+world_events_hold_share_runners	world_events	hold	fork	no
+world_events_hold_share_seekers	world_events	hold	fork	no
+world_events_hold_shrine	world_events	hold	fork	no
+world_events_hold_shrine_bind_range	world_events	hold	fork	no
+world_events_hold_shrine_cooldown_seconds	world_events	hold	fork	no
+world_events_hold_shrine_count	world_events	hold	fork	no
+world_events_hold_shrine_heal	world_events	hold	fork	no
+world_events_hold_shrine_heals_all	world_events	hold	fork	no
+world_events_hold_shrine_player_cooldown_seconds	world_events	hold	fork	no
+world_events_hold_shrine_use_radius	world_events	hold	fork	no
+world_events_hold_spawn_clearance	world_events	hold	fork	no
+world_events_hold_spawn_radius	world_events	hold	fork	no
+world_events_hold_undefended_seconds	world_events	hold	fork	no
+world_events_hold_undefended_seconds_floor	world_events	hold	fork	no
+world_events_hold_undefended_seconds_per_participant	world_events	hold	fork	no
+world_events_hold_wave_count_base	world_events	hold	fork	no
+world_events_hold_wave_count_cap	world_events	hold	fork	no
+world_events_hold_wave_count_per_player	world_events	hold	fork	no
+world_events_hold_wave_interval_seconds	world_events	hold	fork	no
+world_events_hold_wave_resolve_grace_seconds	world_events	hold	fork	no
+world_events_hold_wave_size_base	world_events	hold	fork	no
+world_events_hold_wave_size_base_players	world_events	hold	fork	no
+world_events_hold_wave_size_cap	world_events	hold	fork	no
+world_events_hold_wave_size_max_players	world_events	hold	fork	no
+world_events_hold_wave_size_per_player	world_events	hold	fork	no
 world_events_ip_exempt	world_events	ip	fork	no
 world_events_ip_gate_enabled	world_events	ip	fork	no
 world_events_max_alive	world_events	max	fork	no
@@ -1112,7 +1533,14 @@ world_events_pace_max_wave_seconds	world_events	pace	fork	no
 world_events_pace_min_wave_seconds	world_events	pace	fork	no
 world_events_pace_quantity_step	world_events	pace	fork	no
 world_events_participation_payout_enabled	world_events	participation	fork	no
+world_events_pooled_loot_enabled	world_events	pooled	fork	no
+world_events_presence_death_grace_seconds	world_events	presence	fork	no
+world_events_presence_payout_enabled	world_events	presence	fork	no
+world_events_presence_ring_enabled	world_events	presence	fork	no
+world_events_presence_snap_pct	world_events	presence	fork	no
 world_events_progress_interval_seconds	world_events	progress	fork	no
+world_events_share_roll_batch_size	world_events	share	fork	no
+world_events_share_step_budget_ms	world_events	share	fork	no
 world_events_strip_combat_traits	world_events	strip	fork	no
 world_events_synthetic_champion_health_mult	world_events	synthetic	fork	no
 world_events_synthetic_elite_health_mult	world_events	synthetic	fork	no

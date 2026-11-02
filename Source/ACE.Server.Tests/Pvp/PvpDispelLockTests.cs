@@ -539,7 +539,7 @@ namespace ACE.Server.Tests.Pvp
             {
                 var stripped = StripComment(lines[i]);
 
-                if (stripped == "var removeSpells = target.EnchantmentManager.SelectDispel(spell);")
+                if (stripped == "var removeSpells = target.EnchantmentManager.SelectDispel(spell, this);")
                     selectDispel = i;
 
                 if (stripped == "target.EnchantmentManager.Dispel(removeSpells.Select(s => s.Enchantment).ToList());")

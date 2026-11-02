@@ -75,6 +75,13 @@ namespace ACE.Server.WeaponMods
         };
 
         /// <summary>
+        /// True iff <paramref name="script"/> is one of the quality-tier auras on the Ladder. Tailoring
+        /// uses this to tell an earned, weapon-owned aura from a look-owned effect.
+        /// </summary>
+        public static bool IsTierScript(uint? script) =>
+            script.HasValue && Ladder.Any(t => t.VisualEffectScript == script);
+
+        /// <summary>
         /// Sum of every special's intensity percentage. 0 for a weapon with no specials.
         /// </summary>
         public static int TotalIntensity(WorldObject weapon)
@@ -85,7 +92,7 @@ namespace ACE.Server.WeaponMods
             var total = 0;
 
             foreach (var (definition, magnitude) in WeaponModTinkerSet.ReadSpecials(weapon))
-                total += WeaponModDisplay.IntensityPercent(definition, magnitude);
+                total += WeaponModDisplay.IntensityPercent(definition, magnitude, WeaponModValue.MagnitudeScale(), weapon);
 
             return total;
         }

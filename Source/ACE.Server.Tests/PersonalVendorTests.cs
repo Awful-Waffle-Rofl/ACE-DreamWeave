@@ -432,9 +432,8 @@ namespace ACE.Server.Tests
 
         /// <summary>
         /// Even ONE of a stackable is labelled, which is the case that separates this rule from the
-        /// count-above-one rule that preceded it. VendorShopCreateListStackSize = -1 lets the buy panel
-        /// request any amount of a stackable row, so a row holding a single taper still looks willing to
-        /// sell ten thousand. The label is the only thing that says otherwise.
+        /// count-above-one rule that preceded it. The rendered stack is capped at MaxStackSize, so the
+        /// number held is otherwise missing from every stackable row, including one holding a single taper.
         /// </summary>
         [TestMethod]
         public void RebuildView_LabelsASingleStackable()
@@ -2823,30 +2822,83 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// M5: without VendorShopCreateListStackSize = -1, the client presents one MaxStackSize stack
-        /// per approach for a ledger row, so DESIGN 7.3's headline case (a 10,000-kit row) needs about
-        /// 100 re-approaches to buy out. -1 lets the buy panel request an arbitrary amount;
-        /// TryAdjustAccountVaultStack already adjudicates an over-request against what the ledger
-        /// actually holds, so this is safe.
+        /// The buy panel's request cap (VendorShopCreateListStackSize) is the TRUE held count, so
+        /// dragging the slider to max withdraws everything. One case above the wcid's MaxStackSize
+        /// (the 10,000-kit headline row) and one below it.
         /// </summary>
-        [TestMethod]
-        public void RebuildView_LedgerDisplays_AllowArbitraryStackSize()
+        [DataTestMethod]
+        [DataRow(91600u, 10000L)]
+        [DataRow(91601u, 37L)]
+        public void RebuildView_LedgerDisplays_SliderMaxIsTheHeldCount(uint ledgerWcid, long held)
         {
             EnsureGuidManagerConstructible();
 
-            const uint ledgerWcid = 91600;
             SeedWorldStackableWeenie(ledgerWcid, 100);
 
             var vendor = MakeVendor();
             var store = MakeStore(out var backend, out _);
             vendor.Store = store;
 
-            SeedLedger(backend, ledgerWcid, 10000);
+            SeedLedger(backend, ledgerWcid, held);
 
             vendor.RebuildView();
 
             var display = vendor.DefaultItemsForSale.Values.First(d => d.WeenieClassId == ledgerWcid);
-            Assert.AreEqual(-1, display.VendorShopCreateListStackSize, "a ledger display must allow an arbitrary buy amount, not be capped at one MaxStackSize per approach");
+            Assert.AreEqual((int)held, display.VendorShopCreateListStackSize, "a ledger display's request cap must be the held count, whether above or below one MaxStackSize");
+        }
+
+        /// <summary>
+        /// The approach message packs the cap into 24 bits (GameEventApproachVendor.cs), so a ledger row
+        /// holding more than that is clamped to 0xFFFFFF instead of wrapping to a tiny or zero cap.
+        /// </summary>
+        [TestMethod]
+        public void RebuildView_LedgerDisplays_SliderMaxClampsTo24Bits()
+        {
+            EnsureGuidManagerConstructible();
+
+            const uint ledgerWcid = 91602;
+            SeedWorldStackableWeenie(ledgerWcid, 100);
+
+            var vendor = MakeVendor();
+            var store = MakeStore(out var backend, out _);
+            vendor.Store = store;
+
+            SeedLedger(backend, ledgerWcid, 20000000);
+
+            vendor.RebuildView();
+
+            var display = vendor.DefaultItemsForSale.Values.First(d => d.WeenieClassId == ledgerWcid);
+            Assert.AreEqual(0xFFFFFF, display.VendorShopCreateListStackSize, "the request cap must fit the 24-bit wire field");
+        }
+
+        /// <summary>
+        /// A class row of N indivisible items advertises N as its request cap.
+        /// </summary>
+        [TestMethod]
+        public void RebuildView_ClassRow_SliderMaxIsTheHeldCount()
+        {
+            EnsureGuidManagerConstructible();
+
+            var vendor = MakeVendor();
+            var store = MakeStore(out var backend, out var world);
+            vendor.Store = store;
+
+            SeedVaultHolding(backend, world);
+
+            world.PristineResult = false;
+            world.ClassifyResult = true;
+
+            DepositOnQueue(store, FakeVaultWorld.MakeSalvageBag(7995, 100, 77, 12, 640));
+            DepositOnQueue(store, FakeVaultWorld.MakeSalvageBag(7995, 100, 77, 12, 640));
+            DepositOnQueue(store, FakeVaultWorld.MakeSalvageBag(7995, 100, 77, 12, 640));
+
+            Assert.AreEqual(VaultEntryKind.Class, store.GetEntries(0, -1).Single().Kind, "sanity: the deposits must have folded into a class row, or this covers the wrong branch");
+            Assert.AreEqual(3L, store.GetEntries(0, -1).Single().Count, "sanity: the class row must hold all three");
+
+            vendor.RebuildView();
+
+            var row = vendor.DefaultItemsForSale.Values.Single();
+            Assert.AreEqual(3, row.VendorShopCreateListStackSize, "a class row's request cap must be the held count");
         }
 
         /// <summary>
@@ -3672,10 +3724,10 @@ namespace ACE.Server.Tests
         }
 
         /// <summary>
-        /// A group of N is divisible even though each member is not, so the panel must be allowed to
-        /// request an arbitrary k. The control below is the half that matters: a LONE stored biota must
-        /// keep its old behaviour, because it really is indivisible and a -1 there would let the panel
-        /// ask for an amount the withdraw path then refuses.
+        /// A group of N is divisible even though each member is not, so its request cap is N and the
+        /// panel can ask for any k up to all of them. The control below is the half that matters: a LONE
+        /// stored biota must keep its old behaviour (no cap set), because it really is indivisible and a
+        /// cap there would let the panel ask for an amount the withdraw path then refuses.
         /// </summary>
         [TestMethod]
         public void RebuildView_AGroupRowIsDivisibleAndASingletonIsNot()
@@ -3698,7 +3750,7 @@ namespace ACE.Server.Tests
             var group = vendor.DefaultItemsForSale.Values.Single(d => d.Name.Contains("in vault"));
             var singleton = vendor.DefaultItemsForSale.Values.Single(d => !d.Name.Contains("in vault"));
 
-            Assert.AreEqual(-1, group.VendorShopCreateListStackSize, "the panel must be able to ask for any k of a group");
+            Assert.AreEqual(2, group.VendorShopCreateListStackSize, "a group's request cap must be its member count");
             Assert.IsNull(singleton.VendorShopCreateListStackSize, "a lone stored biota is indivisible and must not advertise otherwise");
         }
 
@@ -4982,7 +5034,10 @@ namespace ACE.Server.Tests
 
             Assert.AreEqual(zero.Guid.Full, BitConverter.ToUInt32(bytes, 4 + 1), "guid");
             Assert.AreEqual(3u, BitConverter.ToUInt32(bytes, 4 + 1 + 4), "stack size");
-            Assert.AreEqual(1u, BitConverter.ToUInt32(bytes, 4 + 1 + 4 + 4), "a zero-value stack is told 1");
+            // 1 PER UNIT, so 3 for a stack of 3: the client divides Value by StackSize before its zero
+            // test, and a flat 1 on this stack would read as 0 (Discord bug 1559583372206936125; see
+            // MuleStackedRareClientValueTests).
+            Assert.AreEqual(3u, BitConverter.ToUInt32(bytes, 4 + 1 + 4 + 4), "a zero-value stack of 3 is told 1 per unit");
         }
 
         #endregion
@@ -5202,6 +5257,279 @@ namespace ACE.Server.Tests
             Assert.AreEqual(1, vendor.LastRebuildTotal, "the store finishing its load (with no version bump) must still be picked up on the next approach, not cached against the first cold build's empty result");
             Assert.AreEqual(1, vendor.LastRebuildShown, "the seeded item must now be shown - it matches the filter and the store is loaded");
             Assert.IsTrue(vendor.TryGetItemForSale(item.Guid, out _));
+        }
+
+        #endregion
+
+        #region Mule partial-salvage combine (deposit trigger)
+
+        private const uint CombineIronWcid = 20986;
+
+        private static uint combineRowId = 9000;
+
+        /// <summary>
+        /// A recording vendor over a class-enabled store that already holds ONE partial iron bag (Salvage (30),
+        /// band 6), so depositing a second partial of the same band is the smallest deposit that combines.
+        /// </summary>
+        private static (RecordingPersonalVendor vendor, AccountVaultStore store, FakeVaultBackend backend, FakeVaultWorld world) MakeCombineScenario()
+        {
+            Assert.IsTrue(PropertyManager.ModifyLong("salvage_bag_value_cap", DefaultPropertyManager.DefaultLongProperties["salvage_bag_value_cap"].Item));
+
+            VaultPartialSalvageCombineTests.EnsurePlayerStaticFieldsSeeded();
+
+            var vendor = MakeRecordingVendor();
+            var store = MakeStore(out var backend, out var world);
+            vendor.Store = store;
+
+            world.PristineResult = false;
+            world.ClassifyResult = true;
+
+            VaultPartialSalvageCombineTests.SeedRow(backend, OwnerAccount, ref combineRowId, CombineIronWcid, 30, 60, 10, 1, 1000);
+
+            return (vendor, store, backend, world);
+        }
+
+        private static WorldObject PartialIronBag(int structure = 40, int iw = 62) => FakeVaultWorld.MakeSalvageBag(CombineIronWcid, structure, iw, 10, 2000);
+
+        private static void DepositOne(PersonalVendor vendor, VaultActor actor, WorldObject item)
+            => vendor.DepositItems(actor, new Dictionary<uint, WorldObject> { { item.Guid.Full, item } }, null);
+
+        private static int LiveIronRows(FakeVaultBackend backend)
+            => backend.Classes.Count(c => c.AccountId == OwnerAccount && c.Wcid == CombineIronWcid && c.Count > 0);
+
+        /// <summary>The deposit's own outcome, which nothing the combine does may change: credited, carrier destroyed, never handed back.</summary>
+        private static void AssertDepositedNormally(RecordingPersonalVendor vendor, FakeVaultWorld world, WorldObject bag, int expectedBought = 1)
+        {
+            Assert.AreEqual(0, vendor.TryHandBackCallCount, "the deposit must not hand anything back");
+            Assert.AreEqual(expectedBought, vendor.NumItemsBought, "the deposit must count as a successful disposition");
+            CollectionAssert.Contains(world.Destroyed, bag, "the bag must have been class-deposited (credited, then its carrier destroyed)");
+        }
+
+        private static void GrantDepositOnly(FakeVaultBackend backend)
+        {
+            backend.Grants.Add(new AccountVaultGrant
+            {
+                Id = 1,
+                OwnerAccountId = OwnerAccount,
+                GranteeCharacterGuid = GranteeCharacter,
+                GranteeCharacterName = "Grantee",
+                CanWithdraw = false,
+                GrantedAt = DateTime.UtcNow,
+            });
+        }
+
+        private static void SetCombineToggle(FakeVaultBackend backend, uint accountId, bool enabled)
+        {
+            backend.VaultSettings[accountId] = new AccountVaultSetting { AccountId = accountId, SalvageCombine = enabled, SetByCharacterGuid = 0x50000999 };
+        }
+
+        [TestMethod]
+        public void SalvageCombine_DepositOfAPartial_CombinesWithAStoredPartial_AndTellsTheDepositor()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(1, backend.ClassExchangeCalls);
+            Assert.AreEqual(1, LiveIronRows(backend), "the deposited partial and the stored one must become one row");
+            Assert.AreEqual("Your mule combined 2 partial salvage bags into 1 partial bag.", vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        public void SalvageCombine_DepositOfAFullBag_DoesNotTrigger()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = FakeVaultWorld.MakeSalvageBag(CombineIronWcid, 100, 60, 10, 5000);
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(0, backend.ClassExchangeCalls, "only a PARTIAL deposit triggers the combine");
+            Assert.IsNull(vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        public void SalvageCombine_ToggleReadFailure_NoCombine_DepositOutcomeUnchanged()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            backend.FailVaultSettingRead = true;
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(0, backend.ClassExchangeCalls);
+            Assert.AreEqual(2, LiveIronRows(backend));
+            Assert.IsNull(vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        public void SalvageCombine_OwnerOff_GranteeDepositing_NoCombine()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            GrantDepositOnly(backend);
+            SetCombineToggle(backend, OwnerAccount, false);
+            SetCombineToggle(backend, GranteeAccount, true);
+
+            DepositOne(vendor, DepositOnlyGrantee, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(0, backend.ClassExchangeCalls, "a grantee's deposit follows the OWNER's setting");
+            Assert.AreEqual(2, LiveIronRows(backend));
+        }
+
+        [TestMethod]
+        public void SalvageCombine_OwnerOn_GranteeOwnAccountOff_GranteeDepositing_Combines()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            GrantDepositOnly(backend);
+            SetCombineToggle(backend, OwnerAccount, true);
+            SetCombineToggle(backend, GranteeAccount, false);
+
+            DepositOne(vendor, DepositOnlyGrantee, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(1, backend.ClassExchangeCalls, "the grantee's own setting must not be consulted");
+            Assert.AreEqual(1, LiveIronRows(backend));
+        }
+
+        [TestMethod]
+        public void SalvageCombine_ToggleSwitchedOnLater_VaultUnchangedUntilTheNextPartialDeposit()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+
+            SetCombineToggle(backend, OwnerAccount, false);
+
+            var first = PartialIronBag();
+            DepositOne(vendor, Owner, first);
+
+            Assert.AreEqual(0, backend.ClassExchangeCalls);
+            Assert.AreEqual(2, LiveIronRows(backend), "sanity: with the toggle OFF both partials are stored as they are");
+
+            Assert.IsTrue(store.TrySetSalvageCombine(true, Owner, out var error), error);
+
+            Assert.AreEqual(0, backend.ClassExchangeCalls, "switching the toggle ON must not by itself touch the vault");
+            Assert.AreEqual(2, LiveIronRows(backend));
+
+            var second = PartialIronBag(structure: 20, iw: 61);
+            DepositOne(vendor, Owner, second);
+
+            AssertDepositedNormally(vendor, world, second, expectedBought: 2);
+            Assert.AreEqual(1, backend.ClassExchangeCalls, "the next partial deposit runs the combine");
+            Assert.AreEqual(1, LiveIronRows(backend), "all three partials (30 + 40 + 20) become one row");
+            Assert.AreEqual("Your mule combined 3 partial salvage bags into 1 partial bag.", vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        [DataRow((int)FakeVaultBackend.ExchangeFailure.BeforeCommit)]
+        [DataRow((int)FakeVaultBackend.ExchangeFailure.AfterCommit)]
+        public void SalvageCombine_ExchangeFailed_InvalidatesClasses_DepositUnchanged_NoMessage(int failMode)
+        {
+            var mode = (FakeVaultBackend.ExchangeFailure)failMode;
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            backend.ClassExchangeFailMode = mode;
+
+            var readsAtExchange = -1;
+            store.BeforeSalvageCombineExchangeForTest = () => readsAtExchange = backend.ClassReads;
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(1, backend.ClassExchangeCalls, "an unknown outcome must not be retried");
+            Assert.IsTrue(readsAtExchange >= 0, "sanity: the pass must have reached its exchange");
+            Assert.IsTrue(backend.ClassReads > readsAtExchange, "the class map must be re-read after an unknown outcome");
+            Assert.IsNull(vendor.LastSalvageCombineMessage, "no message for a combine that is not known to have applied");
+
+            var expectedLines = mode == FakeVaultBackend.ExchangeFailure.AfterCommit ? 1 : 2;
+            Assert.AreEqual(expectedLines, store.GetEntries(0, -1).Count(e => e.Kind == VaultEntryKind.Class && e.Wcid == CombineIronWcid),
+                "the reloaded store must show what the ledger actually holds");
+        }
+
+        [TestMethod]
+        public void SalvageCombine_ExchangeRefused_Reloads_DepositUnchanged_NoMessage()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            var readsAtExchange = -1;
+
+            // The ledger moves underneath the store between its snapshot and its exchange.
+            store.BeforeSalvageCombineExchangeForTest = () =>
+            {
+                backend.Classes.First(c => c.Wcid == CombineIronWcid && c.Count > 0).TotalValue += 1;
+                readsAtExchange = backend.ClassReads;
+            };
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(1, backend.ClassExchangeCalls);
+            Assert.IsTrue(backend.ClassReads > readsAtExchange, "a refusal must reload the class map");
+            Assert.AreEqual(2, LiveIronRows(backend), "a refused exchange moves nothing");
+            Assert.IsNull(vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        public void SalvageCombine_AThrowInsideTheConsolidation_LeavesTheDepositOutcomeUnchanged()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            store.BeforeSalvageCombineExchangeForTest = () => throw new InvalidOperationException("forced failure inside the combine");
+
+            DepositOne(vendor, Owner, bag);
+
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(0, backend.ClassExchangeCalls);
+            Assert.AreEqual(2, LiveIronRows(backend));
+            Assert.IsNull(vendor.LastSalvageCombineMessage);
+        }
+
+        /// <summary>
+        /// Review F4: a throw OUTSIDE the store's own guarded pass - in the vendor's combine step itself - is
+        /// caught by RunPartialSalvageCombine's catch and changes nothing about the deposit. Proven to
+        /// discriminate by deleting that catch: this test then fails with the forced exception escaping
+        /// DepositItems.
+        /// </summary>
+        [TestMethod]
+        public void SalvageCombine_AThrowInTheVendorCombineStep_LeavesTheDepositOutcomeUnchanged()
+        {
+            var (vendor, store, backend, world) = MakeCombineScenario();
+            var bag = PartialIronBag();
+
+            var reached = false;
+
+            vendor.BeforeSalvageCombineForTest = () =>
+            {
+                reached = true;
+                throw new InvalidOperationException("forced failure in the vendor combine step");
+            };
+
+            DepositOne(vendor, Owner, bag);
+
+            Assert.IsTrue(reached, "sanity: the seam must have fired, or this proves nothing");
+            AssertDepositedNormally(vendor, world, bag);
+            Assert.AreEqual(0, backend.ClassExchangeCalls);
+            Assert.AreEqual(2, LiveIronRows(backend));
+            Assert.IsNull(vendor.LastSalvageCombineMessage);
+        }
+
+        [TestMethod]
+        public void SalvageCombine_IsPartialSalvageCandidate_ReadsRawProperties()
+        {
+            Assert.IsTrue(PersonalVendor.IsPartialSalvageCandidate(FakeVaultWorld.MakeSalvageBag(CombineIronWcid, 40, 60, 10, 100)));
+            Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(FakeVaultWorld.MakeSalvageBag(CombineIronWcid, 100, 60, 10, 100)), "a full bag is not partial");
+            Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(FakeVaultWorld.MakeStack(8000, 1, 100)), "not TinkeringMaterial");
+            Assert.IsFalse(PersonalVendor.IsPartialSalvageCandidate(null));
         }
 
         #endregion

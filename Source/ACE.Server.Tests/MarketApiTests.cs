@@ -1356,6 +1356,107 @@ namespace ACE.Server.Tests
         }
 
         [TestMethod]
+        public async Task SheetDirectory_NoKey_Is401Empty()
+        {
+            using var r = await Raw(HttpMethod.Get, "/v1/sheets", key: null);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, r.StatusCode);
+            Assert.AreEqual(0, (await r.Content.ReadAsByteArrayAsync()).Length);
+            Assert.AreEqual(0, sheets.ListPublishedCalls, "the key check must come before the service");
+        }
+
+        [TestMethod]
+        public async Task SheetDirectory_Disabled_Is503()
+        {
+            sheets.NextDirectory = new DirectoryResult(SheetOutcome.Disabled, null);
+            await AssertError("/v1/sheets", HttpStatusCode.ServiceUnavailable, "sheets_disabled");
+            Assert.AreEqual(1, sheets.ListPublishedCalls);
+        }
+
+        [TestMethod]
+        public async Task SheetDirectory_Ok_NeedsNoSession_AndSerializesSnakeCase()
+        {
+            sheets.NextDirectory = new DirectoryResult(SheetOutcome.Ok, new SheetDirectory
+            {
+                GeneratedAt = new DateTime(2026, 10, 9, 0, 0, 0, DateTimeKind.Utc),
+                Truncated = true,
+                Sheets = { new SheetDirectoryEntry { Slug = "Ab3dE5gH9k", Url = "https://char.example.test/Ab3dE5gH9k", Name = "Weftwalker", Level = 275, Heritage = "Gharu'ndim" } },
+            });
+
+            using var r = await Raw(HttpMethod.Get, "/v1/sheets");
+            Assert.AreEqual(HttpStatusCode.OK, r.StatusCode);
+
+            var body = await r.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            CollectionAssert.AreEquivalent(new[] { "generated_at", "truncated", "sheets" }, root.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.IsTrue(root.GetProperty("truncated").GetBoolean());
+
+            var entry = root.GetProperty("sheets")[0];
+            CollectionAssert.AreEquivalent(new[] { "slug", "url", "name", "level", "heritage" }, entry.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.AreEqual("Weftwalker", entry.GetProperty("name").GetString());
+            Assert.AreEqual(275, entry.GetProperty("level").GetInt32());
+
+            StringAssert.DoesNotMatch(body, new System.Text.RegularExpressions.Regex("guid|account", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+        }
+
+        [TestMethod]
+        public async Task SheetDirectory_Failed_Is500()
+        {
+            sheets.NextDirectory = new DirectoryResult(SheetOutcome.Failed, null);
+            await AssertError("/v1/sheets", HttpStatusCode.InternalServerError, "server_error");
+
+            sheets.ThrowOnDirectory = true;
+            await AssertError("/v1/sheets", HttpStatusCode.InternalServerError, "server_error");
+        }
+
+        [TestMethod]
+        public async Task SheetDirectory_Busy_IsSheetBusy()
+        {
+            // SheetMaxInFlight is 4: hold four directory requests inside the service, the fifth must be refused
+            // by the route's own in-flight gate without reaching the service.
+            sheets.DirectoryGate = new System.Threading.ManualResetEventSlim(false);
+            var held = new List<Task<(HttpStatusCode status, JsonElement json)>>();
+
+            try
+            {
+                for (var i = 0; i < 4; i++)
+                    held.Add(Send(Request(HttpMethod.Get, "/v1/sheets")));
+
+                for (var i = 0; i < 4; i++)
+                    Assert.IsTrue(await sheets.DirectoryEntered.WaitAsync(TimeSpan.FromSeconds(10)), "four requests should be inside the service");
+
+                await AssertError("/v1/sheets", HttpStatusCode.ServiceUnavailable, "sheet_busy");
+                Assert.AreEqual(4, sheets.ListPublishedCalls, "the refused request never reached the service");
+            }
+            finally
+            {
+                sheets.DirectoryGate.Set();
+            }
+
+            foreach (var t in held)
+                Assert.AreEqual(HttpStatusCode.OK, (await t).status);
+        }
+
+        [TestMethod]
+        public async Task SheetDirectory_DoesNotShadowSlugRoute()
+        {
+            sheets.NextSheet = new SheetResult(SheetOutcome.Ok, new CharacterSheet { Name = "Weftwalker", Level = 275 });
+
+            using var slugReply = await Raw(HttpMethod.Get, "/v1/sheets/Ab3dE5gH9k");
+            Assert.AreEqual(HttpStatusCode.OK, slugReply.StatusCode);
+            StringAssert.Contains(await slugReply.Content.ReadAsStringAsync(), "\"class_abilities\"");
+            Assert.AreEqual(1, sheets.GetSheetCalls);
+            Assert.AreEqual(0, sheets.ListPublishedCalls);
+
+            using var dirReply = await Raw(HttpMethod.Get, "/v1/sheets");
+            Assert.AreEqual(HttpStatusCode.OK, dirReply.StatusCode);
+            StringAssert.Contains(await dirReply.Content.ReadAsStringAsync(), "\"sheets\"");
+            Assert.AreEqual(1, sheets.GetSheetCalls, "the directory must not be answered by the slug handler");
+            Assert.AreEqual(1, sheets.ListPublishedCalls);
+        }
+
+        [TestMethod]
         public async Task SheetLink_OtherAccountsCharacter_IsRefusedAndServiceNotCalled()
         {
             var token = await LoginAsync();

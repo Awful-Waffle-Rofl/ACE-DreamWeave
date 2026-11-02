@@ -151,6 +151,41 @@ namespace ACE.Server.Pvp.Rules
             return result;
         }
 
+        /// <summary>
+        /// PURE. The battleground twin of <see cref="ApplyFfaRingDmg(bool, bool, double, float)"/>: <paramref name="hit"/> unchanged unless
+        /// <paramref name="isRing"/> and <paramref name="inSameLiveBattleground"/>, then multiplied by <paramref name="ringMod"/> with the same
+        /// NaN / infinite / negative = unchanged rule.
+        /// </summary>
+        public static float ApplyBgRingDmg(bool inSameLiveBattleground, bool isRing, double ringMod, float hit) => ApplyDmgMod1v1(inSameLiveBattleground && isRing, ringMod, hit);
+
+        /// <summary>
+        /// CHOKE-POINT ENTRY for pvp_bg_ring_dmg (the battleground's own ring scaler), called from SpellProjectile.CalculateDamage right
+        /// beside <see cref="ApplyFfaRingDmg(WorldObject, Creature, bool, float)"/>, AFTER the war/void-vs-life branch so it covers a ring of ANY
+        /// school, and so before the PvP rules damage cap. A non-ring projectile, a non-player pair, or anything but a SAME Live battleground
+        /// match (of any battleground mode) returns <paramref name="hit"/> unchanged and reads no setting. Mutually exclusive with the FFA ring
+        /// entry (a match has one mode key).
+        /// </summary>
+        public static float ApplyBgRingDmg(WorldObject source, Creature target, bool isRing, float hit)
+        {
+            if (!isRing)
+                return hit;
+
+            if (!(source is Player attacker) || !(target is Player defender) || ReferenceEquals(attacker, defender))
+                return hit;
+
+            if (!PvpPlayerRules.InSameLiveBattlegroundMatch(attacker.PvpBinding, defender.PvpBinding))
+                return hit;
+
+            var dials = Battlegrounds.BattlegroundTunables.DialSource?.Invoke() ?? Battlegrounds.BattlegroundTunables.Defaults;
+
+            var result = ApplyBgRingDmg(true, true, dials.RingDmg, hit);
+
+            if (!(result == hit))
+                PvpRules.Report(PvpChokePoint.AM1, hit, result);
+
+            return result;
+        }
+
         /// <summary>PURE. min(boostValue, cap) - Doctide's exact clamp, never widening the boost.</summary>
         public static int CapHealkitSkillBonus(int boostValue, int cap) => Math.Min(boostValue, cap);
 

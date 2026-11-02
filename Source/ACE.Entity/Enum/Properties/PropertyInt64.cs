@@ -36,6 +36,10 @@ namespace ACE.Entity.Enum.Properties
         BankedLegendaryKeys   = 9015,
         BankedPromissoryNotes = 9016,
 
+        /* Banking (WaffleACE): per-character banked balance of Mark of the Hopeslayer (wcid 1006650, the PvP
+           arena currency). Bonded, so it is never transferable between characters. Not a Conquest-ACE id. */
+        BankedHopeslayerMarks = 9027,
+
         /* DPS challenge (WaffleACE): a player's best recorded total damage in the instanced arena run */
         BestDpsScore          = 9017,
 
@@ -81,5 +85,19 @@ namespace ACE.Entity.Enum.Properties
            clear before this shipped - there is no historical data to backfill) ranks below every tied player
            who has one. */
         BestWaveClearTimeCenti = 9024,
+
+        /* Knot clear leaderboard (/top knot): the wall-clock time in CENTISECONDS of the character's best Knot clear,
+           the clear that set PropertyInt.BestKnotClearLevel. LOWER IS BETTER at equal level. Written only together
+           with the level and PropertyString.BestKnotClearPinnacleKey, by KnotClearRecords.Record. */
+        BestKnotClearTimeCenti = 9028,
+
+        /* PvP deserter lockout (WaffleACE, Docs/Pvp/BATTLEGROUNDS.md "Deserter lockout"): the unix time (seconds)
+           until which this character may not queue for battlegrounds or Tugak Brawl. Written as an absolute value
+           with PropertyInt.PvpDeserterStrikes and PvpDeserterLastStrikeAt. */
+        PvpDeserterLockoutUntil = 9025,
+
+        /* PvP deserter lockout: the unix time (seconds) of this character's last deserter strike, which strike
+           decay is measured from. */
+        PvpDeserterLastStrikeAt = 9026,
     }
 }

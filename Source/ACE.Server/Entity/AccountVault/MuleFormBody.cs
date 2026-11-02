@@ -83,11 +83,24 @@ namespace ACE.Server.Entity.AccountVault
             if (mule == null || donor == null || setupHeight == null)
                 return null;
 
-            if (donor.PropertiesDID == null || !donor.PropertiesDID.TryGetValue(PropertyDataId.Setup, out var donorSetup))
-                return null;
+            // A donor whose own body draws nothing wears a visible stand-in instead (MuleFormStandIn).
+            // The stand-in carries its own authored scale, so neither the donor's Setup nor its height
+            // is consulted for it.
+            var hasStandIn = MuleFormStandIn.TryGet(donor.WeenieClassId, out var standIn);
+            var scale = 0f;
 
-            if (!TryComputeScale(targetHeight, setupHeight(donorSetup), out var scale))
-                return null;
+            if (hasStandIn)
+            {
+                scale = (float)standIn.DefaultScale;
+            }
+            else
+            {
+                if (donor.PropertiesDID == null || !donor.PropertiesDID.TryGetValue(PropertyDataId.Setup, out var donorSetup))
+                    return null;
+
+                if (!TryComputeScale(targetHeight, setupHeight(donorSetup), out scale))
+                    return null;
+            }
 
             var clone = new Weenie
             {
@@ -151,24 +164,47 @@ namespace ACE.Server.Entity.AccountVault
                 // code that needs to change a summoned mule's palette, texture map or anim parts must
                 // therefore go through Biota and never through Weenie - a write through Weenie would
                 // recolour every future spawn of the DONOR wcid, process-wide.
-                PropertiesPalette = donor.PropertiesPalette,
-                PropertiesTextureMap = donor.PropertiesTextureMap,
-                PropertiesAnimPart = donor.PropertiesAnimPart,
+                //
+                // A stand-in body has none of the three: they index the DONOR's Setup, and the stand-in
+                // model is drawn from its own parts and textures untouched.
+                PropertiesPalette = hasStandIn ? null : donor.PropertiesPalette,
+                PropertiesTextureMap = hasStandIn ? null : donor.PropertiesTextureMap,
+                PropertiesAnimPart = hasStandIn ? null : donor.PropertiesAnimPart,
             };
 
             // The eight body DataIds. REPLACED where the donor carries one and REMOVED where it does
             // not, never left at the mule's value: a donor with no ClothingBase must not end up wearing
             // the Lugian's.
-            foreach (var did in BodyDataIds)
+            if (hasStandIn)
             {
-                if (donor.PropertiesDID.TryGetValue(did, out var value))
-                    clone.PropertiesDID[did] = value;
-                else
+                // The stand-in supplies Setup, MotionTable, SoundTable and Icon. Everything else on the
+                // allow-list is REMOVED, not left at the mule's or the donor's value: a ClothingBase or
+                // PaletteBase meant for another Setup recolours or reshapes the stand-in, and the
+                // donor's CombatTable and PhysicsEffectTable belong to a body that is not being worn.
+                foreach (var did in BodyDataIds)
                     clone.PropertiesDID.Remove(did);
-            }
 
-            CopyOrRemove(donor.PropertiesInt, clone.PropertiesInt, PropertyInt.PaletteTemplate);
-            CopyOrRemove(donor.PropertiesFloat, clone.PropertiesFloat, PropertyFloat.Shade);
+                clone.PropertiesDID[PropertyDataId.Setup] = standIn.Setup;
+                clone.PropertiesDID[PropertyDataId.MotionTable] = standIn.MotionTable;
+                clone.PropertiesDID[PropertyDataId.SoundTable] = standIn.SoundTable;
+                clone.PropertiesDID[PropertyDataId.Icon] = standIn.Icon;
+
+                clone.PropertiesInt.Remove(PropertyInt.PaletteTemplate);
+                clone.PropertiesFloat.Remove(PropertyFloat.Shade);
+            }
+            else
+            {
+                foreach (var did in BodyDataIds)
+                {
+                    if (donor.PropertiesDID != null && donor.PropertiesDID.TryGetValue(did, out var value))
+                        clone.PropertiesDID[did] = value;
+                    else
+                        clone.PropertiesDID.Remove(did);
+                }
+
+                CopyOrRemove(donor.PropertiesInt, clone.PropertiesInt, PropertyInt.PaletteTemplate);
+                CopyOrRemove(donor.PropertiesFloat, clone.PropertiesFloat, PropertyFloat.Shade);
+            }
 
             // CreatureType is what the appraisal panel prints as the body's family, so it travels with
             // the body like PaletteTemplate and Shade above; a donor carrying none leaves the clone
@@ -179,7 +215,8 @@ namespace ACE.Server.Entity.AccountVault
             CopyOrRemove(donor.PropertiesInt, clone.PropertiesInt, PropertyInt.CreatureType);
 
             // Every earned form stands as tall as the default mule, so nothing grows into a doorway in
-            // the Marketplace and the collision cylinder scales with the body.
+            // the Marketplace and the collision cylinder scales with the body. A stand-in is the
+            // exception: it uses its own authored DefaultScale (see MuleFormStandIn).
             clone.PropertiesFloat[PropertyFloat.DefaultScale] = scale;
 
             return clone;

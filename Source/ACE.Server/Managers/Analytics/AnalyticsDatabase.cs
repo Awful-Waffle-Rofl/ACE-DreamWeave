@@ -318,6 +318,74 @@ namespace ACE.Server.Managers.Analytics
             public DungeonRunDetailRow Detail;
         }
 
+        /// <summary>Matches knot_event.kind VARCHAR(16) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotKindMaxLength = 16;
+
+        /// <summary>Matches knot_event.result VARCHAR(16) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotResultMaxLength = 16;
+
+        /// <summary>Matches knot_event.source VARCHAR(8) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotSourceMaxLength = 8;
+
+        /// <summary>Matches knot_event.name VARCHAR(64) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotNameMaxLength = 64;
+
+        /// <summary>Matches knot_event.pinnacle_key VARCHAR(32) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotPinnacleKeyMaxLength = 32;
+
+        /// <summary>Matches knot_event.fiber_levels VARCHAR(96) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotFiberLevelsMaxLength = 96;
+
+        /// <summary>Matches knot_event.reason VARCHAR(64) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotReasonMaxLength = 64;
+
+        /// <summary>Matches knot_event.dungeon_id VARCHAR(16) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotDungeonIdMaxLength = 16;
+
+        /// <summary>Matches knot_event.start_group and attempt_id CHAR(32) in ace_analytics.sql. Keep in sync.</summary>
+        internal const int KnotGroupIdMaxLength = 32;
+
+        /// <summary>
+        /// One Knot-economy event (a roll, weave, bind, copy opening, entry, attempt end or Knot consumed).
+        /// Every value is captured by the producer (KnotTelemetry) before this object is queued: it holds no
+        /// WorldObject, Player or live collection, so the writer thread can serialise it long after the event.
+        /// Nullable members are written as DBNull - NULL means not applicable, never 0. See ace_analytics.sql.
+        /// </summary>
+        public sealed class KnotEventRow
+        {
+            public DateTime TsUtc;
+            public string Kind;
+            public string Result;
+
+            /// <summary>'live' (the running server) or 'log' (the backfill script).</summary>
+            public string Source = "live";
+
+            public uint CharacterId;
+            public string Name;
+            public uint AccountId;
+            public int? CharLevel;
+            public int? KnotLevel;
+            public int Qty = 1;
+            public uint? KnotGuid;
+            public uint? ItemGuid;
+            public string PinnacleKey;
+            public int? EntriesLeft;
+            public int? EntriesMax;
+            public int? MissesBefore;
+            public int? MissesAfter;
+            public int? EnabledPinnacles;
+            public string FiberLevels;
+            public int? PhaseReached;
+            public int? PhaseCount;
+            public bool? Charged;
+            public double? DurationSecs;
+            public string Reason;
+            public string DungeonId;
+            public uint? InstanceId;
+            public string StartGroup;
+            public string AttemptId;
+        }
+
         /// <summary>
         /// Creates the database if needed and applies the (idempotent) schema. Throws on failure so
         /// the caller can disable analytics rather than run half-initialized.
@@ -833,6 +901,73 @@ namespace ACE.Server.Managers.Analytics
 
             tx.Commit();
         }
+
+        /// <summary>
+        /// Appends Knot telemetry rows in ONE multi-row INSERT. Kept out of every other writer's transaction on
+        /// purpose, like chat: a bad knot row must never roll back the dungeon-run or Tier-2 audit. The caller
+        /// (AnalyticsManager.DrainKnotEvents) caps a batch at 1000 rows, so 28 parameters a row stays far under
+        /// the protocol limit. Strings are clamped to their column width (Truncate), never rejected, because one
+        /// overlong value would otherwise take the whole batch down.
+        /// </summary>
+        public static void WriteKnotEvents(IReadOnlyList<KnotEventRow> rows)
+        {
+            if (rows == null || rows.Count == 0)
+                return;
+
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            var sb = new StringBuilder(
+                "INSERT INTO `knot_event` (`ts_utc`,`kind`,`result`,`source`,`character_id`,`name`,`account_id`,`char_level`,`knot_level`,`qty`," +
+                "`knot_guid`,`item_guid`,`pinnacle_key`,`entries_left`,`entries_max`,`misses_before`,`misses_after`,`enabled_pinnacles`," +
+                "`fiber_levels`,`phase_reached`,`phase_count`,`charged`,`duration_secs`,`reason`,`dungeon_id`,`instance_id`,`start_group`,`attempt_id`) VALUES ");
+            using var cmd = conn.CreateCommand();
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                if (i > 0) sb.Append(',');
+                sb.Append($"(@ts{i},@k{i},@rs{i},@src{i},@c{i},@n{i},@a{i},@cl{i},@kl{i},@q{i},@kg{i},@ig{i},@pk{i},@el{i},@em{i},@mb{i},@ma{i},@ep{i}," +
+                          $"@fl{i},@pr{i},@pc{i},@ch{i},@d{i},@re{i},@di{i},@ii{i},@sg{i},@at{i})");
+
+                cmd.Parameters.AddWithValue($"@ts{i}", r.TsUtc);
+                cmd.Parameters.AddWithValue($"@k{i}", Truncate(r.Kind ?? string.Empty, KnotKindMaxLength, "knot_event.kind"));
+                cmd.Parameters.AddWithValue($"@rs{i}", Truncate(r.Result ?? string.Empty, KnotResultMaxLength, "knot_event.result"));
+                cmd.Parameters.AddWithValue($"@src{i}", Truncate(r.Source ?? "live", KnotSourceMaxLength, "knot_event.source"));
+                cmd.Parameters.AddWithValue($"@c{i}", r.CharacterId);
+                cmd.Parameters.AddWithValue($"@n{i}", Truncate(r.Name ?? string.Empty, KnotNameMaxLength, "knot_event.name"));
+                cmd.Parameters.AddWithValue($"@a{i}", r.AccountId);
+                cmd.Parameters.AddWithValue($"@cl{i}", KnotDb(r.CharLevel));
+                cmd.Parameters.AddWithValue($"@kl{i}", KnotDb(r.KnotLevel));
+                cmd.Parameters.AddWithValue($"@q{i}", r.Qty);
+                cmd.Parameters.AddWithValue($"@kg{i}", KnotDb(r.KnotGuid));
+                cmd.Parameters.AddWithValue($"@ig{i}", KnotDb(r.ItemGuid));
+                cmd.Parameters.AddWithValue($"@pk{i}", KnotDb(r.PinnacleKey, KnotPinnacleKeyMaxLength, "knot_event.pinnacle_key"));
+                cmd.Parameters.AddWithValue($"@el{i}", KnotDb(r.EntriesLeft));
+                cmd.Parameters.AddWithValue($"@em{i}", KnotDb(r.EntriesMax));
+                cmd.Parameters.AddWithValue($"@mb{i}", KnotDb(r.MissesBefore));
+                cmd.Parameters.AddWithValue($"@ma{i}", KnotDb(r.MissesAfter));
+                cmd.Parameters.AddWithValue($"@ep{i}", KnotDb(r.EnabledPinnacles));
+                cmd.Parameters.AddWithValue($"@fl{i}", KnotDb(r.FiberLevels, KnotFiberLevelsMaxLength, "knot_event.fiber_levels"));
+                cmd.Parameters.AddWithValue($"@pr{i}", KnotDb(r.PhaseReached));
+                cmd.Parameters.AddWithValue($"@pc{i}", KnotDb(r.PhaseCount));
+                cmd.Parameters.AddWithValue($"@ch{i}", r.Charged.HasValue ? (object)(r.Charged.Value ? 1 : 0) : DBNull.Value);
+                cmd.Parameters.AddWithValue($"@d{i}", KnotDb(r.DurationSecs));
+                cmd.Parameters.AddWithValue($"@re{i}", KnotDb(r.Reason, KnotReasonMaxLength, "knot_event.reason"));
+                cmd.Parameters.AddWithValue($"@di{i}", KnotDb(r.DungeonId, KnotDungeonIdMaxLength, "knot_event.dungeon_id"));
+                cmd.Parameters.AddWithValue($"@ii{i}", KnotDb(r.InstanceId));
+                cmd.Parameters.AddWithValue($"@sg{i}", KnotDb(r.StartGroup, KnotGroupIdMaxLength, "knot_event.start_group"));
+                cmd.Parameters.AddWithValue($"@at{i}", KnotDb(r.AttemptId, KnotGroupIdMaxLength, "knot_event.attempt_id"));
+            }
+
+            cmd.CommandText = sb.ToString();
+            cmd.ExecuteNonQuery();
+        }
+
+        private static object KnotDb<T>(T? value) where T : struct => value.HasValue ? (object)value.Value : DBNull.Value;
+
+        private static object KnotDb(string value, int maxLength, string column)
+            => value == null ? DBNull.Value : (object)Truncate(value, maxLength, column);
 
         // --- session_event (IP integrity; see SessionEvents.cs and Docs/Monitoring/IP-INTEGRITY-DESIGN.md) ---
 

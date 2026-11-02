@@ -91,6 +91,36 @@ namespace ACE.Server.WorldObjects
             return physical > 0.0 ? physical : GetCasterOnlyModValue(modId);
         }
 
+        /// <summary>
+        /// The Defensive Weapon armor level this player's ONE carrier provides, ignoring stance: the MAIN-HAND
+        /// melee/missile weapon if it carries the record, otherwise the wand - the same physical-then-wand
+        /// precedence and the same choice-not-a-sum as <see cref="GetKillingWeaponModValue"/>. Each carrier's
+        /// magnitude already reflects its own ceiling (100 on a one-handed melee weapon, 200 on everything
+        /// else), because WeaponModCombat.ReadWeaponOnly resolves the fraction against the item it read.
+        ///
+        /// DUAL WIELD: reads GetEquippedWeapon(forceMainHand: true). Without the flag, GetEquippedMeleeWeapon
+        /// returns the OFF-HAND weapon whenever the next swing is the off-hand one, so a defensive read would
+        /// flip with the attack alternation. With it, only the main hand counts: an off-hand weapon's Defensive
+        /// Weapon never applies, and two one-handed weapons never sum.
+        ///
+        /// Stance-free so the combat simulator, which profiles a defender in combat from an offline (NonCombat)
+        /// player, can read it. Combat reads <see cref="GetDefensiveWeaponShieldLevel"/> instead.
+        /// </summary>
+        public double GetDefensiveWeaponModValue()
+        {
+            var physical = DefensiveWeaponMath.Sanitize(WeaponModCombat.ReadWeaponOnly(GetEquippedWeapon(forceMainHand: true), WeaponModId.DefensiveWeapon));
+
+            return physical > 0.0 ? physical : DefensiveWeaponMath.Sanitize(GetCasterOnlyModValue(WeaponModId.DefensiveWeapon));
+        }
+
+        /// <summary>
+        /// <see cref="GetDefensiveWeaponModValue"/> as combat reads it: STANCE-BOUND, so 0 while this player is in
+        /// NonCombat. shield_applies_in_noncombat lets an equipped SHIELD count in peace mode; Defensive Weapon
+        /// is a property of a readied weapon and does not, on either GetShieldMod path or in Thorns.
+        /// </summary>
+        public double GetDefensiveWeaponShieldLevel() =>
+            CombatMode == CombatMode.NonCombat ? 0.0 : GetDefensiveWeaponModValue();
+
         // ---------------- physical hits ----------------
 
         /// <summary>
@@ -380,7 +410,14 @@ namespace ACE.Server.WorldObjects
             var restored = 0;
 
             if (health > 0)
-                restored += UpdateVitalDelta(Health, health);
+            {
+                var healthRestored = UpdateVitalDelta(Health, health);
+                restored += healthRestored;
+
+                // Hemomancy: Second Wind's APPLIED health is a real (non-leech) heal
+                if (healthRestored > 0)
+                    OnHealthRestored((uint)healthRestored, false);
+            }
 
             if (stamina > 0)
                 restored += UpdateVitalDelta(Stamina, stamina);
@@ -449,8 +486,9 @@ namespace ACE.Server.WorldObjects
 
         /// <summary>
         /// Cleanse: a killing blow has a chance to strip ONE harmful enchantment off the wielder, every caster's
-        /// layer of it (see <see cref="DispellingEdgeAbility.SelectAllLayers"/>). The victim
-        /// filter lives in <see cref="ApplyWeaponModCreatureDeath"/>, the one caller.
+        /// layer of it (see <see cref="DispellingEdgeAbility.SelectAllLayers"/>), through the shared
+        /// <see cref="CleanseOneHarmfulEnchantment"/>. The victim filter lives in
+        /// <see cref="ApplyWeaponModCreatureDeath"/>, the one caller.
         ///
         /// THE MAGNITUDE IS A PROBABILITY, not an amount - MaxRoll is 1.00 and the row's display format reads
         /// "% chance", so it goes through <see cref="WeaponModCombat.RollsFree"/> and never into an arithmetic
@@ -477,18 +515,41 @@ namespace ACE.Server.WorldObjects
             if (!WeaponModCombat.RollsFree(chance, ThreadSafeRandom.Next(0f, 1f)))
                 return;
 
+            var spell = CleanseOneHarmfulEnchantment();
+
+            if (spell == null)
+                return;
+
+            Session?.Network.EnqueueSend(new GameMessageSystemChat($"Your weapon cleanses {spell.Name} from you.", ChatMessageType.Magic));
+        }
+
+        /// <summary>
+        /// THE SHARED SELF-CLEANSE: strips ONE harmful enchantment off this player, every caster's layer of
+        /// it, and returns the spell that was cleansed (null when there was nothing cleansable). No roll and
+        /// no chat line - each caller owns its own chance and its own message. Two callers: the Cleanse
+        /// weapon mod above (on a killing blow), and Dispelling Dance's self half
+        /// (DispellingEdgeAbility.TryDispel, on a successful proc). Extracted from ApplyWeaponModCleanse on
+        /// 2026-10-24 so the two cannot drift - the selection rule, the item-sourced exclusion, the PvP lock
+        /// and the all-layers expansion are written down exactly once.
+        ///
+        /// THE PvP DISPEL VULN LOCK (D2) STILL HAS EXACTLY ONE CALL SITE PAIR, here: both the pre-pick filter
+        /// and the re-expansion filter below are pinned by PvpDispelLockTests against this file.
+        /// </summary>
+        public Spell CleanseOneHarmfulEnchantment()
+        {
             var harmful = WeaponModCombat.SelectDispellableHarmful(
                 EnchantmentManager.GetEnchantments_TopLayer(EnchantmentTypeFlags.Undef), IsHarmfulSpell);
 
             // PvP dispel vuln lock (D2): after a recent PK attack, a vulnerability another player cast on
-            // this wielder cannot be cleansed away by a killing blow either. No-op outside PvP / lever off.
+            // this wielder cannot be cleansed away by a killing blow or a Dispelling Dance proc either.
+            // No-op outside PvP / lever off.
             harmful = PvpRules.ApplyDispelVulnLock(this, harmful, PvpChokePoint.D2);
 
             if (harmful.Count == 0)
-                return;
+                return null;
 
-            // exactly one, chosen at random - the same rule Dispelling Edge uses, and for the same reason: a
-            // deterministic pick would turn this into a debuff-priority tool
+            // exactly one, chosen at random - the same rule Dispelling Dance uses on the enemy, and for the
+            // same reason: a deterministic pick would turn this into a debuff-priority tool
             var entry = harmful[ThreadSafeRandom.Next(0, harmful.Count - 1)];
 
             var spell = new Spell(entry.SpellId);
@@ -507,7 +568,7 @@ namespace ACE.Server.WorldObjects
 
             EnchantmentManager.Dispel(layers);
 
-            Session?.Network.EnqueueSend(new GameMessageSystemChat($"Your weapon cleanses {spell.Name} from you.", ChatMessageType.Magic));
+            return spell;
         }
 
         /// <summary>

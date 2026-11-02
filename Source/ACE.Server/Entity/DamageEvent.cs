@@ -54,6 +54,15 @@ namespace ACE.Server.Entity
         public WorldObject DamageSource;
         public DamageType DamageType;
 
+        /// <summary>
+        /// Volatile Elements (Spellsword T2): the hit's own type from GetBaseDamage when the ability re-typed
+        /// this hit, null otherwise. Non-null exactly when the roll fired, including when it landed back on the
+        /// same type. <see cref="DamageType"/> then holds the ROLLED type, which everything type-keyed follows;
+        /// this field exists only so rend can look back - the hit's WeaponResistanceMod and the same hit's war
+        /// procs (SpellProjectile.RendSourceDamageType) take the better of the original and rolled type's rend.
+        /// </summary>
+        public DamageType? OriginalDamageType;
+
         public WorldObject Weapon;      // the attacker's weapon. this can be different from DamageSource,
                                         // ie. for a missile attack, the missile would the DamageSource,
                                         // and the buffs would come from the Weapon
@@ -81,6 +90,14 @@ namespace ACE.Server.Entity
 
         public float AttributeMod;
         public float PowerMod;
+
+        /// <summary>
+        /// TRUE only when this hit came from a real power-bar melee swing (Player.DamageTarget's default). A
+        /// Riposte counter reaches DamageTarget without a swing and carries whatever PowerLevel the bar last
+        /// held, so it is marked false; the Spellsword full-power upgrade and power multiplier read this
+        /// (SpellswordSpellTables.SwingPowerLevel) and fire off nothing else.
+        /// </summary>
+        public bool PowerBarSwing;
         public float SlayerMod;
 
         public float DamageRatingBaseMod;
@@ -130,6 +147,14 @@ namespace ACE.Server.Entity
 
         public bool Overpower;
 
+        /// <summary>
+        /// World Events Hold: a run monster hitting a knight of its own active run (WorldEventHooks.IsHoldKnightTargetFor).
+        /// Such a hit always lands and skips the body part, armor, shield and resistance steps: the knight's TakeDamage
+        /// replaces the amount with a time-based slice of its health anyway, so only "did it land" matters. Without this a
+        /// knight copied from an NPC with no body parts (every hit read as evaded) or high defenses could not be hurt.
+        /// </summary>
+        public bool HoldKnightHit;
+
 
         // player defender
         public BodyPart BodyPart;
@@ -165,7 +190,7 @@ namespace ACE.Server.Entity
         /// from the strike that triggered it, so the proc MIRRORS the strike's own rating math (owner
         /// ruling 2026-09-21). Two further factors were added by the 2026-09-22 ruling and are documented on
         /// their own fields: <see cref="ClassAbilityCritDamageBonus"/> (Killer Instinct, crits only) and
-        /// <see cref="MultiShotProcMultiplier"/> (an extra arrow's fraction). The three rating factors below
+        /// <see cref="StrikeFractionProcMultiplier"/> (a partial-damage strike's fraction). The three rating factors below
         /// are values DoCalculateDamage already computed for THIS strike - nothing is recomputed and crit is
         /// never rolled a second time:
         ///
@@ -199,21 +224,22 @@ namespace ACE.Server.Entity
             * (DamageRatingMod > 0.0f ? DamageRatingMod : 1.0)
             * (DamageResistanceRatingMod > 0.0f ? DamageResistanceRatingMod : 1.0)
             * (IsCritical ? 1.0 + Math.Max(0.0, ClassAbilityCritDamageBonus) : 1.0)
-            * Math.Max(0.0, MultiShotProcMultiplier);
+            * Math.Max(0.0, StrikeFractionProcMultiplier);
 
         /// <summary>
-        /// The per-extra-arrow damage multiplier of a Multishot / multi-shot-weapon EXTRA arrow (owner ruling
-        /// 2026-09-22: procs on an extra arrow scale by the same fraction the arrow's own damage does). 1.0 for
-        /// every other hit - the primary arrow, a Double Volley re-fire at the primary target, melee, Riposte
-        /// counters and cleave hits - because Player.DamageTarget writes it only when its multiShotArrow
-        /// argument is true (Player_Missile.FireMultiShotArrow passes that for the extra-target spread).
+        /// The damage fraction of a partial-damage strike, as the procs see it: a Multishot / multi-shot-weapon
+        /// EXTRA arrow (owner ruling 2026-09-22) and a Riposte counter (owner ruling 2026-10-15) scale their
+        /// procs by the same fraction the strike's own damage does. 1.0 for every other hit - the primary arrow,
+        /// a Double Volley re-fire at the primary target, ordinary melee and cleave hits - because
+        /// Player.DamageTarget copies its damageMultiplier here and only Multishot's extra arrows and Riposte
+        /// counters pass anything but the default 1.0.
         ///
         /// READ ONLY BY <see cref="ProcDamageMultiplier"/>, and that is what keeps it from applying twice: the
         /// strike's own copy of the fraction is the separate `Damage *= damageMultiplier` in DamageTarget,
         /// which no proc reads (procs read ProcDamageMultiplier and never Damage), and each arrow builds its
         /// own DamageEvent, so the field is written once per event.
         /// </summary>
-        public float MultiShotProcMultiplier = 1.0f;
+        public float StrikeFractionProcMultiplier = 1.0f;
 
         /// <summary>
         /// A class ability's crit-damage bonus on THIS strike, as the fraction it multiplied Damage by - today
@@ -258,7 +284,15 @@ namespace ACE.Server.Entity
             40301,  // Verdant Moar
         };
 
-        public static DamageEvent CalculateDamage(Creature attacker, Creature defender, WorldObject damageSource, MotionCommand? attackMotion = null, AttackHook attackHook = null)
+        /// <summary>
+        /// <paramref name="deferOutgoingHitEffects"/>: when TRUE the monster-effect riders (and the debug
+        /// logging that reports them) are NOT run here, and the caller must either call
+        /// <see cref="ApplyDeferredOutgoingHitEffects"/> or deliberately drop them. Only the monster-missile
+        /// site in ProjectileCollisionHelper passes it, so Reflect (Vanguard T3) can decide whether the shot
+        /// bounces BEFORE its DoT / debuff / leech riders land on the player it was aimed at. Every other
+        /// caller leaves it false and is unchanged.
+        /// </summary>
+        public static DamageEvent CalculateDamage(Creature attacker, Creature defender, WorldObject damageSource, MotionCommand? attackMotion = null, AttackHook attackHook = null, bool deferOutgoingHitEffects = false)
         {
             var damageEvent = new DamageEvent();
             damageEvent.AttackMotion = attackMotion;
@@ -268,6 +302,23 @@ namespace ACE.Server.Entity
 
             var damage = damageEvent.DoCalculateDamage(attacker, defender, damageSource);
 
+            if (!deferOutgoingHitEffects)
+                FinishOutgoingHit(attacker, defender, damageEvent);
+
+            return damageEvent;
+        }
+
+        /// <summary>
+        /// Runs the riders and logging a <c>deferOutgoingHitEffects: true</c> CalculateDamage held back, for a
+        /// hit that is going to land after all (Reflect did not bounce it).
+        /// </summary>
+        public void ApplyDeferredOutgoingHitEffects()
+        {
+            FinishOutgoingHit(Attacker, Defender, this);
+        }
+
+        private static void FinishOutgoingHit(Creature attacker, Creature defender, DamageEvent damageEvent)
+        {
             // monster combat effects: a non-player attacker's landed hit, after the calculation and before
             // the event is handed back, so the damage applied and the damage reported both include whatever
             // a rider changed. ONE site covers monster melee (Monster_Melee) and monster missile
@@ -276,8 +327,72 @@ namespace ACE.Server.Entity
                 attacker.ApplyOutgoingHitMonsterEffects(defender, damageEvent);
 
             damageEvent.HandleLogging(attacker, defender);
+        }
 
-            return damageEvent;
+        /// <summary>
+        /// Reflect (Vanguard T3): the damage a bounced missile deals to the creature that FIRED it. The attack
+        /// half of <paramref name="incoming"/> (the firer's own rolled base damage, attribute / power / slayer
+        /// mods, damage rating and critical) is kept exactly as it was rolled against the player; only the
+        /// DEFENDER half is resolved again, against the firer: armor rending, body part, armor, resistance,
+        /// damage resist rating, crit damage resist rating and shield, through the same
+        /// <see cref="ResolveDefenderHalf"/> the normal path uses.
+        ///
+        /// DELIBERATELY NOT CalculateDamage(firer, firer): that would re-roll evade and the monster's avoidance
+        /// effects against its own attack, fire their reactors (riposte with attacker == defender), and run the
+        /// outgoing-hit riders a second time. A bounce runs none of those. The firer's Invincible flag is still
+        /// honored.
+        ///
+        /// <paramref name="reflector"/> is the POSITIONAL attacker only - the hit quadrant and the shield's
+        /// facing are measured from where the bounce comes from. Every attacker STAT the defender half reads
+        /// (armor cleaving, hollow, weapon resistance cleaving) stays the firer's, because it is the firer's
+        /// own shot.
+        /// </summary>
+        public static DamageEvent CalculateReflectedMissile(DamageEvent incoming, Creature reflector)
+        {
+            var reflected = new DamageEvent();
+
+            var firer = incoming?.Attacker;
+
+            if (firer == null)
+                return reflected;
+
+            reflected.Attacker = firer;
+            reflected.Defender = firer;
+            reflected.CombatType = incoming.CombatType;
+            reflected.DamageSource = incoming.DamageSource ?? firer;
+            reflected.DamageType = incoming.DamageType;
+            reflected.OriginalDamageType = incoming.OriginalDamageType;
+            reflected.Weapon = incoming.Weapon;
+            reflected.AttackType = incoming.AttackType;
+            reflected.AttackHeight = incoming.AttackHeight;
+            reflected.BaseDamageMod = incoming.BaseDamageMod;
+            reflected.BaseDamage = incoming.BaseDamage;
+            reflected.AttributeMod = incoming.AttributeMod;
+            reflected.PowerMod = incoming.PowerMod;
+            reflected.PowerBarSwing = incoming.PowerBarSwing;
+            reflected.SlayerMod = incoming.SlayerMod;
+            reflected.DamageRatingBaseMod = incoming.DamageRatingBaseMod;
+            reflected.DamageRatingMod = incoming.DamageRatingMod;
+            reflected.IsCritical = incoming.IsCritical;
+            reflected.CriticalDamageMod = incoming.CriticalDamageMod;
+            reflected.CriticalDamageRatingMod = incoming.CriticalDamageRatingMod;
+            reflected.DamageBeforeMitigation = incoming.DamageBeforeMitigation;
+
+            if (firer.Invincible || reflected.DamageBeforeMitigation <= 0.0f)
+                return reflected;
+
+            // PvE only (Player.TryReflectProjectile refuses a Player firer), so this resolves to the neutral
+            // identity; it is resolved anyway so the defender half reads every rating through a scaler,
+            // exactly as the normal path does
+            var reflectScales = PvpRatingScales.Resolve(PvpChokePoint.R1, firer, firer);
+
+            var attackSkill = firer.GetCreatureSkill(firer.GetCurrentWeaponSkill());
+
+            var positional = reflector ?? firer;
+
+            reflected.ResolveDefenderHalf(firer, firer, firer as Player, attackSkill, reflectScales, false, positional, positional);
+
+            return reflected;
         }
 
         private float DoCalculateDamage(Creature attacker, Creature defender, WorldObject damageSource)
@@ -314,6 +429,9 @@ namespace ACE.Server.Entity
             if (attacker.Overpower != null)
                 Overpower = Creature.GetOverpower(attacker, defender);
 
+            // World Events Hold: a knight never avoids its own run's monsters (one field read for every other defender).
+            HoldKnightHit = ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnightTargetFor(attacker, defender);
+
             // class-ability avoidance (Shield Block / Parry) - resolved BEFORE the evade roll so a blocked
             // or parried hit can proc its synergy (Thorns / Shield Check / Riposte), whereas an evaded hit
             // procs nothing. PvE only (playerAttacker == null), matching every other class ability's PvP
@@ -336,14 +454,18 @@ namespace ACE.Server.Entity
             // and clamped by monster_effect_avoidance_cap inside; no-op unless its weenie authored one.
             // Reported as an evade because that is what it is from the attacker's side: the attack simply
             // did not land, and no block/parry synergy exists on the monster side to distinguish.
-            if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
+            // (A World Events Hold knight never avoids its own run's monsters: HoldKnightHit skips the roll.)
+            if (!HoldKnightHit)
             {
-                Evaded = true;
-                return 0.0f;
+                if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
+                {
+                    Evaded = true;
+                    return 0.0f;
+                }
             }
 
-            // evasion chance
-            if (!Overpower)
+            // evasion chance (a World Events Hold knight never dodges its own run's monsters)
+            if (!Overpower && !HoldKnightHit)
             {
                 EvasionChance = GetEvadeChance(attacker, defender);
                 if (EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f))
@@ -366,9 +488,32 @@ namespace ACE.Server.Entity
                     log.Error($"DamageEvent.DoCalculateDamage({attacker?.Name} ({attacker?.Guid}), {defender?.Name} ({defender?.Guid}), {damageSource?.Name} ({damageSource?.Guid})) - DamageType == DamageType.Undef");
                     GeneralFailure = true;
                 }
+                else
+                {
+                    // Defensive tripwire: GetDamageType no longer returns Undef for a monster, so this should be
+                    // unreachable. Monsters keep their behavior (the hit still lands); this is visibility only.
+                    log.Warn($"DamageEvent.DoCalculateDamage({attacker?.Name} ({attacker?.Guid}, wcid {attacker?.WeenieClassId}), {defender?.Name} ({defender?.Guid}), {damageSource?.Name} ({damageSource?.Guid}), {CombatType}) - DamageType == DamageType.Undef");
+                }
             }
 
             if (GeneralFailure) return 0.0f;
+
+            // Volatile Elements (Spellsword T2, PvE only): re-type this weapon hit, one roll per DamageEvent.
+            // AFTER GetBaseDamage, so the missile launcher's flat elemental bonus above was computed from the
+            // weapon's own type and is kept; BEFORE ResolveDefenderHalf, so armor, rend, resistance, shields and
+            // the procs that read DamageType after CalculateDamage all see the rolled type. The original is kept
+            // in OriginalDamageType for the rend max only. Null (no roll, no change) unless the attacker owns the
+            // ability and the defender is a non-player creature.
+            if (playerAttacker != null && playerDefender == null)
+            {
+                var volatileType = playerAttacker.RollVolatileElement(defender, DamageType);
+
+                if (volatileType != null)
+                {
+                    OriginalDamageType = DamageType;
+                    DamageType = volatileType.Value;
+                }
+            }
 
             // get damage modifiers
             PowerMod = attacker.GetPowerMod(Weapon);
@@ -460,6 +605,31 @@ namespace ACE.Server.Entity
                 }
             }
 
+            return ResolveDefenderHalf(attacker, defender, playerDefender, attackSkill, ratingScales, pkBattle, Attacker, DamageSource);
+        }
+
+        /// <summary>
+        /// The DEFENDER half of a physical hit: everything from armor rending to the final Damage, run against
+        /// <paramref name="defender"/> once the attack half has set DamageBeforeMitigation. Extracted verbatim
+        /// and in order from DoCalculateDamage so the Reflect bounce (<see cref="CalculateReflectedMissile"/>)
+        /// resolves against the firer through the identical code.
+        ///
+        /// <paramref name="positionalAttacker"/> / <paramref name="positionalSource"/> are what the hit
+        /// quadrant and the shield's facing are measured from. The normal path passes Attacker and
+        /// DamageSource, which is exactly what this block read before it was extracted.
+        /// </summary>
+        private float ResolveDefenderHalf(Creature attacker, Creature defender, Player playerDefender, ACE.Server.WorldObjects.Entity.CreatureSkill attackSkill, PvpRatingScales ratingScales, bool pkBattle, Creature positionalAttacker, WorldObject positionalSource)
+        {
+            // World Events Hold: no body part, armor, shield or resistance for a knight hit by its own run's monster; at
+            // least 1, so TakeDamage always sees a hit to turn into its time-based slice. False for every other hit
+            // (HoldKnightHit is only ever set in DoCalculateDamage, never on a Reflect bounce).
+            if (HoldKnightHit)
+            {
+                Damage = Math.Max(1.0f, DamageBeforeMitigation);
+                DamageMitigated = 0.0f;
+                return Damage;
+            }
+
             // armor rending and cleaving
             var armorRendingMod = 1.0f;
             if (Weapon != null && Weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
@@ -484,7 +654,7 @@ namespace ACE.Server.Entity
             else
             {
                 // determine height quadrant
-                Quadrant = GetQuadrant(Defender, Attacker, AttackHeight, DamageSource);
+                Quadrant = GetQuadrant(Defender, positionalAttacker, AttackHeight, positionalSource);
 
                 // select random body part @ current attack height
                 GetBodyPart(Defender, Quadrant);
@@ -501,7 +671,9 @@ namespace ACE.Server.Entity
                 ArmorMod = 1.0f;
 
             // get resistance modifiers
-            WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(Weapon, attacker, attackSkill, DamageType);
+            // Volatile Elements: when the hit was re-typed, the weapon keeps the better of its original type's rend
+            // and the rolled type's (a fire-rend weapon rolling cold keeps its fire rend). The plain lookup otherwise.
+            WeaponResistanceMod = VolatileElementsMath.ResolveWeaponResistanceMod(Weapon, attacker, attackSkill, OriginalDamageType, DamageType);
 
             if (playerDefender != null)
             {
@@ -510,7 +682,17 @@ namespace ACE.Server.Entity
             else
             {
                 var resistanceType = Creature.GetResistanceType(DamageType);
-                ResistanceMod = (float)Math.Max(0.0f, defender.GetResistanceMod(resistanceType, Attacker, Weapon, WeaponResistanceMod));
+
+                // Elemental Inversion (Archmage T1, PvE only - this branch is a non-player defender): a proc
+                // replaces ONLY the defender's innate resist term for this melee/missile hit with its weakest innate
+                // value among the seven types. The lookup stays on the hit's own type, so armor (above), shields
+                // (below), rend/cleave and the type's vulnerabilities are untouched. magicDamage FALSE: Arcane
+                // Hollow is magic damage only and never applies to a weapon hit.
+                var inversionInnate = attacker is Player inversionAttacker
+                    ? inversionAttacker.GetArchmageInnateOverride(defender, resistanceType, false)
+                    : null;
+
+                ResistanceMod = (float)Math.Max(0.0f, defender.GetResistanceMod(resistanceType, Attacker, Weapon, WeaponResistanceMod, inversionInnate));
             }
 
             // damage resistance rating
@@ -533,12 +715,34 @@ namespace ACE.Server.Entity
             }
 
             // get shield modifier
-            ShieldMod = defender.GetShieldMod(attacker, DamageType, Weapon);
+            ShieldMod = defender.GetShieldMod(attacker, DamageType, Weapon, positionalAttacker);
 
             // calculate final output damage
             Damage = DamageBeforeMitigation * ArmorMod * ShieldMod * ResistanceMod * DamageResistanceRatingMod;
 
             DamageMitigated = DamageBeforeMitigation - Damage;
+
+            // World Events Hold, the last defender step: the ward on a warded ranged wave monster (missile cut while it is
+            // up, melee shatters it; a Reflect bounce onto a warded firer is a missile like any other), and a run monster's
+            // multiplier on a player. Both hand the damage back unchanged for every creature with no Hold tag, and Damage /
+            // DamageMitigated are rewritten only when it changed.
+            var held = playerDefender == null
+                ? ACE.Server.WorldEvents.WorldEventHooks.HoldWardDamage(defender, CombatType == CombatType.Missile ? ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Missile : ACE.Server.WorldEvents.Defs.WorldEventCombatKinds.Melee, Damage)
+                : Damage;
+
+            if (playerDefender != null)
+            {
+                var holdMult = ACE.Server.WorldEvents.WorldEventHooks.HoldPlayerDamageMult(attacker);
+
+                if (holdMult != 1.0)
+                    held = (float)(Damage * holdMult);
+            }
+
+            if (held != Damage)
+            {
+                Damage = held;
+                DamageMitigated = DamageBeforeMitigation - Damage;
+            }
 
             return Damage;
         }
@@ -570,6 +774,11 @@ namespace ACE.Server.Entity
             // PvP rules choke point DF1 (Docs/Pvp/DESIGN.md "PvP rules (levers)"): pvp_melee_defense_mod / pvp_missile_defense_mod
             // scale the defender's skill for THIS roll only. EffectiveDefenseSkill (read by the debug dump) stays unscaled.
             var rollDefenseSkill = PvpRules.ApplyDefenseMod(attacker, defender, CombatType, EffectiveDefenseSkill);
+
+            // Intimidate (Berserker T2, 2026-10-24): a reckless player attack lowers the MONSTER's defense skill for
+            // this roll only, before the roll. PvE only - a Player defender is never reduced.
+            if (attacker is Player intimidatingPlayer && defender is not Player)
+                rollDefenseSkill = ACE.Server.ClassAbilities.Abilities.IntimidateAbility.ApplyToEvadeRoll(intimidatingPlayer, rollDefenseSkill);
 
             var evadeChance = 1.0f - SkillCheck.GetSkillChance(EffectiveAttackSkill, rollDefenseSkill);
             return (float)evadeChance;
@@ -702,6 +911,9 @@ namespace ACE.Server.Entity
 
             info += $"DamageSource: {DamageSource.Name} ({DamageSource.Guid})\n";
             info += $"DamageType: {DamageType}\n";
+
+            if (OriginalDamageType != null)
+                info += $"OriginalDamageType: {OriginalDamageType} (Volatile Elements)\n";
 
             var weaponName = Weapon != null ? $"{Weapon.Name} ({Weapon.Guid})" : "None\n";
             info += $"Weapon: {weaponName}\n";

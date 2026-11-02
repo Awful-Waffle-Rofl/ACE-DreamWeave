@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Knots;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.Entity
@@ -12,13 +14,14 @@ namespace ACE.Server.Entity
     /// </summary>
     public sealed class LeaderboardBoard
     {
-        public string Key { get; init; }                 // "dps", "defense", "wave", "level", "cap", "stamp", "thread"
+        public string Key { get; init; }                 // "dps", "defense", "wave", "knot", "level", "cap", "stamp", "thread", "title", "deaths"
         public string Title { get; init; }               // exactly the /top title
         public Func<IPlayer, long> Score { get; init; }
         public Func<long, string> Format { get; init; }
         public Func<IPlayer, long> TieBreaker { get; init; }   // null = none
         public Func<IPlayer, string> Detail { get; init; }     // extra per-player line text, appended after Format; null = none
         public string FeatureGate { get; init; }         // PropertyManager bool key or null
+        public bool ExcludeFromSheet { get; init; }      // true = /top only; the character-sheet rank snapshot skips it
     }
 
     /// <summary>
@@ -81,6 +84,25 @@ namespace ACE.Server.Entity
             },
             new LeaderboardBoard
             {
+                Key = "knot",
+                Title = "Knot Clears",
+                // Best clear per character: highest Knot level first, then the faster time. Level, time and Knot type
+                // are written together by KnotClearRecords.Record, so a line never mixes clears.
+                Score = p => p.GetProperty(PropertyInt.BestKnotClearLevel) ?? 0,
+                Format = level => $"Level {level:N0}",
+                // Faster first, like wave: a level with no usable time sorts below every timed tie.
+                TieBreaker = p =>
+                {
+                    var t = p.GetProperty(PropertyInt64.BestKnotClearTimeCenti) ?? 0;
+                    return t > 0 ? -t : long.MinValue;
+                },
+                Detail = p => KnotClearRecords.FormatDetail(
+                    p.GetProperty(PropertyString.BestKnotClearPinnacleKey),
+                    p.GetProperty(PropertyInt64.BestKnotClearTimeCenti)),
+                FeatureGate = null,
+            },
+            new LeaderboardBoard
+            {
                 Key = "level",
                 Title = "Level",
                 Score = p => p.Level ?? 0,
@@ -117,8 +139,67 @@ namespace ACE.Server.Entity
                 Detail = p => $" ({p.GetProperty(PropertyInt.ThreadClearsLifetime) ?? 0:N0} clears)",
                 FeatureGate = "dynamic_dungeons_enabled",
             },
+            new LeaderboardBoard
+            {
+                Key = "title",
+                Title = "Titles",
+                // NumCharacterTitles is persisted on the biota, set by AddTitle and re-synced from the title book
+                // on login, so offline characters rank too; starting heritage titles count like any other.
+                Score = p => p.GetProperty(PropertyInt.NumCharacterTitles) ?? 0,
+                Format = titles => titles == 1 ? "1 title" : $"{titles:N0} titles",
+                TieBreaker = p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
+                FeatureGate = null,
+            },
+            new LeaderboardBoard
+            {
+                Key = "deaths",
+                Title = "Deaths",
+                // NumDeaths is persisted on the biota, so offline characters rank too; zero deaths scores 0 and is dropped.
+                // Honors the AllowOthersToSeeYourNumberOfDeaths option, the same as the appraisal panel (see DeathsBoardScore).
+                Score = p => DeathsBoardScore(p, ReadDeathsVisible),
+                Format = deaths => deaths == 1 ? "1 death" : $"{deaths:N0} deaths",
+                TieBreaker = p => p.GetProperty(PropertyInt64.TotalExperience) ?? 0,
+                FeatureGate = null,
+                // A privacy-gated count: it stays a /top-only board so the web sheet never publishes it.
+                ExcludeFromSheet = true,
+            },
         };
 
+        /// <summary>
+        /// The "deaths" board's score: NumDeaths, or 0 (dropped from the board) when the character has the
+        /// AllowOthersToSeeYourNumberOfDeaths option off - AppraiseInfo hides the same count under the same
+        /// option - or when the option cannot be determined (privacy-safe default: excluded).
+        /// </summary>
+        internal static long DeathsBoardScore(IPlayer p, Func<IPlayer, bool?> deathsVisible)
+        {
+            var deaths = p.GetProperty(PropertyInt.NumDeaths) ?? 0;
+
+            if (deaths <= 0)
+                return 0;
+
+            return deathsVisible(p) == true ? deaths : 0;
+        }
+
+        /// <summary>
+        /// Reads AllowOthersToSeeYourNumberOfDeaths with no database access: from the live Character for an online
+        /// Player, from the option words an OfflinePlayer carries (PlayerManager keeps them current). Null when it
+        /// cannot be determined, which the board treats as hidden.
+        /// </summary>
+        internal static bool? ReadDeathsVisible(IPlayer p)
+        {
+            if (p is Player online)
+                return online.GetCharacterOption(CharacterOption.AllowOthersToSeeYourNumberOfDeaths);
+
+            if (p is OfflinePlayer offline && offline.HasCharacterOptions)
+                return CharacterOption.AllowOthersToSeeYourNumberOfDeaths.IsSet(offline.CharacterOptions1, offline.CharacterOptions2);
+
+            return null;
+        }
+
+        /// <summary>
+        /// The boards the character sheet's rank snapshot ranks: every board not flagged ExcludeFromSheet.
+        /// </summary>
+        internal static IEnumerable<LeaderboardBoard> SheetBoards() => Boards.Where(b => !b.ExcludeFromSheet);
         /// <summary>
         /// The "thread" board's score: the highest Thread-Guide rung won PLUS ONE, or 0 when the character
         /// has neither a rung nor a single Thread clear. Rank drops every score of 0 or less, so a plain

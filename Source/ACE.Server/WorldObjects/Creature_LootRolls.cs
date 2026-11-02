@@ -120,6 +120,28 @@ namespace ACE.Server.WorldObjects
             => encounter != null && encounterIdStamp != null;
 
         /// <summary>
+        /// In memory only, never persisted: set by the Pinnacle encounter (LivePinnacleWorld.Spawn) on every creature it
+        /// spawns (the head, the Grael body, the variants) before it enters the world. Read once by Die through <see cref="IsPinnacleCorpselessDeath"/>.
+        /// </summary>
+        public bool PinnacleCorpseless { get; set; }
+
+        /// <summary>
+        /// In memory only, never persisted: set by LivePinnacleWorld.Spawn on a head whose script opts into a corpse
+        /// (PinnacleScriptData.HeadLeavesCorpse). Its corpse never rots (TimeToRot -1): an empty corpse otherwise rots in
+        /// Corpse.EmptyDecayTime (15 s). The copy's unload removes it.
+        /// </summary>
+        public bool PinnacleCorpseKept { get; set; }
+
+        /// <summary>
+        /// True when this death is a Pinnacle encounter creature's, which leaves no corpse. Without it the head's corpse
+        /// (CreateCorpse copies the Setup, the anim part swap and the 15.5 scale, without the translucency) stood in
+        /// the room as an opaque copy of the head until the corpse decayed. Another sibling of
+        /// <see cref="IsDigsiteCorpselessDeath"/>, OR-ed into the same corpse local in Die; the encounter's reward is
+        /// its cache, so skipping CreateCorpse (and the treasure rolls inside it) is intended.
+        /// </summary>
+        internal static bool IsPinnacleCorpselessDeath(bool pinnacleCorpseless) => pinnacleCorpseless;
+
+        /// <summary>
         /// True when this death must grant NOTHING to anyone: a puzzle-gate ambush creature (see
         /// <see cref="IsPuzzleAmbush"/>), which a player can summon for free with a wrong lever pull. Read once
         /// by OnDeath (which then skips every on-kill reward: killer hooks, kill tasks, death spawn, XP and
@@ -127,5 +149,19 @@ namespace ACE.Server.WorldObjects
         /// the CreatureKills counter). One predicate, two consumers, so the two halves cannot disagree.
         /// </summary>
         internal static bool IsRewardlessDeath(bool isPuzzleAmbush) => isPuzzleAmbush;
+
+        /// <summary>
+        /// True when this death belongs to the World Events pooled-loot model (world_events_pooled_loot_enabled): the
+        /// event hook's two keys (the in-memory back-reference AND the persisted run stamp, so a creature from a
+        /// finished run is inert), plus the run's per-run latch (a bank exists), and NOT the run's boss, which keeps its
+        /// normal corpse and loot. A third sibling of <see cref="IsPooledLootDeath"/> and
+        /// <see cref="IsDigsiteCorpselessDeath"/>, OR-ed into the same corpse local in Die.
+        /// </summary>
+        internal static bool IsWorldEventPooledDeath(ACE.Server.WorldEvents.WorldEvent evt, int? runIdStamp, uint creatureGuid)
+            => IsWorldEventPooledDeath(evt != null, runIdStamp, evt?.LootPool != null, evt != null && evt.IsPooledLootBoss(creatureGuid));
+
+        /// <summary>The same rule over plain values, so its truth table is testable without a run.</summary>
+        internal static bool IsWorldEventPooledDeath(bool hasEventReference, int? runIdStamp, bool runLatchedOn, bool isBoss)
+            => hasEventReference && runIdStamp != null && runLatchedOn && !isBoss;
     }
 }

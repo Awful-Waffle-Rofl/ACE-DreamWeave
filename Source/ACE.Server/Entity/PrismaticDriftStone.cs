@@ -483,7 +483,7 @@ namespace ACE.Server.Entity
             // RecipeManager's gated call sites - this is the only place left that can catch it.
             if (TinkerLock.IsRefused(source, target))
             {
-                player.SendTransientError(TinkerLock.RefusalMessage(target));
+                player.SendTransientError(TinkerLock.RefusalMessage(source, target));
                 return WeenieError.YouDoNotPassCraftingRequirements;
             }
 

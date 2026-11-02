@@ -54,6 +54,19 @@ namespace ACE.Server.Managers.CharacterSheets
         /// joined on ItemGuid. Weapons, shields and aetheria have no suit entry, so they have none here either.
         /// </summary>
         public List<SheetItem> EquippedAppraisal { get; set; } = new();
+
+        /// <summary>The suit-relevant items the character carries but does not wear ("pack" SuitItems), capped at CharacterSheetProjector.MaxPackSuitItems.</summary>
+        public List<ACE.Server.Managers.Market.Suit.SuitItem> Pack { get; set; } = new();
+
+        /// <summary>True when the pack cap dropped suit-relevant items; emitted as pack_truncated only when true.</summary>
+        public bool PackTruncated { get; set; }
+
+        /// <summary>
+        /// The class ability planner import block, filled UNCONDITIONALLY by ProjectOwner: offline loads are joined
+        /// per (guid, ownerView), so a joiner receives the starter's projection and a per-request flag would hand
+        /// some callers an empty block. Internal, so the suit-profile JSON (which lists its fields explicitly) cannot change.
+        /// </summary>
+        internal ClassAbilityImportBlock ClassAbilityImport { get; set; }
     }
 
     public sealed class SheetStat    { public string Name { get; set; } public uint Base { get; set; } public uint Current { get; set; } }
@@ -63,7 +76,30 @@ namespace ACE.Server.Managers.CharacterSheets
     public sealed class SheetRank    { public string Board { get; set; } public string Title { get; set; } public int Rank { get; set; } public string ScoreText { get; set; } }
     public sealed class SheetLink    { public bool Enabled { get; set; } public string Slug { get; set; } public string Url { get; set; } }
 
+    /// <summary>
+    /// GET /v1/sheets: one entry per published sheet. PRIVACY: slug, url, name, level and heritage only.
+    /// Name and level are what the public sheet already shows; heritage is NOT on the public sheet, it is
+    /// added by the directory. Never add a guid, account, presence or location field - the directory is
+    /// readable by anyone holding the API key.
+    /// </summary>
+    public sealed class SheetDirectory
+    {
+        public DateTime GeneratedAt { get; set; }           // UTC
+        public bool Truncated { get; set; }
+        public List<SheetDirectoryEntry> Sheets { get; set; } = new();
+    }
+
+    public sealed class SheetDirectoryEntry
+    {
+        public string Slug { get; set; }
+        public string Url { get; set; }
+        public string Name { get; set; }
+        public int Level { get; set; }
+        public string Heritage { get; set; }
+    }
+
     public enum SheetOutcome { Ok, NotFound, Disabled, Busy, Failed }
+    public readonly record struct DirectoryResult(SheetOutcome Outcome, SheetDirectory Directory);
     public readonly record struct SheetResult(SheetOutcome Outcome, CharacterSheet Sheet);
     public readonly record struct LinkResult(SheetOutcome Outcome, SheetLink Link);
     public readonly record struct OwnerProfileResult(SheetOutcome Outcome, OwnerProfile Profile);
@@ -71,6 +107,12 @@ namespace ACE.Server.Managers.CharacterSheets
     public interface ICharacterSheetService
     {
         SheetResult GetSheet(string slug);
+
+        /// <summary>
+        /// Every published sheet of a known, non-deleted character, capped at CharacterSheetService.MaxDirectoryEntries.
+        /// Outcomes: Ok, Disabled (charsheet_enabled off), Failed (the link read failed). Unsorted.
+        /// </summary>
+        DirectoryResult ListPublished();
 
         /// <summary>
         /// The owner's own view of one character (suit builder). The CALLER must already have proved the

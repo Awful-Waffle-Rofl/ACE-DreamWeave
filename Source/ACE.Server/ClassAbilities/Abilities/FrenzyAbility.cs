@@ -7,10 +7,16 @@ using ACE.Server.WorldObjects;
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// A stacking attack-speed buff for the Berserker's two melee styles. Every landed hit against a
-    /// monster made with a two-handed or dual-wielded melee weapon adds one stack worth +5% attack speed
-    /// (tunable); stacks cap at 3 / 6 / 10 by rank, and reset if you go
-    /// class_ability_frenzy_expire_seconds without landing a qualifying hit.
+    /// A stacking attack-speed buff for every melee style. Every landed hit against a monster made in a
+    /// melee stance (unarmed, one-handed, sword-and-shield, two-handed or dual wield) adds one stack worth
+    /// +2.5% attack speed (tunable); stacks cap at 6 / 12 / 20 by rank, and reset if you go
+    /// class_ability_frenzy_expire_seconds (15) without landing a qualifying hit.
+    ///
+    /// BERSERKER PASS 2026-10-24 (owner ruling): per-stack rate halved (0.05 -> 0.025), stack caps doubled
+    /// (3/6/10 -> 6/12/20), so the PEAK is unchanged and the ramp is twice as long; the reset window went
+    /// 10s -> 15s; and the weapon gate widened from two-handed / dual wield to every melee stance. The
+    /// Frenzied Pace equipment mod's per-stack magnitude was halved in the same change so its peak is
+    /// unchanged too.
     ///
     /// The trigger reuses the IOutgoingDamageAbility hook (fires exactly on a landed, damaging hit vs a
     /// monster - never a miss or PvP) but modifies no damage; it just bumps the player's transient
@@ -19,13 +25,10 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// up to a separate ceiling (class_ability_attack_speed_ceiling). Stacks are transient runtime
     /// state (Player_ClassAbilityBuffs), never persisted.
     ///
-    /// Weapon gate (FINDINGS-LEDGER L6-73, user decision 2026-07-25): BOTH the trigger and the
-    /// application are gated on IsQualifyingStance, so unarmed, a lone one-hander, missile and magic
-    /// neither build nor benefit from stacks. Stacks earned on a qualifying weapon go inert (not
-    /// consumed) while a non-qualifying weapon is out, and become live again on a style swap back if
-    /// the expiry window has not lapsed. This formalizes the premise POWER-LEDGER's Round 9 note
-    /// already priced against (rows at POWER-LEDGER.md:232,250) - the whole Berserker melee package on
-    /// one style.
+    /// Weapon gate: BOTH the trigger and the application are gated on IsQualifyingStance, so missile and
+    /// magic neither build nor benefit from stacks. Stacks earned in melee go inert (not consumed) while a
+    /// bow or wand is out, and become live again on a swap back to melee if the expiry window has not
+    /// lapsed. (Until 2026-10-24 the gate was two-handed / dual wield only, FINDINGS-LEDGER L6-73.)
     /// </summary>
     public class FrenzyAbility : IOutgoingDamageAbility, IAbilityReadout
     {
@@ -36,9 +39,9 @@ namespace ACE.Server.ClassAbilities.Abilities
             Tier = 1,
             Name = "frenzy",
             DisplayName = "Frenzy",
-            Description = "Each landed hit against a monster with a two-handed or dual-wielded melee weapon " +
-                          "increases your attack speed by 5%, stacking up to 3 / 6 / 10 times by rank. " +
-                          "Stacks reset after 10 seconds without landing a hit. " +
+            Description = "Each landed melee hit against a monster (any melee style, unarmed included) " +
+                          "increases your attack speed by 2.5%, stacking up to 6 / 12 / 20 times by rank. " +
+                          "Stacks reset after 15 seconds without landing a hit. " +
                           "Higher Recklessness increases the per-stack bonus.",
             MaxRank = 3,
             CostPerRank = new[] { 1, 1, 1 },   // flat 1/rank (class ability overhaul repricing, 2026-09-12)
@@ -47,38 +50,39 @@ namespace ACE.Server.ClassAbilities.Abilities
         };
 
         // Trigger only: bumps the attacker's transient Frenzy stack. Damage is deliberately untouched.
-        // The two-handed / dual-wield gate lives in Player.OnFrenzyLandedHit so every call site inherits it.
+        // The melee-stance gate lives in Player.OnFrenzyLandedHit so every call site inherits it.
         public void ModifyOutgoingDamage(Player attacker, int rank, Creature target, DamageEvent damageEvent)
         {
             attacker?.OnFrenzyLandedHit(rank);
         }
 
         /// <summary>
-        /// TRUE for the two combat stances Frenzy is allowed on: two-handed melee (sword or staff) and
-        /// dual-wielded melee. Everything else - unarmed, a single one-hander with an empty offhand,
-        /// missile and magic - is FALSE, including a null stance.
+        /// TRUE for every MELEE combat stance (owner ruling 2026-10-24: Frenzy qualifies on all melee):
+        /// unarmed (HandCombat), a one-hander alone (SwordCombat), sword-and-shield (SwordShieldCombat),
+        /// two-handed (TwoHandedSwordCombat / TwoHandedStaffCombat) and dual wield (DualWieldCombat).
+        /// Missile, magic, non-combat and a null stance are FALSE.
         ///
         /// Stance is the authoritative mid-attack weapon-style signal on a Player and is correct for both
-        /// hands of a dual-wield swing: DualWieldCombat is held for the whole swing regardless of which
-        /// hand lands it (the main/off alternation is the separate DualWieldAlternate flag, see
-        /// Player_Melee.cs:454). The stance values mirror Creature.IsDualWieldAttack
-        /// (Creature_Melee.cs:20) and Creature.TwoHandedCombat (Creature_Melee.cs:30), which is the same
-        /// pair the sibling Berserker ability Whirlwind gates on
-        /// (Player_ClassAbilityBuffs.ApplyWhirlwindStamina).
+        /// hands of a dual-wield swing: DualWieldCombat is held for the whole swing regardless of which hand
+        /// lands it. The same predicate gates Whirlwind (Player_ClassAbilityBuffs.ApplyWhirlwindStamina).
         /// </summary>
         public static bool IsQualifyingStance(MotionStance? stance) =>
+            stance == MotionStance.HandCombat ||
+            stance == MotionStance.SwordCombat ||
+            stance == MotionStance.SwordShieldCombat ||
             stance == MotionStance.TwoHandedSwordCombat ||
             stance == MotionStance.TwoHandedStaffCombat ||
             stance == MotionStance.DualWieldCombat;
 
         /// <summary>
-        /// Maximum number of stacks at a given owned rank: 3 / 6 / 10 for ranks 1-3, 0 if unlearned.
+        /// Maximum number of stacks at a given owned rank: 6 / 12 / 20 for ranks 1-3, 0 if unlearned
+        /// (doubled from 3 / 6 / 10 on 2026-10-24 alongside the halved per-stack rate).
         /// </summary>
         public static int StackCap(int rank) => rank switch
         {
-            1 => 3,
-            2 => 6,
-            3 => 10,
+            1 => 6,
+            2 => 12,
+            3 => 20,
             _ => 0,
         };
 

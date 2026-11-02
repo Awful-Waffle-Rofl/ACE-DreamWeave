@@ -36,6 +36,9 @@ namespace ACE.Server.Tests
         {
             Assert.IsTrue(PropertyManager.ModifyBool("account_vault_class_storage", classStorageEnabled),
                 "account_vault_class_storage is missing from DefaultBooleanProperties");
+
+            Assert.IsTrue(PropertyManager.ModifyBool("account_vault_salvage_combine", true),
+                "account_vault_salvage_combine is missing from DefaultBooleanProperties");
         }
     }
 }

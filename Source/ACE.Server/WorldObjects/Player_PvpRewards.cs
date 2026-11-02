@@ -64,7 +64,7 @@ namespace ACE.Server.WorldObjects
             var bg = kind == PvpBloodLedgerKind.Battleground;
 
             if (delivered > 0)
-                Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.Fill(bg ? PvpArenaText.BgMarksReceived : PvpArenaText.BloodReceived, ("amount", delivered), ("marks", PvpArenaText.MarkNoun(delivered))), ChatMessageType.Broadcast));
+                Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.Fill(bg ? (grant.DoubleMarks ? PvpArenaText.BgMarksReceivedDouble : PvpArenaText.BgMarksReceived) : PvpArenaText.BloodReceived, ("amount", delivered), ("marks", PvpArenaText.MarkNoun(delivered))), ChatMessageType.Broadcast));
 
             if (owed > 0)
                 Session?.Network.EnqueueSend(new GameMessageSystemChat(PvpArenaText.Fill(bg ? PvpArenaText.BgMarksOwed : PvpArenaText.BloodOwed, ("amount", owed), ("marks", PvpArenaText.MarkNoun(owed))), ChatMessageType.Broadcast));

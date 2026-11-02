@@ -63,6 +63,100 @@ namespace ACE.Server.ThreadDungeons.Defs
 
         [JsonPropertyName("bossAnchor")]
         public DungeonSpawnPointDef BossAnchor { get; set; }
+
+        // ---- outdoor sites (Open World Threads) ----
+
+        /// <summary>Index row kind: <see cref="KindDungeon"/> (the default when absent) or <see cref="KindOutdoor"/>.</summary>
+        [JsonPropertyName("kind")]
+        public string Kind { get; set; } = KindDungeon;
+
+        public const string KindDungeon = "dungeon";
+        public const string KindOutdoor = "outdoor";
+
+        [JsonIgnore]
+        public bool IsOutdoor => string.Equals(Kind, KindOutdoor, System.StringComparison.Ordinal);
+
+        /// <summary>The parsed outdoor-site file (Content/dungeons/dynamic/outdoor/&lt;id&gt;.json) merged in by
+        /// the store. Null for every dungeon-kind row.</summary>
+        [JsonIgnore]
+        public OutdoorSiteDef Outdoor { get; set; }
+    }
+
+    /// <summary>
+    /// A circle on the outdoor grid. Landblock + local x,y name the centre exactly as a position does in the
+    /// dungeon files; radius is metres. See Content/dungeons/dynamic/outdoor/README.md for the frame.
+    /// </summary>
+    public class OutdoorCircleDef
+    {
+        /// <summary>Hex landblock id of the centre, e.g. "0x5456".</summary>
+        [JsonPropertyName("landblock")] public string LandblockHex { get; set; }
+        [JsonIgnore] public ushort Landblock { get; set; }
+        [JsonPropertyName("x")] public double X { get; set; }
+        [JsonPropertyName("y")] public double Y { get; set; }
+        [JsonPropertyName("radius")] public double Radius { get; set; }
+    }
+
+    /// <summary>One include/exclude area in GLOBAL outdoor metres: exactly one of Circle or Polygon is set.</summary>
+    public class OutdoorAreaDef
+    {
+        [JsonPropertyName("circle")] public OutdoorAreaCircleDef Circle { get; set; }
+
+        /// <summary>Vertices [[gx, gy], ...], at least three, implicitly closed.</summary>
+        [JsonPropertyName("polygon")] public List<List<double>> Polygon { get; set; }
+    }
+
+    public class OutdoorAreaCircleDef
+    {
+        [JsonPropertyName("gx")] public double Gx { get; set; }
+        [JsonPropertyName("gy")] public double Gy { get; set; }
+        [JsonPropertyName("r")] public double R { get; set; }
+    }
+
+    /// <summary>Informational (the spawn tool reads it): one building whose interior cells hold "interior" points.</summary>
+    public class OutdoorInteriorBuildingDef
+    {
+        [JsonPropertyName("landblock")] public string LandblockHex { get; set; }
+        [JsonPropertyName("buildingIndex")] public int BuildingIndex { get; set; }
+        [JsonPropertyName("envCells")] public List<uint> EnvCells { get; set; } = new List<uint>();
+    }
+
+    /// <summary>
+    /// Root of Content/dungeons/dynamic/outdoor/&lt;id&gt;.json. Entry, BossAnchor and Points reuse the dungeon
+    /// file shapes; the rest is outdoor-only. The store validates it and merges it into the index row's
+    /// <see cref="DungeonEntryDef"/> (Entry, Points, BossAnchor, Outdoor).
+    /// </summary>
+    public class OutdoorSiteFileDef
+    {
+        [JsonPropertyName("version")] public int Version { get; set; } = 1;
+        [JsonPropertyName("id")] public string Id { get; set; }
+        [JsonPropertyName("primary")] public string PrimaryHex { get; set; }
+        [JsonPropertyName("footprint")] public List<string> Footprint { get; set; } = new List<string>();
+        [JsonPropertyName("circle")] public OutdoorCircleDef Circle { get; set; }
+        [JsonPropertyName("entry")] public string Entry { get; set; }
+        [JsonPropertyName("exit")] public string Exit { get; set; }
+        [JsonPropertyName("bossAnchor")] public DungeonSpawnPointDef BossAnchor { get; set; }
+        [JsonPropertyName("include")] public List<OutdoorAreaDef> Include { get; set; } = new List<OutdoorAreaDef>();
+        [JsonPropertyName("exclude")] public List<OutdoorAreaDef> Exclude { get; set; } = new List<OutdoorAreaDef>();
+        [JsonPropertyName("interiorBuildings")] public List<OutdoorInteriorBuildingDef> InteriorBuildings { get; set; } = new List<OutdoorInteriorBuildingDef>();
+        [JsonPropertyName("targetPoints")] public int TargetPoints { get; set; }
+        [JsonPropertyName("seed")] public int Seed { get; set; }
+        [JsonPropertyName("points")] public List<DungeonSpawnPointDef> Points { get; set; } = new List<DungeonSpawnPointDef>();
+    }
+
+    /// <summary>The validated outdoor-only part of a site, hung off <see cref="DungeonEntryDef.Outdoor"/>.</summary>
+    public class OutdoorSiteDef
+    {
+        public ushort Primary { get; set; }
+        public List<ushort> Footprint { get; set; } = new List<ushort>();
+        public OutdoorCircleDef Circle { get; set; }
+
+        /// <summary>The exit-portal position, same text shape as <see cref="DungeonEntryDef.Entry"/>.</summary>
+        public string Exit { get; set; }
+        public List<OutdoorAreaDef> Include { get; set; } = new List<OutdoorAreaDef>();
+        public List<OutdoorAreaDef> Exclude { get; set; } = new List<OutdoorAreaDef>();
+        public List<OutdoorInteriorBuildingDef> InteriorBuildings { get; set; } = new List<OutdoorInteriorBuildingDef>();
+        public int TargetPoints { get; set; }
+        public int Seed { get; set; }
     }
 
     /// <summary>Root of Content/dungeons/dynamic/<0xLLLL>.json, written by the dungeonspawns tool.</summary>
@@ -113,6 +207,22 @@ namespace ACE.Server.ThreadDungeons.Defs
         /// <summary>Original generator guid, informational.</summary>
         [JsonPropertyName("source")]
         public string Source { get; set; }
+
+        /// <summary>Outdoor sites only: "outdoor" (open ground) or "interior" (inside a building). Null in dungeon files.</summary>
+        [JsonPropertyName("kind")]
+        public string Kind { get; set; }
+
+        /// <summary>Outdoor sites only, optional: tallest collision height in metres that fits this point
+        /// (interior points under low doorways). Null = no constraint recorded.</summary>
+        [JsonPropertyName("maxCollisionHeight")]
+        public float? MaxCollisionHeight { get; set; }
+
+        /// <summary>
+        /// Runtime only, never in a file: true for an overflow copy of an outdoor point made by
+        /// OutdoorPopulation.ScatterCopy. Its z is the source point's and is snapped to the terrain at placement.
+        /// </summary>
+        [JsonIgnore]
+        public bool Scattered { get; set; }
     }
 
     public class BossListDef
@@ -321,5 +431,38 @@ namespace ACE.Server.ThreadDungeons.Defs
         /// <summary>Radius still reaching 90 percent of the reference-reachable floor area at this height.</summary>
         [JsonPropertyName("collisionRadius90")]
         public double CollisionRadius90 { get; set; }
+    }
+
+    /// <summary>
+    /// Root of Content/dungeons/dynamic/weak-points.json - the attack height each species-table family's
+    /// creatures are weak at (see <see cref="ACE.Server.ThreadDungeons.DungeonWeakPoint"/>). A family with no
+    /// row gets no weak point and a once-per-run WARN, never a refused run.
+    /// </summary>
+    public class WeakPointFileDef
+    {
+        /// <summary>Schema version of this file. The store rejects anything it does not know (TECH-DESIGN S9.4).</summary>
+        [JsonPropertyName("version")]
+        public int Version { get; set; } = 1;
+
+        [JsonPropertyName("families")]
+        public List<WeakPointFamilyDef> Families { get; set; } = new List<WeakPointFamilyDef>();
+    }
+
+    /// <summary>
+    /// One family's weak-point height. <see cref="Height"/> and <see cref="BossHeight"/> are
+    /// high|medium|low|random; <c>random</c> means the family has no height differential and its creatures
+    /// cut a third of their hittable parts instead. An absent <see cref="BossHeight"/> means the boss uses
+    /// <see cref="Height"/>.
+    /// </summary>
+    public class WeakPointFamilyDef
+    {
+        [JsonPropertyName("family")]
+        public string Family { get; set; }
+
+        [JsonPropertyName("height")]
+        public string Height { get; set; }
+
+        [JsonPropertyName("bossHeight")]
+        public string BossHeight { get; set; }
     }
 }

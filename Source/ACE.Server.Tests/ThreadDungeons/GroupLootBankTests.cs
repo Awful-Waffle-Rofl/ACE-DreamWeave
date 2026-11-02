@@ -595,10 +595,11 @@ namespace ACE.Server.Tests.ThreadDungeons
 
             var unscaled = body.IndexOf("if (!IsScaledBonus(rewardBonus))\n                return BuildBossBonusItems(run);", StringComparison.Ordinal);
             var note = body.IndexOf("AddBonusTradeNotes(run, items, rewardBonus);", StringComparison.Ordinal);
+            var key = body.IndexOf("AddBonusLegendaryKey(run, items);", StringComparison.Ordinal);
             var bags = body.IndexOf("AddBonusSalvageBags(run, items);", StringComparison.Ordinal);
             var loot = body.IndexOf("AddBonusLegendaryItems(run, items, rewardBonus);", StringComparison.Ordinal);
 
-            Assert.IsTrue(unscaled >= 0 && unscaled < note && note < bags && bags < loot, "unscaled first; then notes, bags, Legendary items as the 1-arg builder");
+            Assert.IsTrue(unscaled >= 0 && unscaled < note && note < key && key < bags && bags < loot, "unscaled first; then notes, key, bags, Legendary items as the 1-arg builder");
             Assert.IsFalse(body.Contains("PropertyManager"), "the pooled bonus reads no switch");
 
             StringAssert.Contains(src, "private static void AddBonusLegendaryItems(ThreadDungeonRun run, List<WorldObject> items, double rewardBonus) => items.AddRange(BuildCacheLoot(run, rewardBonus));");
@@ -630,7 +631,7 @@ namespace ACE.Server.Tests.ThreadDungeons
             var one = BonusSteps(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"));
             var two = BonusSteps(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run, double rewardBonus)"));
 
-            CollectionAssert.AreEqual(new[] { "AddBonusTradeNotes", "AddBonusSalvageBags", "AddBonusLegendaryItems" }, one, "the one-argument steps");
+            CollectionAssert.AreEqual(new[] { "AddBonusTradeNotes", "AddBonusLegendaryKey", "AddBonusSalvageBags", "AddBonusLegendaryItems" }, one, "the one-argument steps");
             CollectionAssert.AreEqual(one, two, "the two builders' ordered step names match");
 
             StringAssert.Contains(PooledLootSourceText.MethodBody(src, "public static List<WorldObject> BuildBossBonusItems(ThreadDungeonRun run)"),
@@ -665,13 +666,23 @@ namespace ACE.Server.Tests.ThreadDungeons
         public void Member_cache_chest_is_the_shared_factory_with_the_owner_restamped()
         {
             var src = PooledLootSourceText.Read("Source/ACE.Server/ThreadDungeons/ThreadDungeonRewardSpawner.cs");
-            var body = PooledLootSourceText.MethodBody(src, "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid)");
+            // Knots (2026-10-12): the member overload forwards to the one wcid-taking factory, which stamps the given
+            // owner and labels a non-owner by the roster; a failed create returns null before any stamp.
+            StringAssert.Contains(src, "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid)\n"
+                + "            => CreateCacheChest(run, purpose, ownerGuid, BossCacheWcid);");
 
-            var create = body.IndexOf("var chest = CreateCacheChest(run, purpose);", StringComparison.Ordinal);
+            var body = PooledLootSourceText.MethodBody(src, "internal static Chest CreateCacheChest(uint ownerGuid, string ownerName, uint wcid, uint? runId, string purpose)");
+
+            var bail = body.IndexOf("return null;", StringComparison.Ordinal);
             var stamp = body.IndexOf("chest.P_DungeonCacheOwnerGuid = ownerGuid;", StringComparison.Ordinal);
 
-            Assert.IsTrue(create >= 0 && create < stamp, "every stamp from the shared factory first, then the member owner");
-            Assert.IsTrue(body.Contains("if (chest != null)"), "a failed create stays null");
+            Assert.IsTrue(bail >= 0 && bail < stamp, "a failed create stays null, before any stamp");
+            var runSig = "internal static Chest CreateCacheChest(ThreadDungeonRun run, string purpose, uint ownerGuid, uint wcid)";
+            var runStart = src.IndexOf(runSig, StringComparison.Ordinal);
+            var runOverload = src.Substring(runStart, src.IndexOf(';', runStart) - runStart);
+
+            // the roster label moved from the factory body into the run overload (Pinnacles M2c); it is still pinned there
+            StringAssert.Contains(runOverload, "ownerGuid == run.OwnerGuid ? run.OwnerName : run.GetMember(ownerGuid)?.Name");
         }
 
         private static string CodeOnly(string source)

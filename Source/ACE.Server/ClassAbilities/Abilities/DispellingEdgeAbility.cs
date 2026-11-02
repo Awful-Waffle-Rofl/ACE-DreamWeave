@@ -8,15 +8,23 @@ using ACE.Entity.Models;
 using ACE.Server.Entity;
 using ACE.Server.EquipmentMods;
 using ACE.Server.Managers;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
 
 namespace ACE.Server.ClassAbilities.Abilities
 {
     /// <summary>
-    /// Spellsword T3: a landed hit has a 10/16/22% chance (by rank) to strip ONE beneficial enchantment
-    /// from the target - every caster's layer of it (see SelectAllLayers). Affinity: Item Enchantment (2026-09-12 overhaul, replacing Arcane Lore - the strip
-    /// is fundamentally an enchantment-manipulation trick, so the affinity now matches the skill that
-    /// governs enchantments rather than lore), which multiplies the chance.
+    /// Spellsword T3, shown to players as DISPELLING DANCE (renamed from Dispelling Edge 2026-10-24). The
+    /// internal Name stays "dispellingedge" because the ownership quest key is QuestKeyPrefix + Name, and the
+    /// enum value, token file names and token class_Names are unchanged for the same reason.
+    ///
+    /// A landed hit has a 10/16/22% chance (by rank) - ONE roll - and on success it does two independent
+    /// things: strips ONE beneficial enchantment from the target (every caster's layer of it, see
+    /// SelectAllLayers), AND cleanses ONE harmful enchantment from the player through the shared
+    /// Player.CleanseOneHarmfulEnchantment (the Cleanse weapon mod's code). Each half applies if it has
+    /// something to act on; neither needs the other. Affinity: Item Tinkering since 2026-10-24 (Item
+    /// Enchantment from the 2026-09-12 overhaul until then, Arcane Lore before that), which multiplies the
+    /// chance.
     ///
     /// No weapon gate - unlike the three war procs, the design's tier table (SPELLSWORD-DESIGN.md section
     /// 3) states no weapon restriction for this entry, and it deals no damage, so it sits on no damage
@@ -43,7 +51,7 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// method on a different type and never calls it), so the reach could NOT be granted by widening that
     /// dispatch without handing it to all 23 handlers on it, none of which may have it. Declaring the
     /// interface here makes the C# type list the permission list. Pinning Shot is wired the same way;
-    /// VengeanceAbility is the prior art for one handler carrying two hooks.
+    /// BerserkRageAbility is the prior art for one handler carrying two hooks (VengeanceAbility was, until 2026-10-24).
     ///
     /// THE TWO PATHS CANNOT DOUBLE-PROC A SINGLE HIT: they are reached from disjoint call sites (the weapon
     /// path only from Player.DamageTarget, the spell path only from SpellProjectile.OnCollideObject), so a
@@ -56,27 +64,27 @@ namespace ACE.Server.ClassAbilities.Abilities
             Id = ClassAbilityId.DispellingEdge,
             AbilityClass = ClassAbilityClass.Spellsword,
             Tier = 3,
-            Name = "dispellingedge",
-            DisplayName = "Dispelling Edge",
+            Name = "dispellingedge",   // NOT renamed: the ownership quest key is QuestKeyPrefix + Name
+            DisplayName = "Dispelling Dance",
             Description = "Your landed hits and your damaging spell projectiles have a 10/16/22% chance " +
-                          "(by rank) to strip one of the target's beneficial enchantments. Higher Item " +
-                          "Enchantment increases the chance.",
+                          "(by rank) to strip one of the target's beneficial enchantments and cleanse one " +
+                          "harmful enchantment from you. Higher Item Tinkering increases the chance.",
             MaxRank = 3,
-            CostPerRank = new[] { 2, 2, 2 },   // premium reprice 2026-09-13: 1/rank -> 2/rank
+            CostPerRank = new[] { 1, 1, 1 },   // Spellsword pass 2026-10-24: 2/rank -> 1/rank (ClassAbilityRepricing wave 4)
             Implemented = true,
-            AffinitySkill = Skill.ItemEnchantment,
+            AffinitySkill = Skill.ItemTinkering,
         };
 
         /// <summary>
-        /// The dispel chance at a given rank: (base + step*(rank-1)) MULTIPLIED by the Item Enchantment
-        /// affinity (2026-09-12 overhaul, replacing the additive Arcane Lore rider), plus the Dispelling Edge
-        /// equipment mod. Pure for testability. Returns 0 for rank &lt;= 0.
+        /// The proc chance at a given rank: (base + step*(rank-1)) MULTIPLIED by the Item Tinkering affinity
+        /// (Item Enchantment until 2026-10-24), plus the Dispelling Dance equipment mod. Pure for
+        /// testability. Returns 0 for rank &lt;= 0.
         ///
         /// <paramref name="affinityMultiplier"/> is what <c>Player.GetClassAbilityAffinityMultiplier</c>
         /// returns - a FACTOR &gt;= 1.0 multiplying the rank-scaled base, not a raw additive quotient. What
         /// is reported/capped is the AMOUNT that multiply ADDS (rankBonus * multiplier - rankBonus).
         ///
-        /// <paramref name="gearModChance"/> is the DISPELLING EDGE equipment mod
+        /// <paramref name="gearModChance"/> is the DISPELLING DANCE equipment mod
         /// (EquipmentModId.DispellingEdge), a MACHINERY mod and a further summand on the total.
         ///
         /// <paramref name="affinityCap"/> bounds the added amount ONLY (class_ability_affinity_chance_cap),
@@ -175,33 +183,52 @@ namespace ACE.Server.ClassAbilities.Abilities
 
         /// <summary>
         /// The proc body both dispatch paths share, so the roll, the tunable reads and the selection rule
-        /// cannot drift between them. Factored out when the spell path was added on 2026-09-13; every line
-        /// of it came from the weapon path unchanged.
+        /// cannot drift between them. Factored out when the spell path was added on 2026-09-13.
+        ///
+        /// ONE ROLL, TWO INDEPENDENT HALVES (2026-10-24). On a successful roll the enemy half strips one of
+        /// the target's buffs and the self half cleanses one of the player's debuffs. Each half applies only
+        /// if it has something to act on, and an empty one never cancels the other: a buff-less target still
+        /// lets the player cleanse, and a debuff-free player still strips the target. A dead target skips
+        /// only the enemy half - the hit that killed it still landed, so the self half still rolls.
         /// </summary>
         private static void TryDispel(Player attacker, int rank, Creature target)
         {
             if (attacker == null || target == null)
                 return;
 
-            // Nothing to strip from a corpse.
-            if (target.IsDead)
-                return;
+            var itemTinkerAffinity = attacker.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering);
 
-            var itemEnchantAffinity = attacker.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment);
-
-            // Dispelling Edge equipment mod (MACHINERY): +pp on this ability's own dispel roll. Ownership is
-            // proven by the dispatch itself - only LEARNED IOutgoingDamageAbility handlers are in the hook
-            // cache - so the plain read is correct here.
+            // Dispelling Dance equipment mod (MACHINERY): +pp on this ability's own roll. Ownership is proven
+            // by the dispatch itself - only LEARNED handlers are in either hook cache - so the plain read is
+            // correct here.
             var chance = Chance(rank,
                 PropertyManager.GetDouble("class_ability_dispellingedge_chance_base").Item,
                 PropertyManager.GetDouble("class_ability_dispellingedge_chance_step").Item,
-                itemEnchantAffinity,
+                itemTinkerAffinity,
                 attacker.GetEquippedModValue(EquipmentModId.DispellingEdge),
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 
+            // Enemy half. Nothing to strip from a corpse.
+            if (!target.IsDead)
+                StripOneBeneficial(target);
+
+            // Self half: the shared Cleanse code, so this and the Cleanse weapon mod select, filter and
+            // remove a debuff identically (including the PvP dispel vuln lock, a no-op outside PvP).
+            var cleansed = attacker.CleanseOneHarmfulEnchantment();
+
+            if (cleansed != null)
+                attacker.Session?.Network.EnqueueSend(new GameMessageSystemChat($"Your dispelling dance cleanses {cleansed.Name} from you.", ChatMessageType.Magic));
+        }
+
+        /// <summary>
+        /// The enemy half: strips ONE of <paramref name="target"/>'s beneficial enchantments, every caster's
+        /// layer of it. A no-op when the target has nothing dispellable.
+        /// </summary>
+        private static void StripOneBeneficial(Creature target)
+        {
             // Top layer per spell category, so a stack of the same buff counts once and the strongest is
             // what gets taken.
             var dispellable = SelectDispellable(target.EnchantmentManager.GetEnchantments_TopLayer(EnchantmentTypeFlags.Beneficial));
@@ -221,7 +248,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
         /// <summary>
         /// Mirrors the terms fed into Chance() above: (base + step*(rank-1)) multiplied by the Item
-        /// Enchantment affinity, plus the DISPELLING EDGE mod as a further summand exactly as Chance() takes
+        /// Tinkering affinity, plus the DISPELLING DANCE mod as a further summand exactly as Chance() takes
         /// it. Affinity is the CAPPED added amount (rankBonus * multiplier - rankBonus, then clamped), so the
         /// three displayed terms still sum to Effective.
         ///
@@ -236,7 +263,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var skillChance = rank <= 0 ? 0.0 : chanceBase + (rank - 1) * chanceStep;
 
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment);
+            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.ItemTinkering);
             var rawAdded = skillChance * affinityMultiplier - skillChance;
 
             var clampedAdded = affinityCap > 0.0 ? Math.Min(rawAdded, affinityCap) : rawAdded;

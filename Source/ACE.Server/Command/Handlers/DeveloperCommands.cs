@@ -2859,13 +2859,13 @@ namespace ACE.Server.Command.Handlers
             {
                 case "off":
                     session.Player.SpellComponentsRequired = false;
-                    session.Player.EnqueueBroadcast(new GameMessagePublicUpdatePropertyBool(session.Player, PropertyBool.SpellComponentsRequired, session.Player.SpellComponentsRequired));
+                    session.Player.EnqueueBroadcast(new GameMessagePublicUpdatePropertyBool(session.Player, PropertyBool.SpellComponentsRequired, session.Player.ClientSpellComponentsRequired));
                     session.Network.EnqueueSend(new GameMessageSystemChat("You can now cast spells without components.", ChatMessageType.Broadcast));
                     break;
                 case "on":
                 default:
                     session.Player.SpellComponentsRequired = true;
-                    session.Player.EnqueueBroadcast(new GameMessagePublicUpdatePropertyBool(session.Player, PropertyBool.SpellComponentsRequired, session.Player.SpellComponentsRequired));
+                    session.Player.EnqueueBroadcast(new GameMessagePublicUpdatePropertyBool(session.Player, PropertyBool.SpellComponentsRequired, session.Player.ClientSpellComponentsRequired));
                     session.Network.EnqueueSend(new GameMessageSystemChat("You can no longer cast spells without components.", ChatMessageType.Broadcast));
                     break;
             }
@@ -4436,7 +4436,7 @@ namespace ACE.Server.Command.Handlers
 
             try
             {
-                spec = BuildSpecFromCreature(boss);
+                spec = CreatureAttackerSpecs.Melee(boss);
                 notes = DescribeSpecLimits(boss, spec);
                 bossLabel = $"{boss.Name} (wcid {wcid})";
             }
@@ -4635,278 +4635,6 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
-        /// Builds an AttackerSpec from a creature constructed in memory and never placed in the
-        /// world, mirroring the melee path the engine takes for a NON-player attacker:
-        /// DamageEvent.DoCalculateDamage -> Creature.GetBaseDamage(attackPart)
-        /// (Entity\DamageEvent.cs:255-256, WorldObjects\Monster_Melee.cs:387-406).
-        ///
-        /// CRITICAL HITS ARE MODELLED, with one term omitted. Leaving CritChance at zero understates
-        /// mean damage per landed hit by roughly a sixth at the retail base rate, and biases
-        /// landed-hits-to-kill, swings-to-kill and the solved scale the same way, so the crit branch
-        /// of CombatSimulator.Analytic is populated rather than switched off. Every attacker-side and
-        /// weapon-side term is read from production code; the ONE term dropped is the defender's
-        /// crit-resist rating, because DefenderProfile carries none - see the crit block below for
-        /// how it is dropped without reimplementing the four terms around it. Two smaller defender
-        /// terms go with it and cannot be reinstated from a profile either: the Critical Defense
-        /// augmentation (Entity\DamageEvent.cs:300-308) and the crit damage resist rating (:330).
-        ///
-        /// A crit figure from this command is therefore an upper bound against a defender who
-        /// carries crit resistance, and exact against one who carries none. There is also a
-        /// structural limit in AttackerSpec itself, recorded rather than worked around: it has one
-        /// PreMitigationMod for both branches, while the engine recomposes DamageRatingMod entirely
-        /// on a crit - dropping Recklessness and adding the crit damage rating
-        /// (Entity\DamageEvent.cs:325-333). Closing that needs a second modifier field on
-        /// AttackerSpec, which is a Task 1 change, not a change to this command.
-        ///
-        /// WHAT IS DELIBERATELY LEFT AT ITS DEFAULT, and why. Each of these is a term the engine
-        /// computes from the DEFENDER, or from live combat state a creature standing in no landblock
-        /// does not have. Guessing one would misrepresent the boss in a way no reader could see, so
-        /// they stay at the documented neutral value and DescribeSpecLimits prints them.
-        ///
-        /// WithinShieldArc stays true. It is a positional gate on the 180 degree frontal arc
-        /// (CombatSimulator\MitigationMath.cs:43-46), so there is no attacker-side value to read; the
-        /// defender is credited with its shield in full, which is the conservative direction.
-        ///
-        /// Recklessness, Sneak Attack and the creature slayer bonus fold into PreMitigationMod at
-        /// 1.0. Recklessness reads the PLAYER DEFENDER (WorldObjects\Creature_Combat.cs:800-801),
-        /// Sneak Attack needs a live target (:806-815), and the slayer bonus compares the weapon's
-        /// SlayerCreatureType against the defender's CreatureType
-        /// (WorldObjects\WorldObject_Weapon.cs:504-514) - passing a null target returns its neutral
-        /// 1.0, which is what this does.
-        ///
-        /// AttackHeight falls back to Medium, the engine's own fallback at Entity\DamageEvent.cs:196.
-        /// A live monster sets it per swing from its combat maneuver table, which needs a target.
-        ///
-        /// THE BOSS IS PUT INTO MELEE COMBAT MODE FIRST, and that is load-bearing rather than
-        /// cosmetic. GetEffectiveAttackSkill multiplies the raw skill by GetWeaponOffenseModifier,
-        /// which returns 1.0 outright while the wielder is CombatMode.NonCombat
-        /// (WorldObjects\WorldObject_Weapon.cs:244-245), and a factory-built creature is NonCombat
-        /// (WorldObjects\Creature.cs:169). Measuring it there would drop the wielded weapon's
-        /// WeaponOffense and its attack enchantments and understate hit chance.
-        ///
-        /// Creature.SetCombatMode is public (WorldObjects\Creature_Combat.cs:59-62) and is already
-        /// called from outside the class in production - AdvocateFane.cs:103, Bindstone.cs:67,
-        /// Lifestone.cs:52, PetDevice.cs:564 - so no access modifier is widened to do this. It is
-        /// also the same call the engine itself makes before a monster's first swing, through
-        /// DoAttackStance (WorldObjects\Monster_Combat.cs:129-133, from Monster_Melee.cs:59).
-        ///
-        /// This mirrors the decision already taken on the DEFENDER side: ProfileBuilder.Walk
-        /// deliberately does not honour GetShieldMod's matching NonCombat early return, because a
-        /// hydrated Player is always NonCombat and honouring it would zero every shield row ever
-        /// profiled. Both halves of the simulator therefore describe combat stance.
-        ///
-        /// The call is guarded because it is the one thing here that reaches the motion and dat
-        /// layer on an object that never entered the world. Every path it takes is null-safe for
-        /// that case - ExecuteMotion gates its physics block on PhysicsObj != null
-        /// (WorldObjects\WorldObject.cs:1017), EnqueueBroadcast returns early on a null PhysicsObj or
-        /// landblock (WorldObjects\WorldObject_Networking.cs:1421), the physics-motion apply is
-        /// skipped because applyPhysics is false for a non-Player (:1352-1356), and
-        /// MotionTable.GetAnimationLength returns 0 for a zero motion table
-        /// (Physics\Animation\MotionTable.cs:480) - but a diagnostic command must not die on its
-        /// subject, so a throw falls back to NonCombat and DescribeSpecLimits says which state the
-        /// figures were measured in.
-        /// </summary>
-        private static AttackerSpec BuildSpecFromCreature(Creature boss)
-        {
-            try
-            {
-                boss.SetCombatMode(CombatMode.Melee);
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"/simhit could not put wcid {boss.WeenieClassId} into melee combat mode; measuring it out of stance.", ex);
-            }
-
-            // Entity\DamageEvent.cs:193 - the wielded melee weapon IS the damage source when there
-            // is one. Creature.SetEphemeralValues already ran GenerateWieldList,
-            // EquipInventoryItems and GenerateWieldedTreasure inside the constructor
-            // (WorldObjects\Creature.cs:202-212), so a boss that wields in play wields here too.
-            var weapon = boss.GetEquippedMeleeWeapon();
-
-            // NOT the same lookup, and the engine does not treat them as the same either. Base
-            // damage comes off the MELEE weapon (WorldObjects\Monster_Melee.cs:393), but the damage
-            // type comes off GetEquippedWeapon (WorldObjects\Monster_Combat.cs:289-292), which falls
-            // through to the missile weapon when there is no melee one
-            // (WorldObjects\Creature_Equipment.cs:112-116). Collapsing the two onto
-            // GetEquippedMeleeWeapon gave a bow-wielding boss swinging melee its BODY PARTS' damage
-            // type where the engine gives it the bow's - a different armor row, a different
-            // resistance row, and every mitigation figure quietly shifted.
-            var damageTypeWeapon = boss.GetEquippedWeapon();
-
-            // Entity\DamageEvent.cs:292 - the same CreatureSkill object the engine hands to every
-            // weapon-derived modifier below. GetCreatureSkill writes on read (it inserts a missing
-            // PropertiesSkill row and sets ChangesDetected), which lands only on this throwaway: its
-            // biota was never saved, so the caller's Destroy enqueues no database work.
-            var attackSkill = boss.GetCreatureSkill(boss.GetCurrentWeaponSkill());
-
-            float baseDamageMin;
-            float baseDamageMax;
-            DamageType damageType;
-
-            if (weapon != null)
-            {
-                // WorldObjects\Monster_Melee.cs:394-399
-                var weaponDamage = weapon.GetDamageMod(boss);
-
-                baseDamageMin = weaponDamage.MinDamage;
-                baseDamageMax = weaponDamage.MaxDamage;
-            }
-            else
-            {
-                // WorldObjects\Monster_Melee.cs:401-405, AVERAGED over the pool rather than rolled
-                // from one part. GetAttackPart picks uniformly from exactly this set per swing
-                // (:608), so the unweighted mean IS the expected base damage, and it is also what
-                // makes the reported scale factor apply uniformly to DVal on every part.
-                var parts = CombatAttackParts(boss);
-
-                baseDamageMin = 0.0f;
-                baseDamageMax = 0.0f;
-
-                foreach (var part in parts)
-                {
-                    // Entity\BaseDamage.cs:9 - MinDamage is MaxDamage * (1 - Variance)
-                    baseDamageMin += part.DVal * (1.0f - part.DVar);
-                    baseDamageMax += part.DVal;
-                }
-
-                if (parts.Count > 0)
-                {
-                    baseDamageMin /= parts.Count;
-                    baseDamageMax /= parts.Count;
-                }
-            }
-
-            // Resolved on its OWN branch, off the equipped weapon rather than the melee weapon, which
-            // is where the engine splits them - see the damageTypeWeapon comment above.
-            if (damageTypeWeapon != null)
-            {
-                // WorldObjects\Monster_Combat.cs:289-291 defers to the weapon's own damage type
-                damageType = boss.GetDamageType(false, CombatType.Melee);
-            }
-            else
-            {
-                damageType = DamageType.Undef;
-
-                foreach (var part in CombatAttackParts(boss))
-                    damageType |= part.DType;
-
-                // The engine resolves a multi-damage part by picking one of its flags at random per
-                // swing (WorldObjects\Monster_Combat.cs:295-296). A measurement cannot roll, so this
-                // fixes on the first single flag set, which is the deterministic rule the engine
-                // itself uses on the weapon path (WorldObjects\Creature_Combat.cs:1239-1250).
-                if (damageType.IsMultiDamage())
-                    damageType = FirstSingleDamageType(damageType);
-            }
-
-            // Entity\DamageEvent.cs:287 composes the pre-mitigation multiply as
-            // BaseDamage * AttributeMod * PowerMod * SlayerMod * DamageRatingMod. The first three
-            // are read from production code here; the fourth is AdditiveCombine over the damage
-            // rating plus the three defender-dependent terms named in the doc-comment, passed as
-            // their neutral 1.0 so the engine's own rating rounding is preserved rather than
-            // approximated (WorldObjects\Creature_Rating.cs:193-201).
-            var attributeMod = boss.GetAttributeMod(weapon);
-            var powerMod = boss.GetPowerMod(weapon);
-            var slayerMod = WorldObject.GetWeaponCreatureSlayerModifier(weapon, boss, null);
-
-            var damageRatingMod = Creature.AdditiveCombine(
-                Creature.GetPositiveRatingMod(boss.GetDamageRating()), 1.0f, 1.0f, 1.0f);
-
-            // Entity\DamageEvent.cs:340-346 - rending and cleaving reach the armor curve as a single
-            // minimum, which is what AttackerSpec.ArmorRendingMod carries.
-            var armorRendingMod = 1.0f;
-
-            if (weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.ArmorRending))
-                armorRendingMod = WorldObject.GetArmorRendingMod(attackSkill);
-
-            var ignoreArmorMod = Math.Min(armorRendingMod, boss.GetArmorCleavingMod(weapon));
-
-            // CRIT DAMAGE. Entity\DamageEvent.cs:318-323, and AttackerSpec.CritDamageMod wants the
-            // full multiplier with the +1.0 base already folded in. GetWeaponCritDamageMod never
-            // reads its target argument at all (WorldObjects\WorldObject_Weapon.cs:427-438), so a
-            // null defender here is exact, not an approximation. The base is
-            // defaultCritDamageMultiplier = 1.0f (:422), which is why an unimbued weaponless monster
-            // comes out at 2.0 - the value CombatSimulatorParityTests pinned against the engine.
-            var critDamageMod = (1.0f + WorldObject.GetWeaponCritDamageMod(weapon, boss, attackSkill, null))
-                * (1.0f + (float)ACE.Server.WeaponMods.WeaponModCombat.ReadWeaponOnly(weapon, ACE.Server.WeaponMods.WeaponModId.Execution));
-
-            // CRIT CHANCE. Entity\DamageEvent.cs:293. GetWeaponCriticalChance DOES read its target,
-            // at exactly one place: the final multiply by the defender's crit-resist rating
-            // (WorldObjects\WorldObject_Weapon.cs:373-374). Everything before it is attacker-side and
-            // is exactly what this wants - the weapon's CriticalFrequency or the base
-            // defaultPhysicalCritFrequency = 0.1f (:348, :355), the Critical Strike imbue (:357-362),
-            // the attacker's own crit rating (:364-365) and the Focus weapon mod (:370).
-            //
-            // So the boss is passed as its own target and that single term is divided straight back
-            // out, rather than the four attacker-side terms being copied into this file. Copying them
-            // is the tempting shortcut and it is the wrong one: the simulator's whole discipline is
-            // that no factor is reimplemented, only the composition
-            // (Source\ACE.Server.Tests\CombatSimulatorParityTests.cs:17-22), and a copy here would go
-            // silently out of step the next time a crit term is added. This form picks such a change
-            // up automatically; it fails only if a SECOND defender-side term is ever appended, which
-            // would be visible as a new dereference of target in that method.
-            //
-            // GetNegativeRatingMod is strictly positive for any rating when allowBug is false - a
-            // negative rating routes to GetPositiveRatingMod and a non-negative one gives
-            // 100/(100+rating) (WorldObjects\Creature_Rating.cs:43-62) - so the divisor cannot be
-            // zero. The guard is belt and braces.
-            var selfCritResistMod = Creature.GetNegativeRatingMod(boss.GetCritResistRating());
-
-            var critChance = WorldObject.GetWeaponCriticalChance(weapon, boss, attackSkill, boss);
-
-            if (selfCritResistMod > 0.0f)
-                critChance /= selfCritResistMod;
-
-            // Saturated HERE as well as inside CombatSimulator, and the duplication is deliberate.
-            // A crit rating is added unbounded as "rating * 0.01f" (WorldObjects\WorldObject_Weapon.cs:365),
-            // so a weenie carrying CritRating 100 derives 1.1; the engine never notices because its
-            // consumer saturates against a random draw (Entity\DamageEvent.cs:302), and the simulator
-            // now reproduces that. But the simulator's clamp is invisible to this command's
-            // disclosure preamble, which would go on printing "Crits: 110.0% chance" beside figures
-            // computed at 100 percent. Clamping the spec makes the number the admin reads the number
-            // the arithmetic used.
-            critChance = Math.Clamp(critChance, 0.0f, 1.0f);
-
-            // named local so the object initializer below cannot be read as touching the Creature
-            // field of the same name (WorldObjects\Monster_Combat.cs:33)
-            var attackHeight = boss.AttackHeight ?? ACE.Entity.Enum.AttackHeight.Medium;
-
-            return new AttackerSpec
-            {
-                Label = $"{boss.Name} (wcid {boss.WeenieClassId})",
-
-                // Entity\DamageEvent.cs:189 - a non-projectile damage source is Melee
-                CombatType = CombatType.Melee,
-                DamageType = damageType,
-                AttackHeight = attackHeight,
-
-                AttackSkill = boss.GetEffectiveAttackSkill(),
-
-                BaseDamageMin = baseDamageMin,
-                BaseDamageMax = baseDamageMax,
-
-                CritChance = critChance,
-                CritDamageMod = critDamageMod,
-
-                PreMitigationMod = attributeMod * powerMod * slayerMod * damageRatingMod,
-
-                ArmorRendingMod = ignoreArmorMod,
-                IgnoreShieldMod = boss.GetIgnoreShieldMod(weapon),
-
-                // WorldObjects\Monster_Melee.cs GetArmorMod - each resolves the MAX of the weapon's and the
-                // creature's own hollow intensity (HollowMath.Resolve). The spec is on/off only, so any
-                // intensity above 0 is simulated as full; DescribeSpecLimits discloses a partial one.
-                IgnoreMagicArmor = HollowMath.Resolve(weapon, boss, PropertyBool.IgnoreMagicArmor) > 0.0,
-                IgnoreMagicResist = HollowMath.Resolve(weapon, boss, PropertyBool.IgnoreMagicResist) > 0.0,
-
-                WeaponResistanceMod = WorldObject.GetWeaponResistanceModifier(weapon, boss, attackSkill, damageType),
-                IgnoreAllArmor = weapon != null && weapon.HasImbuedEffect(ImbuedEffectType.IgnoreAllArmor),
-
-                WithinShieldArc = true,
-                AttackerIsPlayer = false,
-            };
-        }
-
-        /// <summary>
         /// The lines /simhit prints before its rows, naming the places the spec is narrower than the
         /// live fight. A reader who cannot see these has no way to tell a measurement from a default.
         ///
@@ -4929,7 +4657,7 @@ namespace ACE.Server.Command.Handlers
             }
             else
             {
-                var parts = CombatAttackParts(boss);
+                var parts = CreatureAttackerSpecs.CombatAttackParts(boss);
 
                 notes.Add($"Damage source: averaged over the {parts.Count} combat body part(s) GetAttackPart draws from, " +
                           "so the scale factor applies to DVal and DVar on all of them. " +
@@ -4951,7 +4679,7 @@ namespace ACE.Server.Command.Handlers
             {
                 var composite = DamageType.Undef;
 
-                foreach (var part in CombatAttackParts(boss))
+                foreach (var part in CreatureAttackerSpecs.CombatAttackParts(boss))
                     composite |= part.DType;
 
                 if (composite.IsMultiDamage())
@@ -5015,39 +4743,6 @@ namespace ACE.Server.Command.Handlers
                       "OVERSTATED for any roster character who has learned one.");
 
             return notes;
-        }
-
-        /// <summary>
-        /// The combat body parts a monster's melee swing draws from - the same filter
-        /// GetAttackPart applies for a normal attack, DVal non-zero and not the Breath part
-        /// (WorldObjects\Monster_Melee.cs:606-608).
-        /// </summary>
-        private static List<PropertiesBodyPart> CombatAttackParts(Creature boss)
-        {
-            if (boss.Biota.PropertiesBodyPart == null)
-                return new List<PropertiesBodyPart>();
-
-            return boss.Biota.PropertiesBodyPart
-                .Where(b => b.Value.DVal != 0 && b.Key != CombatBodyPart.Breath)
-                .Select(b => b.Value)
-                .ToList();
-        }
-
-        /// <summary>
-        /// The first single damage-type flag set on a composite, in the enum's own declaration
-        /// order. Mirrors the loop at WorldObjects\Creature_Combat.cs:1239-1250, minus its
-        /// motion-dependent Thrust exception, which needs a live swing. Returns the input unchanged
-        /// when no single flag is set, matching that method's fall-through.
-        /// </summary>
-        private static DamageType FirstSingleDamageType(DamageType damageTypes)
-        {
-            foreach (DamageType damageType in Enum.GetValues(typeof(DamageType)))
-            {
-                if ((damageTypes & damageType) != 0 && !damageType.IsMultiDamage())
-                    return damageType;
-            }
-
-            return damageTypes;
         }
 
     }

@@ -13,9 +13,13 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// <summary>
     /// When one of the player's equipped Aetheria surges, OR their equipped cloak fires its spell proc, all
     /// nearby monsters are taunted into attacking the player for a short time. Rides along with the proc
-    /// ROLL, regardless of which spell procs or whether it resists/fails. Higher Assess Person extends the
-    /// hold duration, up to a hard cap (2026-09-12 overhaul, replacing Loyalty - reading a target down to
-    /// keep it locked onto you is an Assess Person trick, not a Loyalty one).
+    /// ROLL, regardless of which spell procs or whether it resists/fails.
+    ///
+    /// THREE RANKS AT 1/1/1, NO AFFINITY (2026-10-17 Vanguard pass). Rank buys RADIUS - 15/30/65 m by the
+    /// class_ability_taunt_radius_r1/_r2/_r3 tunables - and the hold duration is flat (the base tunable plus
+    /// the Provoke gear term). The Assess Person duration bonus and its cap tunable
+    /// (class_ability_taunt_loyalty_bonus_cap_seconds) were retired; Assess Person no longer feeds Taunt.
+    /// Existing rank-1 owners (who paid 3) are promoted to rank 3 by ClassAbilityRepricing wave 2.
     ///
     /// THE CLOAK TRIGGER WAS ADDED 2026-09-29 AND REUSES THE EXISTING IItemProcAbility HOOK rather than a new
     /// one. Cloak procs resolve entirely inside ACE.Server.Entity.Cloak and never touched
@@ -26,6 +30,12 @@ namespace ACE.Server.ClassAbilities.Abilities
     /// </summary>
     public class TauntAbility : IItemProcAbility, ITestableClassAbility, IAbilityReadout
     {
+        /// <summary>
+        /// The top rank. Named so the Custom Summons Tank pulse (CombatPet.TickTauntPulse) can ask for the
+        /// rank-3 radius through <see cref="RadiusForRank(int)"/> instead of holding a copy of the number.
+        /// </summary>
+        public const int TopRank = 3;
+
         public ClassAbilityDefinition Definition { get; } = new ClassAbilityDefinition
         {
             Id = ClassAbilityId.Taunt,
@@ -34,12 +44,13 @@ namespace ACE.Server.ClassAbilities.Abilities
             Name = "taunt",
             DisplayName = "Taunt",
             Description = "When one of your equipped Aetheria surges, or your equipped cloak fires its spell " +
-                          "proc, all nearby monsters are taunted into attacking you for a short time. Higher " +
-                          "Assess Person increases the hold duration.",
-            MaxRank = 1,
-            CostPerRank = new[] { 3 },
+                          "proc, all monsters within 15/30/65 meters (by rank) are taunted into attacking you " +
+                          "for a short time.",
+            MaxRank = TopRank,
+            // 2026-10-17: one rank at 3 -> three ranks at 1/1/1 (rank 3 = the old single rank's price).
+            // Existing owners are raised to rank 3 by ClassAbilityRepricing wave 2.
+            CostPerRank = new[] { 1, 1, 1 },
             Implemented = true,
-            AffinitySkill = Skill.AssessPerson,
         };
 
         public void OnItemProc(Player wielder, int rank, WorldObject procSource)
@@ -48,7 +59,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (!TriggersOn(procSource))
                 return;
 
-            var taunted = Activate(wielder);
+            var taunted = Activate(wielder, rank);
 
             if (taunted > 0)
                 wielder.Session.Network.EnqueueSend(new GameMessageSystemChat(
@@ -94,27 +105,16 @@ namespace ACE.Server.ClassAbilities.Abilities
         /// enforces (it returns 0 unless the linked ability is live). A plain GetEquippedModValue here would
         /// have let a /testskill taunt from an unowning character pick up gear magnitudes.
         /// </summary>
-        public static int Activate(Player player)
+        public static int Activate(Player player, int rank)
         {
-            // Bellow equipment mod (MACHINERY): +m of taunt radius, added to the raw radius read. There is
-            // no clamp anywhere on this value, so this is a plain summand.
-            var radius = EffectiveRadius(PropertyManager.GetDouble("class_ability_taunt_radius").Item,
+            // Bellow equipment mod (MACHINERY): +m of taunt radius, added to the rank radius. There is no
+            // clamp anywhere on this value, so this is a plain summand.
+            var radius = EffectiveRadius(RadiusForRank(rank),
                 player.GetMachineryEquipmentModValue(EquipmentModId.Bellow));
 
-            // Taunt's Assess Person affinity (2026-09-12 overhaul, replacing Loyalty): MULTIPLIES the base
-            // duration rather than adding beside it. Untrained Assess Person reproduces the base duration
-            // exactly (multiplier = 1.0). What EffectiveDuration clamps is the AMOUNT the multiply adds
-            // (baseDuration * multiplier - baseDuration), not the raw factor.
-            var baseDuration = PropertyManager.GetDouble("class_ability_taunt_duration").Item;
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.AssessPerson);
-            var affinityBonus = baseDuration * affinityMultiplier - baseDuration;
-            var bonusCap = PropertyManager.GetDouble("class_ability_taunt_loyalty_bonus_cap_seconds").Item;
-
-            // Provoke equipment mod (MACHINERY): +s of hold duration, a further summand on the SUM and
-            // therefore OUTSIDE the affinity clamp - see EffectiveDuration.
-            var duration = EffectiveDuration(baseDuration, affinityBonus, bonusCap,
+            // Flat duration: the base tunable plus the Provoke equipment mod (MACHINERY), a summand.
+            var duration = EffectiveDuration(BaseDuration(),
                 player.GetMachineryEquipmentModValue(EquipmentModId.Provoke));
-
             var taunted = 0;
 
             // same visible-objects source and monster filters as GetMultiShotTargets
@@ -147,115 +147,104 @@ namespace ACE.Server.ClassAbilities.Abilities
         }
 
         /// <summary>
-        /// The effective Taunt hold duration in seconds: the base duration plus the affinity bonus (the
-        /// AMOUNT the Assess Person multiplier adds - see Activate above), clamped to
-        /// <paramref name="bonusCapSeconds"/> (0 reproduces <paramref name="baseDuration"/> exactly). Pure
-        /// for testability, and unchanged by the 2026-09-12 affinity-primitive migration: this helper only
-        /// ever clamps whatever bonus its caller hands it, and never cared whether that bonus came from an
-        /// additive Loyalty quotient or a multiplicative Assess Person factor.
-        ///
-        /// <paramref name="gearSeconds"/> is the PROVOKE equipment mod (EquipmentModId.Provoke), a MACHINERY
-        /// mod added as a further summand ON THE SUM, deliberately OUTSIDE the affinity clamp. Only the
-        /// BONUS is clamped here, and the clamp exists to bound an unbounded skill multiply; the gear term is
-        /// already bounded by its registry MaxMagnitude, so folding it inside the clamp would let a
-        /// fully-capped affinity silently eat the mod - the Resonance failure recorded in DESIGN.md 2.2.
-        /// Provoke is therefore live at any Assess Person. Last and defaulted to 0, so an unmodded build is
-        /// bit-identical.
+        /// The effective Taunt hold duration in seconds: the flat base duration plus
+        /// <paramref name="gearSeconds"/>, the PROVOKE equipment mod (EquipmentModId.Provoke), a MACHINERY mod.
+        /// There is no affinity term since the 2026-10-17 Vanguard pass. Pure for testability. The gear term is
+        /// last and defaulted to 0 so an unmodded build is bit-identical.
         /// </summary>
-        public static double EffectiveDuration(double baseDuration, double affinityBonusSeconds, double bonusCapSeconds, double gearSeconds = 0.0)
-        {
-            var bonus = Math.Clamp(affinityBonusSeconds, 0.0, bonusCapSeconds);
-            return baseDuration + bonus + Math.Max(0.0, gearSeconds);
-        }
+        public static double EffectiveDuration(double baseDuration, double gearSeconds = 0.0) =>
+            baseDuration + Math.Max(0.0, gearSeconds);
 
         /// <summary>
-        /// The effective Taunt radius in metres: the base radius tunable (rank-invariant, like Taunt's own
-        /// MaxRank of 1) plus the BELLOW equipment mod, a plain summand with no clamp of its own. Pure for
-        /// testability - shared by Activate, Test and the GetReadout radius Secondary so all three cannot
-        /// drift apart.
+        /// The flat hold duration in seconds before any gear term, from class_ability_taunt_duration. The hold
+        /// is the same at every rank. Shared by Activate and the Custom Summons Tank pulse, which takes this
+        /// hold with no gear term (a pet wears no Provoke).
+        /// </summary>
+        public static double BaseDuration() =>
+            PropertyManager.GetDouble("class_ability_taunt_duration").Item;
+
+        /// <summary>
+        /// The Taunt radius in metres at a rank, from class_ability_taunt_radius_r1/_r2/_r3 (15/30/65). A rank
+        /// outside 1..MaxRank clamps to the nearest end so a stray value never reads past the ladder.
+        /// </summary>
+        public static double RadiusForRank(int rank) =>
+            RadiusForRank(rank,
+                PropertyManager.GetDouble("class_ability_taunt_radius_r1").Item,
+                PropertyManager.GetDouble("class_ability_taunt_radius_r2").Item,
+                PropertyManager.GetDouble("class_ability_taunt_radius_r3").Item);
+
+        /// <summary><see cref="RadiusForRank(int)"/> over explicit per-rank radii, pure for tests.</summary>
+        public static double RadiusForRank(int rank, double r1, double r2, double r3) =>
+            rank <= 1 ? r1 : rank == 2 ? r2 : r3;
+
+        /// <summary>
+        /// The effective Taunt radius in metres: the rank radius (<see cref="RadiusForRank(int)"/>) plus the
+        /// BELLOW equipment mod, a plain summand with no clamp of its own. Pure for testability - shared by
+        /// Activate, Test and the GetReadout radius Secondary so all three cannot drift apart.
         /// </summary>
         public static double EffectiveRadius(double baseRadius, double gearRadius = 0.0) =>
             baseRadius + Math.Max(0.0, gearRadius);
 
         public string Test(Player player)
         {
-            var taunted = Activate(player);
+            // /testskill bypasses the learned requirement: use the owned rank, or the top rank for a non-owner.
+            var rank = player.TryGetClassAbility(Definition.Id, out var owned) && owned > 0 ? owned : Definition.MaxRank;
+
+            var taunted = Activate(player, rank);
 
             // Quotes the radius Activate actually used, Bellow included, through the same machinery gate -
             // so a non-owner running /testskill sees the unmodded number, matching what just happened.
-            var radius = EffectiveRadius(PropertyManager.GetDouble("class_ability_taunt_radius").Item,
+            var radius = EffectiveRadius(RadiusForRank(rank),
                 player.GetMachineryEquipmentModValue(EquipmentModId.Bellow));
 
-            return $"Taunt test: taunted {taunted} monster{(taunted == 1 ? "" : "s")} within {radius:0} units.";
+            return $"Taunt test (rank {rank}): taunted {taunted} monster{(taunted == 1 ? "" : "s")} within {radius:0} units.";
         }
 
         /// <summary>
-        /// Mirrors the base duration + Assess Person affinity bonus terms fed into EffectiveDuration in
-        /// Activate above - the two must stay in step. Already in seconds ("s" unit, no x100). Affinity is
-        /// the CAPPED bonus (clamped the same way EffectiveDuration clamps it), so the three displayed terms
-        /// still sum to Effective. CapNote is set only when the raw bonus actually exceeds the cap this call.
+        /// The hold duration (flat base plus the Provoke gear term, already in seconds) as the primary
+        /// segment, with the rank radius plus Bellow as a Secondary - mirroring Activate, so the two must stay
+        /// in step. No affinity and no cap, so Affinity is 0 and CapNote null.
         ///
-        /// GEAR IS PROVOKE ONLY, not Provoke plus Bellow, ON THIS PRIMARY SEGMENT. Taunt carries two mods
-        /// and they are in different units - Provoke is seconds of hold, Bellow is metres of radius - so
-        /// only the one matching this segment's own Unit ("s") can be summed into it. Bellow's own
-        /// gear-scaled radius bonus is reported as a Secondary below now that the contract supports more
-        /// than one scalar - previously this was a documented display gap (Bellow live in Activate, no
-        /// readout line for it); it no longer is.
+        /// GEAR IS PROVOKE ONLY on the primary segment: Provoke is seconds, Bellow is metres, and only the
+        /// mod matching the segment's own Unit can be summed into it. Bellow is reported on the radius
+        /// Secondary.
         ///
         /// A plain GetEquippedModValue is correct HERE, unlike in Activate: /abilities list only renders a
         /// readout for abilities the player already owns at rank > 0, so ownership is proven by the caller.
         /// The null-conditional is for the readout unit tests, which pass a null Player because Player's
-        /// static initializer cannot run under the test host.
+        /// static initializer cannot run under the test host. No Player method is called otherwise.
         /// </summary>
         public ClassAbilityReadout GetReadout(Player player, int rank)
         {
             var baseDuration = PropertyManager.GetDouble("class_ability_taunt_duration").Item;
-
-            var affinityMultiplier = player.GetClassAbilityAffinityMultiplier(Skill.AssessPerson);
-            var affinityBonus = baseDuration * affinityMultiplier - baseDuration;
-
-            var bonusCap = PropertyManager.GetDouble("class_ability_taunt_loyalty_bonus_cap_seconds").Item;
 
             // Rank-gated - a machinery mod reports nothing without its ability.
             var gear = rank <= 0
                 ? 0.0
                 : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Provoke) ?? 0.0);
 
-            var clampedAffinityBonus = Math.Clamp(affinityBonus, 0.0, bonusCap);
-            var capBit = clampedAffinityBonus < affinityBonus;
-
-            var effective = EffectiveDuration(baseDuration, affinityBonus, bonusCap, gear);
-
-            // RADIUS secondary: mirrors the radius term fed into Activate above exactly - the base radius
-            // tunable (rank-invariant, like Taunt's own MaxRank of 1) plus the BELLOW machinery mod, a
-            // plain summand with no clamp of its own (see Activate's own comment - "no clamp anywhere on
-            // this value").
-            var baseRadius = PropertyManager.GetDouble("class_ability_taunt_radius").Item;
-
             var radiusGear = rank <= 0
                 ? 0.0
                 : Math.Max(0.0, player?.GetEquippedModValue(EquipmentModId.Bellow) ?? 0.0);
-
-            var radiusSecondary = RadiusSecondary(baseRadius, radiusGear);
 
             return new ClassAbilityReadout
             {
                 HasValue = true,
                 Skill = baseDuration,
-                Affinity = clampedAffinityBonus,
+                Affinity = 0.0,
                 Gear = gear,
-                Effective = effective,
+                Effective = EffectiveDuration(baseDuration, gear),
                 Unit = "s",
                 Label = "taunt",
                 Per = null,
-                CapNote = capBit ? "loyalty cap" : null,
-                Secondary = new List<ClassAbilityReadout> { radiusSecondary },
+                CapNote = null,
+                Secondary = new List<ClassAbilityReadout> { RadiusSecondary(RadiusForRank(rank), radiusGear) },
             };
         }
 
         /// <summary>
-        /// The radius secondary readout for a given base radius and Bellow gear term - always present
-        /// (the base radius tunable is never 0 in shipped configuration, unlike the zero-omission secondaries
+        /// The radius secondary readout for a given rank radius and Bellow gear term - always present
+        /// (the rank radius is never 0 in shipped configuration, unlike the zero-omission secondaries
         /// on other abilities). Pure for testability, built on <see cref="EffectiveRadius"/> so GetReadout
         /// and this segment cannot drift from Activate's own radius computation.
         /// </summary>
