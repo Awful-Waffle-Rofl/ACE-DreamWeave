@@ -377,6 +377,12 @@ namespace ACE.Server.Managers
             if (quest.Name.StartsWith("ColoArena"))
                 return false;
 
+            // Bluespire daily kill tasks (WaffleACE): the per-category 20-hour cooldown is an exact 72,000
+            // seconds from the successful NPC reward claim, independent of quest_mindelta_rate. Prefix-scoped
+            // to that one quest family - see BluespireDailyKillTasks.
+            if (BluespireDailyKillTasks.IsQuestFamily(quest.Name))
+                return false;
+
             return true;
         }
 
