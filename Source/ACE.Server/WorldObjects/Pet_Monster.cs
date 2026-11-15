@@ -35,6 +35,10 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private bool PetAlertMonster(Creature monster)
         {
+            // a Frays pack wakes only for players (FraysFire.TryFraysWake), never for a pet passing by
+            if (monster.FraysTag != null)
+                return false;
+
             if (!monster.Attackable || monster.MonsterState != State.Idle || (monster.Tolerance & PlayerCombatPet_MoveExclude) != 0)
                 return false;
 
@@ -68,7 +72,7 @@ namespace ACE.Server.WorldObjects
             if (monster.SameFaction(this))
                 monster.AddRetaliateTarget(this);
 
-            if (monster.MonsterState == State.Idle && (monster.Tolerance & PlayerCombatPet_RetaliateExclude) == 0)
+            if (monster.MonsterState == State.Idle && monster.FraysTag == null && (monster.Tolerance & PlayerCombatPet_RetaliateExclude) == 0)
             {
                 monster.AttackTarget = this;
                 monster.WakeUp();

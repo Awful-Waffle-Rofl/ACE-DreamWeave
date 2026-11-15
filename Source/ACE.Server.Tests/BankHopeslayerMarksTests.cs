@@ -208,7 +208,7 @@ namespace ACE.Server.Tests
             var body = MethodBody(Commands, "private static void HandleBankDeposit(Player player, string cur, string[] parameters)");
 
             AssertContains(body, "case \"m\": case \"mark\": case \"marks\": player.DepositHopeslayerMarks(amount); break;");
-            AssertContains(body, "Use p, l, k, pn, n, pea, or m.");
+            AssertContains(body, "Use p, l, k, pn, n, pea, m or e.");   // e is Embers
         }
 
         // ---------------- withdraw: stacks, cap, partial ----------------
@@ -343,7 +343,7 @@ namespace ACE.Server.Tests
             var help = MethodBody(Commands, "private static void ShowBankHelp(Session session)");
             AssertContains(help, "m=Marks of the Hopeslayer");
             AssertContains(help, "/b w m <amount>      - withdraw Marks of the Hopeslayer");
-            AssertContains(help, "Marks of the Hopeslayer are bonded and cannot be transferred");
+            AssertContains(help, "Marks of the Hopeslayer and Embers are bonded and cannot be transferred");
         }
 
         // ---------------- source helpers ----------------

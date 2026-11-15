@@ -61,6 +61,9 @@ namespace ACE.Server.WorldObjects
             if (PvpTeamFellowshipBlocked())
                 return;
 
+            if (FraysFellowshipBlocked("change who can join"))
+                return;
+
             if (Fellowship != null)
             {
                 if (Guid.Full != Fellowship.FellowshipLeaderGuid)
@@ -81,6 +84,9 @@ namespace ACE.Server.WorldObjects
             if (PvpTeamFellowshipBlocked())
                 return;
 
+            if (FraysFellowshipBlocked("lock or rename"))
+                return;
+
             if (Fellowship != null)
                 Fellowship.UpdateLock(lockState, lockName);
         }
@@ -94,6 +100,10 @@ namespace ACE.Server.WorldObjects
             if (!system && PvpTeamFellowshipBlocked())
                 return;
 
+            // The Frays: the dungeon fellowship cannot be disbanded; leaving it is allowed (and gives up your campfire).
+            if (disband && !system && FraysFellowshipBlocked("disband"))
+                return;
+
             if (Fellowship != null)
                 Fellowship.QuitFellowship(this, disband);
         }
@@ -101,6 +111,9 @@ namespace ACE.Server.WorldObjects
         public void FellowshipDismissPlayer(uint dismissGuid)
         {
             if (PvpTeamFellowshipBlocked())
+                return;
+
+            if (FraysFellowshipBlocked("dismiss anyone from"))
                 return;
 
             if (Fellowship == null) return;
@@ -128,6 +141,9 @@ namespace ACE.Server.WorldObjects
         public void FellowshipRecruit(Player newPlayer)
         {
             if (PvpTeamFellowshipBlocked())
+                return;
+
+            if (FraysFellowshipBlocked("recruit into"))
                 return;
 
             if (newPlayer == null) return;
@@ -177,6 +193,9 @@ namespace ACE.Server.WorldObjects
         public void FellowshipNewLeader(uint newLeaderGuid)
         {
             if (PvpTeamFellowshipBlocked())
+                return;
+
+            if (FraysFellowshipBlocked("hand the lead of"))
                 return;
 
             if (Fellowship == null || Guid.Full == newLeaderGuid)

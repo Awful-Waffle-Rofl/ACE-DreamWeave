@@ -598,6 +598,326 @@ fellowship_share_group_plateau	social	Fellowship	fork	no
 fellowship_vital_update_interval	social	Fellowship	fork	no
 fellowship_xp_tell_invite_enabled	social	Fellowship	fork	no
 fix_chest_missing_inventory_window	server	General	upstream	no
+frays_activity_seconds	frays	XP and lum	fork	no
+frays_affix_shift	frays	Weekly	fork	no
+frays_aggro_range	frays	Spawning	fork	no
+frays_ascension_cost	frays	Long-term rewards	fork	no
+frays_ascension_heat	frays	Long-term rewards	fork	no
+frays_ascension_max	frays	Long-term rewards	fork	no
+frays_ascension_per_week	frays	Long-term rewards	fork	no
+frays_attack_vs_defense	frays	Difficulty curve	fork	no
+frays_attack_vs_defense_per_heat	frays	Difficulty curve	fork	no
+frays_away_seconds	frays	Ownership	fork	no
+frays_bane_slayer_bonus	frays	Long-term rewards	fork	no
+frays_beacon_mode	frays	General	fork	no
+frays_beacon_scale	frays	General	fork	no
+frays_beacon_setup	frays	General	fork	no
+frays_bellows_pack_share	frays	Spawning	fork	no
+frays_blood_boon_radius	frays	Difficulty curve	fork	no
+frays_blood_splash_damage	frays	Difficulty curve	fork	no
+frays_boon_auto_seconds	frays	Heat	fork	no
+frays_boon_bonus_cap	frays	Difficulty curve	fork	no
+frays_boon_every	frays	Heat	fork	no
+frays_boon_popup	frays	Heat	fork	no
+frays_boon_vote_active_seconds	frays	Heat	fork	no
+frays_boon_vote_seconds	frays	Heat	fork	no
+frays_bounty_embers	frays	Long-term rewards	fork	no
+frays_brute_hit_by_pack	frays	Spawning	fork	no
+frays_brute_hit_by_share	frays	Spawning	fork	no
+frays_brute_pack_counts	frays	Spawning	fork	no
+frays_brute_scale	frays	Spawning	fork	no
+frays_cache_items_normal	frays	Snarls	fork	no
+frays_caster_min_heat	frays	Spawning	fork	no
+frays_center_text	frays	Heat	fork	no
+frays_corpse_cap	frays	Loot	fork	no
+frays_corpse_rot_seconds	frays	Loot	fork	no
+frays_damage_bonus_cap	frays	Difficulty curve	fork	no
+frays_damage_reduction_cap	frays	Difficulty curve	fork	no
+frays_death_respawn_at_fire	frays	Long-term rewards	fork	no
+frays_defense_cap	frays	Difficulty curve	fork	no
+frays_defense_cap_per_level	frays	Difficulty curve	fork	no
+frays_earn_bank_minutes	frays	Loot	fork	no
+frays_earn_knee	frays	Loot	fork	no
+frays_earn_past_knee	frays	Loot	fork	no
+frays_effigy_snarl_chance	frays	Snarls	fork	no
+frays_elite_affixes	frays	Heat	fork	no
+frays_ember_over_cap_rate	frays	Embers	fork	no
+frays_ember_weekly_cap	frays	Embers	fork	no
+frays_emberblessed_minutes	frays	Snarls	fork	no
+frays_embers_camp_per_minute	frays	Embers	fork	no
+frays_embers_camp_radius	frays	Embers	fork	no
+frays_embers_kill_normal	frays	Embers	fork	no
+frays_embers_per_level	frays	Embers	fork	no
+frays_enabled	frays	General	fork	no
+frays_families_enabled	frays	Spawning	fork	no
+frays_family_archer_weight	frays	Spawning	fork	no
+frays_family_caster_weight	frays	Spawning	fork	no
+frays_family_exclude	frays	Spawning	fork	no
+frays_family_pin	frays	Spawning	fork	no
+frays_family_source	frays	Spawning	fork	no
+frays_fill_on_take	frays	Spawning	fork	no
+frays_fire_away_seconds	frays	Ownership	fork	no
+frays_fire_overrides	frays	General	fork	no
+frays_fire_scale	frays	Loot	fork	no
+frays_fire_tier_cost	frays	Long-term rewards	fork	no
+frays_fire_tier_max	frays	Long-term rewards	fork	no
+frays_fixed_layout	frays	Spawning	fork	no
+frays_fray_goal_cache_items	frays	Snarls	fork	no
+frays_fray_goal_keys	frays	Snarls	fork	no
+frays_fray_goal_kindling	frays	Snarls	fork	no
+frays_fray_goal_slayer_stones	frays	Snarls	fork	no
+frays_fray_goal_task_mult	frays	Snarls	fork	no
+frays_fray_goal_task_reward	frays	Snarls	fork	no
+frays_fray_goal_work	frays	Snarls	fork	no
+frays_fray_order	frays	Spawning	fork	no
+frays_fray_realm	frays	General	fork	no
+frays_fray_state	frays	Snarls	fork	no
+frays_great_hold_minutes	frays	Snarls	fork	no
+frays_great_leave_hold_minutes	frays	Snarls	fork	no
+frays_great_leave_keep	frays	Snarls	fork	no
+frays_great_portal_seconds	frays	Snarls	fork	no
+frays_great_portal_wcid	frays	Snarls	fork	no
+frays_great_snarl_aug_chance	frays	Snarls	fork	no
+frays_great_snarl_cache_items	frays	Snarls	fork	no
+frays_great_snarl_feeder_share	frays	Snarls	fork	no
+frays_great_snarl_gap_hours	frays	Snarls	fork	no
+frays_great_snarl_health	frays	Snarls	fork	no
+frays_great_snarl_scale	frays	Snarls	fork	no
+frays_great_snarl_warn_seconds	frays	Snarls	fork	no
+frays_great_snarl_work	frays	Snarls	fork	no
+frays_great_snarl_work_per_camper	frays	Snarls	fork	no
+frays_great_timeout_minutes	frays	Snarls	fork	no
+frays_group_death_drop	frays	Group camps	fork	no
+frays_group_health_per_member	frays	Group camps	fork	no
+frays_group_min_size	frays	Group camps	fork	no
+frays_group_min_size_middle	frays	Group camps	fork	no
+frays_group_pack_per_member	frays	Group camps	fork	no
+frays_group_rate_per_member	frays	Group camps	fork	no
+frays_group_runs	frays	Group camps	fork	no
+frays_health_camper_level_cap	frays	Difficulty curve	fork	no
+frays_heat_cap	frays	Heat	fork	no
+frays_heat_curve_damage	frays	Difficulty curve	fork	no
+frays_heat_curve_health	frays	Difficulty curve	fork	no
+frays_heat_curve_hit_cap	frays	Difficulty curve	fork	no
+frays_heat_curve_hit_share	frays	Difficulty curve	fork	no
+frays_heat_curve_income	frays	XP and lum	fork	no
+frays_heat_curve_levels	frays	Difficulty curve	fork	no
+frays_heat_death_clears_pack	frays	Heat	fork	no
+frays_heat_death_drop_levels	frays	Heat	fork	no
+frays_heat_decay_grace_seconds	frays	Heat	fork	no
+frays_heat_decay_seconds	frays	Heat	fork	no
+frays_heat_early_climb_gain	frays	Heat	fork	no
+frays_heat_early_climb_until	frays	Heat	fork	no
+frays_heat_effects	frays	Heat	fork	no
+frays_heat_kill_points	frays	Heat	fork	no
+frays_heat_levels_per_heat	frays	Difficulty curve	fork	no
+frays_heat_pay_curve	frays	XP and lum	fork	no
+frays_heat_points_base	frays	Heat	fork	no
+frays_heat_points_per_level	frays	Heat	fork	no
+frays_heat_progress_step	frays	Heat	fork	no
+frays_heat_settle_deaths	frays	Heat	fork	no
+frays_heat_settle_drop	frays	Heat	fork	no
+frays_heat_settle_hold_max_minutes	frays	Heat	fork	no
+frays_heat_settle_hold_minutes	frays	Heat	fork	no
+frays_heat_settle_window_minutes	frays	Heat	fork	no
+frays_heat_shift_first	frays	Heat	fork	no
+frays_heat_shifts_enabled	frays	Heat	fork	no
+frays_heat_start	frays	Heat	fork	no
+frays_heat_start_below_rating	frays	Heat	fork	no
+frays_heat_up_effect	frays	Heat	fork	no
+frays_heat_upkeep_by_heat	frays	Heat	fork	no
+frays_hecatomb_reach_damage	frays	Difficulty curve	fork	no
+frays_hit_armor_max_cut	frays	Difficulty curve	fork	no
+frays_hit_by_health	frays	Difficulty curve	fork	no
+frays_hot_spot_minutes	frays	Spawning	fork	no
+frays_house_covers	frays	General	fork	no
+frays_hunt_embers	frays	Embers	fork	no
+frays_key_bar_knee	frays	Loot	fork	no
+frays_key_bar_past_knee	frays	Loot	fork	no
+frays_key_bar_work	frays	Loot	fork	no
+frays_kill_pay_by_health	frays	XP and lum	fork	no
+frays_landblocks	frays	General	fork	no
+frays_layout_edges	frays	Spawning	fork	no
+frays_layout_gap_aggro	frays	Spawning	fork	no
+frays_layout_pack_bonus	frays	Spawning	fork	no
+frays_layout_points	frays	Spawning	fork	no
+frays_layout_rest_mult	frays	Spawning	fork	no
+frays_leash_grace_seconds	frays	Leash	fork	no
+frays_leash_margin	frays	Leash	fork	no
+frays_leash_max_chase	frays	Leash	fork	no
+frays_leash_return_heal	frays	Leash	fork	no
+frays_leash_return_speed	frays	Leash	fork	no
+frays_level_scaling	frays	Difficulty curve	fork	no
+frays_lfg_answer_seconds	frays	Group camps	fork	no
+frays_lfg_queue_minutes	frays	Group camps	fork	no
+frays_loot_by_heat_health	frays	Loot	fork	no
+frays_loot_corpse_cap	frays	Loot	fork	no
+frays_loot_items_per_standard	frays	Loot	fork	no
+frays_loot_mundane_per_standard	frays	Loot	fork	no
+frays_loot_ordinary_per_standard	frays	Loot	fork	no
+frays_loot_overflow_per_key	frays	Loot	fork	no
+frays_loot_quality_base	frays	Loot	fork	no
+frays_loot_quality_cap	frays	Loot	fork	no
+frays_loot_quality_per_heat	frays	Loot	fork	no
+frays_loot_quality_per_step	frays	Loot	fork	no
+frays_loot_tier_by_level	frays	Loot	fork	no
+frays_loot_tier_first_heat	frays	Loot	fork	no
+frays_loot_tier_second_heat	frays	Loot	fork	no
+frays_lucid_cache_keys	frays	Long-term rewards	fork	no
+frays_lucid_damage	frays	Long-term rewards	fork	no
+frays_lucid_embers	frays	Long-term rewards	fork	no
+frays_lucid_great_snarls	frays	Long-term rewards	fork	no
+frays_lucid_hours	frays	Long-term rewards	fork	no
+frays_lucid_reward	frays	Long-term rewards	fork	no
+frays_lucid_state	frays	Long-term rewards	fork	no
+frays_lum_by_level	frays	XP and lum	fork	no
+frays_min_level	frays	Ownership	fork	no
+frays_monument_champion	frays	Long-term rewards	fork	no
+frays_monument_champion_angle	frays	Long-term rewards	fork	no
+frays_monument_champion_size	frays	Long-term rewards	fork	no
+frays_monument_ring_radius	frays	Long-term rewards	fork	no
+frays_monument_setup	frays	Long-term rewards	fork	no
+frays_monument_stone_setup	frays	Long-term rewards	fork	no
+frays_monument_stones	frays	Long-term rewards	fork	no
+frays_nest_pack_bonus	frays	Spawning	fork	no
+frays_nest_rest_seconds	frays	Spawning	fork	no
+frays_one_per_ip	frays	Ownership	fork	no
+frays_pack_link	frays	Spawning	fork	no
+frays_pack_tether	frays	Spawning	fork	no
+frays_pack_type_follow	frays	Spawning	fork	no
+frays_pack_type_follow_extra	frays	Spawning	fork	no
+frays_pack_type_follow_seconds	frays	Spawning	fork	no
+frays_pack_type_supply	frays	Spawning	fork	no
+frays_pack_types	frays	Spawning	fork	no
+frays_packmaster_pack_share	frays	Spawning	fork	no
+frays_pay_per_creature_by_heat	frays	Loot	fork	no
+frays_placement_gap	frays	General	fork	no
+frays_quick_rest_seconds	frays	Spawning	fork	no
+frays_radar_free_color	frays	General	fork	no
+frays_radar_lit_color	frays	General	fork	no
+frays_rare_boon_heat	frays	Heat	fork	no
+frays_rating_hold_minutes	frays	Rating	fork	no
+frays_rating_min_cleared	frays	Rating	fork	no
+frays_recall_cooldown_seconds	frays	Long-term rewards	fork	no
+frays_reroll_week_chance	frays	Long-term rewards	fork	no
+frays_retake_cooldown_seconds	frays	Spawning	fork	no
+frays_rich_kill_pay_mult	frays	XP and lum	fork	no
+frays_rich_loot_mult	frays	Spawning	fork	no
+frays_rich_mult	frays	Spawning	fork	no
+frays_rich_points	frays	Spawning	fork	no
+frays_rich_rest_fight_mult	frays	Spawning	fork	no
+frays_rich_rest_seconds	frays	Spawning	fork	no
+frays_rich_warn_seconds	frays	Spawning	fork	no
+frays_score_bronze	frays	Long-term rewards	fork	no
+frays_score_bronze_keys	frays	Long-term rewards	fork	no
+frays_score_death_points	frays	Long-term rewards	fork	no
+frays_score_gilded_points	frays	Long-term rewards	fork	no
+frays_score_gold	frays	Long-term rewards	fork	no
+frays_score_gold_keys	frays	Long-term rewards	fork	no
+frays_score_heat_points	frays	Long-term rewards	fork	no
+frays_score_kill_points	frays	Long-term rewards	fork	no
+frays_score_par_minutes	frays	Long-term rewards	fork	no
+frays_score_silver	frays	Long-term rewards	fork	no
+frays_score_silver_keys	frays	Long-term rewards	fork	no
+frays_score_snarl_points	frays	Long-term rewards	fork	no
+frays_score_time_points	frays	Long-term rewards	fork	no
+frays_score_titles	frays	Long-term rewards	fork	no
+frays_session_log	frays	General	fork	no
+frays_shrine_buff_seconds	frays	Spawning	fork	no
+frays_shrine_cooldown_seconds	frays	Spawning	fork	no
+frays_shrine_enabled	frays	Spawning	fork	no
+frays_shrine_fury	frays	Spawning	fork	no
+frays_shrine_mending	frays	Spawning	fork	no
+frays_shrine_radius	frays	Spawning	fork	no
+frays_shrine_rotate	frays	Spawning	fork	no
+frays_shrine_scale	frays	Spawning	fork	no
+frays_shrine_setup	frays	Spawning	fork	no
+frays_shrine_stoke	frays	Spawning	fork	no
+frays_shrine_ward	frays	Spawning	fork	no
+frays_sky_banner_embers	frays	Loot	fork	no
+frays_sky_banner_keys	frays	Loot	fork	no
+frays_sky_banner_minutes	frays	Loot	fork	no
+frays_sky_bundle_keys	frays	Loot	fork	no
+frays_sky_bundle_kindling	frays	Loot	fork	no
+frays_sky_bundle_shards	frays	Loot	fork	no
+frays_sky_seals_at_heat	frays	Loot	fork	no
+frays_sky_seals_great_snarl	frays	Loot	fork	no
+frays_sky_seals_heat	frays	Loot	fork	no
+frays_sky_seals_per_snarl	frays	Loot	fork	no
+frays_sky_seals_weekly_task	frays	Loot	fork	no
+frays_snarl_adds	frays	Snarls	fork	no
+frays_snarl_adds_bar_mult	frays	Snarls	fork	no
+frays_snarl_adds_count	frays	Snarls	fork	no
+frays_snarl_adds_health	frays	Snarls	fork	no
+frays_snarl_aug_chance	frays	Long-term rewards	fork	no
+frays_snarl_aug_wcids	frays	Long-term rewards	fork	no
+frays_snarl_bane_chance	frays	Long-term rewards	fork	no
+frays_snarl_bar_gilded_mult	frays	Snarls	fork	no
+frays_snarl_bar_need	frays	Snarls	fork	no
+frays_snarl_damage_normal	frays	Snarls	fork	no
+frays_snarl_ember_chance	frays	Long-term rewards	fork	no
+frays_snarl_ember_count	frays	Long-term rewards	fork	no
+frays_snarl_health_by_heat	frays	Snarls	fork	no
+frays_snarl_health_normal	frays	Snarls	fork	no
+frays_snarl_keys	frays	Loot	fork	no
+frays_snarl_kindling_chance	frays	Long-term rewards	fork	no
+frays_snarl_mmd_chance	frays	Long-term rewards	fork	no
+frays_snarl_mmd_count	frays	Long-term rewards	fork	no
+frays_snarl_scarab_chance	frays	Long-term rewards	fork	no
+frays_snarl_shard_chance	frays	Long-term rewards	fork	no
+frays_snarl_speed_cap	frays	Snarls	fork	no
+frays_snarl_trophy_chance	frays	Long-term rewards	fork	no
+frays_spawn_follow_extra	frays	Spawning	fork	no
+frays_spawn_follow_seconds	frays	Spawning	fork	no
+frays_spawn_interval_floor	frays	Spawning	fork	no
+frays_spawn_interval_per_level	frays	Spawning	fork	no
+frays_spawn_interval_seconds	frays	Spawning	fork	no
+frays_spawn_max_alive	frays	Spawning	fork	no
+frays_spawn_near_radius	frays	Spawning	fork	no
+frays_spawn_pack_every	frays	Spawning	fork	no
+frays_spawn_points_per_player	frays	Spawning	fork	no
+frays_spawn_regrow_seconds	frays	Spawning	fork	no
+frays_spawn_target_by_heat	frays	Spawning	fork	no
+frays_spawn_target_per_hour	frays	Spawning	fork	no
+frays_spell_hit_share	frays	Difficulty curve	fork	no
+frays_surge_every_seconds	frays	Weekly	fork	no
+frays_swarm_health_share	frays	Spawning	fork	no
+frays_swarm_hit_share	frays	Spawning	fork	no
+frays_swarm_pack_counts	frays	Spawning	fork	no
+frays_swarm_pack_share	frays	Spawning	fork	no
+frays_task_luminance	frays	Long-term rewards	fork	no
+frays_task_xp_max	frays	Long-term rewards	fork	no
+frays_task_xp_min	frays	Long-term rewards	fork	no
+frays_task_xp_percent	frays	Long-term rewards	fork	no
+frays_threads_shape	frays	Difficulty curve	fork	no
+frays_threads_shape_heat_levels	frays	Difficulty curve	fork	no
+frays_threads_shape_max_level	frays	Difficulty curve	fork	no
+frays_trophy_counts_state	frays	Long-term rewards	fork	no
+frays_trophy_wall_count	frays	Long-term rewards	fork	no
+frays_trophy_wall_state	frays	Long-term rewards	fork	no
+frays_vault_bonus_enabled	frays	Loot	fork	no
+frays_vault_embers_max	frays	Loot	fork	no
+frays_vault_embers_min	frays	Loot	fork	no
+frays_vault_mote_chance	frays	Loot	fork	no
+frays_vault_motes_max	frays	Loot	fork	no
+frays_vault_salvage_chance	frays	Loot	fork	no
+frays_vault_scarab_chance	frays	Loot	fork	no
+frays_village_layout	frays	General	fork	no
+frays_week_offset	frays	Weekly	fork	no
+frays_week_reset_day	frays	Weekly	fork	no
+frays_week_reset_hour	frays	Weekly	fork	no
+frays_weekly_task_embers	frays	Long-term rewards	fork	no
+frays_wisp_height	frays	General	fork	no
+frays_wisp_scale	frays	General	fork	no
+frays_wisp_setup	frays	General	fork	no
+frays_wisp_spacing	frays	General	fork	no
+frays_wisps_enabled	frays	General	fork	no
+frays_xp_by_level	frays	XP and lum	fork	no
+frays_xp_kill_cap	frays	XP and lum	fork	no
+frays_xp_kill_cap_by_heat	frays	XP and lum	fork	no
+frays_xp_kill_pace	frays	XP and lum	fork	no
+frays_xp_kill_share	frays	XP and lum	fork	no
+frays_zone_radius	frays	General	fork	no
 gateway_ties_summonable	server	General	upstream	no
 gearknight_core_plating	server	General	upstream	no
 hazard_mech_balls	server	General	fork	no
@@ -1278,6 +1598,7 @@ show_dot_messages	server	General	upstream	no
 show_first_login_gift	server	General	upstream	no
 show_mana_conv_bonus_0	server	General	upstream	no
 smite_uses_takedamage	combat	Combat	upstream	no
+sp_damage_by_attack_height	combat	Combat	fork	no
 spell_projectile_ethereal	combat	Magic	upstream	no
 spell_projectile_ethereal_360	combat	Magic	fork	no
 spellcast_max_angle	combat	Magic	upstream	no

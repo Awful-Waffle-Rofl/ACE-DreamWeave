@@ -459,6 +459,7 @@ namespace ACE.Server.Entity
             {
                 if (!Overpower && playerDefender == null && defender.RollMonsterEffectAvoidance(attacker, CombatType))
                 {
+                    ACE.Server.Frays.FraysThreadsShape.LogRoll("monster-effect avoid", attacker, defender, 0, 0, 1, true);
                     Evaded = true;
                     return 0.0f;
                 }
@@ -468,9 +469,12 @@ namespace ACE.Server.Entity
             if (!Overpower && !HoldKnightHit)
             {
                 EvasionChance = GetEvadeChance(attacker, defender);
-                if (EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f))
+                var evadeRoll = EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f);
+                ACE.Server.Frays.FraysThreadsShape.LogRoll($"evade {CombatType}", attacker, defender, EffectiveAttackSkill, EffectiveDefenseSkill, EvasionChance, evadeRoll);
+                if (evadeRoll)
                 {
                     Evaded = true;
+
                     return 0.0f;
                 }
             }
@@ -744,6 +748,22 @@ namespace ACE.Server.Entity
                 DamageMitigated = DamageBeforeMitigation - Damage;
             }
 
+            // The Frays: a fire monster's hit on its owner (Heat and elite damage, rating protection, Last Ember).
+            // One null check for every other creature.
+            if (playerDefender != null && attacker?.FraysTag != null)
+            {
+                Damage = ACE.Server.Frays.FraysManager.AdjustDamageToPlayer(attacker, playerDefender, Damage, DamageType, DamageBeforeMitigation);
+                DamageMitigated = DamageBeforeMitigation - Damage;
+            }
+
+            // The Frays: a camper's (or their pet's) hit on their own fire's creature (boons, the week's affixes).
+            // One null check for every other creature.
+            if (playerDefender == null && defender.FraysTag != null && attacker != null)
+            {
+                Damage = ACE.Server.Frays.FraysManager.AdjustDamageToMonster(attacker, defender, Damage, DamageType, Weapon);
+                DamageMitigated = DamageBeforeMitigation - Damage;
+            }
+
             return Damage;
         }
 
@@ -779,6 +799,9 @@ namespace ACE.Server.Entity
             // this roll only, before the roll. PvE only - a Player defender is never reduced.
             if (attacker is Player intimidatingPlayer && defender is not Player)
                 rollDefenseSkill = ACE.Server.ClassAbilities.Abilities.IntimidateAbility.ApplyToEvadeRoll(intimidatingPlayer, rollDefenseSkill);
+
+            // The Frays (attack_vs_defense): a campfire creature swings at no less than its camper's defense plus a Heat step.
+            EffectiveAttackSkill = ACE.Server.Frays.FraysManager.AdjustAttackVsPlayer(attacker, defender, EffectiveAttackSkill, rollDefenseSkill);
 
             var evadeChance = 1.0f - SkillCheck.GetSkillChance(EffectiveAttackSkill, rollDefenseSkill);
             return (float)evadeChance;

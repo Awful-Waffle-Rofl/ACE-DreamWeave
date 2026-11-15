@@ -72,6 +72,9 @@ namespace ACE.Server.WorldEvents
             if (victim == null || attacker == null)
                 return;
 
+            // The Frays: a hit between a player and a fire monster marks the player active (static XP).
+            ACE.Server.Frays.FraysManager.OnCombatContact(victim, attacker);
+
             // Self-contact is never credit - a caster-source transfer, a self-inflicted tick, falling. Refused
             // here explicitly rather than relying on the direction rules happening to reject it.
             if (ReferenceEquals(victim, attacker))

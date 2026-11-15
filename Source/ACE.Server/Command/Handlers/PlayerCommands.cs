@@ -542,6 +542,37 @@ namespace ACE.Server.Command.Handlers
         }
 
         /// <summary>
+        /// Per-character toggle for the class ability buff lines ("Adrenaline surges - ...", "Kinetic charge at full
+        /// ...") that can flood the chat in a fight. The buffs themselves are unchanged; only the lines go.
+        /// </summary>
+        [CommandHandler("abilitymsgs", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, 0,
+            "Turn the class ability buff chat lines (Adrenaline surges, Kinetic charge and the like) on or off.", "on | off")]
+        public static void HandleAbilityMessages(Session session, params string[] parameters)
+        {
+            var player = session.Player;
+            if (player == null)
+                return;
+
+            void Msg(string text) => session.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
+            var muted = player.GetProperty(PropertyBool.ClassAbilityChatMuted) == true;
+
+            switch (parameters.Length == 0 ? "" : parameters[0].ToLowerInvariant())
+            {
+                case "off":
+                    player.SetProperty(PropertyBool.ClassAbilityChatMuted, true);
+                    Msg("Class ability buff messages are off. The buffs still work. /abilitymsgs on shows them again.");
+                    break;
+                case "on":
+                    player.RemoveProperty(PropertyBool.ClassAbilityChatMuted);
+                    Msg("Class ability buff messages are on.");
+                    break;
+                default:
+                    Msg($"Class ability buff messages are {(muted ? "off" : "on")}. Use /abilitymsgs {(muted ? "on" : "off")} to turn them {(muted ? "on" : "off")}.");
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Per-character toggle for the outgoing damage-over-time combat message: the line you see
         /// when your own DoT spell ticks on a target. With no argument, reports the current setting
         /// and whether it is your own choice or inherited from the server default.
@@ -944,7 +975,7 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.AdminTell));
         }
 
-        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp | thread | title | knot | 1v1 | 2v2 | tugak | bg")]
+        [CommandHandler("top", AccessLevel.Player, CommandHandlerFlag.RequiresWorld, "Show a leaderboard (top 20).", "dps | defense | wave | speed | speed winners | level | bank | cap | stamp | thread | title | knot | 1v1 | 2v2 | tugak | bg | fray heat|guardian|score|group|groupscore|rating|grouprating|combined [week]")]
         public static void HandleTop(Session session, params string[] parameters)
         {
             var player = session.Player;
@@ -952,6 +983,37 @@ namespace ACE.Server.Command.Handlers
                 return;
 
             var sub = parameters.Length > 0 ? parameters[0].ToLowerInvariant() : "";
+
+            // The Frays: heat, inferno, guardian (fastest Snarl) and rating, all-time or this week.
+            if (sub == "fray" || sub == "frays")
+            {
+                var which = parameters.Length > 1 ? parameters[1].ToLowerInvariant() : "heat";
+
+                if (which == "combined")
+                {
+                    session.Network.EnqueueSend(new GameMessageSystemChat(ACE.Server.Frays.FraysFrayWide.CombinedText(), ChatMessageType.System));
+                    return;
+                }
+                var weekly = parameters.Length > 2 && parameters[2].Equals("week", StringComparison.OrdinalIgnoreCase);
+
+                // One entry per group run, naming its members.
+                if (which == "groupruns" || which == "runs")
+                {
+                    session.Network.EnqueueSend(new GameMessageSystemChat(ACE.Server.Frays.FraysGroupRuns.Text(weekly), ChatMessageType.System));
+                    return;
+                }
+
+                var board = ACE.Server.Frays.FraysLeaderboards.Board(which, weekly);
+
+                if (board == null)
+                {
+                    session.Network.EnqueueSend(new GameMessageSystemChat("Use: /top fray heat | guardian | score | group | groupscore | groupruns | rating | grouprating | ascension | combined [week]", ChatMessageType.System));
+                    return;
+                }
+
+                SendLeaderboard(session, board.Value.Title, board.Value.Score, board.Value.Format, detail: ACE.Server.Frays.FraysLeaderboards.Detail);   // adds the Ascensions column
+                return;
+            }
 
             switch (sub)
             {
@@ -1454,6 +1516,7 @@ namespace ACE.Server.Command.Handlers
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Legendary Keys: {player.BankedLegendaryKeys:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Promissory Notes: {player.BankedPromissoryNotes:N0}", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Marks of the Hopeslayer: {player.BankedHopeslayerMarks:N0}", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Embers: {player.BankedEmbers:N0}", ChatMessageType.System));
 
             if (PropertyManager.GetBool("offline_bonus_enabled").Item)
                 session.Network.EnqueueSend(new GameMessageSystemChat($"[BANK] Offline Bonus Time: {player.OfflineExperienceBonusDisplay}", ChatMessageType.System));
@@ -1467,17 +1530,18 @@ namespace ACE.Server.Command.Handlers
 
         private static void ShowBankHelp(Session session)
         {
-            session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Bank commands (currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas, m=Marks of the Hopeslayer):", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Bank commands (currencies: p=pyreals, l=luminance, k=legendary keys, pn=promissory notes, n=trade notes, pea=peas, m=Marks of the Hopeslayer, e=Embers):", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b                   - show balances", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d                 - deposit everything", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat("/b d p|l|k|pn|n|pea|m [amt] - deposit one currency (amount optional)", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b d p|l|k|pn|n|pea|m|e [amt] - deposit one currency (amount optional)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b d pea             - bank peas (lead through pyreal) as pyreals at face value", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w p <amount>      - withdraw pyreals (as 250k notes + coins)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w n [value] <cnt> - withdraw trade notes (value defaults to 250000)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w k <uses>       - withdraw legendary keys; the amount is in USES, paid as 10-use Durable keys + 1-use Aged keys", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w pn <amount>     - withdraw promissory notes", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b w m <amount>      - withdraw Marks of the Hopeslayer", ChatMessageType.System));
-            session.Network.EnqueueSend(new GameMessageSystemChat("/b t p|k|pn <amount> <char> - transfer to another character (Marks of the Hopeslayer are bonded and cannot be transferred)", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b w e <amount>      - withdraw Embers (the Ember Trader and Boonwright also spend banked Embers)", ChatMessageType.System));
+            session.Network.EnqueueSend(new GameMessageSystemChat("/b t p|k|pn <amount> <char> - transfer to another character (Marks of the Hopeslayer and Embers are bonded and cannot be transferred)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("/b ad [on|off]       - vendor sale proceeds to the bank (on) or as coins in your pack (off)", ChatMessageType.System));
             session.Network.EnqueueSend(new GameMessageSystemChat("Luminance can be deposited but not withdrawn or transferred. Amounts accept k/m/b suffixes (e.g. 10k).", ChatMessageType.System));
         }
@@ -1500,10 +1564,11 @@ namespace ACE.Server.Command.Handlers
                 case "k": case "keys": player.DepositLegendaryKeys(); break;
                 case "pn": case "promissory": case "promissorynotes": player.DepositPromissoryNotes(); break;
                 case "m": case "mark": case "marks": player.DepositHopeslayerMarks(amount); break;
+                case "e": case "ember": case "embers": player.DepositEmbers(amount); break;
                 case "n": case "notes": player.DepositTradeNotes(); break;
                 case "pea": case "peas": player.DepositPeas(); break;
                 default:
-                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, l, k, pn, n, pea, or m.", ChatMessageType.System));
+                    player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Unknown currency. Use p, l, k, pn, n, pea, m or e.", ChatMessageType.System));
                     break;
             }
         }
@@ -1598,6 +1663,13 @@ namespace ACE.Server.Command.Handlers
                 case "marks":
                     if (parameters.Length < 3 || !Player.TryParseAmount(parameters[2], out var mAmt)) { player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Usage: /b w m <amount>", ChatMessageType.System)); return; }
                     player.WithdrawHopeslayerMarks(mAmt);
+                    break;
+
+                case "e":
+                case "ember":
+                case "embers":
+                    if (parameters.Length < 3 || !Player.TryParseAmount(parameters[2], out var eAmt)) { player.Session.Network.EnqueueSend(new GameMessageSystemChat("[BANK] Usage: /b w e <amount>", ChatMessageType.System)); return; }
+                    player.WithdrawEmbers(eAmt);
                     break;
 
                 case "l":

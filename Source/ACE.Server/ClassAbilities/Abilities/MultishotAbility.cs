@@ -79,6 +79,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // PerShotMultiplier above for the clamp shape.
             var cap = PropertyManager.GetDouble("class_ability_multishot_damage_mult_cap").Item;
             var perShot = PerShotMultiplier(rankBonus, affinity, gearMod, cap);
+            perShot = (float)(perShot * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Multishot)); // the Frays: a class boon
 
             for (var i = 0; i < rank; i++)
                 shotDamageMultipliers.Add(perShot);

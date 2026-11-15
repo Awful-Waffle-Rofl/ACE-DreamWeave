@@ -174,6 +174,57 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Drops every attached effect record <paramref name="drop"/> picks (kind, then the whole record) and
+        /// re-attaches the rest, with fresh state, so call it before the creature enters the world. Dropping
+        /// them all leaves the creature with no effects, and a later overlay composes onto nothing rather than
+        /// the weenie's string. Returns how many records went.
+        /// </summary>
+        public int RemoveMonsterEffects(Func<string, string, bool> drop)
+        {
+            var spec = attachedMonsterEffectSpec ?? GetProperty(PropertyString.MonsterCombatEffects);
+            var kept = FilterMonsterEffectSpec(spec, drop, out var removed);
+
+            if (removed == 0)
+                return 0;
+
+            if (string.IsNullOrWhiteSpace(kept) || !AttachMonsterEffects(kept))
+            {
+                MonsterEffects = null;
+                monsterEffectState = null;
+                attachedMonsterEffectSpec = string.Empty;
+            }
+
+            return removed;
+        }
+
+        /// <summary>The spec with the records <paramref name="drop"/> picks (kind lowercased, then the record) left out. Pure.</summary>
+        internal static string FilterMonsterEffectSpec(string spec, Func<string, string, bool> drop, out int removed)
+        {
+            removed = 0;
+
+            if (string.IsNullOrWhiteSpace(spec) || drop == null)
+                return spec;
+
+            var kept = new List<string>();
+
+            foreach (var raw in spec.Split(';'))
+            {
+                var record = raw.Trim();
+                if (record.Length == 0)
+                    continue;
+
+                var kind = record.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)[0].ToLowerInvariant();
+
+                if (drop(kind, record))
+                    removed++;
+                else
+                    kept.Add(record);
+            }
+
+            return removed == 0 ? spec : string.Join("; ", kept);
+        }
+
+        /// <summary>
         /// "authored; extra", tolerating a blank authored spec and a trailing separator on it. Pure, so the
         /// composition is testable without a creature.
         /// </summary>

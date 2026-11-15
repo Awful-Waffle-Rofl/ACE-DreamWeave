@@ -476,6 +476,18 @@ namespace ACE.Server.Entity
                 log.Info($"Landblock 0x{Id.Landblock:X4} instance 0x{Instance:X8}: row exclusion {excludedRows} dropped {excludedCount} landblock_instance rows");
             }
 
+            // The Frays: a Frays dungeon loads without its retail creatures and generators; its campfires replace
+            // them (FraysManager.OnLandblockLoaded, below). Base and realm copies only, never an ephemeral one.
+            if (threadCopyExit == null && !IsEphemeral && ACE.Server.Frays.FraysManager.IsClearedLandblock(Id.Landblock, Instance))
+            {
+                var before = objects.Count;
+                objects = ACE.Server.Frays.FraysManager.FilterRetailSpawns(objects, o => o.WeenieClassId,
+                    wcid => DatabaseManager.World.GetCachedWeenie(wcid)?.WeenieType,
+                    wcid => DatabaseManager.World.GetCachedWeenie(wcid)?.PropertiesGenerator?.Count > 0,
+                    wcid => DatabaseManager.World.GetCachedWeenie(wcid)?.PropertiesBool?.TryGetValue(ACE.Entity.Enum.Properties.PropertyBool.Attackable, out var attackable) == true && !attackable);
+                log.Info($"[FRAYS] 0x{Id.Landblock:X4} instance 0x{Instance:X8}: retail spawns off, {before - objects.Count} of {before} rows skipped");
+            }
+
             // Threads: a run's copy is retail-pristine and loads NO shard-persisted statics, so no
             // persisted door, chest or portal state from the base world leaks into it. Ephemeral instances
             // never WRITE shard state (SaveDB returns early on IsEphemeral, see below in this file), so
@@ -573,6 +585,9 @@ namespace ACE.Server.Entity
 
                 CreateWorldObjectsCompleted = true;
 
+                // The Frays: place this dungeon's campfires (a no-op for every other landblock).
+                ACE.Server.Frays.FraysManager.OnLandblockLoaded(this);
+
                 // The other half of the trail: what is actually in the landblock at the moment the gate
                 // Player.OnTeleportComplete waits on opens. Objects added by the loop above are still in
                 // pendingAdditions at this point (AddWorldObjectInternal stages them there; they move into
@@ -659,6 +674,11 @@ namespace ACE.Server.Entity
 
             // Instance groups: a bare-terrain copy spawns no encounters (see ContentSources).
             if (!ContentSources.HasFlag(Realms.EphemeralContentSources.Encounters))
+                return;
+
+            // The Frays: a Fray landblock (or Vissidal ground in the Frays' realm) holds only campfire creatures, and the
+            // outdoor encounter table is where most of an island's retail monsters come from.
+            if (ACE.Server.Frays.FraysManager.IsClearedLandblock(Id.Landblock, Instance))
                 return;
 
             // Realms Phase 4: a realm may suppress this landblock's encounters entirely
@@ -2188,6 +2208,9 @@ namespace ACE.Server.Entity
             var landblockID = Id.Raw | 0xFFFF;
 
             //log.DebugFormat("Landblock.Unload({0:X8})", landblockID);
+
+            // The Frays: this copy's fires go out and are forgotten (the objects go with everything else below).
+            ACE.Server.Frays.FraysManager.OnLandblockUnloaded(this);
 
             ProcessPendingWorldObjectAdditionsAndRemovals();
 

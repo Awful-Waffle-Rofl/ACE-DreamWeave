@@ -164,7 +164,7 @@ namespace ACE.Server.ClassAbilities.Abilities
 
             var chance = Chance(rank,
                 PropertyManager.GetDouble("class_ability_acidproc_chance_base").Item,
-                attacker.GetEquippedModValue(EquipmentModId.AcidProc));
+                attacker.GetEquippedModValue(EquipmentModId.AcidProc)) * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.AcidProc);   // the Frays: class boon
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;

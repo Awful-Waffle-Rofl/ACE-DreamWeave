@@ -178,6 +178,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 caster.GetClassAbilityAffinityMultiplier(Skill.ItemEnchantment),
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item);
 
+            chance *= (float)ACE.Server.Frays.FraysManager.AbilityBoost(caster, ClassAbilityId.Cascade); // the Frays: a class boon
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 

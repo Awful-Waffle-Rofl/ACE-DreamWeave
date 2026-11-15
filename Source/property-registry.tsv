@@ -120,6 +120,9 @@ PropertyBool	9085	SummonGemHammer	custom-summons	reserved	Custom Summons: marks 
 PropertyBool	9086	SummonSpellBinder	custom-summons	reserved	Custom Summons: marks a caster summon device that binds scroll spells into its bound-spell slots (SummonBoundSpell1/2)
 PropertyBool	9087	SummonCasterBrain	custom-summons	reserved	Custom Summons: marks a pet that runs the caster-pet spell selection behaviour
 PropertyBool	9088	SummonNeverInitiates	custom-summons	reserved	Custom Summons: marks a pet that never initiates aggro and only targets monsters already engaged with its owner or the owner's pets
+
+PropertyBool	9089	FraysEmbered	hollows-prototype	reserved	The Frays: marks an Embered item (a rare bonded Fray drop that adds damage against Fray creatures while worn). Read and written only by ACE.Server.Frays.FraysLongTerm
+PropertyBool	9090	ClassAbilityChatMuted	hollows-prototype	reserved	Per-character toggle set by /abilitymsgs on|off: TRUE hides the class ability buff chat lines (Adrenaline surges, Kinetic charge at full and the like) in Player.SendClassAbilityBuffMessage. Absent means shown
 PropertyDataId	9000	VisualEffectScript	weaponvfx	active	raw 0x33 PhysicsScript DataID replayed at the object on every client rebuild via opcode 0xF754; additive, layers over the Setup's own baked effect
 PropertyDataId	9001	SummonBoundSpell1	custom-summons	reserved	Custom Summons: on a caster summon device, the first scroll-bound spell id
 PropertyDataId	9002	SummonBoundSpell2	custom-summons	reserved	Custom Summons: on a caster summon device, the second scroll-bound spell id
@@ -334,6 +337,7 @@ PropertyInt64	9025	PvpDeserterLockoutUntil	pvp-arena	reserved	PvP deserter locko
 PropertyInt64	9026	PvpDeserterLastStrikeAt	pvp-arena	reserved	PvP deserter lockout: on a player, the unix time (seconds) of the last deserter strike, which strike decay is measured from. Written with 9089 and 9025
 PropertyInt64	9027	BankedHopeslayerMarks	banking	active	per-character banked balance of Mark of the Hopeslayer (wcid 1006650, the PvP arena currency); bonded, so /bank refuses to transfer it
 PropertyInt64	9028	BestKnotClearTimeCenti	knots	active	Knot clear leaderboard (/top knot): on a player, the wall-clock time in CENTISECONDS of the best Knot clear (the clear that set 9094); LOWER IS BETTER at equal level. Written only with 9094 and 9030 by KnotClearRecords.Record
+PropertyInt64	9029	BankedEmbers	hollows-prototype	active	per-character banked balance of Embers (wcid 2000032, the Frays currency); bonded, never transferable. Read and written by Player_Bank (DepositEmbers, WithdrawEmbers, the vendor shop hook, FraysEmbers.Spend)
 PropertyString	9008	ClassAbilityTrainerAbilities	classabilities	active	abilities a Drift Network trainer NPC offers
 PropertyString	9009	WeaponModTinkerLog	weapon-mods	active	this system's own current tinker composition; REPLACED never appended
 PropertyString	9010	WorldEventFamily	world-events	active	World Events: family id of a 9028-flagged creature weenie, read by the catalog scan; must equal a Content/events/axes/families.json id (TECH-DESIGN 5.4/5.5), lowercase [a-z0-9_]+
@@ -360,3 +364,7 @@ PropertyString	9030	BestKnotClearPinnacleKey	knots	active	Knot clear leaderboard
 PropertyString	9031	CreationRollSpec	void-claw	reserved	On a weenie, per-copy stat rolls applied at creation in WorldObjectFactory.CreateNewWorldObject(Weenie), format v1|f29=1.13:1.27:0.01;i44=50:55:1 (type letter i/f + property id = min:max:step, uniform on the step grid, both ends inclusive); removed from the created object after rolling. Parsed by ACE.Server.Entity.CreationRoll
 PropertyString	9032	DuoSummonSlotA	custom-summons	reserved	Custom Summons: on a Duo Summon Gem, the stored state of the first absorbed summon item
 PropertyString	9033	DuoSummonSlotB	custom-summons	reserved	Custom Summons: on a Duo Summon Gem, the stored state of the second absorbed summon item
+
+PropertyString	9034	FraysState	hollows-prototype	reserved	The Frays (UCM camping prototype): on a player, the per-character JSON record of campfire mode and limit, Heat rating, Embers and the last Last Ember time. Read and written only by ACE.Server.Frays.FraysPlayerRecord. Absent means a fresh record (mode climb, rating 0, no Embers)
+PropertyString	9050	DyeColours	hollows-prototype	active	Custom dye (ACE.Server.Dye): on a dyed item, its colour per colour slot, comma separated in slot order. Read at render time by CalculateObjDesc
+PropertyString	9051	DyePotColour	hollows-prototype	active	Custom dye: on a Prismatic Dye Pot (wcid 2000192), the colour it is loaded with as key or key:slot. Set by /dye, spent when the pot is used

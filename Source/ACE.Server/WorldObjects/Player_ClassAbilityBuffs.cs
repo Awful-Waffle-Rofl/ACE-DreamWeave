@@ -19,6 +19,10 @@ namespace ACE.Server.WorldObjects
     {
         private void SendClassAbilityBuffMessage(string text)
         {
+            // /abilitymsgs off (in a fight they flood the chat).
+            if (GetProperty(ACE.Entity.Enum.Properties.PropertyBool.ClassAbilityChatMuted) == true)
+                return;
+
             Session?.Network.EnqueueSend(new GameMessageSystemChat(text, ChatMessageType.Broadcast));
         }
 
@@ -263,7 +267,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public (double Skill, double Affinity, double Gear) GetFrenzyPerStackTerms()
         {
-            var stackBonus = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item;
+            var stackBonus = PropertyManager.GetDouble("class_ability_frenzy_percent_per_stack").Item * ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.Frenzy);   // the Frays: class boon
 
             var affinity = GetClassAbilityAffinityMultiplier(Skill.Recklessness);
 
@@ -520,7 +524,7 @@ namespace ACE.Server.WorldObjects
                     // other standard-rate ability). DamageMultiplier takes an additive term, so what is
                     // passed is the AMOUNT the multiplier adds; the gear term stays outside it and never
                     // compounds with the skill.
-                    var voidPerRank = PropertyManager.GetDouble("class_ability_voiddamage_percent_per_rank").Item;
+                    var voidPerRank = PropertyManager.GetDouble("class_ability_voiddamage_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.VoidDamage);   // the Frays: class boon
                     var voidRankBonus = voidRank * voidPerRank;
 
                     var voidMagic = ownsVoidDamage
@@ -701,7 +705,8 @@ namespace ACE.Server.WorldObjects
             // Leadership MULTIPLIES this ability's OWN rank bonus (2026-09-12 overhaul). StatMultiplier
             // still takes an additive rider, so what is passed is the AMOUNT the multiplier adds; the gear
             // term stays outside it and never compounds with the skill.
-            var perRank = PropertyManager.GetDouble("class_ability_empoweredsummons_percent_per_rank").Item;
+            var perRank = PropertyManager.GetDouble("class_ability_empoweredsummons_percent_per_rank").Item
+                * ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.EmpoweredSummons);   // the Frays: class boon (1 elsewhere)
             var rankBonus = rank * perRank;
 
             var leadership = owned
@@ -1326,7 +1331,8 @@ namespace ACE.Server.WorldObjects
         private double BloodChargePerStack() =>
             BloodChargeMath.PerChargeValue(
                 PropertyManager.GetDouble("class_ability_bloodmage_charge_per_stack").Item,
-                GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment));
+                GetClassAbilityAffinityMultiplier(Skill.CreatureEnchantment))
+            * ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.SanguineReserve);   // the Frays: class boon (1 elsewhere)
 
         /// <summary>
         /// The public read of <see cref="BloodChargePerStack"/> for readouts that must quote the
@@ -1335,6 +1341,9 @@ namespace ACE.Server.WorldObjects
         /// handler file, ClassAbilityAffinityDeclarationTests). Ungated: callers decide ownership.
         /// </summary>
         public double GetBloodChargePerStackValue() => BloodChargePerStack();
+
+        /// <summary>The Frays' Ember Tithe boon on Blood Price's damage bonus (1 when not camping or not held).</summary>
+        private double BloodPriceBoon() => ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.BloodPrice);
 
         /// <summary>
         /// The BLOOD CHARGE equipment mod's addition to that per-charge value. Machinery, so it is only ever
@@ -1854,9 +1863,9 @@ namespace ACE.Server.WorldObjects
                 // above deliberately takes neither: gear and skill amplify the payoff and never discount the
                 // price (DESIGN.md 2.3).
                 BloodPriceMath.ScaledDamageBonus(rank,
-                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r1").Item,
-                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r2").Item,
-                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r3").Item,
+                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r1").Item * BloodPriceBoon(),   // the Frays: class boon (1 elsewhere)
+                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r2").Item * BloodPriceBoon(),
+                    PropertyManager.GetDouble("class_ability_bloodprice_damage_r3").Item * BloodPriceBoon(),
                     GetClassAbilityAffinityMultiplier(Skill.LifeMagic),
                     GetEquippedModValue(EquipmentModId.BloodPrice)),
                 PropertyManager.GetDouble("class_ability_bloodprice_min_health_fraction").Item);

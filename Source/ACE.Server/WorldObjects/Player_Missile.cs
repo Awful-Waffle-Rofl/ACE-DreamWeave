@@ -244,6 +244,9 @@ namespace ACE.Server.WorldObjects
             // launch projectile
             actionChain.AddAction(this, () =>
             {
+                // the Frays: a camper's camp log counts shots (one a volley)
+                ACE.Server.Frays.FraysSessions.OnShot(this);
+
                 // handle self-procs
                 TryProcEquippedItems(this, this, true, weapon);
 

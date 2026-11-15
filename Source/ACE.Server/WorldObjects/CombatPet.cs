@@ -521,6 +521,10 @@ namespace ACE.Server.WorldObjects
             if (!IsPetTargetCandidate(creature))
                 return false;
 
+            // in a Fray every pet acts as never-initiates: a sleeping pack is left alone until its owner wakes it
+            if (creature.FraysTag != null)
+                return PetEngagement.IsEngagedWithOwner(creature, P_PetOwner);
+
             return !neverInitiates || PetEngagement.IsEngagedWithOwner(creature, P_PetOwner);
         }
 

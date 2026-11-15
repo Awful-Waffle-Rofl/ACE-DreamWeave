@@ -374,6 +374,10 @@ namespace ACE.Server.WorldObjects
                     {
                         var cleave = GetCleaveTarget(creature, weapon);
 
+                        // how much of the pack a live cleave reaches (Frays only)
+                        ACE.Server.Frays.FraysReach.Sample(this, creature, "cleave", cleave?.Count ?? 0,
+                            TotalCleaveTargets(weapon?.CleaveTargets ?? 0, WhirlwindSwingActive ? WhirlwindExtraTargets : 0, weapon != null ? KineticChargeCleaveTargets : 0));
+
                         if (cleave != null)
                         {
                             // class ability: Kinetic Charge must not SPEND (consume the stack) on a cleave

@@ -82,7 +82,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (!TargetHasQualifyingMark(attacker, target))
                 return;
 
-            var rankBonus = rank * PropertyManager.GetDouble("class_ability_opportunist_percent_per_rank").Item;
+            var rankBonus = rank * PropertyManager.GetDouble("class_ability_opportunist_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Opportunist);
 
             var affinity = attacker.GetClassAbilityAffinityMultiplier(Skill.SneakAttack);
 

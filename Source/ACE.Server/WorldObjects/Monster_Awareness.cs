@@ -37,6 +37,10 @@ namespace ACE.Server.WorldObjects
 
             if (alertNearby)
                 AlertFriendly();
+
+            // The Frays: a pack wakes together (pack_link), and only that pack.
+            if (FraysTag != null && AttackTarget is Creature frayTarget)
+                FraysTag.Fire?.LinkPack(this, frayTarget, fromWake: true);
         }
 
         /// <summary>
@@ -79,6 +83,9 @@ namespace ACE.Server.WorldObjects
         {
             if (DebugMove)
                 Console.WriteLine($"{Name} ({Guid}).Sleep()");
+
+            // The Frays: a fire's monster that walked home on its leash heals (before the state below is cleared).
+            OnFraysSleep();
 
             // Open World Threads (R11c): every return-home leg ends here, in State.Return.
             if (MonsterState == State.Return && P_OutdoorPerimeter != null)
@@ -352,6 +359,9 @@ namespace ACE.Server.WorldObjects
                 // an ordinary tactic, so the rest of the wave keeps going for the players.
                 if (ACE.Server.WorldEvents.WorldEventHooks.IsHoldKnight(creature)) continue;
 
+                // The Frays: a fire's monster only ever targets its owners (and their pets) inside its zone.
+                if (FraysTag != null && !FraysTag.Accepts(creature)) continue;
+
                 // ensure within 'detection radius' ?
                 var chaseDistSq = creature == AttackTarget ? MaxChaseRangeSq : VisualAwarenessRangeSq;
 
@@ -604,6 +614,16 @@ namespace ACE.Server.WorldObjects
                     continue;
 
                 if ((nearbyCreature.Tolerance & AlertExclude) != 0)
+                    continue;
+
+                // The Frays: a fire's monster is only ever alerted to its own owners.
+                if (nearbyCreature.FraysTag != null && !nearbyCreature.FraysTag.Accepts(targetCreature))
+                    continue;
+
+                // With pack linking on, outdoors, a Fray creature alerts only its own pack, never a neighbouring one.
+                if (FraysTag != null && nearbyCreature.FraysTag != null && FraysTag.Fire?.Def.Outdoor == true
+                    && ACE.Server.Frays.FraysSettings.Toggle(ACE.Server.Frays.FraysSettings.PackLink)
+                    && !ACE.Server.Frays.FraysFire.SamePack(FraysTag, nearbyCreature.FraysTag))
                     continue;
 
                 if (CreatureType != null && CreatureType == nearbyCreature.CreatureType ||

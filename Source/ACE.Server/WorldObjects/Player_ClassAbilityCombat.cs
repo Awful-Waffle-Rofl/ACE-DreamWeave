@@ -302,7 +302,7 @@ namespace ACE.Server.WorldObjects
             // Knot loot: Shield of the Rose's armor bonus counts as base shield AL, so Thorns scales off it too.
             var shieldArmorLevel = (shield.GetProperty(PropertyInt.ArmorLevel) ?? 0) + KnotTraitCombat.ShieldArmorBonus(shield, this) + shield.EnchantmentManager.GetArmorMod();
 
-            var percentPerRank = PropertyManager.GetDouble("class_ability_thorns_percent_per_rank").Item;
+            var percentPerRank = PropertyManager.GetDouble("class_ability_thorns_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.Thorns);   // the Frays: class boon
 
             var shieldScale = owned
                 ? GetClassAbilityScaling(Skill.Shield,

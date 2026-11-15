@@ -41,6 +41,7 @@ namespace ACE.Server.Managers.Market
             ("class_abilities", "Class Abilities"),
             ("threads", "Threads"),
             ("world_events", "World Events"),
+            ("frays", "The Frays"),
         };
 
         private readonly Dictionary<string, ConfigMetadataRow> rowsByKey;

@@ -389,7 +389,7 @@ namespace ACE.Server.WorldObjects
             }
 
             var runSkill = GetCreatureSkill(Skill.Run).Current;
-            var runRate = MovementSystem.GetRunRate(burden, (int)runSkill, 1.0f);
+            var runRate = MovementSystem.GetRunRate(burden, (int)runSkill, 1.0f) * FraysRunRateMult;   // the Frays: a follower pet keeps pace (1 for everyone else)
 
             // World Events Hold: a wave runner's run-speed multiplier (never a player). One field read for every other creature.
             if (!(this is Player))
@@ -645,6 +645,8 @@ namespace ACE.Server.WorldObjects
 
             MonsterState = State.Return;
             AttackTarget = null;
+
+            OnFraysMoveToHome();
 
             var home = GetPosition(PositionType.Home);
 

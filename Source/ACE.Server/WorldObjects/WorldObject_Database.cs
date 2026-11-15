@@ -174,6 +174,10 @@ namespace ACE.Server.WorldObjects
             if (ACE.Server.WorldEvents.WorldEventHooks.IsTransientEventObject(this))
                 return false;
 
+            // The Frays: campfires and fire monsters are placed by the server on every load.
+            if (FraysTransient)
+                return false;
+
             // WaffleACE Threads: run-owned creatures are transient by construction.
             if (GetProperty(PropertyInt.ThreadDungeonRunId) != null)
                 return false;

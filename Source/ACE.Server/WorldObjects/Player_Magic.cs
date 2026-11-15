@@ -941,6 +941,10 @@ namespace ACE.Server.WorldObjects
             if (RecordCast.Enabled)
                 RecordCast.Log($"DoCastSpell_Inner()");
 
+            // the Frays camp log: casts by spell (one field read for anyone not camping)
+            if (casterItem == null && FraysMods != null)
+                ACE.Server.Frays.FraysSessions.OnCast(this, spell);
+
             if (MagicState.CastMeter)
             {
                 var gestureTime = Physics.Animation.MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MagicState.CastGesture, EffectiveCastSpeed);

@@ -335,6 +335,9 @@ namespace ACE.Server
             Entity.GameTables.Initialize(DatManager.PortalDat.SkillTable, DatManager.PortalDat.SecondaryAttributeTable);
             Entity.SpellSet.Initialize(DatManager.PortalDat.SpellTable);
 
+            // Custom dye: build the palette candidate pool in the background, so the first dyed item renders without a pause.
+            Dye.DyeMatcher.WarmUp();
+
             if (ConfigManager.Config.DDD.EnableDATPatching)
             {
                 log.Info("Initializing DDDManager...");
@@ -537,6 +540,23 @@ namespace ACE.Server
             // vendor_stock_weenie_warmup off.
             log.Info("Starting vendor stock weenie warm-up...");
             VendorStockWeenieWarmup.Start();
+
+            // Background, and never awaited: the Frays' creature families (748 weenies), built here instead of inside the
+            // first lit fire's landblock tick (which stalled the plateau for 8.4 s).
+            log.Info("Starting Frays family warm-up...");
+            ACE.Server.Frays.FraysFamilies.WarmUp();
+
+            // The Frays settings still holding an old code default move to the current one (FraysSettings.OldDefaults):
+            // a default is written to the shard at its first boot, so a later change to it never took effect.
+            try
+            {
+                foreach (var line in ACE.Server.Frays.FraysSettings.SyncOldDefaults((property, value) => ACE.Server.Frays.FraysAdmin.Writer(property, value, null)))
+                    log.Info($"Frays setting: {line}");
+            }
+            catch (Exception ex)
+            {
+                log.Error("Frays: moving old setting defaults threw", ex);
+            }
 
             // Free up memory before the server goes online. This can free up 6 GB+ on larger servers.
             log.Info("Forcing .net garbage collection...");

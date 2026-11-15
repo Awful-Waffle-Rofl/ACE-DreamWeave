@@ -152,10 +152,14 @@ namespace ACE.Server.WorldObjects
         {
             get
             {
-                if (ClassAbilityMoveSlowUntil == 0.0)
-                    return 1.0f;
+                // The Frays: a fire's monster walking home on its leash moves at the return speed (1 for every other
+                // creature, and for it at any other time). Applied here so the wire and the server use the same number.
+                var frays = FraysTag != null ? FraysReturnSpeedFactor : 1.0f;
 
-                return GetMovementSlowFactorAt(Timers.RunningTime);
+                if (ClassAbilityMoveSlowUntil == 0.0)
+                    return frays;
+
+                return GetMovementSlowFactorAt(Timers.RunningTime) * frays;
             }
         }
 

@@ -455,6 +455,10 @@ namespace ACE.Server.WorldObjects
 
             var damage = -UpdateVitalDelta(Health, -tryDamage);
 
+            // a Frays camp creature: damage by source for the camp log (FraysSessions)
+            if (FraysTag != null && damage > 0 && source != null)
+                ACE.Server.Frays.FraysSessions.OnSourcedHit(this, source, (uint)damage, ACE.Server.Frays.FraysHitKinds.KindOf(source, origin, damageType));
+
             // TODO: update monster stamina?
 
             // source should only be null for combined DoT ticks from multiple sources

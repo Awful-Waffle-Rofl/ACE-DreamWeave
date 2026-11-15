@@ -1,6 +1,7 @@
 command	handler	bucket	basis	capture	flags	note
 MoveTo	ACE.Server.Command.Handlers.DeveloperCommands.MoveTo	in_game_character	requires_world	captured	-	
 abilities	ACE.Server.Command.Handlers.ClassAbilityCommands.HandleSkills	in_game_character	requires_world	captured	-	
+abilitymsgs	ACE.Server.Command.Handlers.PlayerCommands.HandleAbilityMessages	in_game_character	requires_world	captured	-	
 accountcreate	ACE.Server.Command.Handlers.AccountCommands.HandleAccountCreate	web	scan_safe	captured	-	
 accountget	ACE.Server.Command.Handlers.AccountCommands.HandleAccountGet	web	console_invoke	uncaptured	-	
 acecommands	ACE.Server.Command.Handlers.HelpCommands.HandleACECommands	in_game_character	scan_unsafe	partial	-	
@@ -123,6 +124,7 @@ facet	ACE.Server.Command.Handlers.FacetCommands.HandleFacet	in_game_character	re
 faction	ACE.Server.Command.Handlers.DeveloperCommands.HandleFaction	in_game_character	requires_world	captured	-	
 fast	ACE.Server.Command.Handlers.DeveloperCommands.HandleFast	in_game_character	requires_world	captured	-	
 fasttick	ACE.Server.Command.Handlers.PlayerCommands.HandleFastTick	in_game_character	requires_world	captured	-	
+fc	ACE.Server.Command.Handlers.FraysCommands.HandleFrayCamps	in_game_character	requires_world	captured	-	
 fellow-dist	ACE.Server.Command.Handlers.DeveloperCommands.HandleFellowDist	in_game_character	requires_world	captured	-	
 fellow-info	ACE.Server.Command.Handlers.DeveloperCommands.HandleFellowInfo	in_game_character	requires_world	captured	-	
 fellowbuff	ACE.Server.Command.Handlers.SentinelCommands.HandleFellowBuff	in_game_character	requires_world	captured	-	
@@ -146,6 +148,9 @@ forcegc2	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceGC2	web	scan_s
 forcelogoff	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceLogoff	in_game_character	requires_world	captured	-	
 forcelogout	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceLogout	in_game_character	requires_world	captured	-	
 forceobjdescprobe	ACE.Server.Command.Handlers.DeveloperCommands.HandleForceObjDescProbe	in_game_character	requires_world	captured	-	
+fp	ACE.Server.Command.Handlers.FraysCommands.HandleFrayProgress	in_game_character	requires_world	captured	-	
+fray	ACE.Server.Command.Handlers.FraysCommands.HandleFray	in_game_character	requires_world	captured	-	
+frays	ACE.Server.Command.Handlers.FraysCommands.HandleFrays	in_game_character	requires_world	captured	-	
 freeze	ACE.Server.Command.Handlers.AdminCommands.HandleFreeze	in_game_character	requires_world	captured	-	
 fship	ACE.Server.Command.Handlers.FellowshipCommands.HandleFship	in_game_character	requires_world	captured	-	
 fumble	ACE.Server.Command.Handlers.AdminCommands.HandleFumble	in_game_character	requires_world	captured	-	

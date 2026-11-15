@@ -292,5 +292,24 @@ namespace ACE.Entity.Enum.Properties
 
         // Custom Summons: on a Duo Summon Gem, the stored state of the second absorbed summon item.
         DuoSummonSlotB                     = 9033,
+
+        /// The Frays (UCM camping prototype): on a player, the per-character JSON record of campfire mode and limit, Heat
+        /// rating, Embers and the last Last Ember time. Read and written only by ACE.Server.Frays.FraysPlayerRecord.
+        /// </summary>
+        FraysState                       = 9034,
+
+        /// <summary>
+        /// Custom dye (ACE.Server.Dye): on a dyed item, its colour per colour slot, comma separated in slot order
+        /// ("crimson,,navy"; an empty entry keeps that slot's own colour). Keys are DyeColours keys. A slot is one
+        /// CloSubPalette of the item's ClothingTable entry. Read at render time by WorldObject/Creature CalculateObjDesc.
+        /// Ids 9050+ are kept clear of the 903x block other branches are still filling.
+        /// </summary>
+        DyeColours                       = 9050,
+
+        /// <summary>
+        /// Custom dye: on a Prismatic Dye Pot, the colour it is loaded with as "key" or "key:slot" (slot 1-based).
+        /// Set by /dye; spent when the pot is used on an item.
+        /// </summary>
+        DyePotColour                     = 9051,
     }
 }

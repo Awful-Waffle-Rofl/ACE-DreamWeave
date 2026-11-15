@@ -317,6 +317,10 @@ namespace ACE.Server.WorldObjects
                     physicsState |= PhysicsState.Ethereal;
             }
 
+            // The Frays: a house door is created ethereal so the client cannot shove it; its solid state follows (TrackObject).
+            if (FraysCreateEthereal)
+                physicsState |= PhysicsState.Ethereal;
+
             writer.Write((uint)physicsState);
 
             if ((physicsDescriptionFlag & PhysicsDescriptionFlag.Movement) != 0)
@@ -895,8 +899,8 @@ namespace ACE.Server.WorldObjects
                 UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Player, CloakStatus < CloakStatus.Creature);
 
             // World Events Hold: a knight that shows its health bar is sent as attackable (the server still refuses every
-            // attack on it). Unchanged for everything else.
-            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, ACE.Server.WorldEvents.WorldEventHooks.HoldClientAttackable(this, Attackable));
+            // attack on it). Unchanged for everything else. The Frays: a fire's monster is attackable only to its owners.
+            UpdateObjectDescriptionFlag(ObjectDescriptionFlag.Attackable, ACE.Server.WorldEvents.WorldEventHooks.HoldClientAttackable(this, FraysAttackableBit));
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.PlayerKiller, PlayerKillerStatus == PlayerKillerStatus.PK);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.HiddenAdmin, HiddenAdmin);
             UpdateObjectDescriptionFlag(ObjectDescriptionFlag.UiHidden, UiHidden);
@@ -992,8 +996,9 @@ namespace ACE.Server.WorldObjects
                 //    Console.WriteLine($"Found an item with 1 ClothingSubPalEffects and a PaletteTemplate = {PaletteTemplate} and/or Shade = {Shade} ");
 
                 // If there are no ClothingSubPalEffects, or this item has no Shade and no PaletteTemplate set, we will not apply any Palette changes
-                if (item.ClothingSubPalEffects.Count > 0 && (Shade.HasValue || PaletteTemplate.HasValue))
-                { 
+                // Custom dye (ACE.Server.Dye): a dyed item always gets its palettes, even with no Shade or template.
+                if (item.ClothingSubPalEffects.Count > 0 && (Shade.HasValue || PaletteTemplate.HasValue || ACE.Server.Dye.CustomDye.IsDyed(this)))
+                {
                     CloSubPalEffect itemSubPal;
                     int palOption = 0;
                     if (PaletteTemplate.HasValue)
@@ -1021,7 +1026,10 @@ namespace ACE.Server.WorldObjects
                         {
                             ushort palOffset = (ushort)(itemSubPal.CloSubPalettes[i].Ranges[j].Offset / 8);
                             ushort numColors = (ushort)(itemSubPal.CloSubPalettes[i].Ranges[j].NumColors / 8);
-                            objDesc.SubPalettes.Add(new PropertiesPalette { SubPaletteId = itemPal, Offset = palOffset, Length = numColors });
+
+                            // Custom dye: slot i's ranges take the matched palette instead (one entry, unchanged, when undyed).
+                            foreach (var (segPal, segOffset, segLength) in ACE.Server.Dye.CustomDye.Segments(this, i, itemPal, palOffset, numColors, protectBaseAppearance: false))
+                                objDesc.SubPalettes.Add(new PropertiesPalette { SubPaletteId = segPal, Offset = segOffset, Length = segLength });
                         }
                     }
                 }
@@ -1539,7 +1547,8 @@ namespace ACE.Server.WorldObjects
 
             foreach (var player in PhysicsObj.ObjMaint.GetKnownPlayersValuesAsPlayer())
             {
-                if (sharedCreate == null && !player.Adminvision)
+                // (The Frays: a per-viewer description is never shared - TrackObject builds each viewer's own.)
+                if (sharedCreate == null && !player.Adminvision && !HasPerViewerDescription)
                     sharedCreate = new GameMessageCreateObject(this);
 
                 player.AddTrackedObject(this, sharedCreate);

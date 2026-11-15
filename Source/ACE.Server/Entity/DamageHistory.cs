@@ -140,6 +140,9 @@ namespace ACE.Server.Entity
             // hooks above. A field read and a type test for every hit outside a Thread.
             ACE.Server.ThreadDungeons.ThreadContributionHook.OnDamageRecorded(Creature, attacker, amount);
 
+            // The Frays session log (FraysSessions): damage a camper dealt to, or took from, a fire creature. Two field reads for any other hit.
+            ACE.Server.Frays.FraysSessions.OnDamage(Creature, attacker, amount);
+
             Creature.OnHealthUpdate();
         }
 

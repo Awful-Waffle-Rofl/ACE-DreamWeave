@@ -170,17 +170,30 @@ namespace ACE.Server.WorldObjects
             if (worldObject.IsSkyDecor && !ShouldSendToClient(worldObject, HideSkyDecor))
                 return;
 
+            // The Frays: an object shown to one player only (a zone's wisps, for its owner).
+            if (worldObject.FraysOnlyFor != 0 && worldObject.FraysOnlyFor != Guid.Full && !Adminvision)
+                return;
+
             // teleport_flush_scope 2: entering a landblock this client holds from another copy deletes that copy
             // first. Under scopes 0 and 1 this only reads the ledger and sends nothing. See Player_TeleportFlush.
             DeleteOtherCopyBeforeCreate(worldObject);
 
-            Session.Network.EnqueueSend(sharedCreate != null && !Adminvision
-                ? sharedCreate
-                : new GameMessageCreateObject(worldObject, Adminvision, Adminvision));
+            // The Frays: a fire's monster is described per viewer (attackable to its owners only), so it is never
+            // handed a shared create.
+            if (worldObject.HasPerViewerDescription)
+                Session.Network.EnqueueSend(CreateObjectFor(this, worldObject, Adminvision, Adminvision));
+            else
+                Session.Network.EnqueueSend(sharedCreate != null && !Adminvision
+                    ? sharedCreate
+                    : new GameMessageCreateObject(worldObject, Adminvision, Adminvision));
 
             // A client drops every attached particle script when it rebuilds an object, so re-emit
             // them right behind the create. See VisualEffectManager.
             VisualEffectManager.SendTo(Session, worldObject, resend);
+
+            // The Frays: a house door was created ethereal (FraysCreateEthereal); now its real, solid state.
+            if (worldObject.FraysCreateEthereal && worldObject.PhysicsObj != null && !worldObject.PhysicsObj.State.HasFlag(PhysicsState.Ethereal))
+                Session.Network.EnqueueSend(new GameMessageSetState(worldObject, worldObject.PhysicsObj.State));
 
             //Console.WriteLine($"Player {Name} - TrackObject({worldObject.Name})");
 

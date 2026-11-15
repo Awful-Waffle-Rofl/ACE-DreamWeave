@@ -172,6 +172,20 @@ namespace ACE.Server.WorldObjects
                 return;
             }
 
+            // Custom dye: a Prismatic Dye Pot used on an item (ACE.Server.Dye.CustomDye).
+            if (ACE.Server.Dye.CustomDye.TryUseOn(this, sourceItem, target))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
+            // The Frays: a Slayer or Reroll Stone used on a weapon.
+            if (ACE.Server.Frays.FraysLongTerm.TryUseOn(this, sourceItem, target))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
             if (target.CurrentLandblock != null && target != this)
             {
                 // todo: verify target can be used remotely
@@ -254,6 +268,14 @@ namespace ACE.Server.WorldObjects
                     return;
                 }
 
+                // The Frays: an Ember Shrine is used from where its owner stands (up to 15 m), with no walk to it,
+                // and always answers.
+                if (ACE.Server.Frays.FraysFire.TryUseShrineFromRange(this, item))
+                {
+                    SendUseDoneEvent();
+                    return;
+                }
+
                 if (item.CurrentLandblock != null && !item.Visibility && item.Guid != LastOpenedContainerId)
                 {
                     if (IsBusy)
@@ -284,6 +306,27 @@ namespace ACE.Server.WorldObjects
         {
             //Console.WriteLine($"{Name}.TryUseItem({item.Name}, {success})");
             LastUseTime = 0.0f;
+
+            // The Frays: a Hollow Campfire is lit by its fire, never by the model's own use.
+            if (success && ACE.Server.Frays.FraysManager.TryUseCampfire(this, item))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
+            // Custom dye: the Prismatic Dye Pot used on its own explains itself.
+            if (success && ACE.Server.Dye.CustomDye.TryUse(this, item))
+            {
+                SendUseDoneEvent();
+                return;
+            }
+
+            // The Frays: Frays items used on their own (Hearthstone, Kindling, bundles, tokens and the like).
+            if (success && ACE.Server.Frays.FraysLongTerm.TryUse(this, item))
+            {
+                SendUseDoneEvent();
+                return;
+            }
 
             if (success)
                 item.OnActivate(this);

@@ -103,6 +103,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             var chance = EchoChance(rank, chanceBase, chanceStep, tinker,
                 caster.GetEquippedModValue(EquipmentModId.EchoCast));
 
+            chance *= (float)ACE.Server.Frays.FraysManager.AbilityBoost(caster, ClassAbilityId.EchoCast); // the Frays: a class boon
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 

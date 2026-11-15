@@ -69,6 +69,10 @@ namespace ACE.Server.WorldObjects
             var player = worldObject as Player;
             if (player == null) return;
 
+            // The Fray Journal writes its pages from this reader's record first.
+            if (ACE.Server.Frays.FraysJournal.IsJournal(this))
+                ACE.Server.Frays.FraysJournal.Refresh(this, player);
+
             int maxChars = Biota.PropertiesBook.MaxNumCharsPerPage;
             int maxPages = Biota.PropertiesBook.MaxNumPages;
 

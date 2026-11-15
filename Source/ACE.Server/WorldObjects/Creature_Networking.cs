@@ -319,12 +319,23 @@ namespace ACE.Server.WorldObjects
                             for (int i = 0; i < itemSubPal.CloSubPalettes.Count; i++)
                             {
                                 var itemPalSet = DatManager.PortalDat.ReadFromDat<PaletteSet>(itemSubPal.CloSubPalettes[i].PaletteSet);
-                                ushort itemPal = (ushort)itemPalSet.GetPaletteID(shade);
+                                ushort tablePal = (ushort)itemPalSet.GetPaletteID(shade);
 
-                                for (int j = 0; j < itemSubPal.CloSubPalettes[i].Ranges.Count; j++)
+                                // Custom dye (ACE.Server.Dye): each range splits into segments, the matched palette for a
+                                // dyed slot, with the skin/hair/eye block kept on the item's own palette. One unchanged
+                                // segment when the item is not dyed.
+                                var dyeSegments = new List<(uint pal, ushort offset, ushort length)>();
+                                for (int r = 0; r < itemSubPal.CloSubPalettes[i].Ranges.Count; r++)
+                                    dyeSegments.AddRange(ACE.Server.Dye.CustomDye.Segments(w, i, tablePal,
+                                        (ushort)(itemSubPal.CloSubPalettes[i].Ranges[r].Offset / 8),
+                                        (ushort)(itemSubPal.CloSubPalettes[i].Ranges[r].NumColors / 8),
+                                        protectBaseAppearance: true));
+
+                                foreach (var (segPal, segOffset, segLength) in dyeSegments)
                                 {
-                                    ushort palOffset = (ushort)(itemSubPal.CloSubPalettes[i].Ranges[j].Offset / 8);
-                                    ushort numColors = (ushort)(itemSubPal.CloSubPalettes[i].Ranges[j].NumColors / 8);
+                                    var itemPal = segPal;
+                                    ushort palOffset = segOffset;
+                                    ushort numColors = segLength;
 
                                     // ClothingPartExclusions: an item that hands body parts back to the
                                     // wearer must hand their colors back too. Skin/hair/eyes live in

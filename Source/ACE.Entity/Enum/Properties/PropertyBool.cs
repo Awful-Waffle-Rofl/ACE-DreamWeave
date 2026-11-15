@@ -600,5 +600,13 @@ namespace ACE.Entity.Enum.Properties
 
         // Marks a pet that never initiates aggro: it only targets monsters already engaged with its owner or the owner's pets.
         SummonNeverInitiates                  = 9088,
+
+        // The Frays: an Embered item (a rare Fray drop): bonded, and while worn it adds a little damage against Fray
+        // creatures (ACE.Server.Frays.FraysLongTerm). Absent means an ordinary item.
+        FraysEmbered                        = 9089,
+
+        // Per-character chat toggle, set by "/abilitymsgs on|off": TRUE hides the class ability buff lines
+        // ("Adrenaline surges ...", "Kinetic charge at full ...") in Player.SendClassAbilityBuffMessage. Absent means shown.
+        ClassAbilityChatMuted                 = 9090,
     }
 }

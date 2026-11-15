@@ -1492,6 +1492,20 @@ namespace ACE.Server.WorldObjects
                 // Placed AFTER the cloak damage proc, matching the physical path's order, and inside the
                 // health branch so a Stamina/Mana Lowering drain is never absorbed - the barrier trades
                 // Mana for Health, which would be nonsense against a mana drain.
+                // The Frays: a fire monster's bolt on its owner (Heat and elite damage, rating protection, Last Ember).
+                if (targetPlayer != null && ProjectileSource is Creature fraysCaster && fraysCaster.FraysTag != null)
+                {
+                    damage = ACE.Server.Frays.FraysManager.AdjustDamageToPlayer(fraysCaster, targetPlayer, damage, Spell.DamageType);
+                    percent = damage / target.Health.MaxValue;
+                }
+
+                // The Frays: a camper's bolt on their own fire's creature (boons, the week's affixes).
+                if (targetPlayer == null && target.FraysTag != null && ProjectileSource != null)
+                {
+                    damage = ACE.Server.Frays.FraysManager.AdjustDamageToMonster(ProjectileSource, target, damage, Spell.DamageType);
+                    percent = damage / target.Health.MaxValue;
+                }
+
                 if (targetPlayer != null)
                 {
                     var beforeMitigation = (uint)Math.Round(damage);
@@ -1556,6 +1570,10 @@ namespace ACE.Server.WorldObjects
                 }
 
                 amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage));
+
+                // a Frays camp creature: damage by school for the camp log (FraysSessions)
+                if (target.FraysTag != null)
+                    ACE.Server.Frays.FraysSessions.OnSourcedHit(target, ProjectileSource, amount, ACE.Server.Frays.FraysHitKinds.SpellKind(this));
 
                 // the damage actually applied to the vital, for the Elemental Proficiency Acid DoT sizing
                 LastAppliedDamage = amount;

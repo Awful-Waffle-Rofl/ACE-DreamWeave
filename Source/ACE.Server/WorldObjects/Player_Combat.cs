@@ -1087,7 +1087,18 @@ namespace ACE.Server.WorldObjects
 
             return $"[COMBATMODE] {Name} (0x{Guid.Full:X8}) req={requested} path={path} repeat={repeatedRequest} " +
                    $"srvMode={CombatMode} srvStance={CurrentMotionState?.Stance} clientStance={clientStance} " +
-                   $"movSeq={movSeq} ctlSeq={ctlSeq} teleporting={Teleporting} sinceTeleport={sinceTeleport:0.0}s nextUseIn={nextUseIn:0.00}s";
+                   $"movSeq={movSeq} ctlSeq={ctlSeq} teleporting={Teleporting} sinceTeleport={sinceTeleport:0.0}s nextUseIn={nextUseIn:0.00}s " +
+                   $"wantStance={GetCombatStance()} busy={IsBusy} hands=[{HandsText()}]";
+        }
+
+        /// <summary>What the server thinks this player holds in the hand slots, for the [COMBATMODE] line.</summary>
+        private string HandsText()
+        {
+            var hands = EquippedObjects.Values
+                .Where(e => ((e.CurrentWieldedLocation ?? EquipMask.None) & (EquipMask.MeleeWeapon | EquipMask.Shield | EquipMask.MissileWeapon | EquipMask.Held | EquipMask.TwoHanded)) != 0)
+                .Select(e => $"{e.CurrentWieldedLocation}:{e.Name}{(e.IsShield ? "(shield)" : "")}");
+
+            return string.Join(",", hands);
         }
 
         public void HandleActionChangeCombatMode_Inner(CombatMode newCombatMode, bool forceHandCombat = false, Action callback = null, bool repeatedRequest = false)
@@ -1234,7 +1245,9 @@ namespace ACE.Server.WorldObjects
         public override bool CanDamage(Creature target)
         {
             // WaffleACE fork, World Events Hold: a knight is never damageable by a player (see CheckPKStatusVsTarget).
-            return target.Attackable && !target.Teleporting && !(target is CombatPet) && !ACE.Server.WorldEvents.WorldEventHooks.RefusesPlayerHarm(target);
+            // The Frays: a fire's monster is damageable only by its owners.
+            return target.Attackable && !target.Teleporting && !(target is CombatPet) && !ACE.Server.WorldEvents.WorldEventHooks.RefusesPlayerHarm(target)
+                && ACE.Server.Frays.FraysManager.PlayerMayHarm(this, target);
         }
 
         // http://acpedia.org/wiki/Announcements_-_2002/04_-_Betrayal
@@ -1471,6 +1484,11 @@ namespace ACE.Server.WorldObjects
             // get single damage type
             if (damageType == (DamageType.Pierce | DamageType.Slash))
             {
+                // DreamWeave: low attacks pierce, medium attacks slash; high attacks fall through to the rule below
+                var byHeight = GetSlashPierceByAttackHeight(combatType);
+                if (byHeight != null)
+                    return byHeight.Value;
+
                 if ((AttackType & AttackType.Punches) != 0)
                 {
                     if (PowerLevel < ThrustThreshold)
@@ -1488,6 +1506,36 @@ namespace ACE.Server.WorldObjects
             var powerLevel = combatType == CombatType.Melee ? (float?)PowerLevel : null;
 
             return damageType.SelectDamageType(powerLevel);
+        }
+
+        /// <summary>
+        /// For a slash/pierce melee weapon with sp_damage_by_attack_height on: Pierce for a low attack, Slash for a
+        /// medium one. Null for a high attack, a non-melee attack, or the setting off (the retail rule then decides).
+        /// </summary>
+        private DamageType? GetSlashPierceByAttackHeight(CombatType? combatType)
+        {
+            if (combatType != CombatType.Melee || AttackHeight == null)
+                return null;
+
+            if (!PropertyManager.GetBool("sp_damage_by_attack_height").Item)
+                return null;
+
+            // The Frays only: off the island the retail rule picks slash or pierce.
+            if (!ACE.Server.Frays.FraysManager.OnFrays(Location))
+                return null;
+
+            return SlashPierceForHeight(AttackHeight.Value);
+        }
+
+        /// <summary>The attack-height rule on its own: Low = Pierce, Medium = Slash, High = null (no change).</summary>
+        public static DamageType? SlashPierceForHeight(AttackHeight height)
+        {
+            switch (height)
+            {
+                case ACE.Entity.Enum.AttackHeight.Low: return DamageType.Pierce;
+                case ACE.Entity.Enum.AttackHeight.Medium: return DamageType.Slash;
+                default: return null;
+            }
         }
 
         public WorldObject HandArmor => EquippedObjects.Values.FirstOrDefault(i => (i.ClothingPriority & CoverageMask.Hands) > 0);
@@ -1535,6 +1583,11 @@ namespace ACE.Server.WorldObjects
             // harmful spells and class-ability strikes all ask here). Harmful actions only; null for every other target.
             if ((spell == null || spell.IsHarmful) && TryOutdoorPerimeterDamageGate(targetCreature, out var perimeterResult))
                 return perimeterResult;
+
+            // The Frays: a fire's monster can only be harmed by its owners. Here as well as CanDamage for the same
+            // reason as above (cleave, multi-shot and AoE candidate filters ask this method).
+            if (IsHarmfulAction(spell) && !ACE.Server.Frays.FraysManager.PlayerMayHarm(this, targetCreature))
+                return BattlegroundObjectiveRefusalErrors();
 
             // PvP arena damage gate (Docs/Pvp/DESIGN.md H6), first among the PK rules: when either player is in a
             // match, PvpArenaGate decides and the retail rules below do not run. Harmful actions only (melee,

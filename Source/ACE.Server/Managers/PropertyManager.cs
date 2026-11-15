@@ -385,6 +385,62 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
+        /// The cached value of a string property, without ever reading the database. At runtime every registered key is
+        /// cached from boot on (defaults first, then the database rows), so this sees every live value; a unit test has
+        /// no cache, and gets false. Used by hot per-tick readers (World Events Hold settings).
+        /// </summary>
+        internal static bool TryGetCachedString(string key, out string value)
+        {
+            if (key != null && CachedStringSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = null;
+            return false;
+        }
+
+        /// <summary>The cached value of a long property, without reading the database. See <see cref="TryGetCachedString"/>.</summary>
+        internal static bool TryGetCachedLong(string key, out long value)
+        {
+            if (key != null && CachedLongSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = 0;
+            return false;
+        }
+
+        /// <summary>The cached value of a double property, without reading the database. See <see cref="TryGetCachedString"/>.</summary>
+        internal static bool TryGetCachedDouble(string key, out double value)
+        {
+            if (key != null && CachedDoubleSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = 0;
+            return false;
+        }
+
+        /// <summary>The cached value of a bool property, without reading the database. See <see cref="TryGetCachedString"/>.</summary>
+        internal static bool TryGetCachedBool(string key, out bool value)
+        {
+            if (key != null && CachedBooleanSettings.TryGetValue(key, out var entry))
+            {
+                value = entry.Item;
+                return true;
+            }
+
+            value = false;
+            return false;
+        }
+
+        /// <summary>
         /// Modifies a string value in the cache and marks it for being synced on the next cycle
         /// </summary>
         /// <param name="key">The string key for the property</param>
@@ -941,6 +997,48 @@ namespace ACE.Server.Managers
             return new ReadOnlyDictionary<string, Property<double>>(all);
         }
 
+        /// <summary>Adds the Frays' text settings (frays_*), with their code defaults; the rest are typed (WithFrays below).</summary>
+        private static ReadOnlyDictionary<string, Property<string>> WithFrays(ReadOnlyDictionary<string, Property<string>> baseline)
+        {
+            var all = new Dictionary<string, Property<string>>(baseline);
+
+            foreach (var (key, @default, description) in ACE.Server.Frays.FraysSettings.RegisteredStringDefaults())
+                all.Add(key, new Property<string>(@default, description));
+
+            return new ReadOnlyDictionary<string, Property<string>>(all);
+        }
+
+        /// <summary>Adds the Frays' typed settings (frays_*): toggles as bools, whole numbers as longs, numbers as doubles.</summary>
+        private static ReadOnlyDictionary<string, Property<bool>> WithFrays(ReadOnlyDictionary<string, Property<bool>> baseline)
+        {
+            var all = new Dictionary<string, Property<bool>>(baseline);
+
+            foreach (var (key, @default, description) in ACE.Server.Frays.FraysSettings.RegisteredBoolDefaults())
+                all.Add(key, new Property<bool>(@default, description));
+
+            return new ReadOnlyDictionary<string, Property<bool>>(all);
+        }
+
+        private static ReadOnlyDictionary<string, Property<long>> WithFrays(ReadOnlyDictionary<string, Property<long>> baseline)
+        {
+            var all = new Dictionary<string, Property<long>>(baseline);
+
+            foreach (var (key, @default, description) in ACE.Server.Frays.FraysSettings.RegisteredLongDefaults())
+                all.Add(key, new Property<long>(@default, description));
+
+            return new ReadOnlyDictionary<string, Property<long>>(all);
+        }
+
+        private static ReadOnlyDictionary<string, Property<double>> WithFrays(ReadOnlyDictionary<string, Property<double>> baseline)
+        {
+            var all = new Dictionary<string, Property<double>>(baseline);
+
+            foreach (var (key, @default, description) in ACE.Server.Frays.FraysSettings.RegisteredDoubleDefaults())
+                all.Add(key, new Property<double>(@default, description));
+
+            return new ReadOnlyDictionary<string, Property<double>>(all);
+        }
+
         private static ReadOnlyDictionary<A, V> DictOf<A, V>(params (A, V)[] pairs)
         {
             return new ReadOnlyDictionary<A, V>(pairs.ToDictionary
@@ -977,7 +1075,7 @@ namespace ACE.Server.Managers
         // ==================================================================================
 
         public static readonly ReadOnlyDictionary<string, Property<bool>> DefaultBooleanProperties =
-            WithGoalScopedSettings(DictOf(
+            WithFrays(WithGoalScopedSettings(DictOf(
                 ("account_creation_enabled", new Property<bool>(true, "WaffleACE: if FALSE, no new account is auto-created at login - an unknown account name is rejected with AccountDoesntExist instead. Existing accounts and their characters log in normally. This is a live toggle (/modifybool account_creation_enabled false) that needs no restart; it is ANDed with the restart-only Config.js Server.Accounts.AllowAutoAccountCreation, so it can only tighten that setting, never loosen it")),
                 ("account_login_boots_in_use", new Property<bool>(true, "if FALSE, oldest connection to account is not booted when new connection occurs")),
                 ("account_vault_class_storage", new Property<bool>(true, "WaffleACE Mule Vendor: master switch for the counted item-CLASS storage tier. On: a deposited item that is provably rebuildable from its weenie plus a small whitelist of per-instance properties (salvage bags, in practice) is stored as a COUNT on one account_vault_class row instead of as its own biota, and already-stored biotas are folded into those rows a few at a time as a vault loads. Off: nothing new collapses and nothing folds, every deposit keeps its biota exactly as before, and class rows that already exist stay readable and withdrawable - turning it off is a stop, never a rollback")),
@@ -1033,6 +1131,7 @@ namespace ACE.Server.Managers
                 ("monster_effects_enabled", new Property<bool>(true, "(non-retail function) enables the monster combat effect system: effects authored on a monster weenie in PropertyString 9015 MonsterCombatEffects. Read at the dispatch sites, not at creature construction, so switching it back on takes effect without a relog or a landblock reset")),
                 ("enlightenment_broadcast_enabled", new Property<bool>(true, "(non-retail function) if TRUE, each successful enlightenment is announced with a server-wide broadcast")),
                 ("equipment_mods_enabled", new Property<bool>(true, "(non-retail function) enables the equipment mod system: applying salvage-based mods to eligible gear, their combat effects, and their appraisal display. Ships enabled as standard content. While FALSE, stored mod values are inert and invisible")),
+                ("sp_damage_by_attack_height", new Property<bool>(true, "(non-retail function) ON THE FRAYS ONLY (Vissidal Island and Fray landblocks in the Frays realm): a player's slash/pierce melee weapon picks its damage type from the attack height: a LOW attack pierces and a MEDIUM attack slashes. A HIGH attack keeps the retail rule (the power bar, or the thrust or slash swing, picks it). FALSE restores the retail rule at every height")),
                 ("weapon_mods_enabled", new Property<bool>(true, "(non-retail function) THE SINGLE MASTER SWITCH for the whole weapon mod system: the Tourmaline reroll and the Amethyst swap on weapons, their appraisal display, AND every Tier B combat effect (the leeches, Ambush, Quickening, Overload and Second Wind). Ships enabled as standard content. While FALSE both salvage bags fall through to ordinary tinkering, no Tier B modifier can be rolled by any pool, and every Tier B combat effect reads zero - including on a weapon that already carries a record from when it was TRUE")),
                 ("weapon_mod_guarantee_damage_special", new Property<bool>(true, "(non-retail function) weapon mods: if TRUE, the FIRST special of a rolled set is drawn from the damage-relevant subset of the class pool (the rows flagged AffectsSingleTargetDamage) instead of the whole pool, so a set is never entirely utility. Every later special still comes from the full pool. Best-effort: if a class has no damage-relevant rows left to draw, the full pool is used. RETUNED FROM FALSE TO TRUE on 2026-08-06 as part of the v3 magnitude pass")),
                 ("serpentine_reroll_enabled", new Property<bool>(true, "(non-retail function) enables the Serpentine spell reroll: a Bag or Hammer of Serpentine salvage used on a piece of gear replaces its non-cantrip item enchantments with different ones of the SAME LEVEL. Defaults TRUE - this is standard player content, unlike the equipment/weapon mod systems. While FALSE the Serpentine salvage falls through to ordinary tinkering")),
@@ -1285,10 +1384,10 @@ namespace ACE.Server.Managers
                 ("knot_trait_frugal_hand_enabled", new Property<bool>(ACE.Server.KnotLoot.KnotLootDefaults.FrugalHandEnabled, "(non-retail function) Knot loot: Gauntlets of the Frugal Hand switch. While false the trait does nothing on every item. Read live, so changing it retunes existing items.")),
                 ("knot_trait_wrist_trade_enabled", new Property<bool>(ACE.Server.KnotLoot.KnotLootDefaults.WristTradeEnabled, "(non-retail function) Knot loot: Glass Turtle Bracelet trade switch. While false the whole trade is zeroed on every item. Read live, so changing it retunes existing items.")),
                 ("knot_trait_overpowering_intent_enabled", new Property<bool>(ACE.Server.KnotLoot.KnotLootDefaults.OverpoweringIntentEnabled, "(non-retail function) Knot loot: Overpowering Intent switch (Matron hive batons: War/Void skill multiplier for the resist check vs non-players). While false the trait does nothing on every item. Read live, so changing it retunes existing items."))
-                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedBoolDefaults());
+                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedBoolDefaults()));
 
         public static readonly ReadOnlyDictionary<string, Property<long>> DefaultLongProperties =
-            WithGoalScopedSettings(DictOf(
+            WithFrays(WithGoalScopedSettings(DictOf(
                 ("account_vault_entry_cap", new Property<long>(500, "WaffleACE Mule Vendor: maximum ENTRIES an account may store, where one entry is one stored biota OR one collapsed-stackable ledger row - never the number of units held. 10,000 plain healing kits are ONE entry; ten individually tinkered arrows are ten. Enforced at deposit only and NEVER retroactively: lowering it below an account's existing holdings refuses further deposits but leaves everything withdrawable. This number also equals the number of lines the client vendor panel is asked to render, which is what live test 17.1 measures - set it from that result")),
                 ("account_vault_landblock", new Property<long>(0x7FFF, "WaffleACE Mule Vendor: landblock id given as the Location of every vault CONTAINER biota. This landblock is never activated for players and holds no content. Its only purpose is risk R1: PurgeOrphanedBiotas keeps a biota only if it has a Container, Wielder or Location pointer, and a vault container has none of the first two. The purge keep-test exemption is the redundant second mitigation - both must exist, because a content edit can undo this one and an upstream merge can undo that one")),
                 ("account_vault_summon_rot_seconds", new Property<long>(600, "WaffleACE Mule Vendor: seconds a summoned mule vendor survives without interaction. Refreshed on every interaction. One vendor per summoner; re-summoning destroys the old one")),
@@ -1728,10 +1827,10 @@ namespace ACE.Server.Managers
                 ("knot_loot_matron_note_max", new Property<long>(ACE.Server.KnotLoot.KnotLootDefaults.MatronNoteMax, "(non-retail function) Knot loot: Matron table highest count of Promissory Notes in a windowed roll. If min is above max the defaults 25 and 50 are used. Read at each roll; affects new drops only.")),
                 ("knot_loot_matron_window_low_level", new Property<long>(ACE.Server.KnotLoot.KnotLootDefaults.MatronWindowLowLevel, "(non-retail function) Knot loot: Matron table Knot level at which the roll window sits at its low start. If the high level is not above this, both levels return to 200 and 400. Read live, so changing it retunes existing items.")),
                 ("knot_loot_matron_window_high_level", new Property<long>(ACE.Server.KnotLoot.KnotLootDefaults.MatronWindowHighLevel, "(non-retail function) Knot loot: Matron table Knot level at which the roll window sits at its high start. If it is not above the low level, both levels return to 200 and 400. Read live, so changing it retunes existing items."))
-                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedLongDefaults());
+                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedLongDefaults()));
 
         public static readonly ReadOnlyDictionary<string, Property<double>> DefaultDoubleProperties =
-            WithGoalScopedSettings(WithPvpContextTuning(DictOf(
+            WithFrays(WithGoalScopedSettings(WithPvpContextTuning(DictOf(
 
                 ("account_vault_summon_leash", new Property<double>(30.0, "WaffleACE Mule Vendor: metres from the summoner beyond which a summoned mule vendor despawns, checked on a slow tick. Mirrors the passive pet leash")),
                 ("anti_blink_door_width", new Property<double>(3.0, "(non-retail function) MINIMUM width in units of the blocking plane anti-blink builds across a closed door, centered on the door's origin and perpendicular to its facing. Each door is measured by its own collision shape and uses max(this value, that width), so wide gates no longer need this raised; lower it only if legitimate movement beside a narrow door is being rejected")),
@@ -2594,10 +2693,10 @@ namespace ACE.Server.Managers
                 ("knot_trait_wrist_trade_cost_max", new Property<double>(ACE.Server.KnotLoot.KnotLootDefaults.WristTradeCostMax, "(non-retail function) Knot loot: Glass Turtle Bracelet highest cost. If min is above max the defaults 10 and 20 are used. Read live, so changing it retunes existing items.")),
                 ("knot_trait_overpowering_intent_min", new Property<double>(ACE.Server.KnotLoot.KnotLootDefaults.OverpoweringIntentMin, "(non-retail function) Knot loot: Overpowering Intent lowest skill fraction (positive magnitude; 0.05 = the caster's War/Void skill counts as 1.05x for the resist check vs non-players). If min is above max the defaults 0.05 and 0.1 are used. Read live, so changing it retunes existing items.")),
                 ("knot_trait_overpowering_intent_max", new Property<double>(ACE.Server.KnotLoot.KnotLootDefaults.OverpoweringIntentMax, "(non-retail function) Knot loot: Overpowering Intent highest skill fraction. If min is above max the defaults 0.05 and 0.1 are used. Read live, so changing it retunes existing items."))
-                )), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedDoubleDefaults());
+                )), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedDoubleDefaults()));
 
         public static readonly ReadOnlyDictionary<string, Property<string>> DefaultStringProperties =
-            WithGoalScopedSettings(DictOf(
+            WithFrays(WithGoalScopedSettings(DictOf(
                 ("pinnacle_grael_p2_wisps", new Property<string>(ACE.Server.Pinnacles.Grael.GraelSettings.DefaultP2Wisps, "(non-retail function) Pinnacle Grael encounter: the wisp hazard that runs during the Grael-body fight (phase 1), looping until the body dies, as a space-separated key=value list for the wisps mechanic (pattern=, cycles=, move=/move_end=, hold=/hold_end=, hold_floor=, rest=/rest_end=, follow=...). A key with _end ramps toward it over the first run; every later run holds the _end values flat. Blank restores the shipped string. Read when a fight is created")),
                 ("pinnacle_grael_p3_memory", new Property<string>(ACE.Server.Pinnacles.Grael.GraelSettings.DefaultP3Memory, "(non-retail function) Pinnacle Grael encounter: phase 3 memory puzzle, as key=value tokens (len= opening length, pulse_on=/pulse_on_end=, pulse_off=/pulse_off_end=, answer_timeout=). The pulse times ramp over rounds L=4 to L=7. Blank restores the shipped string. Read when a fight is created")),
                 ("pinnacle_grael_p4_balls", new Property<string>(ACE.Server.Pinnacles.Grael.GraelSettings.DefaultP4Balls, "(non-retail function) Pinnacle Grael encounter: phase 4 ball series (fan, alternating rings, row, cross), as key=value tokens (waves=, speed=/speed_end=, lead=/lead_end=, wave_every=/wave_every_end= launch-to-launch seconds, spread= fan degrees, marker=, ray_markers=). The row series has its own pinnacle_grael_p4_rows; the cross keeps one opening per wall. Leads are pinned per series, whatever lead= says: the fan and the rings take none (their balls move the moment they appear), the cross and the rows exactly 2 s. The ring series runs twice waves. A key with _end ramps toward it across the series. Blank restores the shipped string. Read when a fight is created")),
@@ -2673,6 +2772,6 @@ namespace ACE.Server.Managers
                 ("hazard_mech_balls", new Property<string>(ACE.Server.HazardMechanics.HazardDefaults.Balls, "(non-retail function) Hazard mechanics: numbers for the rolling balls, whitespace-separated key=value laid UNDER the caller's args (args win; the first of a repeated key wins). Every value is clamped by the mechanic, a non-numeric one is refused. speed=<m/s> lead=<seconds of telegraph before motion, raised to a fair-lead floor> gap=<metres between the balls flanking a row/cross gap> waves=<waves per run> wave_gap=<seconds between waves> window=<seconds one random wave's launches are spread over> escape_speed=<assumed player run speed m/s, 1..12; sizes the fair-lead floors> pct=<damage fraction of max health>. Optional (no default in this string): count=<ring balls, random launches or fan balls per wave; default 8 rings, 6 random, 3 fan> dir=<n|s|e|w|random, the side a row starts from> dirs=<two adjacent sides such as ne, or random, for a cross> gaps=<openings per row or cross wall, 1..6, default 1; more than 1 places that many gap-wide openings at random with a ball-width of wall between them and at the ends> no_overlap=<1|0, default 0, row and cross: walls at a pitch of 2 x reach + 0.02 so no two balls' reach discs overlap, every wall stretch a whole number of pitches, the leftover span widening the openings> origin_clear=<metres, default 0, fan and rings: fan and ring-out balls start this far out from the origin, ring-in balls stop this far short of it> distinct_dirs=<1|0, default 0, cadence row (dir=random, max_in_flight up to 3) or cross (dirs=random, max_in_flight up to 2): no two waves in flight share a wall, and a wave waits until one is free> max_in_flight=<whole waves, cadence only: a wave whose time has come waits while this many earlier waves are still in flight> max_in_flight_end=<the last wave's cap; ramped and rounded per wave> max_balls=<whole balls, cadence only: a due wave launches when nothing is in flight or the balls in flight plus its size fit this budget, else it waits with its plan; a world event's live count replaces it> damage_type=<fire|acid|cold|electric|bludgeon, default fire; any other word is refused> marker_script=<effect script id, decimal or 0x hex; the look of every marker pillar, default the fire pillar> target=<random|nearest, fan> spread=<degrees across a fan> cx/cy=<landblock-local ring or fan centre, both or neither> marker=<true|false, a pillar at each gap> ray_markers=<1|0, default 0: ring-out and ring-in put pillars along each ray during the lead> fair_lead=<1|0, default 1; 0 drops every fair-lead floor, the fan's sidestep floor included, so lead may be 0 and the balls move the moment they appear> ball_z=<hover metres above the ground, 2..10> ball_radius=<roll and hit radius metres> ball_wcid=<ball weenie> player_radius=<metres> edge_inset=<metres the balls stay inside the region edge> hit_lag=<seconds, default 0.15, 0..0.5: latency compensation; every point of a ball's path is hit-tested against player positions hit_lag seconds after the server's ball reached it, and a ball whose leg ended stays that long to sweep its tail, so a hit lands where the player sees the ball; 0 is off> occupancy=<fraction, default 0.75, 0.25..2; random pattern only: the fraction of the narrowest side that balls in flight may block; Validate refuses a launch rate whose expected balls in flight exceed it; raise it for balls that come from all sides> Ramps (each optional, no default: without it the run is exactly as before; wave 1 uses the start key, the last wave the end key, linear between): speed_end=<m/s, the last wave's speed; with stream, the last launch's> lead_end=<seconds, still raised to the fair-lead floor> wave_gap_end=<seconds>. Cadence (default off): wave_every=<seconds, 0.5..120; each wave launches this long after the one before, never waiting for its balls to clear, so waves overlap and wave_gap is unused> wave_every_end=<seconds, the last launch-to-launch period>. Stream (random pattern only, default off): stream=<seconds, 0..300; ONE wave of count launches spread over that many seconds, waves and window ignored, speed ramps launch by launch>")),
                 ("hazard_mech_beams", new Property<string>(ACE.Server.HazardMechanics.HazardDefaults.Beams, "(non-retail function) Hazard mechanics: numbers for the scattered beam columns, whitespace-separated key=value laid UNDER the caller's args. n=<beams> seconds=<lifetime> where=floor|ceiling|both (ceiling needs a region with a ceiling) pct=<damage fraction of max health; 0 = visual only>")),
                 ("hazard_mech_memory", new Property<string>(ACE.Server.HazardMechanics.HazardDefaults.Memory, "(non-retail function) Hazard mechanics: numbers for the colour memory game, whitespace-separated key=value laid UNDER the caller's args (args win; the first of a repeated key wins). Every value is clamped by the mechanic, a non-numeric one is refused. len=<colours in round 1; each round is a fresh random sequence one colour longer> max_len=<colours in the final round> beams_per_pulse=<beam hosts per shown colour, default 6> beam_from=<ceiling|floor, default ceiling: beams fire down from the region's ceiling, refused in a region with none> beam_flip=<1|0, default 0: SWAP the beam orientation. The beam mesh hangs below its host, so ceiling beams are left unturned (falling) and floor and echo beams are turned (rising); 1 inverts both> beam_corners=<1|0, default 0: the first four beams of every pulse stand one in each corner of a rectangular region, edge_inset inside; the rest stay random> pad_pillar=<1|0, default 0: every shown colour also raises one fire pillar on the centre of its pad, standing pulse_on seconds, an unmistakable cue for the answer pad; it deals the standard hazard damage (pct) to every player within pad_radius plus the player's radius, one hit per player per pillar> pulse_on/pulse_off=<seconds> answer_timeout=<seconds allowed per entry> pad_radius=<metres, a pad is 2 x this across> pad_gap=<minimum metres between pad centres> pad_spacing=<metres between ring markers on a pad>. Optional: layout=<quadrant|random, the four quadrant centres or four random pads> edge_inset=<metres a pad's rim stays inside the region edge>. pct=<damage per pad_pillar hit as a fraction of max health, default 0.60; with pad_pillar=0 the game deals no damage>"))
-                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedStringDefaults());
+                ), ACE.Server.WorldEvents.WorldEventSettingsRegistry.GoalScopedStringDefaults()));
     }
 }

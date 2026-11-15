@@ -227,6 +227,10 @@ namespace ACE.Server.WorldObjects
 
         public override void Open(Player player)
         {
+            // The Frays' Ember Vault: its bonus items, once a fill (the first open before a reset is scheduled).
+            if (WeenieClassId == ACE.Server.Frays.FraysVault.VaultWcid && !ResetMessagePending)
+                ACE.Server.Frays.FraysVault.OnFreshOpen(this);
+
             base.Open(player);
 
             if (!ResetMessagePending && !double.IsPositiveInfinity(ChestResetInterval))

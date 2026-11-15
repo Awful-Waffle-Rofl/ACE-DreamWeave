@@ -38,8 +38,11 @@ namespace ACE.Server.WorldObjects
             if (!MaledictionAbility.AffectsSpell(spell.School, spell.StatModType, spell.StatModKey, spell.StatModVal))
                 return false;
 
-            var intensityBase = PropertyManager.GetDouble("class_ability_malediction_intensity_base").Item;
-            var intensityStep = PropertyManager.GetDouble("class_ability_malediction_intensity_step").Item;
+            // the Frays: class boon (1 elsewhere). It scales base and step, so it reaches the intensity itself and not only
+            // the Creature Enchantment rider (applied to rankBonus alone, it would feed only that rider).
+            var boon = ACE.Server.Frays.FraysManager.AbilityBoost(this, ClassAbilityId.Malediction);
+            var intensityBase = PropertyManager.GetDouble("class_ability_malediction_intensity_base").Item * boon;
+            var intensityStep = PropertyManager.GetDouble("class_ability_malediction_intensity_step").Item * boon;
 
             var rankBonus = rank <= 0 ? 0.0 : intensityBase + (rank - 1) * intensityStep;
 

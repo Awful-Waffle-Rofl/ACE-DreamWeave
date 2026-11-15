@@ -38,6 +38,10 @@ namespace ACE.Server.WorldObjects
                 //uint authorID = ScribeIID ?? 0xFFFFFFFF;
                 uint authorID = (book.ScribeIID.HasValue) ? (uint)book.ScribeIID : 0xFFFFFFFF;
 
+                // The Fray Journal writes its pages from this reader's record first.
+                if (ACE.Server.Frays.FraysJournal.IsJournal(book))
+                    ACE.Server.Frays.FraysJournal.Refresh(book, this);
+
                 var pages = book.Biota.PropertiesBookPageData.Clone(book.BiotaDatabaseLock);
 
                 bool ignoreAuthor = book.IgnoreAuthor ?? false;

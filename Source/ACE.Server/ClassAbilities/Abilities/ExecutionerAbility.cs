@@ -35,7 +35,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (!IsExecuteRange(target, PropertyManager.GetDouble("class_ability_executioner_hp_fraction").Item))
                 return;
 
-            var rankBonus = rank * PropertyManager.GetDouble("class_ability_executioner_percent_per_rank").Item;
+            var rankBonus = rank * PropertyManager.GetDouble("class_ability_executioner_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Executioner);
 
             // Recklessness is MULTIPLICATIVE on this ability's OWN rank bonus (2026-09-12 overhaul), not an
             // additive rider beside it - so the skill is worth more the more ranks you have bought, and

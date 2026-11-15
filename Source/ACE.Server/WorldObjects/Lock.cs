@@ -164,6 +164,8 @@ namespace ACE.Server.WorldObjects
                                 var lockpickSkill = player.GetCreatureSkill(Skill.Lockpick);
                                 Proficiency.OnSuccessUse(player, lockpickSkill, difficulty);
                             }
+                            else if (target is Chest frayVault && frayVault.WeenieClassId == ACE.Server.Frays.FraysVault.VaultWcid)
+                                ACE.Server.Frays.FraysVault.TakeMoreKeys(player, unlocker, frayVault);   // up to 10 Vault Keys a use
 
                             ConsumeUnlocker(player, unlocker, target, true);
                             break;

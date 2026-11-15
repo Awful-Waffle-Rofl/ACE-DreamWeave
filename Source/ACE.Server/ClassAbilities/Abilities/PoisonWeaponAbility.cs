@@ -115,7 +115,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             if (rank <= 0)
                 return 0.0;
 
-            var rankBonus = rank * PropertyManager.GetDouble("class_ability_poisonweapon_damage_per_rank").Item;
+            var rankBonus = rank * PropertyManager.GetDouble("class_ability_poisonweapon_damage_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.PoisonWeapon);   // the Frays: class boon
 
             // Untrained/Inactive Alchemy, or no live player, resolves to the neutral 1.0 factor - the
             // rank bonus alone, bit-identical to an unaffiliated build.

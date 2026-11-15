@@ -208,6 +208,7 @@ namespace ACE.Server.WorldObjects
 
             //Console.WriteLine($"{target.Name}.ResistSpell({Name}, {spell.Name}): magicSkill: {magicSkill}, difficulty: {difficulty}");
             bool resisted = MagicDefenseCheck(magicSkill, difficulty, out float resistChance);
+            ACE.Server.Frays.FraysThreadsShape.LogRoll($"resist {spell.School}", caster, target, magicSkill, difficulty, resistChance, resisted);
 
             var player = this as Player;
             var targetPlayer = target as Player;
@@ -764,6 +765,11 @@ namespace ACE.Server.WorldObjects
                 if (holdHarm != -tryBoost)
                     tryBoost = boost = -(int)Math.Round(holdHarm);
             }
+
+            // The Frays: a fire monster's Harm on its owner (Heat and elite damage, rating protection, Last Ember).
+            if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is Player fraysTarget && this is Creature fraysCaster
+                && fraysCaster.FraysTag != null)
+                tryBoost = boost = -(int)Math.Round(ACE.Server.Frays.FraysManager.AdjustDamageToPlayer(fraysCaster, fraysTarget, -tryBoost));
 
             if (spell.VitalDamageType == DamageType.Health && tryBoost < 0 && targetCreature is not Player)
             {
@@ -1976,8 +1982,39 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         private void TryCrimsonHarvest(Player caster, Spell spell, Creature primaryTarget)
         {
-            if (!caster.TryGetClassAbility(ClassAbilityId.CrimsonHarvest, out var harvestRank))
+            // the Frays: Crimson Splash (a Blood Mage boon) gives the harvest to a camper without the ability, or
+            // raises its target count to the boon's (FraysBloodBoons)
+            var hasHarvest = caster.TryGetClassAbility(ClassAbilityId.CrimsonHarvest, out var harvestRank);
+            var splash = ACE.Server.Frays.FraysBloodBoons.SplashTargets(caster);
+
+            if (!hasHarvest && splash <= 0)
                 return;
+
+            if (!hasHarvest)
+            {
+                var harvestCap = hasHarvest
+                    ? CrimsonHarvestMath.SecondaryTargetCap(harvestRank,
+                        PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
+                        PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
+                        PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item)
+                    : 0;
+                double? harvestRadius = hasHarvest
+                    ? PropertyManager.GetDouble("class_ability_crimsonharvest_radius").Item + caster.GetEquippedModValue(EquipmentModId.Bloodletting)
+                    : null;
+
+                foreach (var secondary in ACE.Server.Frays.FraysBloodBoons.Neighbors(caster, primaryTarget, Math.Max(harvestCap, splash), harvestRadius))
+                {
+                    if (secondary.IsDead)
+                        continue;
+
+                    HandleCastSpell_Transfer(spell, secondary, isSecondaryStrike: true);
+
+                    if (spell.TargetEffect != 0)
+                        secondary.EnqueueBroadcast(new GameMessageScript(secondary.Guid, spell.TargetEffect, spell.Formula.Scale));
+                }
+
+                return;
+            }
 
             // BLOODLETTING (EquipmentModId.Bloodletting) extends the RADIUS only, additively, inside the
             // ability's own reach figure. The TryGetClassAbility early return directly above is what makes
@@ -1992,10 +2029,10 @@ namespace ACE.Server.WorldObjects
                 + caster.GetEquippedModValue(EquipmentModId.Bloodletting);
 
             // the EXTRA creatures beyond the primary, by rank (2/3/4 at the defaults); rank 3 == the old flat cap
-            var maxTargets = CrimsonHarvestMath.SecondaryTargetCap(harvestRank,
+            var maxTargets = Math.Max(splash, CrimsonHarvestMath.SecondaryTargetCap(harvestRank,
                 PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r1").Item,
                 PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r2").Item,
-                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item);
+                PropertyManager.GetLong("class_ability_crimsonharvest_extra_targets_r3").Item));
 
             if (radius <= 0.0 || maxTargets <= 0)
                 return;

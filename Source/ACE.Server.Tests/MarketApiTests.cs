@@ -1718,9 +1718,9 @@ namespace ACE.Server.Tests
             Assert.AreEqual(HttpStatusCode.OK, status);
 
             var tabs = json.GetProperty("tabs").EnumerateArray().ToList();
-            Assert.AreEqual(10, tabs.Count);
+            Assert.AreEqual(11, tabs.Count);
             CollectionAssert.AreEqual(
-                new[] { "server", "social", "combat", "pvp", "items", "economy", "progression", "class_abilities", "threads", "world_events" },
+                new[] { "server", "social", "combat", "pvp", "items", "economy", "progression", "class_abilities", "threads", "world_events", "frays" },
                 tabs.Select(t => t.GetProperty("id").GetString()).ToList());
 
             var settings = json.GetProperty("settings").EnumerateArray().ToList();

@@ -241,6 +241,10 @@ namespace ACE.Server.WorldObjects
             if (VictimId == null || player.Guid.Full == VictimId)
                 return true;
 
+            // the Frays: a fire monster's corpse belongs to its fire owner alone, for its whole life
+            if (FraysLootOwner != 0)
+                return player.Guid.Full == FraysLootOwner;
+
             // players can loot corpses of creatures they killed or corpses that have previously been looted by killer
             if (KillerId != null && player.Guid.Full == KillerId || IsLooted)
                 return true;

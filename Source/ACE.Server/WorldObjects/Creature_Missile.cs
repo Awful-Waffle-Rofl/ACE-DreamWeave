@@ -264,6 +264,10 @@ namespace ACE.Server.WorldObjects
 
             var multiShotTargets = GetMultiShotTargets(primary, weapon, shotMultipliers.Count);
 
+            // how much of the pack a live volley reaches (Frays only)
+            if (this is Player shooter)
+                ACE.Server.Frays.FraysReach.Sample(shooter, primary, "multishot", multiShotTargets.Count, shotMultipliers.Count);
+
             // An arrow with no secondary target left overflows onto the PRIMARY at one third of its
             // own multiplier, as its own hit (owner ruling; see MultiShotOverflow) - unless the
             // primary is out of sight, when the overflow arrows are dropped.

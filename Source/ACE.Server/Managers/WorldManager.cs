@@ -759,7 +759,10 @@ namespace ACE.Server.Managers
             ActionQueue.EnqueueAction(action);
         }
 
-        private static readonly RateLimiter updateGameWorldRateLimiter = new RateLimiter(60, TimeSpan.FromSeconds(1));
+        /// <summary>Game world updates a second: every player's queued actions (each step of an attack chain) run once an update.</summary>
+        public const int GameWorldUpdatesPerSecond = 60;
+
+        private static readonly RateLimiter updateGameWorldRateLimiter = new RateLimiter(GameWorldUpdatesPerSecond, TimeSpan.FromSeconds(1));
 
         /// <summary>
         /// Manages updating all entities on the world.
@@ -939,6 +942,16 @@ namespace ACE.Server.Managers
             catch (Exception ex)
             {
                 log.Error("WorldManager.UpdateGameWorld(): WorldEventManager.Tick() threw; skipping it this heartbeat", ex);
+            }
+
+            try
+            {
+                // The Frays: queues each lit campfire's once-a-second tick onto its landblock. Returns at once otherwise.
+                ACE.Server.Frays.FraysManager.Tick();
+            }
+            catch (Exception ex)
+            {
+                log.Error("WorldManager.UpdateGameWorld(): FraysManager.Tick() threw; skipping it this heartbeat", ex);
             }
             WorldTickProfile.Lap(WorldTickPhase.WorldManagers);
 

@@ -44,7 +44,7 @@ namespace ACE.Server.ClassAbilities.Abilities
             // a skill reset. GetClassAbilityAffinityMultiplier then takes the per-SPEC rate, and returns
             // exactly 1.0 (never below) for an Untrained/Inactive source, so it can only ever grow the rank
             // bonus, never zero it.
-            var rankBonus = rank * PropertyManager.GetDouble("class_ability_bloodlust_percent_per_rank").Item;
+            var rankBonus = rank * PropertyManager.GetDouble("class_ability_bloodlust_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Bloodlust);
 
             // Salvaging is MULTIPLICATIVE on this ability's OWN rank bonus (2026-09-12 overhaul), not an
             // additive rider beside it - see ClassAbilityAffinity.Multiplier. At zero effective Salvaging the

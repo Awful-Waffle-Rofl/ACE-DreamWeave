@@ -645,6 +645,22 @@ namespace ACE.Server.WorldObjects
         /// Returns TRUE if unwielding an item from wieldedLocation
         /// should cause the player to switch to a new stance
         /// </summary>
+        /// <summary>
+        /// Moving a wielded weapon to a pack first forces the plain hand stance, then moves it. When that move did not
+        /// unwield anything (it failed, or a repeated request found the item already in the pack - clients can resend moves),
+        /// nothing switched the stance back, so a player still holding two weapons sat in the hand stance while the
+        /// client stayed in dual wield and the character stood still. Puts the stance back to what the wielded
+        /// items call for.
+        /// </summary>
+        private void RestoreStanceAfterForcedHandCombat()
+        {
+            if (CombatMode != CombatMode.Melee || CurrentMotionState == null)
+                return;
+
+            if (CurrentMotionState.Stance != GetCombatStance())
+                HandleActionChangeCombatMode(CombatMode.Melee);
+        }
+
         public bool RequiresStanceSwap(EquipMask wieldedLocation, bool checkMissile = true)
         {
             if (CombatMode == CombatMode.NonCombat)
@@ -1410,14 +1426,17 @@ namespace ACE.Server.WorldObjects
                 // is not handled here, but is still handled downstream
                 if (RequiresStanceSwap(wieldedLocation, false))
                 {
+                    log.Info($"[COMBATMODE] {Name} (0x{Guid.Full:X8}) moving wielded {item.Name} ({wieldedLocation}) to 0x{containerGuid:X8}: forcing hand stance first");
+
                     HandleActionChangeCombatMode(CombatMode.Melee, true, () =>
                     {
-                        if (!HandleActionPutItemInContainer_Verify(itemGuid, containerGuid, placement,
+                        if (HandleActionPutItemInContainer_Verify(itemGuid, containerGuid, placement,
                             out Container itemRootOwner, out WorldObject item, out Container containerRootOwner, out Container container, out bool itemWasEquipped))
                         {
-                            return;
+                            DoHandleActionPutItemInContainer(item, itemRootOwner, itemWasEquipped, container, containerRootOwner, placement);
                         }
-                        DoHandleActionPutItemInContainer(item, itemRootOwner, itemWasEquipped, container, containerRootOwner, placement);
+
+                        RestoreStanceAfterForcedHandCombat();
                     });
                 }
                 else

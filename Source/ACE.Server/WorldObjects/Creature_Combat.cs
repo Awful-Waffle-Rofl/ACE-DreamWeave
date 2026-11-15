@@ -1225,6 +1225,10 @@ namespace ACE.Server.WorldObjects
         {
             if (target is Player)
             {
+                // The Frays: a fire's monster never harms anyone but its owners (a passer-by in a splash, say).
+                if (FraysTag != null && !FraysTag.Fire.IsOwner((Player)target))
+                    return false;
+
                 // monster attacking player
                 return true;    // other checks handled elsewhere
             }
@@ -1233,6 +1237,13 @@ namespace ACE.Server.WorldObjects
                 // monster attacking monster
                 var sourcePet = this is CombatPet;
                 var targetPet = target is CombatPet;
+
+                // The Frays: only an owner's combat pet may harm a fire's monster, and a fire's monster only its owners' pets.
+                if (target.FraysTag != null && !(this is CombatPet ownPet && target.FraysTag.Fire.IsOwner(ownPet.P_PetOwner)))
+                    return false;
+
+                if (FraysTag != null && !(target is CombatPet theirPet && FraysTag.Fire.IsOwner(theirPet.P_PetOwner)))
+                    return false;
 
                 // WaffleACE fork, World Events Hold: a knight is damaged by its own run's monsters and by nothing else that
                 // reaches this override (players have their own CanDamage). One field read for every other target.
@@ -1313,6 +1324,10 @@ namespace ACE.Server.WorldObjects
             // non-attackable creatures do not get aggroed,
             // unless they have a TargetingTactic, such as the invisible archers in Oswald's Dirk Quest
             if (!monster.Attackable && monster.TargetingTactic == TargetingTactic.None)
+                return false;
+
+            // The Frays: a fire's monster is only woken by its owners (and their pets) inside its zone.
+            if (monster.FraysTag != null && !monster.FraysTag.Accepts(this))
                 return false;
 
             // ensure monster is currently in idle state to wake up,

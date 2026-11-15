@@ -40,6 +40,10 @@ namespace ACE.Entity.Enum.Properties
            arena currency). Bonded, so it is never transferable between characters. Not a Conquest-ACE id. */
         BankedHopeslayerMarks = 9027,
 
+        /* Banking (DreamWeave, the Frays): per-character banked balance of Embers (wcid 2000032, the Frays currency).
+           Bonded, so it is never transferable between characters. */
+        BankedEmbers = 9029,
+
         /* DPS challenge (WaffleACE): a player's best recorded total damage in the instanced arena run */
         BestDpsScore          = 9017,
 

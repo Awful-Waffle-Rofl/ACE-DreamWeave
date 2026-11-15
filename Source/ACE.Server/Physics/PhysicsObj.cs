@@ -4247,11 +4247,20 @@ namespace ACE.Server.Physics
                 return false;
             }
 
+            // see PhysicsUpdateBudget: a slow step is not repeated for the rest of the catch-up
+            var budgetStart = System.Diagnostics.Stopwatch.GetTimestamp();
+
             while (deltaTime > PhysicsGlobals.MaxQuantum)
             {
                 PhysicsTimer_CurrentTime += PhysicsGlobals.MaxQuantum;
                 UpdateObjectInternal(PhysicsGlobals.MaxQuantum, instance);
                 deltaTime -= PhysicsGlobals.MaxQuantum;
+
+                if (deltaTime > PhysicsGlobals.MinQuantum && PhysicsUpdateBudget.StepBudgetSpent(budgetStart, System.Diagnostics.Stopwatch.GetTimestamp()))
+                {
+                    UpdateTime = PhysicsTimer.CurrentTime;   // drop the rest, as for a gap over HugeQuantum
+                    return true;
+                }
             }
 
             if (deltaTime > PhysicsGlobals.MinQuantum)

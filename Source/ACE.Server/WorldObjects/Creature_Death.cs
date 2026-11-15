@@ -218,6 +218,12 @@ namespace ACE.Server.WorldObjects
                 }
             }
 
+            // The Frays: a fire's monster reports its kill to its fire (Heat, Embers).
+            if (FraysTag != null)
+                ACE.Server.Frays.FraysManager.OnCreatureDied(this, lastDamager, topDamager);
+            else if (FraysGreatSnarl != 0)
+                ACE.Server.Frays.FraysFrayWide.OnGreatSnarlDied(this);
+
             // Threads pooled loot (Docs/Threads/POOLED-LOOT-CACHE-DESIGN.md sections 2-3): a creature of a pooled
             // run leaves no corpse and banks its loot on the run instead. Banked HERE, before the run kill hook just
             // below, so the kill that clears the run is already in the ledger when AnnounceCleared asks for
@@ -938,6 +944,10 @@ namespace ACE.Server.WorldObjects
             else
             {
                 corpse.IsMonster = true;
+
+                // The Frays: a fire monster's corpse rots fast and counts toward its fire's corpse cap.
+                if (FraysTag != null)
+                    ACE.Server.Frays.FraysManager.OnCorpseCreated(this, corpse);
 
                 // Rare/treasure-map eligibility only: a kill landed by a player's CombatPet is eligible
                 // exactly as if the owner had made the kill (DamageHistoryInfo.ResolvePetOwnerAsKiller).

@@ -243,7 +243,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 PropertyManager.GetDouble("class_ability_sundermark_chance_step").Item,
                 affinity,
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item,
-                attacker.GetEquippedModValue(EquipmentModId.Sundermark));
+                attacker.GetEquippedModValue(EquipmentModId.Sundermark)) * ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Sundermark);   // the Frays: class boon
 
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;

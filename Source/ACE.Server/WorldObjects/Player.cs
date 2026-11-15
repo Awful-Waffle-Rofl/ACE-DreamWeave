@@ -404,6 +404,9 @@ namespace ACE.Server.WorldObjects
             // World Events Hold: assessing a knight also says its health in chat (throttled). Nothing for any other target.
             ACE.Server.WorldEvents.WorldEventHooks.SendHoldKnightHealthLine(this, wo);
 
+            // Frays: the Snarl Monument's text is written from the latest Snarl Trophy finders.
+            ACE.Server.Frays.FraysMonument.BeforeAppraise(wo);
+
             var currentTime = Time.GetUnixTime();
 
             // compare with previously requested appraisal target

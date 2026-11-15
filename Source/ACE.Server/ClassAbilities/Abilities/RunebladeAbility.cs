@@ -116,6 +116,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 PropertyManager.GetDouble("class_ability_affinity_chance_cap").Item,
                 attacker.GetEquippedModValue(EquipmentModId.Runeblade));
 
+            chance *= (float)ACE.Server.Frays.FraysManager.AbilityBoost(attacker, ClassAbilityId.Runeblade); // the Frays: a class boon
             if (ThreadSafeRandom.Next(0.0f, 1.0f) > chance)
                 return;
 

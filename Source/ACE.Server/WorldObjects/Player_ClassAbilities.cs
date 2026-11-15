@@ -654,6 +654,10 @@ namespace ACE.Server.WorldObjects
         {
             var learned = spellHitClassAbilities ??= BuildClassAbilityHookCache(ClassAbilityRegistry.SpellHitAbilities);
 
+            // the Frays: the Blood Mage AoE boons (camping only; FraysBloodBoons)
+            if (target != null && target is not Player)
+                ACE.Server.Frays.FraysBloodBoons.OnSpellHit(this, target, projectile);
+
             // NB: no IsDead guard - the hit that triggers this frequently kills the struck target
             // (a nuke against weaker monsters), and the blast still legitimately radiates from where
             // that target stood to its surviving neighbors. The dying target's Location/PhysicsObj are

@@ -120,6 +120,16 @@ namespace ACE.Server.WorldObjects
         /// <summary>The /bank currency tokens that mean Marks of the Hopeslayer.</summary>
         internal static bool IsHopeslayerMarkToken(string token) => token is "m" or "mark" or "marks";
 
+        // "Ember" (dreamweave-content 2000032) - the Frays currency, a bonded Stackable. Banked like the Marks:
+        // a per-character count, never
+        // transferable, spent by the Ember Trader and Boonwright through the shop hook below.
+        internal const uint EmberWcid = ACE.Server.Frays.FraysDefs.EmberWcid;
+        internal const string EmberName = "Embers";
+        internal const string EmbersTransferRefusedMessage = "Embers are bonded and cannot be transferred to other characters.";
+
+        /// <summary>The /bank currency tokens that mean Embers.</summary>
+        internal static bool IsEmberToken(string token) => token is "e" or "ember" or "embers";
+
         /// <summary>
         /// True, with the player-facing refusal, when a /bank transfer names a currency that may never move between
         /// characters (Marks of the Hopeslayer). Pure so the refusal is testable without a live Player; the
@@ -130,6 +140,12 @@ namespace ACE.Server.WorldObjects
             if (IsHopeslayerMarkToken(currencyToken))
             {
                 message = MarksTransferRefusedMessage;
+                return true;
+            }
+
+            if (IsEmberToken(currencyToken))
+            {
+                message = EmbersTransferRefusedMessage;
                 return true;
             }
 
@@ -262,6 +278,12 @@ namespace ACE.Server.WorldObjects
         {
             get => GetProperty(PropertyInt64.BankedHopeslayerMarks) ?? 0;
             set => SetProperty(PropertyInt64.BankedHopeslayerMarks, value);
+        }
+
+        public long BankedEmbers
+        {
+            get => GetProperty(PropertyInt64.BankedEmbers) ?? 0;
+            set => SetProperty(PropertyInt64.BankedEmbers, value);
         }
 
         /// <summary>
@@ -1327,9 +1349,10 @@ namespace ACE.Server.WorldObjects
             DepositLegendaryKeys(suppressChat: true);
             DepositPromissoryNotes(suppressChat: true);
             DepositHopeslayerMarks(-1, suppressChat: true);
+            DepositEmbers(-1, suppressChat: true);
 
             var peas = peaValue > 0 ? $" (including {peaValue:N0} from peas)" : "";
-            BankMsg($"Deposited all. Pyreals: {BankedPyreals:N0}{peas} | Luminance: {BankedLuminance:N0} | Keys: {BankedLegendaryKeys:N0} | Promissory Notes: {BankedPromissoryNotes:N0} | Marks of the Hopeslayer: {BankedHopeslayerMarks:N0}");
+            BankMsg($"Deposited all. Pyreals: {BankedPyreals:N0}{peas} | Luminance: {BankedLuminance:N0} | Keys: {BankedLegendaryKeys:N0} | Promissory Notes: {BankedPromissoryNotes:N0} | Marks of the Hopeslayer: {BankedHopeslayerMarks:N0} | Embers: {BankedEmbers:N0}");
         }
 
         #endregion
@@ -1709,6 +1732,100 @@ namespace ACE.Server.WorldObjects
                 BankMsg($"Withdrew {created:N0} of {amount:N0} Marks of the Hopeslayer (partial - out of pack space). Balance: {balance:N0}");
         }
 
+        /// <summary>
+        /// Deposits Embers (the Frays currency, a bonded stackable), exactly as Marks of the Hopeslayer: amount &lt; 0
+        /// means "all", and only what actually left the pack is credited.
+        /// </summary>
+        public long DepositEmbers(long amount = -1, bool suppressChat = false)
+        {
+            if (amount == 0)
+            {
+                if (!suppressChat) BankMsg("Amount must be greater than zero.");
+                return 0;
+            }
+
+            var take = PlanMarkDeposit(GetNumInventoryItemsOfWCID(EmberWcid), amount);
+
+            if (take <= 0)
+            {
+                if (!suppressChat) BankMsg("No Embers found to deposit.");
+                return 0;
+            }
+
+            var deposited = RunMarkDeposit(take, planned =>
+            {
+                var before = GetNumInventoryItemsOfWCID(EmberWcid);
+                TryConsumeFromInventoryWithNetworking(EmberWcid, (int)planned);
+                return before - GetNumInventoryItemsOfWCID(EmberWcid);
+            });
+
+            if (deposited != take)
+                log.Error($"[BANK] {Name} (0x{Guid.Full:X8}) DepositEmbers planned {take} but {deposited} left the pack; crediting {deposited}.");
+
+            if (deposited <= 0)
+            {
+                if (!suppressChat) BankMsg("No Embers found to deposit.");
+                return 0;
+            }
+
+            var balance = ModifyBankBalance(PropertyInt64.BankedEmbers, deposited);
+
+            // Persist now, as for the Marks: the pack change and the balance reach the shard together.
+            SaveBiotaToDatabase();
+
+            if (!suppressChat) BankMsg($"Deposited {deposited:N0} Embers. Balance: {balance:N0}");
+
+            return deposited;
+        }
+
+        /// <summary>Withdraws banked Embers as stacks. Debits only what was created.</summary>
+        public void WithdrawEmbers(long amount)
+        {
+            if (amount <= 0) { BankMsg("Amount must be greater than zero."); return; }
+            if (amount > BankedEmbers) { BankMsg($"Insufficient banked Embers. You have {BankedEmbers:N0}."); return; }
+            if (amount > MaxWithdrawItems) { BankMsg($"Cannot withdraw more than {MaxWithdrawItems:N0} Embers at once."); return; }
+
+            var created = RunMarkWithdraw(amount, remaining => TryCreateStackInInventory(EmberWcid, remaining));
+
+            if (created <= 0) { BankMsg("Could not withdraw - check your pack space."); return; }
+
+            var balance = ModifyBankBalance(PropertyInt64.BankedEmbers, -created);
+            SaveBiotaToDatabase();
+
+            if (created == amount)
+                BankMsg($"Withdrew {created:N0} Embers. Balance: {balance:N0}");
+            else
+                BankMsg($"Withdrew {created:N0} of {amount:N0} Embers (partial - out of pack space). Balance: {balance:N0}");
+        }
+
+        /// <summary>
+        /// Spends Embers for something the server sells outside a vendor (a campfire tier): the pack first, then the
+        /// bank. Nothing is taken unless the two together cover <paramref name="amount"/>.
+        /// </summary>
+        public bool TrySpendEmbers(long amount)
+        {
+            if (amount <= 0)
+                return true;
+
+            var held = (long)GetNumInventoryItemsOfWCID(EmberWcid);
+
+            if (held + BankedEmbers < amount)
+                return false;
+
+            var fromPack = Math.Min(held, amount);
+
+            if (fromPack > 0 && !TryConsumeFromInventoryWithNetworking(EmberWcid, (int)fromPack))
+                return false;
+
+            var fromBank = amount - fromPack;
+
+            if (fromBank > 0)
+                ModifyBankBalance(PropertyInt64.BankedEmbers, -fromBank);
+
+            SaveBiotaToDatabase();
+            return true;
+        }
+
         #endregion
 
         #region Transfer
@@ -1971,6 +2088,8 @@ namespace ACE.Server.WorldObjects
                 return BankedPromissoryNotes;
             if (wcid == HopeslayerMarkWcid)
                 return BankedHopeslayerMarks;
+            if (wcid == EmberWcid)
+                return BankedEmbers;
             // PK facet: class ability points cannot be spent in any form there, so as a vendor currency the
             // balance reads as 0 (every CAP-priced purchase then fails its affordability check) - and
             // DebitBankedAlternateCurrency below refuses on its own as well, so neither half relies on the other.
@@ -1998,6 +2117,11 @@ namespace ACE.Server.WorldObjects
             {
                 ModifyBankBalance(PropertyInt64.BankedHopeslayerMarks, -amount);
                 return HopeslayerMarkName;
+            }
+            if (wcid == EmberWcid && TryDebitBankedMarks(BankedEmbers, amount, out _))
+            {
+                ModifyBankBalance(PropertyInt64.BankedEmbers, -amount);
+                return EmberName;
             }
             // PK facet: the class ability point freeze covers points as a vendor currency too. A null return is
             // "not bankable or insufficient", which every caller already treats as "do not hand over goods".
@@ -2081,6 +2205,8 @@ namespace ACE.Server.WorldObjects
                 return "Promissory Notes";
             if (wcid == HopeslayerMarkWcid)
                 return HopeslayerMarkName;
+            if (wcid == EmberWcid)
+                return EmberName;
             if (wcid == ClassAbilityPointCurrencyWcid)
                 return "Class Ability Points";
             if (wcid == MmdWcid)

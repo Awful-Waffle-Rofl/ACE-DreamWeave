@@ -53,6 +53,14 @@ namespace ACE.Server.WorldObjects
 
         public override void HandleActionUseOnTarget(Player player, WorldObject target)
         {
+            // DreamWeave Frays: a loose Vault Key folds onto the Vault Keyring first, and the ring opens the lock.
+            if (WeenieClassId == ACE.Server.Frays.FraysLongTerm.DreamKey && player != null
+                && ACE.Server.Frays.FraysLongTerm.FoldLooseKeys(player) is Key ring && ring != this)
+            {
+                ring.HandleActionUseOnTarget(player, target);
+                return;
+            }
+
             // verify use requirements
             var result = CheckUseRequirements(player);
 

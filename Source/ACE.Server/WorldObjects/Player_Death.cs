@@ -42,6 +42,9 @@ namespace ACE.Server.WorldObjects
 
             var deathMessage = base.OnDeath(lastDamager, damageType, criticalHit);
 
+            // The Frays: the fire this player owns cools by the death drop.
+            ACE.Server.Frays.FraysManager.OnPlayerDied(this, $"{lastDamager?.Name ?? "unknown"} ({damageType.GetName().ToLowerInvariant()})");
+
             var lastDamagerObj = lastDamager?.TryGetAttacker();
 
             if (lastDamagerObj != null)
@@ -481,7 +484,13 @@ namespace ACE.Server.WorldObjects
                 SetPosition(PositionType.EphemeralRealmExitTo, null);
             }
             else
-                newPosition = Sanctuary ?? Instantiation ?? Location;
+            {
+                // The Frays: a camper holding a lit solo campfire respawns beside it (null when not, or the setting is off).
+                var atFire = ACE.Server.Frays.FraysLongTerm.DeathRespawn(this);
+                if (atFire != null)
+                    Session?.Network.EnqueueSend(new GameMessageSystemChat("Your campfire calls you back.", ChatMessageType.Broadcast));
+                newPosition = atFire ?? Sanctuary ?? Instantiation ?? Location;
+            }
 
             // A death in one realm copy of a landblock whose lifestone is in another copy of the same landblock
             // (dying in realm 0's Aerfalle Keep while bound at the realm-1 Marketplace lifestone) is a

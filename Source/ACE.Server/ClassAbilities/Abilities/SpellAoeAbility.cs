@@ -79,8 +79,11 @@ namespace ACE.Server.ClassAbilities.Abilities
             // Same visible-objects source and monster filters used by GetMultiShotTargets / Taunt.
             // Collected into its own list first, since spawning children adds objects to the landblock.
             var visible = caster.PhysicsObj.ObjMaint.GetVisibleObjectsValuesWhere(o => o.WeenieObj.WorldObject != null);
+            var radiated = 0;
 
-            foreach (var obj in visible)
+            try
+            {
+                foreach (var obj in visible)
             {
                 var creature = obj.WeenieObj.WorldObject as Creature;
 
@@ -112,6 +115,13 @@ namespace ACE.Server.ClassAbilities.Abilities
                     continue;
 
                 projectile.SpawnClassAbilityAoeChild(caster, primaryTarget, creature, damageMult);
+                radiated++;
+                }
+            }
+            finally
+            {
+                // how much of the pack a live splash reaches (Frays only)
+                ACE.Server.Frays.FraysReach.Sample(caster, primaryTarget, "Spell AOE", radiated, int.MaxValue);
             }
         }
 

@@ -357,6 +357,9 @@ namespace ACE.Server.Managers
             Meter.CreateObservableGauge("ace.landblocks.ephemeral.live", () => LandblockManager.EphemeralInstanceCount,
                 "instances", "Live ephemeral landblock instances");
 
+            // Frays: counters and gauges live in Frays/FraysMetrics.cs (same meter name, so the sidecar collects them).
+            ACE.Server.Frays.FraysMetrics.Initialize();
+
             // Depth of the single shard-database work queue. SerializedShardDatabase funnels every
             // shard read and write through ONE worker thread, so this is the first thing that backs
             // up under load and the only direct view of it - a sustained non-zero depth means the

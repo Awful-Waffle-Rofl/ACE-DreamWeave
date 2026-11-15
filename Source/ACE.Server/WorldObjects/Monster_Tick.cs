@@ -88,6 +88,9 @@ namespace ACE.Server.WorldObjects
             // and scripted abilities are not driven from here at all. One double compare when not stunned.
             if (IsClassAbilityStunned) return;
 
+            // The Frays: a fire's monster is leashed to its room (a no-op for every other creature).
+            if (FraysTag != null && TickFraysLeash()) return;
+
             HandleFindTarget();
 
             CheckMissHome();    // tickrate?

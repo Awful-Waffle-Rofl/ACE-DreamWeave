@@ -464,10 +464,14 @@ namespace ACE.Server.WorldObjects
                 if (elapsedSeconds >= 0.100) // Yea, that ain't good....
                 {
                     slowUpdateObjectPhysicsHits++;
-                    log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+                    // Destroy laggy projectiles: one update of a second or more is enough (a Force Bolt once took 28 s).
+                    // Not one that already landed in this update: its impact has run and its removal is queued.
+                    var endIt = this is SpellProjectile && PhysicsObj.is_active()
+                        && PhysicsUpdateBudget.ShouldEndSlowProjectile(elapsedSeconds, slowUpdateObjectPhysicsHits);
 
-                    // Destroy laggy projectiles
-                    if (slowUpdateObjectPhysicsHits >= 5 && this is SpellProjectile spellProjectile)
+                    log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}{(endIt ? ". SpellProjectile destroyed." : "")}");
+
+                    if (endIt && this is SpellProjectile spellProjectile)
                     {
                         PhysicsObj.set_active(false);
                         spellProjectile.ProjectileImpact();
@@ -478,7 +482,8 @@ namespace ACE.Server.WorldObjects
                     slowUpdateObjectPhysicsHits++;
 
                     // Destroy laggy projectiles
-                    if (slowUpdateObjectPhysicsHits >= 5 && this is SpellProjectile spellProjectile)
+                    if (this is SpellProjectile spellProjectile && PhysicsObj.is_active()
+                        && PhysicsUpdateBudget.ShouldEndSlowProjectile(elapsedSeconds, slowUpdateObjectPhysicsHits))
                     {
                         PhysicsObj.set_active(false);
                         spellProjectile.ProjectileImpact();

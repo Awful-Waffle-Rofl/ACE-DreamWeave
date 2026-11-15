@@ -80,7 +80,7 @@ namespace ACE.Server.ClassAbilities.Abilities
                 return 1.0f;
 
             return HemomancyMath.DamageMultiplier(rank,
-                PropertyManager.GetDouble("class_ability_hemomancy_damage_percent_per_rank").Item,
+                PropertyManager.GetDouble("class_ability_hemomancy_damage_percent_per_rank").Item * ACE.Server.Frays.FraysManager.AbilityBoost(player, ClassAbilityId.Hemomancy),   // the Frays: class boon
                 player.GetClassAbilityAffinityMultiplier(Skill.Healing),
                 active: true);
         }
